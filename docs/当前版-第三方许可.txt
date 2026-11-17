@@ -1,0 +1,55 @@
+整理助手 —— 第三方组件许可声明
+================================================
+
+本程序集成了以下开源组件，均按其许可证要求保留署名：
+
+1. organize（文件管理自动化引擎）
+   项目：https://github.com/tfeldmann/organize
+   版本：3.3.0
+   许可：MIT License
+   用途：高级规则 YAML 的解析与执行（界面「高级规则」页签）
+   说明：本程序仅通过 `organize.Config.from_string(...).execute(...)`
+         调用其公开 API，未修改其源码。
+
+2. 参考实现（未包含其代码）
+   Bulk Crap Uninstaller (BCUninstaller)
+   项目：https://github.com/BCUninstaller/Bulk-Crap-Uninstaller
+   许可：Apache License 2.0
+   用途：本程序的「卸载程序」页签参照其功能设计（程序枚举、静默卸载、
+         残留扫描、注册表导出备份）用 Python 原生重写，
+         **没有包含、链接或分发其任何代码或二进制文件**。
+
+3. pypdf
+   项目：https://github.com/py-pdf/pypdf
+   许可：BSD-3-Clause
+   用途：读取 PDF 正文（按内容识别）
+
+4. python-docx / lxml
+   项目：https://github.com/python-openxml/python-docx
+   许可：MIT / BSD-3-Clause（lxml）
+   用途：读取 DOCX 正文（按内容识别）
+
+5. organize 的依赖（随主程序一同分发）
+   arrow (Apache-2.0)、docopt-ng (MIT)、docx2txt (MIT)、ExifRead (BSD-3)、
+   Jinja2 (BSD-3)、natsort (MIT)、pdfminer.six (MIT)、platformdirs (MIT)、
+   pydantic / pydantic-core (MIT)、PyYAML (MIT)、rich (MIT)、
+   Send2Trash (BSD-3)、simplematch (MIT)
+
+6. PyInstaller（构建工具，运行时引导器）
+   项目：https://github.com/pyinstaller/pyinstaller
+   许可：GPL-2.0 with Bootloader Exception
+
+7. Inter（界面字体，随程序内嵌）
+   项目：https://github.com/rsms/inter
+   下载来源：Google Fonts 的 Inter 可变字体子集（latin / latin-ext，v20）
+   文件：src/web/assets/fonts/Inter-latin.woff2、Inter-latin-ext.woff2
+   许可：SIL Open Font License 1.1（全文见同目录 OFL.txt）
+   用途：界面拉丁字符与数字；中文仍走系统字体（微软雅黑 / PingFang），
+         不额外打包中文字体，避免安装包膨胀。
+   说明：未修改字形，仅按 Google Fonts 提供的 unicode-range 子集分发。
+
+上述组件的完整许可证文本见各自项目仓库。
+
+------------------------------------------------
+本程序自身的原创部分（分类逻辑、安全边界、界面、卸载模块、打包脚本）
+按 MIT 许可发布，可自由使用与修改。

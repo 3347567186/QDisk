@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TidyAssistant",
+  "version": "1.23.16",
+  "identifier": "com.tidy.assistant",
+  "build": {
+    "frontendDist": "../web"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "整理助手",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 1000,
+        "minHeight": 660,
+        "resizable": true,
+        "decorations": false,
+        "shadow": true,
+        "center": true,
+        "theme": "Light"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../../引擎": "引擎",
+      "../../THIRD_PARTY.md": "THIRD_PARTY.md"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
+

@@ -1,0 +1,365 @@
+/* 日志页：查看运行日志文件与引擎连接信息 */
+(function () {
+  'use strict';
+
+  const { h, T, icon, card, toast, empty, busy, confirm, fmtBytes, fmtCount, fmtTime, skeleton, attachMenu } = UI;
+
+  window.Pages = window.Pages || {};
+
+  // 右键菜单里用到的两个小工具：把错误转成可读文本、复制到剪贴板。
+  const errText = UI.errText;
+  const copyText = UI.copy;
+
+  window.Pages.log = {
+    title: ['日志', 'Logs'],
+    subtitle: ['查看运行日志与引擎连接信息', 'Read run logs and engine connection info'],
+
+    async mount(root) {
+      const state = {
+        files: null,
+        error: null,
+        loading: true,
+        selected: null,
+        content: null,
+        contentError: null,
+        app: null,
+        engine: null,
+        engineError: null,
+        history: null,
+        historyError: null
+      };
+
+      let contentBox = null;
+      let openToken = 0;
+
+      const titleRow = (text, hint) => h('div', { class: 'card-title' },
+        h('h2', null, text),
+        hint ? h('div', { class: 'hint', text: hint }) : null
+      );
+
+      const kv = (label, value) => [h('dt', { text: label }), h('dd', null, value)];
+
+      function pathCell(path) {
+        return h('div', { class: 'row' },
+          h('span', {
+            class: 'mono ellipsis',
+            title: path || '',
+            style: { minWidth: 0, flex: 1 },
+            text: path || '—'
+          }),
+          path ? h('button', {
+            class: 'btn ghost sm icon',
+            title: T('打开目录', 'Open folder'),
+            'aria-label': T('打开目录', 'Open folder'),
+            onclick: () => reveal(path)
+          }, icon('external', 14)) : null
+        );
+      }
+
+      function paint() {
+        contentBox = null;
+        root.textContent = '';
+        root.appendChild(filesCard());
+        root.appendChild(contentCard());
+        root.appendChild(engineCard());
+        root.appendChild(historyCard());
+      }
+
+      /* ---------- 操作历史（整理记录时间线） ----------
+       * 数据来自引擎写的 history/*.json，由 Rust 的 history_list 读出来；
+       * 这里只做展示，不提供“回滚”按钮——回滚走整理页的撤销。 */
+      function historyCard() {
+        const box = h('div', { class: 'card-body' });
+        if (state.history === null && !state.historyError) {
+          box.appendChild(skeleton(4, 'log'));
+          loadHistory().then(() => { if (box.isConnected) renderHistory(box); });
+        } else {
+          renderHistory(box);
+        }
+        return h('div', { class: 'card' },
+          h('div', { class: 'card-title' },
+            h('h2', { text: T('操作历史', 'Activity history') }),
+            h('div', { class: 'hint', text: T('最近 20 次整理', 'Latest 20 tidy runs') }),
+            h('span', { class: 'spacer' }),
+            h('button', {
+              class: 'btn ghost sm',
+              onclick: async () => { state.history = null; state.historyError = null; paint(); }
+            }, icon('refresh', 14), h('span', { text: T('刷新', 'Refresh') }))
+          ),
+          box
+        );
+      }
+
+      async function loadHistory() {
+        try {
+          const list = await API.historyList();
+          state.history = Array.isArray(list) ? list : [];
+        } catch (e) {
+          state.historyError = e;
+        }
+      }
+
+      function renderHistory(box) {
+        if (state.historyError) {
+          box.replaceChildren(empty(T('读取操作历史失败', 'Could not read history'),
+            errText(state.historyError)));
+          return;
+        }
+        const list = state.history || [];
+        if (!list.length) {
+          box.replaceChildren(empty(T('还没有整理记录', 'No tidy runs yet'),
+            T('在「整理文件」里执行一次整理后，这里会出现记录',
+              'Run a tidy once and it will show up here')));
+          return;
+        }
+        box.replaceChildren(h('div', { class: 'timeline' },
+          list.slice(0, 20).map((it) => h('div', { class: 'tl-item' },
+            h('span', { class: 'tl-dot' }),
+            h('div', { class: 'tl-body' },
+              h('div', { class: 'row' },
+                h('span', { class: 'ellipsis', title: it.folder || '', text: it.folder || '—' }),
+                h('span', { class: 'spacer' }),
+                h('span', { class: 'tl-time', text: it.time || '' })
+              ),
+              h('div', { class: 'muted small' },
+                T('移动 ' + fmtCount(it.moved || 0) + ' 个文件' +
+                  (it.created ? '，新建 ' + fmtCount(it.created) + ' 个文件夹' : ''),
+                  'Moved ' + fmtCount(it.moved || 0) +
+                  (it.created ? ', created ' + fmtCount(it.created) + ' folder(s)' : '')))
+            )
+          ))
+        ));
+      }
+
+
+      /* ---------- 日志文件列表 ---------- */
+      function filesCard() {
+        let body;
+        if (state.loading && state.files === null) {
+          body = skeleton(5, 'log');
+        } else if (state.error) {
+          body = empty(T('日志列表读取失败', 'Could not read the log list'),
+            h('button', { class: 'btn sm', onclick: refresh }, icon('refresh', 14), h('span', { text: T('重试', 'Retry') })));
+        } else if (!state.files || !state.files.length) {
+          body = empty(T('暂无日志文件', 'No log files'),
+            T('运行一次整理后这里会出现日志', 'Logs appear here after the app runs'));
+        } else {
+          body = h('div', { class: 'table-wrap tall' }, h('div', { class: 'list' },
+            state.files.map((f) => {
+              const active = state.selected && state.selected.path === f.path;
+              const row = h('div', {
+                class: 'list-item',
+                onclick: () => openFile(f)
+              },
+                icon('file'),
+                h('span', { class: 'ellipsis spacer', title: f.name, text: f.name }),
+                active ? h('span', { class: 'badge accent', text: T('查看中', 'Open') }) : null,
+                h('span', { class: 'small muted', text: fmtBytes(f.size) }),
+                h('span', { class: 'small muted', text: fmtTime(f.mtime) }),
+                h('button', {
+                  class: 'btn ghost sm',
+                  onclick: (e) => { e.stopPropagation(); openFile(f); }
+                }, h('span', { text: T('查看', 'View') }))
+              );
+              // 右键：查看 / 定位文件 / 复制文件名
+              attachMenu(row, [
+                { label: T('查看', 'View'), icon: 'file', action: () => openFile(f) },
+                { label: T('在资源管理器中定位', 'Reveal in Explorer'), icon: 'external', action: () => API.reveal(f.path).catch((e) => toast(errText(e), 'error')) },
+                { label: T('复制文件名', 'Copy file name'), icon: 'copy', action: () => copyText(f.name) }
+              ]);
+              return row;
+            })
+          ));
+        }
+
+        return card(
+          titleRow(T('日志文件', 'Log files'),
+            state.files && state.files.length ? T('共 {n} 个', '{n} total').replace('{n}', fmtCount(state.files.length)) : null),
+          h('div', { class: 'toolbar' },
+            h('button', { class: 'btn', disabled: state.loading, onclick: refresh }, icon('refresh'), h('span', { text: T('刷新', 'Refresh') })),
+            h('button', { class: 'btn ghost', onclick: openLogDir }, icon('external'), h('span', { text: T('打开日志目录', 'Open log folder') })),
+            h('button', { class: 'btn danger', disabled: state.loading, onclick: clearLogs }, icon('trash'), h('span', { text: T('清空', 'Clear') }))
+          ),
+          body
+        );
+      }
+
+      /* ---------- 日志内容 ---------- */
+      function contentCard() {
+        const body = [];
+        if (!state.selected) {
+          body.push(empty(T('选择一个日志文件', 'Select a log file'),
+            T('点击列表中的查看按钮', 'Use View in the list above')));
+        } else if (state.contentError) {
+          body.push(empty(T('日志读取失败', 'Could not read the log'), state.contentError));
+        } else if (state.content === null) {
+          body.push(skeleton(8, 'log'));
+        } else if (!state.content.trim()) {
+          body.push(empty(T('日志为空', 'This log is empty')));
+        } else {
+          body.push(h('div', { class: 'row' },
+            h('span', { class: 'mono ellipsis', title: state.selected.path, style: { minWidth: 0, flex: 1 }, text: state.selected.path }),
+            h('span', { class: 'small muted', text: fmtBytes(state.selected.size) })
+          ));
+          body.push(h('div', {
+            class: 'table-wrap',
+            ref: (el) => { contentBox = el; }
+          }, h('pre', {
+            class: 'mono',
+            style: { margin: 0, padding: 'var(--space-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+            text: state.content
+          })));
+        }
+
+        return card(
+          titleRow(T('日志内容', 'Log content'),
+            state.selected ? T('较大文件仅显示末尾内容', 'Large files show the tail only') : null),
+          body
+        );
+      }
+
+      /* ---------- 引擎连接 ---------- */
+      function engineCard() {
+        const eng = state.engine;
+        const logDir = (eng && eng.log_dir) || (state.app && state.app.log_dir) || '';
+        const status = !eng
+          ? h('span', { class: 'badge', text: '—' })
+          : (eng.pid > 0
+            ? h('span', { class: 'badge ok', text: T('运行中', 'Running') })
+            : h('span', { class: 'badge warn', text: T('未启动', 'Not running') }));
+
+        const nodes = []
+          .concat(kv(T('状态', 'Status'), status))
+          .concat(kv(T('引擎路径', 'Engine path'), pathCell(eng && eng.exe)))
+          .concat(kv(T('进程号', 'PID'), h('span', { class: 'mono', text: eng && eng.pid ? String(eng.pid) : '—' })))
+          .concat(kv(T('数据目录', 'Data folder'), pathCell((eng && eng.data_dir) || (state.app && state.app.data_dir))))
+          .concat(kv(T('日志目录', 'Log folder'), pathCell(logDir)));
+
+        return card(
+          titleRow(T('引擎连接', 'Engine'), null),
+          state.engineError ? empty(T('引擎信息读取失败', 'Could not read engine info'), state.engineError) : h('dl', { class: 'kv' }, nodes),
+          h('div', { class: 'toolbar' },
+            h('button', { class: 'btn sm', onclick: refreshEngine }, icon('refresh', 14), h('span', { text: T('刷新引擎信息', 'Refresh engine info') }))
+          )
+        );
+      }
+
+      /* ---------- 数据加载 ---------- */
+      async function loadFiles() {
+        state.error = null;
+        try {
+          const files = await API.logList();
+          state.files = Array.isArray(files) ? files : [];
+          if (state.selected && !state.files.some((f) => f.path === state.selected.path)) {
+            state.selected = null;
+            state.content = null;
+            state.contentError = null;
+          }
+        } catch (e) {
+          state.files = [];
+          state.error = e && e.message ? e.message : String(e);
+          toast(state.error, 'error');
+        }
+      }
+
+      async function loadEngine() {
+        state.engineError = null;
+        try {
+          state.engine = await API.engineInfo();
+        } catch (e) {
+          state.engineError = e && e.message ? e.message : String(e);
+        }
+      }
+
+      async function loadAppInfo() {
+        try {
+          state.app = await API.appInfo();
+        } catch (e) {
+          state.app = null;
+        }
+      }
+
+      async function refresh() {
+        state.loading = true;
+        paint();
+        await loadFiles();
+        state.loading = false;
+        paint();
+      }
+
+      async function refreshEngine() {
+        await loadEngine();
+        paint();
+      }
+
+      /* ---------- 交互 ---------- */
+      async function openFile(f) {
+        const token = ++openToken;
+        state.selected = f;
+        state.content = null;
+        state.contentError = null;
+        paint();
+        try {
+          const text = await API.logRead(f.path);
+          if (token !== openToken) return;
+          state.content = typeof text === 'string' ? text : String(text == null ? '' : text);
+        } catch (e) {
+          if (token !== openToken) return;
+          state.contentError = e && e.message ? e.message : String(e);
+          toast(state.contentError, 'error');
+        }
+        paint();
+        if (contentBox) contentBox.scrollTop = contentBox.scrollHeight;
+      }
+
+      async function clearLogs() {
+        const ok = await confirm({
+          title: T('清空日志', 'Clear logs'),
+          body: T('将删除日志目录中的所有文件，此操作不可撤销。', 'This deletes every file in the log folder. It cannot be undone.'),
+          ok: T('清空', 'Clear'),
+          danger: true
+        });
+        if (!ok) return;
+        await busy(async () => {
+          await API.logClear();
+          state.selected = null;
+          state.content = null;
+          state.contentError = null;
+          await loadFiles();
+          toast(T('日志已清空', 'Logs cleared'), 'ok');
+        }, T('正在清空日志…', 'Clearing logs…'), 'log');
+        paint();
+      }
+
+      async function openLogDir() {
+        let dir = (state.app && state.app.log_dir) || (state.engine && state.engine.log_dir);
+        if (!dir) {
+          await loadAppInfo();
+          dir = state.app && state.app.log_dir;
+        }
+        if (!dir) {
+          toast(T('日志目录未知', 'Log folder is unknown'), 'error');
+          return;
+        }
+        try {
+          await API.reveal(dir);
+        } catch (e) {
+          toast(e && e.message ? e.message : String(e), 'error');
+        }
+      }
+
+      async function reveal(path) {
+        try {
+          await API.reveal(path);
+        } catch (e) {
+          toast(e && e.message ? e.message : String(e), 'error');
+        }
+      }
+
+      paint();
+      await Promise.all([loadFiles(), loadEngine(), loadAppInfo()]);
+      state.loading = false;
+      paint();
+    }
+  };
+})();
