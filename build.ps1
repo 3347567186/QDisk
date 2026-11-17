@@ -23,6 +23,7 @@ param(
   [switch]$Bundle,
   [switch]$Portable,
   [switch]$Clean,
+  [switch]$Status,
   [string]$Version,
   [ValidateSet('patch', 'minor', 'major')]
   [string]$Bump
@@ -36,6 +37,17 @@ $confPath  = Join-Path $tauriDir 'tauri.conf.json'
 $cargoPath = Join-Path $tauriDir 'Cargo.toml'
 $target    = 'D:\Builds\tidyassistant-target'
 $pyTag     = 'Astral\CPython3.11.15'   # 与现网引擎的 python311.dll 对齐
+
+# ---------------------------------------------------------------- 构建管理
+# 锁 / 源码快照 / 构建台账都在 tools\build-manager.ps1：
+#   - 同一时间只允许一个会话构建（锁文件 D:\Builds\.locks\tidyassistant.build.lock）
+#   - 构建前把当前源码树提交进 git（tag build-<版本>），产物永远追得回源码
+#   - 每次构建追加一条记录到 D:\Builds\tidyassistant-builds.jsonl
+# 规范见 docs\01-当前版\构建管理.md。缺模块就直接中止，绝不在无锁状态下构建。
+$managerPath = Join-Path $root 'tools\build-manager.ps1'
+if (-not (Test-Path $managerPath)) { throw "缺少构建管理模块：$managerPath（已中止，避免无锁并发构建）" }
+. $managerPath
+if ($Status) { Show-TidyBuildStatus -Root $root; return }
 
 if ($Clean) {
   Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
@@ -72,19 +84,7 @@ function Next-Version([string]$cur, [string]$kind) {
   }
 }
 
-$current = Get-Version
-if ($Bump) {
-  $next = Next-Version $current $Bump
-  Set-Version $next
-  Write-Host "版本号：$current → $next（$Bump）" -ForegroundColor Green
-  $current = $next
-} elseif ($Version) {
-  Set-Version $Version
-  Write-Host "版本号：$current → $Version（指定）" -ForegroundColor Green
-  $current = $Version
-} else {
-  Write-Host "版本号：$current" -ForegroundColor DarkGray
-}
+# 版本号的实际读写放在主流程里（必须先拿到构建锁，否则两个会话会互相覆盖）
 
 # ---------------------------------------------------------------- 构建步骤
 
@@ -241,13 +241,106 @@ function Remove-OldReleases([string]$pattern) {
   }
 }
 
-# ---------------------------------------------------------------- 主流程
+# ---------------------------------------------------------------- 主流程（全程持锁）
 
-if ($Engine) { Build-Engine }
-if (-not $Engine -and (-not $Portable -or $Bundle)) { Build-App }
-if ($Portable) { Build-Portable }
+$mode     = if ($Engine) { 'engine' } elseif ($Portable -and -not $Bundle) { 'portable' } else { 'app' }
+$appBuilt = (-not $Engine -and (-not $Portable -or $Bundle))
 
-if ($Bundle)    { Remove-OldReleases 'TidyAssistant_*_x64-setup.exe' }
-if ($Portable)  { Remove-OldReleases '*便携版.zip' }
+Enter-TidyBuildLock -Root $root -Mode $mode | Out-Null
+$startedAt = Get-Date
+$record = @{
+  version  = ''
+  kind     = 'none'
+  mode     = $mode
+  session  = (Get-TidySessionTag)
+  result   = 'failed'
+  git      = ''
+  exe      = ''
+  exeBytes = 0
+  releases = @()
+  duration = ''
+  note     = ''
+}
 
+try {
+  $current = Get-Version
+
+  if ($Bump) {
+    $next = Next-Version $current $Bump
+    Set-Version $next
+    Write-Host "版本号：$current → $next（$Bump）" -ForegroundColor Green
+    $current = $next
+    $record.kind = "bump:$Bump"
+  } elseif ($Version) {
+    Set-Version $Version
+    Write-Host "版本号：$current → $Version（指定）" -ForegroundColor Green
+    $current = $Version
+    $record.kind = 'explicit'
+  } else {
+    Write-Host "版本号：$current" -ForegroundColor DarkGray
+  }
+  $record.version = $current
+  Update-TidyBuildLock -Version $current
+
+  # 构建前快照：把当前工作树（含别人的未提交改动）固定成一个 git 提交。
+  # 之后不管谁再改、谁再构建，这一次产物的源码都追得回来。
+  Write-Host '记录源码快照…' -ForegroundColor DarkGray
+  $snapshot = Save-TidySourceSnapshot -Root $root -Version $current -Reason $mode
+  $record.git = $snapshot
+  if ($snapshot) { Write-Host ("  源码快照：{0}（tag build-{1}）" -f $snapshot, $current) -ForegroundColor DarkGray }
+
+  if ($Engine)  { Build-Engine }
+  if ($appBuilt) { Build-App }
+  if ($Portable) { Build-Portable }
+
+  if ($Bundle)   { Remove-OldReleases 'TidyAssistant_*_x64-setup.exe' }
+  if ($Portable) { Remove-OldReleases '*便携版.zip' }
+
+  # 产物自检：版本、二进制、安装包三者必须对得上
+  $exe = Join-Path $root 'tidy-assistant.exe'
+  if (Test-Path $exe) {
+    $record.exe = Get-TidyFileSha256 $exe
+    $record.exeBytes = (Get-Item $exe).Length
+  }
+  $releases = @()
+  if ($Bundle) {
+    $pkg = Join-Path $root ("release\TidyAssistant_{0}_x64-setup.exe" -f $current)
+    if (-not (Test-Path $pkg)) { throw "安装包缺失：$pkg" }
+    $releases += @{ name = (Split-Path $pkg -Leaf); sha256 = (Get-TidyFileSha256 $pkg) }
+  }
+  if ($Portable) {
+    $zip = Join-Path $root ("release\整理助手_{0}_便携版.zip" -f $current)
+    if (-not (Test-Path $zip)) { throw "便携包缺失：$zip" }
+    $releases += @{ name = (Split-Path $zip -Leaf); sha256 = (Get-TidyFileSha256 $zip) }
+  }
+  $record.releases = $releases
+
+  $issues = Test-TidyBuildHealth -Root $root -SkipExe:(-not $appBuilt)
+  if ($issues.Count -gt 0) { throw ("产物自检不通过：" + ($issues -join '；')) }
+
+  $record.result = 'ok'
+} catch {
+  $record.duration = ('{0:N1}s' -f ((Get-Date) - $startedAt).TotalSeconds)
+  $record.note = $_.Exception.Message
+  Write-TidyBuildRecord -Root $root -Record $record
+  Write-Host ("构建失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
+  throw
+} finally {
+  Exit-TidyBuildLock
+}
+
+$record.duration = ('{0:N1}s' -f ((Get-Date) - $startedAt).TotalSeconds)
+Write-TidyBuildRecord -Root $root -Record $record
+
+$tagged = Tag-TidyBuild -Root $root -Version $current -Commit $snapshot
+if (-not $tagged) {
+  Write-Host ("警告：build-{0} 标签已存在（同版本重复构建）。版本规范禁止一份版本号对应两份不同二进制，确认这次不是要顶替已发布的包。" -f $current) -ForegroundColor Yellow
+}
+
+$prevSame = Get-TidyBuildHistory -Last 80 | Where-Object { $_.version -eq $current -and $_.result -eq 'ok' -and $_.exe -and $_.exe -ne $record.exe }
+if ($prevSame) {
+  Write-Host ("警告：版本 {0} 之前构建过，且 exe 哈希不同。回滚时无法判断装的是哪一份，请递增版本号。" -f $current) -ForegroundColor Yellow
+}
+
+Write-Host ("构建完成：{0}（{1}，{2}）" -f $current, $record.duration, $record.git) -ForegroundColor Green
 Write-Host ("release\ 现存：{0}" -f ((Get-ChildItem (Join-Path $root 'release') -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) -join ' | ')) -ForegroundColor Cyan

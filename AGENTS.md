@@ -43,11 +43,27 @@
 .\build.ps1 -Bump patch        # 先递增版本号（patch|minor|major），再重建
 .\build.ps1 -Bump minor -Bundle -Portable   # 出安装包 + 便携包（自动清理旧版本）
 .\build.ps1 -Engine            # 只重建 Python 引擎
+.\build.ps1 -Status            # 只看状态：版本 / 锁 / 编译进程 / release / 一致性
+.\build.ps1 -Bundle -Portable  # 用当前版本出安装包 + 便携包
 ```
 
 首次构建约 2 分钟（增量十几秒）。构建中间目录固定在 `D:\Builds\`（纯 ASCII）——**不要**把 target 放进 `%TEMP%`，这台机器的 DSH 临时目录带中文，`dlltool` 会直接失败。
 
-**同一时间只允许一个会话构建**：`build.ps1` 会覆盖根目录 exe、改写 `tauri.conf.json`/`Cargo.toml` 的版本号、清理 `release\`。两个会话同时构建会出现 A 改版本号、B 用旧版本号覆盖、产物名与二进制对不上（2026-11-15 实际发生过）。看到 `cargo`/`rustc`/`cargo-tauri` 进程在跑就先等，或者只改不构建。
+### 构建必须走 build.ps1（2026-11-18 起强制）
+
+**禁止绕过 build.ps1 直接调 `cargo-tauri build` / `cargo build`**，也禁止在别的目录里另写一份构建脚本。原因：直接调 cargo 不取构建锁、不改版本号、不留源码快照，一次并发就能让产物和源码对不上。
+
+`build.ps1` 现在自带构建管理（`tools\build-manager.ps1`），每次构建会：
+
+1. 取锁 `D:\Builds\.locks\tidyassistant.build.lock`，拿不到就退出（不会排队、不会互相覆盖）；同时检测是否有别的会话用旧方式在编译，发现就拒绝启动。
+2. 在锁内递增/写入版本号（`tauri.conf.json` 与 `Cargo.toml` 一起改）。
+3. 构建前把整棵源码树（含其他会话未提交的改动）提交成 git 快照，并打 `build-<版本>` 标签 —— 任何一次产物都追得回它对应的源码。
+4. 构建后自检：配置版本、`Cargo.toml` 版本、exe 内嵌版本、安装包文件名必须一致，不一致直接判失败。
+5. 追加一条记录到 `D:\Builds\tidyassistant-builds.jsonl` 和 `.build\builds.jsonl`（版本、模式、git SHA、产物哈希、耗时、成败）。
+
+两个会话同时构建会出现 A 改版本号、B 用旧版本号覆盖、产物名与二进制对不上（2026-11-15 实际发生过）。看到 `cargo`/`rustc`/`cargo-tauri` 进程在跑就先等，或者只改不构建。
+
+完整机制、冲突处理、回滚方法：`docs\01-当前版\构建管理.md`。
 
 ## 用户数据
 

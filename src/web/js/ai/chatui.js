@@ -249,15 +249,16 @@
     }
 
     /* 每一档能塞多少 token：窗口 × 档位占比，夹在 [2000, 窗口-2000]
-       —— 和真正发请求时 budgetFor 用的是同一个算法，标出来的数就是会用的数 */
-    function thinkBudgets(settings) {
+       —— 滑块上标的数字和真正发请求时用的是同一份，不各算各的 */
+    function thinkBudgetOf(id, settings) {
+      const t = THINKING[id] || THINKING.medium;
       const win = ctxWindowOf(settings);
+      return Math.max(2000, Math.min(Math.round(win * t.share), win - 2000));
+    }
+
+    function thinkBudgets(settings) {
       return Object.keys(THINKING).map(function (id) {
-        const t = THINKING[id];
-        return {
-          id: id,
-          budget: Math.max(2000, Math.min(Math.round(win * t.share), win - 2000))
-        };
+        return { id: id, budget: thinkBudgetOf(id, settings) };
       });
     }
 
@@ -401,14 +402,13 @@
     let lastAsk = null;
 
     function budgetFor(thinking, settings) {
-      const t = THINKING[thinking] || THINKING.medium;
-      const win = ctxWindowOf(settings);
-      /* 单轮能塞进上下文的消息预算：窗口 × 档位占比，
-         另外给工具结果与回复各留出空间，所以上限是「窗口 - 2000」。 */
-      const budget = Math.max(2000, Math.min(Math.round(win * t.share), win - 2000));
+      const key = THINKING[thinking] ? thinking : 'medium';
+      const t = THINKING[key];
+      /* 单轮能塞进上下文的消息预算：直接取滑块上标出来的那个数，
+         两边共用 thinkBudgetOf，不存在「显示的 32K、实际发 40K」 */
       return {
         steps: Math.min(t.steps, Number(settings.maxSteps) || t.steps),
-        budget: budget,
+        budget: thinkBudgetOf(key, settings),
         replyMax: t.replyMax
       };
     }
