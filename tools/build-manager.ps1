@@ -267,7 +267,9 @@ function Test-TidyBuildHealth {
   }
 
   $lock = Read-TidyLock
-  if ($lock -and (Test-TidyProcessAlive -ProcessId ([int]$lock.pid) -StartTicks ([long]$lock.startTicks))) {
+  # 自检时自己还握着锁（退出在 finally 里），必须排掉自己的 pid，
+  # 否则每次构建都会在最后一步误报「有构建正在进行」而判失败。
+  if ($lock -and [int]$lock.pid -ne $PID -and (Test-TidyProcessAlive -ProcessId ([int]$lock.pid) -StartTicks ([long]$lock.startTicks))) {
     $issues.Add("有构建正在进行：pid=$($lock.pid) 会话=$($lock.session) 版本=$($lock.version)")
   }
 
