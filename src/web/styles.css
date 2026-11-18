@@ -3930,3 +3930,17 @@ html[data-theme="dark"] .ai-page {
 .ai-drawer .dac-agent-mode .dac-label { display: inline; }
 .ai-drawer .dac-agent-mode .dac-chev { display: inline-flex; }
 .ai-drawer .dac-pill { max-width: 150px; }
+
+/* 抽屉这排：两枚胶囊都保留文字，只把模型名收窄（132px 后省略），
+   靠 padding/gap 省出空间，而不是把哪个按钮压成半个。 */
+.ai-drawer .dac-left { overflow: visible; }
+.ai-drawer .dac-perm-btn .dac-label { display: inline; }
+.ai-drawer .dac-perm-btn .dac-chev { display: none; }
+.ai-drawer .dac-perm-btn { padding: 0 10px; }
+.ai-drawer .dac-agent-mode { padding: 0 10px; }
+.ai-drawer .dac-agent-mode .dac-label { display: inline; }
+.ai-drawer .dac-agent-mode .dac-chev { display: inline-flex; }
+.ai-drawer .dac-pill { max-width: 132px; }
+.ai-drawer .dac-bar { gap: 6px; }
+/* 箭头两枚都留：有箭头才像能点开的下拉，没有就像普通标签 */
+.ai-drawer .dac-perm-btn .dac-chev { display: inline-flex; }
