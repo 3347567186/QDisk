@@ -912,8 +912,8 @@
             setRow(T('上下文窗口', 'Context window'),
               h('div', { class: 'row' }, ctxIn, h('span', { class: 'badge' + (reported ? ' ok' : ''), text: winSrc })),
               reported
-                ? T('读自端点 /models 的 max context length；助手按窗口的 70% 自动压缩，超了就压，不会失忆', 'Read from the endpoint; history is auto-compressed at 70% of the window')
-                : T('端点没有报告这个值：按模型名推断，推断不出按 1M。助手按窗口的 70% 自动压缩上下文', 'Not reported; inferred from the model name, else 1M. History is auto-compressed at 70%')),
+                ? T('读自端点 /models 的 max context length；历史超过窗口 50% 起按需裁剪，85% 压成摘要，不会失忆', 'Read from the endpoint; history is trimmed past 50% of the window and summarized at 85%')
+                : T('端点没有报告这个值：按模型名推断，推断不出按 1M。历史超过窗口 50% 起自动裁剪，85% 压成摘要', 'Not reported; inferred from the model name, else 1M. History is trimmed past 50% and summarized at 85%')),
             setRow(T('温度', 'Temperature'), tempIn, T('越低越稳，助手类任务建议 0–0.3', 'Lower is steadier; 0–0.3 suits assistant tasks')),
             setRow(T('查证轮数', 'Max tool steps'),
               h('div', { class: 'row' },
