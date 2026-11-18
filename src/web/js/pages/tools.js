@@ -253,12 +253,27 @@
       jumpBox.hidden = false;
     }
 
+    /* 命中判定：同一个路径，或者「AI 给的是目录、这一行在目录里」。
+       后者很常见——助手说「最大的文件都在 release 目录」，带过来的是目录本身，
+       要标出来的是它下面的那些文件。 */
+    function hitSet(paths) {
+      const list = paths.map((p) => normPath(p)).filter(Boolean);
+      /* 点名了具体文件时只标那几个：把整个目录的行都点亮等于没说清楚是哪个 */
+      const named = list.some((x) => paths.some((p) => normPath(p) === x && isFile(p)));
+      return (rowPath) => {
+        const p = normPath(rowPath || '');
+        if (!p) return false;
+        if (list.includes(p)) return true;
+        if (named) return false;
+        return list.some((x) => p.startsWith(x + '\\'));
+      };
+    }
+
     function markBig(paths) {
-      const set = new Set(paths.map((p) => normPath(p)));
+      const hit = hitSet(paths);
       let first = null;
       bigList.querySelectorAll('.tool-row').forEach((row) => {
-        const p = normPath(row.dataset.path || '');
-        if (!p || !set.has(p)) return;
+        if (!hit(row.dataset.path)) return;
         row.classList.add('ai-hit');
         if (!row.querySelector('.ai-hit-tag')) {
           const nameRow = row.querySelector('.row');
@@ -270,11 +285,10 @@
     }
 
     function markEmpty(paths) {
-      const set = new Set(paths.map((p) => normPath(p)));
+      const hit = hitSet(paths);
       let first = null;
       emptyList.querySelectorAll('.tool-row').forEach((row) => {
-        const p = normPath(row.dataset.path || '');
-        if (!p || !set.has(p)) return;
+        if (!hit(row.dataset.path)) return;
         row.classList.add('ai-hit');
         if (!first) first = row;
       });
