@@ -2635,12 +2635,15 @@ html[data-theme="dark"] .ai-page {
 .tl-mark { display: none; }
 .tl-step.bad .ai-step-name { color: var(--danger); }
 
-/* 思考正文：一句一行、整段折行（不再是单行省略号）。
-   12.5px 二级灰、行高 1.68 —— 展开后是一段可读的推理，不跟回答抢注意力。 */
-.tl-thoughts { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
-.tl-thought-row {
+/* 思考正文：整段折行、句与句紧挨着（不是一句一块）。
+   12.5px 二级灰、行高 1.7 —— 展开后是一段可读的推理，不跟回答抢注意力。 */
+.tl-thoughts {
+  display: flex; flex-direction: column; align-items: stretch;
   padding: 10px 12px; min-width: 0;
-  font-size: 13px; line-height: 1.7; font-weight: 400;
+}
+.tl-thought-row {
+  padding: 0; min-width: 0;
+  font-size: 12.5px; line-height: 1.7; font-weight: 400;
   color: var(--cl-ink-2);
   animation: tl-row-in 200ms var(--cl-ease) both;
 }
