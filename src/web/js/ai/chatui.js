@@ -193,14 +193,21 @@
        合并写盘：拖强度滑块、点权限不会每动一下就落一次文件。 */
     const ui = Object.assign({}, (AIStore.UI_DEFAULTS || {}), options.ui || {});
     let uiTimer = 0;
+    /* 只把「这次真的改过」的字段写回去。整份 ui 写回会把别处（设置页、
+       另一个会话）刚存的 agent 档位盖成默认值——1.30.0 的档位一重启就丢，
+       就是因为这里每次都把整个快照落盘。 */
+    const uiPending = {};
 
     function rememberUi(patch) {
       Object.assign(ui, patch || {});
+      Object.assign(uiPending, patch || {});
       if (uiTimer) clearTimeout(uiTimer);
       uiTimer = setTimeout(function () {
         uiTimer = 0;
+        const out = Object.assign({}, uiPending);
+        Object.keys(uiPending).forEach(function (k) { delete uiPending[k]; });
         try {
-          Promise.resolve(AIStore.saveUi(ui)).catch(function () { /* 记不住不该挡住对话 */ });
+          Promise.resolve(AIStore.saveUi(out)).catch(function () { /* 记不住不该挡住对话 */ });
         } catch (e) { /* 同上 */ }
       }, 400);
     }
