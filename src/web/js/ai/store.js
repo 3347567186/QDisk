@@ -45,6 +45,50 @@
 
   const MAX_SESSIONS = 20;
 
+  /* ---------------- 界面偏好：跟接口配置分开存 ----------------
+     推理强度、权限、选中的模型、上次打开的会话是「使用习惯」，
+     不是接口配置：换端点或换密钥时不该把它们重置，重存 AI 配置时
+     也不该被顺手覆盖掉。所以单开 app.json 的 ai_ui 段——Rust 的
+     config_set 是按 key 合并的，两段互不打扰。 */
+  const UI_DEFAULTS = {
+    thinking: 'medium',
+    permission: 'standard',
+    model: '',
+    lastSession: '',
+    railClosed: false
+  };
+
+  const THINK_IDS = ['simple', 'medium', 'deep'];
+  const PERM_IDS = ['readonly', 'standard', 'deep'];
+
+  let uiCache = null;
+
+  function normalizeUi(raw) {
+    const out = Object.assign({}, UI_DEFAULTS);
+    if (!raw || typeof raw !== 'object') return out;
+    if (THINK_IDS.indexOf(raw.thinking) >= 0) out.thinking = raw.thinking;
+    if (PERM_IDS.indexOf(raw.permission) >= 0) out.permission = raw.permission;
+    if (typeof raw.model === 'string') out.model = raw.model.trim().slice(0, 120);
+    if (typeof raw.lastSession === 'string') out.lastSession = raw.lastSession.trim().slice(0, 80);
+    if (typeof raw.railClosed === 'boolean') out.railClosed = raw.railClosed;
+    return out;
+  }
+
+  async function loadUi(force) {
+    if (uiCache && !force) return uiCache;
+    let cfg = {};
+    try { cfg = await API.configGet(); } catch { cfg = {}; }
+    uiCache = normalizeUi(cfg && cfg.ai_ui);
+    return uiCache;
+  }
+
+  async function saveUi(patch) {
+    const next = normalizeUi(Object.assign({}, uiCache || UI_DEFAULTS, patch || {}));
+    await API.configSet({ ai_ui: next });
+    uiCache = next;
+    return next;
+  }
+
   let cache = null;
 
   function normalize(raw) {
@@ -194,11 +238,15 @@
   const API_ = {
     PROVIDERS,
     DEFAULTS,
+    UI_DEFAULTS,
     FALLBACK_CTX,
     MAX_SESSIONS,
     normalize,
+    normalizeUi,
     load,
     save,
+    loadUi,
+    saveUi,
     isConfigured,
     maskKey,
     listSessions,

@@ -44,14 +44,7 @@
 
       const rail = h('aside', { class: 'ai-rail' },
         h('div', { class: 'ai-rail-top' }, newBtn, railToggle),
-        railList,
-        h('div', { class: 'ai-rail-foot' },
-          h('button', {
-            class: 'ai-rail-link',
-            type: 'button',
-            onclick: () => { window.location.hash = '#settings'; }
-          }, icon('settings'), h('span', {}, T('设置', 'Settings')))
-        )
+        railList
       );
 
       /* ---------- 右栏 ---------- */
@@ -69,15 +62,22 @@
 
       function setRail(closed, focus) {
         page.dataset.rail = closed ? 'closed' : 'open';
+        railClosed = !!closed;
         railToggle.setAttribute('aria-expanded', String(!closed));
         mainToggle.setAttribute('aria-expanded', String(!closed));
         try { localStorage.setItem(RAIL_KEY, closed ? '1' : '0'); } catch (e) { /* 隐私模式忽略 */ }
+        /* 同一份偏好也记进 app.json：换 WebView 缓存、重装后仍然记得收起状态 */
+        try { Promise.resolve(AIStore.saveUi({ railClosed: !!closed })).catch(() => {}); } catch (e) { /* 记不住不影响收起 */ }
         if (focus) (closed ? mainToggle : railToggle).focus();
       }
 
       let railClosed = false;
       try { railClosed = localStorage.getItem(RAIL_KEY) === '1'; } catch (e) { /* 忽略 */ }
       setRail(railClosed, false);
+      /* localStorage 只是首屏的即时线索，权威值在 app.json 的 ai_ui 里 */
+      AIStore.loadUi().then((u) => {
+        if (typeof u.railClosed === 'boolean' && u.railClosed !== railClosed) setRail(u.railClosed, false);
+      }).catch(() => {});
 
       function onKey(e) {
         if (e.key !== 'b' && e.key !== 'B') return;
@@ -217,8 +217,15 @@
         /* 新会话落盘 / 载入后刷新左栏，标题与排序跟着变 */
         onSessions: () => { renderList(); }
       });
-      chat.newSession();
-      activeId = chat.session ? chat.session.id : null;
+      /* 上次的强度 / 权限 / 模型 / 会话都从 ai_ui 恢复；
+         读完再点亮左栏高亮，避免先亮一个再跳一个 */
+      chat.boot().then(() => {
+        activeId = chat.session ? chat.session.id : null;
+        paintActive();
+      }).catch(() => {
+        activeId = chat.session ? chat.session.id : null;
+        paintActive();
+      });
       chat.focus();
       /* 先让页面画出来，再读归档（20 个文件头，别挡首屏） */
       requestAnimationFrame(() => { renderList(); });

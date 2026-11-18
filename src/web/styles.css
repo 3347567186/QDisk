@@ -28,6 +28,9 @@
   /* 字体：Inter 管拉丁与数字，中文回落雅黑，保证同一套字号/字重/行距 */
   --font: "Inter", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Microsoft YaHei UI", monospace;
+  /* 思考过程专用：衬线体，和回答正文（Inter/雅黑）明显区分。
+     中文优先思源宋体/宋体，英文退 Georgia，都读得清。 */
+  --font-thought: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
 
   --fs-title: 15px;   /* 页面标题 */
   --fs-group: 13px;   /* 区块标题 / 正文强调 */
@@ -2334,15 +2337,8 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .ai-sess-del:hover { color: var(--danger); background: var(--surface-3); }
 .ai-sess-del svg { width: 12px; height: 12px; }
 
-.ai-rail-foot { flex: 0 0 auto; padding-top: 8px; border-top: 1px solid var(--line); }
-.ai-rail-link {
-  width: 100%; height: 30px; display: flex; align-items: center; gap: 8px;
-  padding: 0 8px; border: 0; background: none; border-radius: var(--radius);
-  color: var(--text-2); cursor: pointer; font-size: var(--fs-body); font-family: inherit;
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
-}
-.ai-rail-link:hover { background: var(--hover); color: var(--text-1); }
-.ai-rail-link svg { width: 13px; height: 13px; flex: 0 0 auto; }
+/* 侧栏底部不再挂「设置」入口：AI 的配置与习惯都在输入框的模型菜单里，
+   侧栏只放会话本身，底栏与它一起删掉，不给空壳留样式。 */
 
 /* 窄窗（最小 1000×660）把左栏收窄，别把对话区挤成一条缝 */
 @media (max-width: 1120px) {
@@ -2547,9 +2543,11 @@ body[data-motion="off"] .shot-flag { animation: none; }
    减少动态时直接落字。缩进仍与过程行对齐。 */
 .tl-thought {
   padding: .3em 2px .2em 1.9em;
-  font-size: var(--fs-body);
+  font-family: var(--font-thought);
+  font-size: 13.5px;
   font-weight: 400;
-  line-height: 1.72;
+  line-height: 1.78;
+  letter-spacing: .012em;
   color: var(--text-1);
   white-space: pre-wrap;
   word-break: break-word;
@@ -2574,12 +2572,12 @@ body[data-motion="off"] .shot-flag { animation: none; }
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; margin-left: .1em; padding: 0; flex: none;
   border: 0; border-radius: var(--radius-sm); background: none; color: inherit;
-  opacity: 0; cursor: pointer;
+  opacity: .45; cursor: pointer;
   transition: opacity var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out),
     color var(--dur-2) var(--ease-out);
 }
 .tl-copy[hidden] { display: none; }
-.tl-head:hover .tl-copy, .tl-copy:focus-visible, .tl:not([data-working]) .tl-copy { opacity: .55; }
+.tl-head:hover .tl-copy, .tl-copy:focus-visible { opacity: .9; }
 .tl-copy:hover { opacity: 1; background: var(--hover); color: var(--text-1); }
 .tl-copy svg { width: 13px; height: 13px; }
 .tl-copy[data-done] { opacity: 1; color: var(--ok); }

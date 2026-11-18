@@ -174,24 +174,41 @@
     const shell = h('div', { class: 'ai-shell' + (compact ? ' compact' : '') }, scroller);
     rootEl.appendChild(shell);
 
+    /* 界面偏好（推理强度 / 权限 / 选中的模型 / 上次的会话）跟接口配置分两处存：
+       这里先按上次记下的值起来，读到磁盘之前不改用户已经做过的选择。
+       合并写盘：拖强度滑块、点权限不会每动一下就落一次文件。 */
+    const ui = Object.assign({}, (AIStore.UI_DEFAULTS || {}), options.ui || {});
+    let uiTimer = 0;
+
+    function rememberUi(patch) {
+      Object.assign(ui, patch || {});
+      if (uiTimer) clearTimeout(uiTimer);
+      uiTimer = setTimeout(function () {
+        uiTimer = 0;
+        try {
+          Promise.resolve(AIStore.saveUi(ui)).catch(function () { /* 记不住不该挡住对话 */ });
+        } catch (e) { /* 同上 */ }
+      }, 400);
+    }
+
     let state = {
       running: false,
       token: { stopped: false },
       session: null,
       history: [],
       lastResult: null,
-      thinking: 'medium',
-      permission: 'standard',
-      model: ''
+      thinking: ui.thinking || 'medium',
+      permission: ui.permission || 'standard',
+      model: ui.model || ''
     };
 
     /* 输入框：模型菜单与推理强度都在它里面，这里只接回调 */
     const composer = root.AIComposer.create(shell, {
       compact: compact,
       models: options.models || [],
-      model: options.model,
-      thinking: 'medium',
-      permission: 'standard',
+      model: options.model || state.model,
+      thinking: state.thinking,
+      permission: state.permission,
       disabled: false,
       dir: () => {
         const c = ctxProvider() || {};
@@ -207,10 +224,18 @@
         try { if (window.API && window.API.aiCancel) window.API.aiCancel(); } catch (e) { /* 断连失败不影响界面 */ }
         composer.setBusy(true, true);
       },
-      onThinkingChange: (v) => { state.thinking = v; },
+      onThinkingChange: (v) => {
+        state.thinking = v;
+        rememberUi({ thinking: v });
+      },
+      onPermissionChange: (p) => {
+        state.permission = p;
+        rememberUi({ permission: p });
+      },
       onModelChange: (id) => {
         /* 换模型就换窗口：每个模型的上下文长度是各自的能力，不共用上一个的 */
         state.model = id;
+        rememberUi({ model: id });
         const w = Number((state.settings && state.settings.modelCtx && state.settings.modelCtx[id]) || 0);
         if (w) {
           state.ctxWindow = w;
@@ -241,8 +266,11 @@
       const list = realModels(settings);
       composer.setModels(list);
       if (list.length) {
-        state.model = list[0].id;
-        composer.setModel(list[0].id);
+        /* 上次在菜单里选的那个模型优先：它在清单里就沿用它，
+           不在（端点换了、模型下线了）才退回设置里配的第一个。 */
+        const want = ui.model && list.some(function (m) { return m.id === ui.model; }) ? ui.model : list[0].id;
+        state.model = want;
+        composer.setModel(want);
       } else {
         state.model = '';
       }
@@ -584,6 +612,9 @@
         state.session.messages.push({ role: 'assistant', content: res.answer || '', at: Date.now(), ok: res.ok });
         if (!state.session.title || state.session.title === '新会话') state.session.title = q.slice(0, 30);
         try { await AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
+        /* 记住「正在聊的这个会话」：下次进 AI 页直接接着聊，
+           而不是每次都开一个空白新会话。 */
+        rememberUi({ lastSession: state.session.id });
         notifySessions();
       }
       AIStore.logUsage({
@@ -618,6 +649,20 @@
 
     renderEmpty();
     composer.focus();
+    /* 谁创建聊天就自动套上上次的强度与权限（抽屉里的临时会话也一致），
+       不必等调用方记得传。模型由 applyModels 按 ui.model 落地。 */
+    AIStore.loadUi().then((prefs) => {
+      if (!prefs) return;
+      Object.assign(ui, prefs);
+      if (prefs.thinking) {
+        state.thinking = prefs.thinking;
+        composer.setThinking(prefs.thinking);
+      }
+      if (prefs.permission) {
+        state.permission = prefs.permission;
+        composer.setPermission(prefs.permission);
+      }
+    }).catch(() => {});
     AIStore.load().then((s) => {
       applyModels(s);
     }).catch(() => {});
@@ -674,6 +719,30 @@
       },
       sessions() {
         return AIStore.listSessions();
+      },
+      /* 挂载时叫它：恢复上次的界面偏好（强度 / 权限 / 模型）与上次那个会话。
+         记忆是锦上添花——读失败或会话文件没了就按默认值继续，不报错。 */
+      async boot() {
+        let prefs = null;
+        try { prefs = await AIStore.loadUi(); } catch (e) { prefs = null; }
+        if (prefs) {
+          Object.assign(ui, prefs);
+          this.setThinking(prefs.thinking);
+          this.setPermission(prefs.permission);
+          if (prefs.model) this.setModel(prefs.model);
+        }
+        if (ui.lastSession) {
+          try {
+            const s = await AIStore.loadSession(ui.lastSession);
+            if (s) {
+              this.loadSession(s);
+              return s;
+            }
+          } catch (e) { /* 坏文件当作没有 */ }
+          rememberUi({ lastSession: '' });
+        }
+        this.newSession();
+        return state.session;
       },
       get session() { return state.session; },
       focus() { composer.focus(); },
