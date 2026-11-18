@@ -947,8 +947,8 @@
           url: d.endpoint,
           headers: d.key ? { Authorization: 'Bearer ' + d.key } : {},
           body: JSON.stringify(Object.assign({ model: d.model, stream: false }, body)),
-          /* 推理模型实测单轮可到 70s+，20s 会把它误判成连不通 */
-          timeoutMs: 90000
+          /* 推理模型实测单轮可到 70–120s，20s 会把它误判成连不通 */
+          timeoutMs: 180000
         });
         try {
           const res = await send({ messages: [{ role: 'user', content: 'ping' }], max_tokens: 8 });
@@ -984,23 +984,35 @@
           { role: 'system', content: '只输出一个 JSON 对象，其它什么都不要：{"ok":true}' },
           { role: 'user', content: 'reply' }
         ];
-        try {
-          let res = await send({ messages, max_tokens: 60, response_format: { type: 'json_object' } });
-          /* 有的兼容端点不认 response_format，去掉再试一次，别误报 */
-          if (!res || res.status !== 200) res = await send({ messages, max_tokens: 60 });
-          if (!res || res.status !== 200) return '';
+        const contentOf = (res) => {
           let payload = null;
-          try { payload = JSON.parse(String(res.body || '')); } catch (e) { return ''; }
+          try { payload = JSON.parse(String((res && res.body) || '')); } catch (e) { return ''; }
           const ch = payload && payload.choices && payload.choices[0];
-          const text = String((ch && ch.message && ch.message.content) || '')
+          return String((ch && ch.message && ch.message.content) || '')
             .trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+        };
+        const t0 = Date.now();
+        try {
+          let res = await send({ messages, max_tokens: 800, response_format: { type: 'json_object' } });
+          /* 有的兼容端点不认 response_format，去掉再试一次，别误报 */
+          if (!res || res.status !== 200) res = await send({ messages, max_tokens: 800 });
+          let text = (res && res.status === 200) ? contentOf(res) : '';
+          /* 推理模型先把预算花在 reasoning_content 上：给小了就只有思考没有正文 */
           if (!text) {
-            return T('端点这次返回了空内容（推理模型可能把话放在 reasoning_content，或 max_tokens 给小了），对话会不稳定',
-              'Empty content this time; replies may be unstable');
+            res = await send({ messages, max_tokens: 1600, response_format: { type: 'json_object' } });
+            if (res && res.status === 200) text = contentOf(res);
           }
-          if (text.indexOf('{') >= 0) return '';
-          return T('这个模型不按 JSON 输出（它回的是「' + text.slice(0, 20) + '…」），对话会反复报「输出格式不对」。建议换 deepseek-chat、glm-4.5 这类，或者先关掉下面的「要求 JSON 模式」再试',
-            'This model ignores the JSON contract, so chats will keep failing. Switch models, or turn off "Request JSON mode"');
+          const secs = Math.round((Date.now() - t0) / 1000);
+          const slow = secs > 25 ? T('，而且这轮用了 ' + secs + ' 秒', ', and it took ' + secs + 's') : '';
+          if (!text) {
+            return T('端点两次都只回了空内容——推理模型会把 token 预算先花在思考上。换 glm-4.5-flash / deepseek-chat 这类非推理模型最省事' + slow,
+              'Empty content twice; switch to a non-reasoning model');
+          }
+          if (text.indexOf('{') >= 0) {
+            return slow ? T('格式没问题' + slow + '，对话会明显偏慢', 'Format OK' + slow + ', but replies are slow') : '';
+          }
+          return T('这个模型不按 JSON 输出（它回的是「' + text.slice(0, 20) + '…」），对话会反复报「输出格式不对」。建议换 deepseek-chat、glm-4.5-flash 这类' + slow,
+            'This model ignores the JSON contract, so chats will keep failing. Switch models' + slow);
         } catch (e) {
           return '';
         }

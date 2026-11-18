@@ -14,9 +14,10 @@
 
   const DEFAULT_MAX_STEPS = 6;
   const DEFAULT_TURN_BUDGET = 8000;      // token（按字符数/2 估算）
-  /* 20s 只够 chat 小模型；推理模型（deepseek-v4 系、o 系）实测单轮可到 70s+，
-     超时会被当成失败，用户看到的是「AI 没能给出结论」 */
-  const DEFAULT_CALL_TIMEOUT = 90000;
+  /* 20s 只够 chat 小模型；实测 glm-4.7-flash 单轮 118s、中转站推理模型 71s，
+     超时会被当成失败，用户看到的是「AI 没能给出结论」。
+     流式下这个值是「多久没收到新数据算断」，不是总时长。 */
+  const DEFAULT_CALL_TIMEOUT = 180000;
   /* 原来硬编码 700：300 字中文 + evidence/suggest 会被截断成「JSON 没有闭合」 */
   const DEFAULT_REPLY_TOKENS = 1400;
   const MAX_REPLY_TOKENS = 8192;
@@ -262,6 +263,7 @@
         let sawSse = false;
         let sseFinish = '';
         let streamUsage = null;
+        let reasoningSeen = false;
         const pump = (piece) => {
           if (typeof piece !== 'string' || !piece) return;
           sseBuf += piece;
@@ -284,6 +286,7 @@
             if (ch && ch.finish_reason) sseFinish = ch.finish_reason;
             if (!d) continue;
             if (d.reasoning_content && onEvent) onEvent({ type: 'thought', text: d.reasoning_content });
+            if (d.reasoning_content) reasoningSeen = true;
             if (d.content) sseText += d.content;
           }
         };
@@ -327,12 +330,16 @@
           /* 不认流式时，推理模型会把思考放在 reasoning_content 里：
              直接抛给界面，别浪费掉 */
           const reasoning = choice && choice.message && choice.message.reasoning_content;
+          if (reasoning) reasoningSeen = true;
           if (reasoning && onEvent) onEvent({ type: 'thought', text: reasoning });
           /* 只有当 reasoning_content 本身就是合法 JSON 时才当正文用；
              原先是无条件顶替，结果把一段思考文字塞给解析器，必然格式错 */
           if (!content && reasoning && !extractJson(reasoning).error) content = reasoning;
           usage = (payload && payload.usage) || {};
         }
+        /* 见了 reasoning_content 就说明是推理模型：思考也吃 token 预算，
+           给宽一点，别让正文被挤成空串 */
+        if (reasoningSeen && tokenCap < 2400) tokenCap = 2400;
         const parsed = extractJson(content);
         if (parsed.error) {
           /* 被 max_tokens 截断：放宽长度重来，别算进「格式修一次」的配额 */
