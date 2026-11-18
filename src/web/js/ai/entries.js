@@ -195,9 +195,20 @@
 
   /* 一个位置 = 图标 + 名字 + 所在目录（名字左边已经写了，右边只补位置）。
      悬停给完整路径，右键给菜单，点击就是打开。 */
+  /* 盘符根（D:\）的父目录就是它自己，再挂一个「· D:」只会让人以为弄错了 */
+  function suffixOf(e) {
+    if (!e.s) return '';
+    const s = stripSlash(e.s);
+    const n = stripSlash(e.n);
+    if (s === n) return '';
+    if (/^[A-Za-z]:$/.test(s) && /^[A-Za-z]:/.test(n)) return '';
+    return e.s;
+  }
+
   function chip(p, opts) {
     const o = opts || {};
     const e = entry(p, o.kind, o.src) || { p: p, k: 'file', n: String(p), s: '', src: 'suggest' };
+    const suffix = suffixOf(e);
     const btn = h('button', {
       class: 'ai-entry ' + (e.k === 'dir' ? 'is-dir' : 'is-file') + (o.compact ? ' compact' : ''),
       type: 'button',
@@ -206,7 +217,7 @@
     },
       UIx.icon(e.k === 'dir' ? 'folder' : 'file', 14),
       h('span', { class: 'ai-entry-n' }, e.n),
-      e.s ? h('span', { class: 'ai-entry-s' }, e.s) : null
+      suffix ? h('span', { class: 'ai-entry-s' }, suffix) : null
     );
     btn.addEventListener('click', (ev) => {
       ev.preventDefault();

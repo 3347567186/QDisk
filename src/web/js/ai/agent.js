@@ -311,7 +311,12 @@
     const settings = deps.settings || {};
 
     const maxSteps = Number(settings.maxSteps) || DEFAULT_MAX_STEPS;
-    const budget = Number(settings.turnBudget) || DEFAULT_TURN_BUDGET;
+    /* 历史预算不再由「思考强度」切分，而是跟着模型窗口走：
+       窗口 × 70%，至少 4000。窗口是端点上报的，没上报时上层已经按模型名推过。
+       这样调思考强度只改「查几轮」，不会把能记住的上下文自己截短。 */
+    const ctxWin = Number(settings.ctxWindow) || 0;
+    const budget = Number(settings.turnBudget) ||
+      (ctxWin > 0 ? Math.max(4000, Math.round(ctxWin * 0.7)) : DEFAULT_TURN_BUDGET);
     const callTimeout = Number(settings.callTimeout) || DEFAULT_CALL_TIMEOUT;
     const capKey = capKeyOf(settings.endpoint, settings.model);
     const caps = readCaps(settings.caps, capKey);
@@ -426,7 +431,9 @@
     /** 一步模型调用：HTTP → 取 content → 解析 → 校验（失败修复一次）
      *  支持 SSE：transport 认 onDelta 时边读边把推理片段抛成 thought 事件，
      *  正文 Delta 先攒起来，等这一轮结束再当完整 JSON 解析。 */
-    async function callModel(messages, ctxTools, calledTools, onEvent, stop) {
+    /* sink.thought 收这一轮模型的推理原文：界面把它挂成「思考」行，
+       历史回放才看得到「当时为什么这么查」，而不是只剩工具名。 */
+    async function callModel(messages, ctxTools, calledTools, onEvent, stop, sink) {
       let repairLeft = 1;
       let tokenCap = replyTokens();
       let downLeft = 4;       // 能力降级最多四次（参数名 / 温度 / json / 流式）
@@ -440,6 +447,8 @@
         let sseFinish = '';
         let streamUsage = null;
         let reasoningSeen = false;
+        let reasonAcc = '';
+        if (sink) sink.thought = '';
         const pump = (piece) => {
           if (typeof piece !== 'string' || !piece) return;
           /* 点了停止就别再往界面推字：网络那头可能还在吐，界面已经收尾了 */
@@ -464,7 +473,11 @@
             if (ch && ch.finish_reason) sseFinish = ch.finish_reason;
             if (!d) continue;
             if (d.reasoning_content && onEvent) onEvent({ type: 'thought', text: d.reasoning_content });
-            if (d.reasoning_content) reasoningSeen = true;
+            if (d.reasoning_content) {
+              reasoningSeen = true;
+              reasonAcc += d.reasoning_content;
+              if (sink) sink.thought = reasonAcc;
+            }
             if (d.content) sseText += d.content;
           }
         };
@@ -551,6 +564,10 @@
           const reasoning = choice && choice.message && choice.message.reasoning_content;
           if (reasoning) reasoningSeen = true;
           if (reasoning && onEvent) onEvent({ type: 'thought', text: reasoning });
+          if (reasoning) {
+            reasonAcc = String(reasoning);
+            if (sink) sink.thought = reasonAcc;
+          }
           /* 只有当 reasoning_content 本身就是合法 JSON 时才当正文用；
              原先是无条件顶替，结果把一段思考文字塞给解析器，必然格式错 */
           if (!content && reasoning && !extractJson(reasoning).error) content = reasoning;
@@ -680,7 +697,11 @@
         v: 1,
         messages: (messages || []).map((m) => ({ role: m.role, content: m.content })),
         steps,
-        trace: trace.map((t) => ({ tool: t.tool, args: t.args, ok: t.ok, ms: t.ms, summary: t.summary })),
+        trace: trace.map((t) => ({
+          tool: t.tool, label: t.label, args: t.args, ok: t.ok, ms: t.ms, summary: t.summary,
+          /* 断点里的思考只留开头一小段：继续时界面上的过程行还在，文件不至于胀 */
+          thought: String(t.thought || '').slice(0, 400)
+        })),
         calledTools: calledTools.slice(),
         compressed
       });
@@ -727,8 +748,9 @@
         const c = compressHistory(messages, budget);
         compressed = c.level;
         let step;
+        const sink = { thought: '' };
         try {
-          step = await callModel(messages, ctxTools, calledTools, onEvent, stop);
+          step = await callModel(messages, ctxTools, calledTools, onEvent, stop, sink);
         } catch (e) {
           /* 停止不是故障：不要走降级文案，直接把断点交给界面 */
           if ((e && e.code === 'aborted') || stop.isStopped()) return stoppedResult();
@@ -788,6 +810,9 @@
         /* 工具步：一步最多 MAX_BATCH_TOOLS 个互不依赖的查询。
            执行仍是串行的（引擎调用本来就串行），省下的是模型往返与整段重发。 */
         const calls = step.kind === 'tools' ? step.tools : [{ tool: step.tool, args: step.args || {} }];
+        /* 这一步之前的推理原文：挂到第一行工具上，回放时「思考 → 调用」的顺序才在。
+           同一轮思考在多工具批里只记一次，不复制成 N 份。 */
+        const stepThought = String(sink.thought || '').slice(0, 2000);
         const ran = [];
         for (const call of calls) {
           if (stop.isStopped()) return stoppedResult();
@@ -809,9 +834,11 @@
           }
           const ms = Date.now() - t0;
           const summary = ok && tools[call.tool].summary ? tools[call.tool].summary(args, result) : errorText;
-          trace.push({ tool: call.tool, args, ok, ms, summary, result });
+          const label = (tools[call.tool] && tools[call.tool].label) || call.tool;
+          const thought = ran.length ? '' : stepThought;
+          trace.push({ tool: call.tool, label, args, ok, ms, summary, result, thought });
           calledTools.push(call.tool);
-          if (onEvent) onEvent({ type: 'step', tool: call.tool, args, ok, ms, summary, result, error: errorText });
+          if (onEvent) onEvent({ type: 'step', tool: call.tool, label, args, ok, ms, summary, result, thought, error: errorText });
           ran.push({ tool: call.tool, args, ok, result });
         }
 

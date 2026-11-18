@@ -32,16 +32,47 @@
     temperature: 0.2,
     jsonMode: true,
     maxSteps: 6,
-    turnBudget: 8000,
+    /* 单轮历史预算（token）。0 = 不写死，按模型窗口算（窗口 × 70%）：
+       思考强度只决定查证轮数，不再切分上下文长度。 */
+    turnBudget: 0,
     /* 端点能力记忆：键是「主机|模型」，值是学到的习惯（是否认 response_format、
        是否认 stream_options、能不能流式、要不要预留给思考、实测耗时）。
        不同模型差异很大，所以按模型各记一份，换模型就重新学。 */
     caps: {}
   };
 
-  /* 端点没报窗口时的保守兜底：32K。
-     界面上会明确写「未上报，按 32K 处理」，不会假装读过。 */
-  const FALLBACK_CTX = 32768;
+  /* 端点没报窗口时的兜底：1M。
+     现在的模型动辄 128K–1M，先按 32K 处理会让助手「明明能记住却自己忘掉」。
+     界面上仍会明确写「端点未上报，按 1M」——是默认值，不是假装读过。 */
+  const FALLBACK_CTX = 1000000;
+
+  /* 已知模型的窗口：端点不报 max context length 时按名字推一个，
+     比一律 1M 更接近真实能力；推不出才落到 FALLBACK_CTX。
+     顺序即优先级（先匹配到的胜出），所以「deepseek-v4」要排在「deepseek」前面。 */
+  const CTX_TABLE = [
+    [/deepseek[-_ ]?v?4|deepseek[-_ ]?r2/i, 1000000],
+    [/deepseek[-_ ]?(v3\.2|3\.2)|deepseek[-_ ]?chat|deepseek[-_ ]?reasoner/i, 131072],
+    [/deepseek/i, 1000000],
+    [/gpt-4\.1|gpt-5|o3|o4/i, 1000000],
+    [/gpt-4o|gpt-4|gpt-3\.5|o1/i, 131072],
+    [/claude/i, 200000],
+    [/gemini/i, 1048576],
+    [/qwen|tongyi/i, 131072],
+    [/glm|chatglm/i, 131072],
+    [/kimi|moonshot/i, 262144],
+    [/llama|mistral|mixtral/i, 131072]
+  ];
+
+  /** 按模型名推窗口；推不出返回 0，交给调用方决定兜底 */
+  function inferCtx(model) {
+    const id = String(model || '');
+    if (!id) return 0;
+    for (let i = 0; i < CTX_TABLE.length; i += 1) {
+      if (CTX_TABLE[i][0].test(id)) return CTX_TABLE[i][1];
+    }
+    return 0;
+  }
+
 
   const MAX_SESSIONS = 20;
 
@@ -124,7 +155,7 @@
     const steps = Number(raw.maxSteps);
     if (steps >= 1 && steps <= 10) out.maxSteps = Math.round(steps);
     const budget = Number(raw.turnBudget);
-    if (budget >= 2000 && budget <= 400000) out.turnBudget = Math.round(budget);
+    if (budget >= 2000 && budget <= 4000000) out.turnBudget = Math.round(budget);
     const win = Number(raw.ctxWindow);
     if (win >= 2000 && win <= 2000000) out.ctxWindow = Math.round(win);
     if (raw.modelCtx && typeof raw.modelCtx === 'object' && !Array.isArray(raw.modelCtx)) {
@@ -357,6 +388,7 @@
     DEFAULTS,
     UI_DEFAULTS,
     FALLBACK_CTX,
+    inferCtx,
     MAX_SESSIONS,
     normalize,
     normalizeUi,

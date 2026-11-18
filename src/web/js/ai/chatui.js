@@ -44,14 +44,14 @@
     none: 'tools'
   };
 
-  /* 推理强度：不是「想得更久」的玄学，而是三个可量化的预算旋钮。
-     simple 少查几步、答案更短；deep 多给两步、单次结果读得更全。
-     budget 不再是写死的 token 数，而是「占上下文窗口的比例」——
-     窗口本身来自模型能力（设置页从端点 /models 读回来，读不到才用保守默认值）。 */
+  /* 推理强度只管「查几轮、答案多长」，不再切分上下文：
+     以前写成 deep 就吃掉窗口的 75%，等于「想得深就必须记得少」——
+     窗口是模型能力，不是思考旋钮。现在历史预算统一按窗口的 70%（见 agent.js），
+     三档只差 MAX_STEPS 与回复长度。 */
   const THINKING = {
-    simple: { steps: 3, share: 0.25, replyMax: 320 },
-    medium: { steps: 6, share: 0.50, replyMax: 600 },
-    deep: { steps: 9, share: 0.75, replyMax: 900 }
+    simple: { steps: 3, replyMax: 320 },
+    medium: { steps: 6, replyMax: 600 },
+    deep: { steps: 9, replyMax: 900 }
   };
 
   /* 权限档位决定「这一轮允许模型看见哪些工具」。
@@ -468,25 +468,28 @@
       return list;
     }
 
-    /* 每一档能塞多少 token：窗口 × 档位占比，夹在 [2000, 窗口-2000]
-       —— 滑块上标的数字和真正发请求时用的是同一份，不各算各的 */
-    function thinkBudgetOf(id, settings) {
-      const t = THINKING[id] || THINKING.medium;
+    /* 单轮历史预算：跟窗口走，与思考强度无关（70%，夹在 [4000, 窗口-2000]）。
+       滑块上不再标 token 数，避免又变成「选深度＝改上下文」的暗示。 */
+    function historyBudget(settings) {
       const win = ctxWindowOf(settings);
-      return Math.max(2000, Math.min(Math.round(win * t.share), win - 2000));
+      return Math.max(4000, Math.min(Math.round(win * 0.7), win - 2000));
     }
 
-    function thinkBudgets(settings) {
+    /* 三档滑块标的是「查证轮数」，不是 token */
+    function thinkBudgets() {
       return Object.keys(THINKING).map(function (id) {
-        return { id: id, budget: thinkBudgetOf(id, settings) };
+        return { id: id, steps: THINKING[id].steps };
       });
     }
 
-    /* 模型窗口：优先用设置里存的端点实测值，没有才退回保守默认 */
+    /* 模型窗口：端点报过就用报的值，没报按模型名推，推不出按 1M。
+       这三步都在 store 里，界面只负责用。 */
     function ctxWindowOf(settings) {
       const n = Number(settings && settings.ctxWindow);
-      if (Number.isFinite(n) && n >= 2000 && n <= 2000000) return Math.round(n);
-      return (AIStore && AIStore.FALLBACK_CTX) || 32768;
+      if (Number.isFinite(n) && n >= 2000 && n <= 4000000) return Math.round(n);
+      const guess = (AIStore && AIStore.inferCtx && AIStore.inferCtx(settings && settings.model)) || 0;
+      if (guess) return guess;
+      return (AIStore && AIStore.FALLBACK_CTX) || 1000000;
     }
 
     function setEmpty(show) {
