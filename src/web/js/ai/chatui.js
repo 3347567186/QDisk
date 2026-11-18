@@ -1071,6 +1071,8 @@
         /* 回放时 trace 里只有工具，没有「想了几次、记了几条」。
            这两个数落盘放着，历史里的那一行才和当时一模一样 */
         res.counts = { thoughts: c.pg.counts.thoughts, tools: c.pg.counts.tools, records: (res.evidence || []).length };
+      /* 状态词也要跟着落盘：回放时「· 已停止 / · 查证未完成」得能从文件里读回来 */
+      res.status = res.stopped ? 'stopped' : (!res.ok ? 'unfinished' : '');
         res.status = res.stopped ? 'stopped' : (!res.ok ? 'unfinished' : '');
       }
       paintAnswer(c.body, res.answer || '');
