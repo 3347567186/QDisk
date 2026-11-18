@@ -185,8 +185,67 @@
     scroller.appendChild(emptyBox);
     scroller.appendChild(msgs);
 
-    const shell = h('div', { class: 'ai-shell' + (compact ? ' compact' : '') }, scroller);
+    /* 右下角的「回到底部」：只因读者自己往上翻而出现，贴底后消失 */
+    const toBottom = h('button', {
+      class: 'ai-tobottom',
+      type: 'button',
+      'aria-label': T('回到底部', 'Back to bottom'),
+      title: T('回到底部', 'Back to bottom')
+    }, UIx.icon('chevron'));
+    toBottom.addEventListener('click', function () {
+      if (follow) follow.resume();
+    });
+
+    const shell = h('div', { class: 'ai-shell' + (compact ? ' compact' : '') }, scroller, toBottom);
     rootEl.appendChild(shell);
+
+    /* 回合导航：一条刻度 = 一轮（用户一句话 + 它的回答）。窄窗或只有一轮时自己隐藏。 */
+    const turns = [];
+    const rail = root.AITurnRail ? root.AITurnRail.create({
+      host: shell,
+      onNavigate: function (i) { jumpToTurn(i); }
+    }) : null;
+
+    /* 视角跟随：贴底就跟，读者一往上翻就撒手，出现「回到底部」 */
+    const follow = root.AIFollow ? root.AIFollow.create({
+      scroller: scroller,
+      content: msgs,
+      onChange: function (s) { toBottom.classList.toggle('on', !s.following); }
+    }) : null;
+
+    function jumpToTurn(i) {
+      const t = turns[i];
+      if (!t || !t.userNode) return;
+      if (follow) follow.reveal(t.userNode, 24);
+      rail && rail.setActive(i);
+      /* 跳转后按新位置重算「当前轮」，别停在旧的高亮上 */
+      requestAnimationFrame(function () { paintActiveTurn(); });
+    }
+
+    /* 当前读到第几轮：判读线在视口顶往下 96px（最多 20% 视口高） */
+    function currentTurnIndex() {
+      if (!turns.length) return -1;
+      if (follow && follow.isFollowing()) return turns.length - 1;
+      const line = scroller.scrollTop + Math.min(96, scroller.clientHeight * 0.2);
+      let idx = 0;
+      for (let i = 0; i < turns.length; i++) {
+        const n = turns[i].userNode;
+        if (n && n.offsetTop <= line) idx = i;
+      }
+      return idx;
+    }
+
+    let activeTurn = -1;
+    function paintActiveTurn() {
+      const i = currentTurnIndex();
+      if (i === activeTurn) return;
+      activeTurn = i;
+      rail && rail.setActive(i);
+    }
+
+    scroller.addEventListener('scroll', function () {
+      if (rail) requestAnimationFrame(paintActiveTurn);
+    }, { passive: true });
 
     /* 界面偏好（推理强度 / 权限 / 选中的模型 / 上次的会话）跟接口配置分两处存：
        这里先按上次记下的值起来，读到磁盘之前不改用户已经做过的选择。
@@ -350,11 +409,13 @@
     }
 
     function scrollEnd(force) {
-      /* 只有贴着底（80px 内）才跟着滚：用户往上翻历史时不该被新内容拽回去 */
-      if (!force) {
-        const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-        if (gap > 80) return;
+      /* 贴底跟随交给 AIFollow 判断；这里只做「已经在底部」时的即时贴底 */
+      if (follow) {
+        if (follow.isFollowing() || force) follow.toBottom(force ? 'instant' : 'instant');
+        return;
       }
+      const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      if (!force && gap > 80) return;
       scroller.scrollTop = scroller.scrollHeight;
     }
 
@@ -773,9 +834,13 @@
     function addUser(text) {
       setEmpty(false);
       /* 不挂「你」的标签：右侧浅底气泡本身已经说明了是谁在说 */
-      msgs.appendChild(h('div', { class: 'ai-msg user' },
+      const node = h('div', { class: 'ai-msg user' },
         h('div', { class: 'ai-msg-body' }, text)
-      ));
+      );
+      msgs.appendChild(node);
+      /* 每句话开一轮：导航条上一条刻度，跳转就落到这句话 */
+      turns.push({ prompt: text, answer: '', userNode: node, answerNode: null });
+      if (rail) rail.setTurns(turns);
       scrollEnd(true);
     }
 
@@ -784,22 +849,56 @@
     /* 思路行：一行呼吸中的句子 + 可折起的过程（thoughtline.js）。
        label 是「正在做什么」，落定后换成「查了 N 项 · 用时」，计时器滑到句尾；
        过程在跑的时候是摊开的，落定即折成一行，点一下可再摊开。 */
+    /* 一行摘要：参考实现折叠时显示的是「推理的第一句」，不是时长与段数。
+       取最近一段的第一行、去掉 ** 与列表符号，24 字以内。 */
+    function summaryOf(tl) {
+      const list = (tl && tl.thoughts) || [];
+      for (let i = list.length - 1; i >= 0; i--) {
+        const raw = String(list[i] || '');
+        const parts = raw.split(/[\n。！？]/).map(function (s) {
+          return s.replace(/\*\*/g, '').replace(/^[-*\s]+/, '').trim();
+        }).filter(Boolean);
+        if (parts.length) {
+          const line = parts[0];
+          return line.length > 24 ? line.slice(0, 24) + '…' : line;
+        }
+      }
+      return '';
+    }
+
+    /* 思路行：一行呼吸中的句子 + 可折起的过程（thoughtline.js）。
+       折叠态照参考实现：图标 + 「思考」+ 一句摘要 + chevron；时长不进标题，
+       只留在右下角的用量里。 */
     function startAnswer(opts) {
       const replay = !!(opts && opts.replay);
-      /* 过程卡里那颗 loader 换成 Claude 的三颗点（glyph:'dots'，见 thoughtline.js）；
-         落定后三点停住、转成二级灰，标题行换成「思考 N 段 · 调用 N 次工具」 */
+      /* 折叠态标题恒为「思考」，摘要另起一段放在圆点后面（跟参考实现一致：
+         标题不带时长、不带段数，那一句是推理的第一句） */
+      var sumEl = null;
       const tl = replay ? null : root.AIThoughtLine.create({
-        label: T('正在思考…', 'Thinking…'),
+        label: T('思考', 'Thinking'),
         glyph: 'dots',
         collapsible: true,
         collapseOnSettle: true,
-        showTimer: true,
+        showTimer: false,
         copyLabel: T('复制思考过程', 'Copy reasoning'),
         thoughtLabel: T('思考', 'Thinking'),
-        /* 思考正文不再内滚，长出来就把对话滚到底 */
-        onAppend: () => scrollEnd(),
+        /* 思考正文不再内滚，长出来就把对话滚到底；顺手把摘要换成第一句 */
+        onAppend: () => {
+          const s = summaryOf(tl);
+          if (s) sumEl.textContent = s;
+          scrollEnd();
+        },
         speak: (sec) => T(sec.toFixed(1) + ' 秒', sec.toFixed(1) + ' seconds')
       });
+      if (tl) {
+        sumEl = h('span', { class: 'tl-sum' });
+        const head = tl.el.querySelector('.tl-head');
+        const timer = head && head.querySelector('.tl-timer');
+        if (head) {
+          if (timer) head.insertBefore(sumEl, timer);
+          else head.appendChild(sumEl);
+        }
+      }
       const body = h('div', { class: 'ai-msg-body ai-answer' });
       const extra = h('div', { class: 'ai-extra' });
       const node = h('div', { class: 'ai-msg bot' },
@@ -810,6 +909,8 @@
       msgs.appendChild(node);
       scrollEnd(true);
       current = { node, tl, body, extra, steps: [], replay, stopped: false };
+      const turn = turns[turns.length - 1];
+      if (turn) turn.answerNode = node;
       return current;
     }
 
@@ -821,7 +922,8 @@
         summary: step.summary,
         error: step.error,
         ms: step.ms,
-        ok: step.ok
+        ok: step.ok,
+        detail: step.result
       });
       scrollEnd();
     }

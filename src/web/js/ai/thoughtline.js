@@ -233,12 +233,37 @@
       const s = step || {};
       const ok = s.ok !== false;
       const summary = s.summary || s.error || '';
-      const row = UIx.h('div', { class: 'ai-step tl-step' + (ok ? '' : ' bad'), 'data-ok': ok ? '' : undefined },
+      const detail = s.detail == null ? '' : String(s.detail);
+      const canOpen = !!detail && detail.length > 0;
+      const row = UIx.h('div', {
+        class: 'ai-step tl-step' + (ok ? '' : ' bad') + (canOpen ? ' openable' : ''),
+        'data-ok': ok ? '' : undefined,
+        role: canOpen ? 'button' : undefined,
+        tabindex: canOpen ? '0' : undefined,
+        'aria-expanded': canOpen ? 'false' : undefined
+      },
         UIx.h('span', { class: 'tl-mark', 'aria-hidden': 'true' }),
         UIx.h('span', { class: 'ai-step-name' }, s.text || ''),
         summary ? UIx.h('span', { class: 'ai-step-sum', title: summary }, summary) : null,
-        s.ms ? UIx.h('span', { class: 'ai-step-ms' }, Math.round(s.ms) + 'ms') : null
+        s.ms ? UIx.h('span', { class: 'ai-step-ms' }, Math.round(s.ms) + 'ms') : null,
+        canOpen ? UIx.h('span', { class: 'ai-step-chev', 'aria-hidden': 'true' }) : null
       );
+      var out = null;
+      if (canOpen) {
+        /* 展开的是「这次调用到底拿到了什么」：等宽小字、限高内滚，跟参考实现的输入/输出卡同款 */
+        out = UIx.h('div', { class: 'ai-step-out', hidden: '' }, UIx.h('pre', {}, detail));
+        row.appendChild(out);
+        function toggle() {
+          const on = row.getAttribute('aria-expanded') !== 'true';
+          row.setAttribute('aria-expanded', on ? 'true' : 'false');
+          if (on) out.removeAttribute('hidden');
+          else out.setAttribute('hidden', '');
+        }
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+        });
+      }
       stepsEl.appendChild(row);
       paintMarks();
       refreshToggle();
