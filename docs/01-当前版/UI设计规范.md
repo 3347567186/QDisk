@@ -466,3 +466,34 @@ AI 页是唯一一处不跟全站蓝色强调走的地方：它按 Claude 的外
 `md-quote` / `md-hr` / `md-link`，样式见 `styles.css` 末尾的「回答正文的 Markdown」段。
 渲染前一律转义，链接只放行 http/https/mailto；`javascript:` 之类只保留链接文字。
 `chatui.js` 用 `paintAnswer()` 判断：`hasMarkup` 为真才渲染，否则退回纯文本。
+
+## 11. 设置卡与抽屉（1.33.0 起）
+
+### 设置页的单卡行式
+
+除「外观与语言」这类本来就只有两三项的分组，其余分组一律用「一张卡、若干行」：
+
+| 元素 | 规格 |
+|---|---|
+| 卡 | `--surface` 底、1px `--line` 描边、`--radius-lg` 圆角、`overflow:hidden` |
+| 分区标题 `.set-cap` | 12px/600、`--text-3`、`padding:12px 16px 6px`；右侧可挂徽章或状态词 |
+| 行 `.set-row` | 两列 `152px minmax(0,1fr)`、`gap:12px 16px`、`padding:11px 16px` |
+| 行间线 | `.5px solid var(--line)`，首行与分区标题之后不画 |
+| 标签 `.set-label` | 13px、`--text-2`、与右侧控件首行对齐（`line-height:30px`） |
+| 说明 `.desc` | 12px/1.55、`--text-3`、`margin-top:5px` |
+| 窄屏 | ≤720px 折成单列，标签变小号加粗，`gap:6px` |
+
+直接挂在 `.set-body` 下的输入框必须 `width:100%`（它不在 flex 行里，`auto` 只会按内容宽），
+包在 `.row` 里的输入框才用 `flex:1 1 auto`。
+
+### 抽屉头部与历史
+
+| 位置 | 内容 |
+|---|---|
+| 左 | 「＋ 新对话」深色胶囊（`--accent-solid` 底 + `--on-solid` 字）、「历史」幽灵按钮（展开时 `--surface-2` 底） |
+| 中 | 标题 13px/600 + 一句「贴着当前页问」12px `--text-3`，两者都可省略号截断 |
+| 右 | 「整页」幽灵按钮、「✕」图标按钮 |
+| 历史面板 | 从头部下方推开，`max-height` 0 → 320px（`--ease` 过渡），超出内滚 |
+| 历史行 | 标题 13px 省略 + 时间 12px 等宽数字；行悬停才显删除图标 |
+
+约定：抽屉里不放会话归档栏（那是 AI 页的），历史只做「换一条继续」，不做批量管理。

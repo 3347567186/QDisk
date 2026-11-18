@@ -3859,3 +3859,16 @@ html[data-theme="dark"] .ai-page {
 
 .set-row .set-body > .input { width: 100%; box-sizing: border-box; }
 .set-row .set-body > .row > .input { width: auto; }
+
+/* ---------------- 输入框那排：窄容器里不许互相压住 ----------------
+   抽屉只有 432px：左边三枚胶囊 + 右边容量环/模型胶囊/发送键会把 flex 撑破，
+   胶囊是 flex-shrink:0 的，于是左边那一组溢进右边、压在模型的灯泡上。 */
+.dac-left { overflow: hidden; }
+.dac-perm { flex-shrink: 1; min-width: 0; }
+.dac-perm .dac-label { min-width: 0; }
+.ai-drawer .dac-bar { gap: 8px; }
+.ai-drawer .dac-perm { padding: 0 9px; }
+.ai-drawer .dac-perm .dac-ic { margin-right: 5px; }
+.ai-drawer .dac-think { display: none; }
+.ai-drawer .dac-pill { max-width: 148px; min-width: 0; }
+.ai-drawer .dac-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

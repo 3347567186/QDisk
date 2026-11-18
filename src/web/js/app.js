@@ -202,7 +202,6 @@
     navigate(item.id);
     if (item.id === 'ai' && window.SteveAvatar) {
       window.SteveAvatar.spin(mark);
-      window.SteveAvatar.burst(mark);
     }
   }
 
