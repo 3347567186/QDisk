@@ -846,6 +846,15 @@
 
     let current = null;
 
+    /* 清空回合：换会话/新会话时必须连刻度一起清，
+       否则右边会留着上一段对话的刻度，悬停还能看到上一轮的提问。 */
+    function resetTurns() {
+      turns.length = 0;
+      if (rail) rail.setTurns([]);
+      if (follow) follow.resume();
+      if (toBottom) toBottom.classList.remove('on');
+    }
+
     /* 思路行：一行呼吸中的句子 + 可折起的过程（thoughtline.js）。
        label 是「正在做什么」，落定后换成「查了 N 项 · 用时」，计时器滑到句尾；
        过程在跑的时候是摊开的，落定即折成一行，点一下可再摊开。 */
@@ -879,7 +888,9 @@
         glyph: 'dots',
         collapsible: true,
         collapseOnSettle: true,
-        showTimer: false,
+        /* 跑的时候右边是跳动的秒数（跟参考的「正在思考 9分57秒」同义）；
+           落定后这个秒数收掉，时长留在右下角的用量里，标题只留「思考 · 摘要」 */
+        showTimer: true,
         copyLabel: T('复制思考过程', 'Copy reasoning'),
         thoughtLabel: T('思考', 'Thinking'),
         /* 思考正文不再内滚，长出来就把对话滚到底；顺手把摘要换成第一句 */
@@ -957,7 +968,12 @@
     function finishAnswer(res) {
       if (!current) startAnswer();
       const c = current;
-      if (c.tl) c.tl.settle({ doneLabel: doneLabelFor(c.steps, res, c.tl.thoughts) });
+      if (c.tl) {
+        c.tl.settle({ doneLabel: doneLabelFor(c.steps, res, c.tl.thoughts) });
+        /* 落定后不再显示秒数：折叠态那一行只留「思考 · 摘要」 */
+        const tm = c.tl.el.querySelector('.tl-timer');
+        if (tm) tm.hidden = true;
+      }
       paintAnswer(c.body, res.answer || '');
       if (res.degraded && !res.ok) c.body.classList.add('degraded');
       if (res.stopped) c.body.classList.add('degraded');
@@ -1254,6 +1270,7 @@
       retry: retryLast,
       composer,
       clear() {
+        resetTurns();
         msgs.innerHTML = '';
         cardNodes.clear();
         if (proposals) proposals.newSession();
@@ -1264,6 +1281,7 @@
         setEmpty(true);
       },
       loadSession(session) {
+        resetTurns();
         msgs.innerHTML = '';
         state.session = session;
         state.history = [];
@@ -1281,6 +1299,7 @@
         notifySessions();
       },
       newSession() {
+        resetTurns();
         msgs.innerHTML = '';
         /* 新会话清空提案队列：上一个会话没确认的动作不能跨会话留着，
            否则「我上次好像点过什么」就成了猜谜。配额也从零开始。 */

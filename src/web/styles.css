@@ -3887,3 +3887,34 @@ html[data-theme="dark"] .ai-page {
 /* 箭头留着（不然「只读」看起来像纯文字，不像能点开）；抽屉里上一轮把它藏了，
    现在左边腾出空间，放回去还差 10px 余量。 */
 .ai-drawer .dac-agent-mode .dac-chev { display: block; }
+
+/* 过程行：可展开的那条要有明确的「能点开」和展开动画，
+   静态截图上跟不可展开的行看不出区别，等于没有入口。 */
+.tl-step.openable { cursor: pointer; }
+.tl-step.openable:hover { background: var(--hover); }
+.tl-step.openable:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
+.ai-step-chev {
+  flex: 0 0 auto; width: 14px; height: 14px; margin-left: 4px; opacity: .45;
+  transition: transform var(--dur-2) var(--ease-out), opacity var(--dur-2);
+}
+.ai-step-chev::before {
+  content: ''; display: block; width: 6px; height: 6px; margin: 4px 0 0 3px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+.tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(180deg); opacity: .8; }
+.tl-step.openable:hover .ai-step-chev { opacity: .8; }
+
+/* 展开的过程明细：高度过渡而不是瞬间占位，收起时也不留一条空白 */
+.ai-step-out {
+  flex-basis: 100%; display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-2) var(--ease-out);
+}
+.ai-step-out[hidden] { display: grid; }
+.tl-step[aria-expanded="true"] .ai-step-out { grid-template-rows: 1fr; }
+.ai-step-out > pre {
+  min-height: 0; overflow: hidden auto; max-height: 168px; margin: 0;
+  padding: 0; font-family: var(--mono); font-size: 11px; line-height: 1.7;
+  color: var(--text-3); white-space: pre-wrap; word-break: break-word;
+}
+.tl-step[aria-expanded="true"] .ai-step-out > pre { padding: 6px 0 8px; }

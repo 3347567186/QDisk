@@ -56,9 +56,17 @@
         if (i === active) b.setAttribute('aria-current', 'true');
         b.dataset.turn = String(i);
         b.style.top = (INSET + i * PITCH) + 'px';
-        b.addEventListener('click', function () { onNavigate(i); });
+        b.addEventListener('click', function () {
+          /* 点完就收起预览：按钮拿到焦点后会触发 focus 预览，不主动收掉就会
+             一直挂着一块「我上一轮问了什么」的浮层，看起来像是界面没关干净。 */
+          hidePreview();
+          onNavigate(i);
+        });
         b.addEventListener('pointerenter', function () { showPreview(i); });
-        b.addEventListener('focus', function () { showPreview(i); });
+        b.addEventListener('focus', function (e) {
+          /* 只有键盘聚焦才出预览；鼠标点出来的焦点不算 */
+          if (e.target.matches && e.target.matches(':focus-visible')) showPreview(i);
+        });
         b.addEventListener('pointerleave', hidePreview);
         b.addEventListener('blur', hidePreview);
         list.appendChild(b);
@@ -112,7 +120,7 @@
       if (t.answer) preview.appendChild(el('div', 'ai-tnav-a', clip(t.answer, 160)));
       var mark = marks()[i];
       var top = mark ? mark.offsetTop + 5 : INSET + i * PITCH;
-      preview.style.setProperty('--rail-c', top - scroller.scrollTop + 'px');
+      preview.style.setProperty('--rail-c', (top - scroller.scrollTop) + 'px');
       preview.classList.add('on');
       preview.setAttribute('aria-hidden', 'false');
     }
@@ -121,6 +129,7 @@
       hovering = -1;
       preview.classList.remove('on');
       preview.setAttribute('aria-hidden', 'true');
+      if (preview.parentNode === nav) preview.style.removeProperty('--rail-c');
       centerActive();
     }
 
@@ -135,8 +144,11 @@
 
     return {
       setTurns: function (list2) {
+        /* 换了内容先把浮层收掉：刻度重画时预览若还挂着，会显示上一轮的问题 */
+        hidePreview();
         turns = list2 || [];
-        if (active >= turns.length) active = turns.length - 1;
+        if (!turns.length) active = -1;
+        else if (active >= turns.length) active = turns.length - 1;
         paintMarks();
         centerActive();
       },
