@@ -3872,3 +3872,12 @@ html[data-theme="dark"] .ai-page {
 .ai-drawer .dac-think { display: none; }
 .ai-drawer .dac-pill { max-width: 148px; min-width: 0; }
 .ai-drawer .dac-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 抽屉里的输入框那排再收紧一档：把「只读」的箭头省掉、模型胶囊限到 132px，
+   左右两组刚好放得下（408 = 左 168 + 右 206 + 间距），不再被裁掉半个字。 */
+.ai-drawer .dac-bar { gap: 6px; }
+.ai-drawer .dac-attach { width: 30px; height: 30px; }
+.ai-drawer .dac-perm { padding: 0 8px; }
+.ai-drawer .dac-agent-mode .dac-chev { display: none; }
+.ai-drawer .dac-pill { max-width: 132px; }
+.ai-drawer .dac-right { gap: 6px; }
