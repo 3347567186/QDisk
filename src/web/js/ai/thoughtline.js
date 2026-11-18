@@ -53,6 +53,7 @@
       fontSize: 0,          /* 0 = 跟随 CSS 的 --tl-font（默认 --fs-small） */
       copyLabel: '复制',
       copiedLabel: '已复制',
+      thoughtLabel: '思考',   /* 每行思考前面的那枚标签 */
       onAppend: null,
       speak: null,
       onSettle: null
@@ -70,10 +71,15 @@
     let ro = null;
     let dead = false;
 
-    /* 思考正文：模型的推理片段按帧追加进 .tl-thought。
+    /* 思考正文：模型的推理片段按「行」追加，一行一句、单行截断。
+       形状对齐常用的 agent 轨迹列表：左侧一枚「思考 ·」标签，右侧灰色小字，
+       超出宽度直接省略，不把整段推理摊成正文抢回答的注意力。
        必须在这里先声明——初始化时 refreshToggle() 会读它，晚声明会踩 TDZ。 */
-    let thoughtEl = null;
-    let thoughtBuf = '';
+    let thoughtWrap = null;     /* .tl-thoughts 容器 */
+    let curRow = null;          /* 当前这一行 */
+    let curText = null;         /* 当前行的文字层 */
+    let thoughtCount = 0;       /* 已经起了多少行（用于落定摘要） */
+    let thoughtBuf = '';        /* 攒着等下一帧一起写，避免一帧一个节点 */
     let thoughtRaf = 0;
 
     /* ---------------- DOM ---------------- */
@@ -105,7 +111,7 @@
     copyBtn.addEventListener('click', function (ev) {
       ev.stopPropagation();
       ev.preventDefault();
-      const text = thoughtEl ? thoughtEl.textContent : '';
+      const text = thoughtWrap ? thoughtWrap.textContent : '';
       if (!text) return;
       try { UIx.copy(text); } catch (e) { /* 复制失败不该影响对话 */ }
       copyBtn.setAttribute('data-done', '');
@@ -149,11 +155,11 @@
     /* ---------------- 状态 ---------------- */
 
     function toggleable() {
-      return o.collapsible && (stepsEl.children.length > 0 || !!thoughtEl);
+      return o.collapsible && (stepsEl.children.length > 0 || !!thoughtWrap);
     }
 
     function hasBody() {
-      return stepsEl.children.length > 0 || !!thoughtEl;
+      return stepsEl.children.length > 0 || !!thoughtWrap;
     }
 
     function setOpen(v) {
@@ -230,34 +236,65 @@
       return row;
     }
 
-    /* 思考正文逐帧追加。1.25.0 起不再在 168px 的小框里内滚：正文随页面自然长高，
-       每批文字包一层 .tl-chunk 做淡入（减少动态时直接落纯文本），
-       复制按钮在正文出现后才显形。 */
+    /* 思考正文按行追加：一句一行，行内单行截断。
+       形状对齐 agent 的轨迹列表——行首一枚「思考」标签，右侧灰色小字，
+       超宽直接省略号；完整文字仍留在 DOM 里，复制按钮与读屏都拿得到全量。 */
+    function newRow() {
+      curText = UIx.h('span', { class: 'tl-thought-text' });
+      curRow = UIx.h('div', { class: 'tl-thought-row', 'data-streaming': '' },
+        UIx.h('span', { class: 'tl-tag', 'aria-hidden': 'true' }, o.thoughtLabel),
+        curText
+      );
+      thoughtWrap.appendChild(curRow);
+      thoughtCount += 1;
+    }
+
+    function ensureWrap() {
+      if (thoughtWrap) return;
+      thoughtWrap = UIx.h('div', { class: 'tl-thoughts', role: 'log' });
+      fold.insertBefore(thoughtWrap, stepsEl);
+      refreshToggle();
+      if (working) setOpen(true);
+    }
+
+    function endRow() {
+      if (curRow) curRow.removeAttribute('data-streaming');
+      curRow = null;
+      curText = null;
+    }
+
+    /* 句末标点就收行；没收到的半句留在当前行，下一批继续往里接 */
+    function writeThought(buf) {
+      ensureWrap();
+      if (!curRow) newRow();
+      let rest = buf;
+      while (rest) {
+        const m = rest.match(/[\n。！？；]+/);
+        if (!m) {
+          curText.appendChild(document.createTextNode(rest));
+          break;
+        }
+        const cut = m.index + m[0].length;
+        curText.appendChild(document.createTextNode(rest.slice(0, cut)));
+        rest = rest.slice(cut).replace(/^\s+/, '');
+        endRow();
+        if (rest) newRow();
+      }
+    }
+
     function flushThought() {
       thoughtRaf = 0;
-      if (dead || !thoughtEl || !thoughtBuf) return;
+      if (dead || !thoughtBuf) return;
       const buf = thoughtBuf;
       thoughtBuf = '';
-      if (reduce) {
-        thoughtEl.appendChild(document.createTextNode(buf));
-      } else {
-        const span = document.createElement('span');
-        span.className = 'tl-chunk';
-        span.textContent = buf;
-        thoughtEl.appendChild(span);
-      }
+      writeThought(buf);
       copyBtn.hidden = false;
       if (typeof o.onAppend === 'function') o.onAppend();
     }
 
     function addThought(text) {
       if (dead || typeof text !== 'string' || !text) return;
-      if (!thoughtEl) {
-        thoughtEl = UIx.h('div', { class: 'tl-thought', 'data-streaming': '', role: 'log' });
-        fold.insertBefore(thoughtEl, stepsEl);
-        refreshToggle();
-        if (working) setOpen(true);
-      }
+      ensureWrap();
       thoughtBuf += text;
       if (!thoughtRaf) thoughtRaf = root.requestAnimationFrame(flushThought);
     }
@@ -290,19 +327,13 @@
       if (dead || !working) return;
       /* 收尾时把攒着的最后一段同步写完，不然会丢尾巴 */
       if (thoughtRaf) { root.cancelAnimationFrame(thoughtRaf); thoughtRaf = 0; }
-      if (thoughtEl && thoughtBuf) {
+      if (thoughtBuf) {
         const tail = thoughtBuf;
         thoughtBuf = '';
-        if (reduce) thoughtEl.appendChild(document.createTextNode(tail));
-        else {
-          const span = document.createElement('span');
-          span.className = 'tl-chunk tl-chunk--tail';
-          span.textContent = tail;
-          thoughtEl.appendChild(span);
-        }
+        writeThought(tail);
         copyBtn.hidden = false;
       }
-      if (thoughtEl) thoughtEl.removeAttribute('data-streaming');
+      endRow();
       const i = info || {};
       working = false;
       const done = typeof i.doneLabel === 'string' && i.doneLabel
@@ -371,7 +402,8 @@
       close: function () { setOpen(false); },
       destroy: destroy,
       get working() { return working; },
-      get seconds() { return ds / 10; }
+      get seconds() { return ds / 10; },
+      get thoughts() { return thoughtCount; }
     };
   }
 

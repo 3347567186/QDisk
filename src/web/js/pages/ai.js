@@ -23,6 +23,7 @@
         class: 'ai-new',
         type: 'button',
         title: T('新对话', 'New chat'),
+        'aria-label': T('新对话', 'New chat'),
         onclick: () => {
           chat.newSession();
           activeId = chat.session ? chat.session.id : null;
@@ -31,9 +32,9 @@
         }
       }, icon('plus'), h('span', {}, T('新对话', 'New chat')));
 
-      /* 收起/展开左栏：收起不是整栏消失，而是收成 56px 的图标栏——
-         展开按钮、新对话、每个会话的首字记号都还在，只是文字淡出。
-         状态存在 ai_ui（app.json），换缓存/重装后仍然记得。 */
+      /* 收起/展开左栏：收起不是整栏消失，而是收成 56px 的两枚按钮——
+         展开、新对话；会话列表收起，聊到哪个会话展开看，避免 34px 方块
+         里塞一串认不出来的缩写。状态存在 ai_ui（app.json），换缓存/重装后仍然记得。 */
       const RAIL_KEY = 'ai.rail.closed';
       const railToggle = h('button', {
         class: 'ai-rail-toggle',
@@ -96,15 +97,6 @@
           if (n.dataset.id === activeId) n.setAttribute('data-active', '');
           else n.removeAttribute('data-active');
         });
-      }
-
-      /* 收起成图标栏时，每个会话只剩一个方块：取标题第一个可见字符当记号
-         （中文用本字、英文用大写首字母），都没有就用一个点，保证方块不空。 */
-      function glyphOf(title) {
-        const s = String(title || '').replace(/^[\s\p{P}\p{S}]+/u, '');
-        if (!s) return '·';
-        const first = Array.from(s)[0];
-        return /[a-z]/.test(first) ? first.toUpperCase() : first;
       }
 
       function dayGroup(ms) {
@@ -188,7 +180,6 @@
                   }
                 }
               },
-                h('span', { class: 'ai-sess-glyph', 'aria-hidden': 'true' }, glyphOf(r.title)),
                 h('span', { class: 'ai-sess-title' }, r.title),
                 h('span', { class: 'ai-sess-time' }, timeLabel(r.mtime))
               ),

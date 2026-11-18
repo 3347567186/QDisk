@@ -351,6 +351,7 @@
         collapseOnSettle: true,
         showTimer: true,
         copyLabel: T('复制思考过程', 'Copy reasoning'),
+        thoughtLabel: T('思考', 'Thinking'),
         /* 思考正文不再内滚，长出来就把对话滚到底 */
         onAppend: () => scrollEnd(),
         speak: (sec) => T(sec.toFixed(1) + ' 秒', sec.toFixed(1) + ' seconds')
@@ -382,19 +383,22 @@
       scrollEnd();
     }
 
-    /* 落定后的那句话：把「查了什么、查了几项」压进一句，时间由计时器接在后面 */
-    function doneLabelFor(steps, res) {
+    /* 落定后的那句话：把「想了多少、查了什么」压成一句，时间由计时器接在后面 */
+    function doneLabelFor(steps, res, thoughts) {
       const n = steps.length;
+      const t = thoughts || 0;
       if (res.stopped) return T('已停止', 'Stopped');
       if (!res.ok) return n ? T(`查了 ${n} 项 · 未完成`, `Checked ${n} · unfinished`) : T('查证失败', 'Failed');
-      if (!n) return T('思考了', 'Thought for');
-      return T(`查了 ${n} 项 · 用时`, `Checked ${n} · `);
+      const parts = [];
+      if (t) parts.push(T(`思考 ${t} 段`, `Thought ${t}×`));
+      if (n) parts.push(T(`调用 ${n} 次工具`, `${n} tool calls`));
+      return parts.length ? parts.join(' · ') : T('思考了', 'Thought');
     }
 
     function finishAnswer(res) {
       if (!current) startAnswer();
       const c = current;
-      if (c.tl) c.tl.settle({ doneLabel: doneLabelFor(c.steps, res) });
+      if (c.tl) c.tl.settle({ doneLabel: doneLabelFor(c.steps, res, c.tl.thoughts) });
       c.body.textContent = res.answer || '';
       if (res.degraded && !res.ok) c.body.classList.add('degraded');
       if (res.stopped) c.body.classList.add('degraded');
