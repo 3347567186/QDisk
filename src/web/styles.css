@@ -3639,43 +3639,43 @@ html[data-theme="dark"] .ai-page {
 }
 
 /* ---------------- 回合导航（右侧刻度条） ---------------- */
-.ai-rail-nav {
+.ai-tnav {
   position: absolute; right: 12px; top: 10px; bottom: 116px; width: 28px;
   display: flex; align-items: center; z-index: 7; pointer-events: none;
 }
-.ai-rail-nav[hidden] { display: none; }
-.ai-rail-frame {
+.ai-tnav[hidden] { display: none; }
+.ai-tnav-frame {
   position: relative; width: 28px; max-height: 100%;
   pointer-events: auto;
 }
-.ai-rail-scroller {
+.ai-tnav-scroll {
   position: relative; width: 28px; max-height: 100%; overflow: hidden;
   scrollbar-width: none; -ms-overflow-style: none;
 }
-.ai-rail-scroller::-webkit-scrollbar { display: none; }
-.ai-rail-scroller.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px); mask-image: linear-gradient(to bottom, transparent, #000 24px); }
-.ai-rail-scroller.fade-bottom { -webkit-mask-image: linear-gradient(to top, transparent, #000 24px); mask-image: linear-gradient(to top, transparent, #000 24px); }
-.ai-rail-scroller.fade-top.fade-bottom {
+.ai-tnav-scroll::-webkit-scrollbar { display: none; }
+.ai-tnav-scroll.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px); mask-image: linear-gradient(to bottom, transparent, #000 24px); }
+.ai-tnav-scroll.fade-bottom { -webkit-mask-image: linear-gradient(to top, transparent, #000 24px); mask-image: linear-gradient(to top, transparent, #000 24px); }
+.ai-tnav-scroll.fade-top.fade-bottom {
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 24px), transparent);
   mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 24px), transparent);
 }
-.ai-rail-list { position: relative; width: 28px; }
-.ai-rail-mark {
+.ai-tnav-list { position: relative; width: 28px; }
+.ai-tnav-mark {
   position: absolute; left: 0; width: 28px; height: 10px; padding: 0;
   border: 0; background: none; cursor: pointer; display: flex; align-items: center;
   justify-content: flex-end;
 }
-.ai-rail-mark::before {
+.ai-tnav-mark::before {
   content: ''; display: block; width: 20px; height: 2px; border-radius: 2px;
   background: var(--text-3); transform: scaleX(.6); transform-origin: right center;
   transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), opacity var(--dur-fast);
   opacity: .9;
 }
-.ai-rail-mark:hover::before { transform: scaleX(1); background: var(--text-2); }
-.ai-rail-mark[aria-current="true"]::before { transform: scaleX(1); background: var(--text-1); opacity: 1; }
-.ai-rail-mark:focus-visible { outline: none; }
-.ai-rail-mark:focus-visible::before { box-shadow: 0 0 0 2px var(--accent-ring); }
-.ai-rail-preview {
+.ai-tnav-mark:hover::before { transform: scaleX(1); background: var(--text-2); }
+.ai-tnav-mark[aria-current="true"]::before { transform: scaleX(1); background: var(--text-1); opacity: 1; }
+.ai-tnav-mark:focus-visible { outline: none; }
+.ai-tnav-mark:focus-visible::before { box-shadow: 0 0 0 2px var(--accent-ring); }
+.ai-tnav-pop {
   position: absolute; right: calc(100% + 10px); top: var(--rail-c, 0);
   width: min(300px, 42vw); padding: 9px 12px; border-radius: var(--radius-lg);
   background: var(--surface); border: 1px solid var(--line);
@@ -3683,12 +3683,12 @@ html[data-theme="dark"] .ai-page {
   transition: opacity 140ms var(--ease), transform 140ms var(--ease);
   pointer-events: none; z-index: 8;
 }
-.ai-rail-preview.on { opacity: 1; transform: none; }
-.ai-rail-prompt {
+.ai-tnav-pop.on { opacity: 1; transform: none; }
+.ai-tnav-q {
   font-size: var(--fs-small); font-weight: 600; color: var(--text-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ai-rail-answer {
+.ai-tnav-a {
   margin-top: 3px; font-size: var(--fs-tiny); line-height: 1.5; color: var(--text-2);
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
@@ -3746,7 +3746,7 @@ html[data-theme="dark"] .ai-page {
 .ai-page .tl-thought-row { padding: 0; }
 .ai-page .tl-thought-text { font-size: var(--fs-small); line-height: 1.62; color: var(--text-3); }
 @media (prefers-reduced-motion: reduce) {
-  .ai-rail-mark::before, .ai-rail-preview, .ai-tobottom { transition: none; }
+  .ai-tnav-mark::before, .ai-tnav-pop, .ai-tobottom { transition: none; }
 }
 
 /* 思考行摘要：标题固定「思考」，圆点后面跟推理第一句 */

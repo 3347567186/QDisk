@@ -28,12 +28,12 @@
     var host = opts.host;                 // position:relative 的容器
     var onNavigate = opts.onNavigate || function () {};
 
-    var nav = el('nav', 'ai-rail-nav');
+    var nav = el('nav', 'ai-tnav');
     nav.setAttribute('aria-label', '轮次导航');
-    var frame = el('div', 'ai-rail-frame');
-    var scroller = el('div', 'ai-rail-scroller');
-    var list = el('div', 'ai-rail-list');
-    var preview = el('div', 'ai-rail-preview');
+    var frame = el('div', 'ai-tnav-frame');
+    var scroller = el('div', 'ai-tnav-scroll');
+    var list = el('div', 'ai-tnav-list');
+    var preview = el('div', 'ai-tnav-pop');
     preview.setAttribute('role', 'tooltip');
     preview.setAttribute('aria-hidden', 'true');
 
@@ -50,7 +50,7 @@
     function paintMarks() {
       list.textContent = '';
       turns.forEach(function (t, i) {
-        var b = el('button', 'ai-rail-mark');
+        var b = el('button', 'ai-tnav-mark');
         b.type = 'button';
         b.setAttribute('aria-label', '跳转到第 ' + (i + 1) + ' 轮');
         if (i === active) b.setAttribute('aria-current', 'true');
@@ -107,9 +107,9 @@
       var t = turns[i];
       if (!t) return;
       preview.textContent = '';
-      var a = el('div', 'ai-rail-prompt', clip(t.prompt, 80) || ('第 ' + (i + 1) + ' 轮'));
+      var a = el('div', 'ai-tnav-q', clip(t.prompt, 80) || ('第 ' + (i + 1) + ' 轮'));
       preview.appendChild(a);
-      if (t.answer) preview.appendChild(el('div', 'ai-rail-answer', clip(t.answer, 160)));
+      if (t.answer) preview.appendChild(el('div', 'ai-tnav-a', clip(t.answer, 160)));
       var mark = marks()[i];
       var top = mark ? mark.offsetTop + 5 : INSET + i * PITCH;
       preview.style.setProperty('--rail-c', top - scroller.scrollTop + 'px');
