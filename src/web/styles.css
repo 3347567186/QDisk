@@ -2828,6 +2828,43 @@ html[data-theme="dark"] .ai-page {
 .ai-prop-item-d { color: var(--danger); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-prop-more { font-size: var(--fs-tiny); color: var(--text-3); padding: 2px 8px; background: var(--bg-1); }
 
+/* 批量确认：一张卡里勾选要执行的那几条。
+   行高比数据行矮一点（30px），勾掉的行压暗，勾选数变化时右侧给出真实数量与体积。 */
+.ai-prop-live { margin-left: 8px; font-size: var(--fs-tiny); color: var(--text-3); }
+
+.ai-prop-pickbox { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
+.ai-prop-picks-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; background: var(--bg-1);
+  font-size: var(--fs-tiny); color: var(--text-3);
+  border-bottom: 1px solid var(--line);
+}
+.ai-prop-picks-acts { margin-left: auto; display: flex; gap: 2px; }
+.ai-prop-mini {
+  border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-size: var(--fs-tiny); color: var(--accent-text, var(--text-2));
+  padding: 2px 6px; border-radius: var(--radius-sm);
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+.ai-prop-mini:hover { background: var(--accent-weak, var(--surface-2)); }
+.ai-prop-mini:focus-visible { outline: 2px solid var(--accent-ring, var(--line)); outline-offset: 1px; }
+
+.ai-prop-picks { display: flex; flex-direction: column; }
+.ai-prop-pick {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 8px; min-height: 30px; cursor: pointer;
+  font-size: var(--fs-tiny);
+  background: var(--bg-1);
+  transition: background var(--dur-1) var(--ease-out), opacity var(--dur-1) var(--ease-out);
+}
+.ai-prop-pick + .ai-prop-pick { border-top: .5px solid var(--line); }
+.ai-prop-pick:hover { background: var(--surface-2, var(--surface)); }
+.ai-prop-pick.off { opacity: .45; }
+.ai-prop-cb { width: 14px; height: 14px; flex: 0 0 auto; margin: 0; accent-color: var(--accent, #d97757); cursor: pointer; }
+.ai-prop-pick-name { flex: 0 0 auto; max-width: 38%; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-prop-pick.off .ai-prop-pick-name { text-decoration: line-through; }
+.ai-prop-pick-path { flex: 1 1 auto; min-width: 0; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .ai-prop-warn {
   font-size: var(--fs-tiny); color: var(--warn); background: var(--warn-weak);
   border-radius: var(--radius-lg); padding: 5px 8px; display: flex; flex-direction: column; gap: 1px;

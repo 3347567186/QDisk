@@ -89,8 +89,43 @@
     let denyStreak = {};
     let lastHash = '';
     let chainReady = null;
+    const subs = new Set();
 
     const now = () => Date.now();
+
+    /* 订阅：整页和抽屉是两个 chat 实例，但共用同一份提案队列，
+       谁改了状态就通知所有人重画，免得一边执行完另一边还挂着「执行」按钮。 */
+    function subscribe(fn) {
+      if (typeof fn !== 'function') return () => {};
+      subs.add(fn);
+      return () => subs.delete(fn);
+    }
+
+    function notify() {
+      subs.forEach((fn) => {
+        try { fn(); } catch (e) { /* 某个视图画挂了不该影响别的视图 */ }
+      });
+    }
+
+    /* 这个动作里「可以勾选的那一列」是哪一列：第一个能放多条的 paths 参数。
+       没有就返回空串——例如 settings.set 只有一个键，没什么可挑的。 */
+    function pickKeyOf(actionId) {
+      const act = actions.get(actionId);
+      if (!act || !act.schema) return '';
+      for (const k of Object.keys(act.schema)) {
+        const s = act.schema[k];
+        if (s && s.type === 'paths' && (s.max || 0) > 1) return k;
+      }
+      return '';
+    }
+
+    function capItemsOf(actionId) {
+      return actionId === 'organize.apply' ? 20000 : Math.min(policy.maxItems, actions.limits.items);
+    }
+
+    function capBytesNow() {
+      return Math.min(policy.maxBytes, actions.limits.bytes);
+    }
 
     /* 审计链：会话第一条先读回当天文件最后一行，保证跨会话也能对上 */
     function ready() {
@@ -154,11 +189,13 @@
     }
 
     function newSession() {
-      pending = [];
+      /* 待处理的提案不清：它是一张等用户点的卡，不是这一轮对话的中间状态。
+         清掉它会让「整页开的卡」在抽屉里一开新对话就消失，用户以为丢了。 */
       history = [];
       execs = 0;
       turnMsgs = 0;
       denyStreak = {};
+      notify();
     }
 
     /* 过期清扫：过期的提案一律标 expired，不再接受批准 */
@@ -247,11 +284,11 @@
         return { ok: false, error: zero };
       }
 
-      const capItems = act.id === 'organize.apply' ? 20000 : Math.min(policy.maxItems, actions.limits.items);
+      const capItems = capItemsOf(act.id);
       if (card.count > capItems) {
         return { ok: false, error: '这次有 ' + card.count + ' 项，超过单次上限 ' + capItems + ' 项。请缩小范围，或者让用户自己在界面里做。' };
       }
-      const capBytes = Math.min(policy.maxBytes, actions.limits.bytes);
+      const capBytes = capBytesNow();
       if (card.bytes > capBytes) {
         return {
           ok: false,
@@ -272,6 +309,9 @@
       const reversible = card.reversibleNow !== undefined ? card.reversibleNow
         : (card.reversible !== undefined ? card.reversible : act.reversible);
       const auto = canAuto(risk, reversible);
+      /* 可勾选的那一列：卡片上默认全选，用户可以只留几条一起执行 */
+      const pickKey = pickKeyOf(act.id);
+      const picks = (pickKey && Array.isArray(args[pickKey])) ? args[pickKey].slice() : [];
 
       const p = {
         id,
@@ -286,6 +326,8 @@
         }),
         risk,
         reversible,
+        pickKey,
+        picks,
         hash: hash(JSON.stringify({ a: act.id, args })),
         at: now(),
         expires: now() + TTL,
@@ -300,12 +342,15 @@
         phase: 'propose', id, action: act.id, cat: act.cat,
         items: card.count, bytes: card.bytes, hash: p.hash, why: p.why
       });
+      notify();
       return { ok: true, proposal: p, auto };
     }
 
     /* ------------------------------------------------------------ 批准 */
     /* 只允许 UI 的用户手势调用。approvedBy 必须是 'user'，
-       模型没有这个函数，也没有任何工具能间接调到它。 */
+       模型没有这个函数，也没有任何工具能间接调到它。
+       opt.paths 是「批量确认」：用户在一张卡里勾掉了其中几条，
+       这里只接受原提案里真实存在的子集，并且按子集重新预演、重新算账。 */
     async function commit(id, opt) {
       const o = opt || {};
       sweep();
@@ -322,6 +367,7 @@
       if (p.expires <= now()) {
         p.status = 'expired';
         await journal({ phase: 'expire', id, action: p.action, cat: p.cat });
+        notify();
         return { ok: false, error: '提案超过 10 分钟，已经过期。让 AI 重新提一次。' };
       }
       if (policy.mode === 'off') return { ok: false, error: '写入权限已经被关闭，动作没有执行' };
@@ -330,13 +376,34 @@
       const h = hash(JSON.stringify({ a: p.action, args: p.args }));
       if (h !== p.hash) return { ok: false, error: '参数和提议时不一致，已拒绝执行' };
 
+      /* 勾选：只能是原提案的子集，不能借这个口子加东西进来 */
+      let args = p.args;
+      let pick = 0;
+      if (o.paths !== undefined && o.paths !== null) {
+        if (!p.pickKey) return { ok: false, error: '这个动作没有可挑选的项' };
+        const all = Array.isArray(p.args[p.pickKey]) ? p.args[p.pickKey] : [];
+        const want = [];
+        const given = Array.isArray(o.paths) ? o.paths : [];
+        for (const x of given) {
+          if (typeof x !== 'string') continue;
+          if (all.indexOf(x) < 0) return { ok: false, error: '勾选的项不在原来的提案里，已拒绝执行' };
+          if (want.indexOf(x) < 0) want.push(x);
+        }
+        if (!want.length) return { ok: false, error: '一项都没勾，什么也没做' };
+        if (want.length < all.length) {
+          args = Object.assign({}, p.args);
+          args[p.pickKey] = want;
+          pick = want.length;
+        }
+      }
+
       if (root.AIGuard) {
-        const act = actions.get(p.action);
+        const act0 = actions.get(p.action);
         const batches = [];
-        for (const k of Object.keys(act.schema)) {
-          const s = act.schema[k];
-          if (s.type === 'paths' && Array.isArray(p.args[k])) batches.push(p.args[k]);
-          else if (s.type === 'string' && PATH_KEYS.indexOf(k) >= 0 && p.args[k]) batches.push([p.args[k]]);
+        for (const k of Object.keys(act0.schema)) {
+          const s = act0.schema[k];
+          if (s.type === 'paths' && Array.isArray(args[k])) batches.push(args[k]);
+          else if (s.type === 'string' && PATH_KEYS.indexOf(k) >= 0 && args[k]) batches.push([args[k]]);
         }
         for (const b of batches) {
           const g = root.AIGuard.check(b);
@@ -344,22 +411,43 @@
         }
       }
 
-      p.status = 'running';
-      execs += 1;
-      await journal({ phase: 'approve', id, action: p.action, cat: p.cat, items: p.card.count, bytes: p.card.bytes, hash: p.hash });
       const act = actions.get(p.action);
+      /* 子集要重新预演：卡片上那串数字是「整批」的，勾掉一半还按整批记账就是骗人 */
+      let card = p.card;
+      if (pick) {
+        try {
+          card = await act.plan(args);
+        } catch (e) {
+          return { ok: false, error: (e && e.message) || '预演失败' };
+        }
+        if (!card || !card.count) return { ok: false, error: '勾选的这几项已经没有可执行的内容了' };
+        if (card.count > capItemsOf(p.action)) {
+          return { ok: false, error: '勾选的这几项有 ' + card.count + ' 项，超过单次上限' };
+        }
+        if (card.bytes > capBytesNow()) {
+          return { ok: false, error: '勾选的这几项合计 ' + (card.bytes / 1073741824).toFixed(1) + ' GB，超过单次上限' };
+        }
+      }
+
+      p.status = 'running';
+      p.picked = pick || null;
+      execs += 1;
+      await journal({ phase: 'approve', id, action: p.action, cat: p.cat, items: card.count, bytes: card.bytes, hash: p.hash });
       let out;
       try {
-        out = await act.run(p.args);
+        out = await act.run(args);
       } catch (e) {
         p.status = 'failed';
         p.error = (e && e.message) || '执行失败';
         pending = pending.filter((x) => x.id !== id);
         history.unshift(p);
         await journal({ phase: 'result', id, action: p.action, cat: p.cat, result: 'failed: ' + p.error });
+        notify();
         return { ok: false, error: p.error, proposal: p };
       }
       p.status = 'done';
+      p.args = args;
+      p.card = Object.assign({}, card, { action: p.action, label: p.label, risk: p.risk, reversible: p.reversible });
       p.undo = out.undo || null;
       p.result = out.result || null;
       p.message = out.message || '已执行';
@@ -368,9 +456,46 @@
       history.unshift(p);
       await journal({
         phase: 'commit', id, action: p.action, cat: p.cat,
-        items: p.card.count, bytes: p.card.bytes, result: p.message
+        items: card.count, bytes: card.bytes,
+        result: p.message + (pick ? '（勾选 ' + pick + ' 项）' : '')
       });
+      notify();
       return { ok: true, proposal: p, message: p.message, result: p.result };
+    }
+
+    /* 勾选变化时先算一遍再显示：卡片上的「N 项 / 多大」必须是真的。
+       只读，不动队列，失败就当没算出来（界面上退回整批的数字）。 */
+    async function preview(id, paths) {
+      const p = pending.find((x) => x.id === id);
+      if (!p) return { ok: false, error: '找不到这个提案' };
+      if (!p.pickKey) return { ok: false, error: '这个动作没有可挑选的项' };
+      const all = Array.isArray(p.args[p.pickKey]) ? p.args[p.pickKey] : [];
+      const want = [];
+      for (const x of (Array.isArray(paths) ? paths : [])) {
+        if (typeof x === 'string' && all.indexOf(x) >= 0 && want.indexOf(x) < 0) want.push(x);
+      }
+      if (!want.length) return { ok: true, empty: true, count: 0, bytes: 0 };
+      if (root.AIGuard) {
+        const g = root.AIGuard.check(want);
+        if (!g.ok) return { ok: false, error: '有路径不能动：' + g.bad[0].why };
+      }
+      const args = Object.assign({}, p.args);
+      args[p.pickKey] = want;
+      const act = actions.get(p.action);
+      let card;
+      try {
+        card = await act.plan(args);
+      } catch (e) {
+        return { ok: false, error: (e && e.message) || '预演失败' };
+      }
+      return {
+        ok: true,
+        card,
+        count: Number(card && card.count) || 0,
+        bytes: Number(card && card.bytes) || 0,
+        risk: card.riskNow !== undefined ? card.riskNow : p.risk,
+        reversible: card.reversibleNow !== undefined ? card.reversibleNow : p.reversible
+      };
     }
 
     /* ------------------------------------------------------------ 拒绝 */
@@ -385,6 +510,7 @@
       pending = pending.filter((x) => x.id !== id);
       history.unshift(p);
       await journal({ phase: 'deny', id, action: p.action, cat: p.cat, why: p.denyWhy });
+      notify();
       return { ok: true };
     }
 
@@ -397,6 +523,7 @@
       pending = pending.filter((x) => x.id !== id);
       history.unshift(p);
       await journal({ phase: 'deny', id, action: p.action, cat: p.cat, why: '模型撤回' });
+      notify();
       return { ok: true };
     }
 
@@ -410,6 +537,7 @@
       if (r.ok) {
         p.undone = true;
         await journal({ phase: 'undo', id, action: p.action, cat: p.cat, result: r.message });
+        notify();
       }
       return r;
     }
@@ -437,11 +565,20 @@
     return {
       setPolicy, getPolicy, startTurn, newSession,
       propose, commit, deny, cancel, undo, list, recent, stats,
+      preview, subscribe, notify,
       TTL, MAX_PENDING, MODES, CATS
     };
   }
 
-  const API = { create, defaultPolicy, normalizePolicy, hash, TTL, MODES, CATS };
+  /* 全应用一份：整页的对话、抽屉里的对话、设置页看到的应该是同一队提案，
+     各建一份会出现「这边执行完，那边还挂着执行按钮」。 */
+  let shared = null;
+  function sharedCreate(deps) {
+    if (!shared) shared = create(deps);
+    return shared;
+  }
+
+  const API = { create, shared: sharedCreate, defaultPolicy, normalizePolicy, hash, TTL, MODES, CATS };
   root.AIProposals = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof window !== 'undefined' ? window : globalThis);

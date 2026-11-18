@@ -201,6 +201,60 @@ if (set.ok) {
   ok('设置可撤销回原值', false, set.error);
 }
 
+/* 14 批量确认：一张卡里勾选一部分执行 */
+await clearQueue();
+props.setPolicy(Object.assign({}, props.getPolicy(), { mode: 'confirm' }));
+props.startTurn();
+const three = await props.propose({
+  action: 'files.delete',
+  args: {
+    paths: ['D:\\Users\\me\\Downloads\\a.iso', 'D:\\Users\\me\\Downloads\\b.txt', 'D:\\Users\\me\\Downloads\\c.log'],
+    mode: 'trash'
+  }
+});
+ok('可挑选项列出三条', three.ok && Array.isArray(three.proposal.picks) && three.proposal.picks.length === 3,
+  three.error || '');
+ok('挑选列是 paths', three.ok && three.proposal.pickKey === 'paths', three.ok ? three.proposal.pickKey : '');
+
+if (three.ok) {
+  const pre = await props.preview(three.proposal.id, ['D:\\Users\\me\\Downloads\\b.txt']);
+  ok('预演只算勾选项', pre.ok && pre.count === 1 && pre.bytes === 12_000,
+    (pre.error || '') + ' count=' + pre.count + ' bytes=' + pre.bytes);
+
+  const before = calls.filter((c) => c[0] === 'files.delete' && c[1].confirm === true).length;
+  const sub = await props.commit(three.proposal.id, {
+    approvedBy: 'user',
+    paths: ['D:\\Users\\me\\Downloads\\b.txt']
+  });
+  const executed = calls.filter((c) => c[0] === 'files.delete' && c[1].confirm === true).slice(before);
+  const sentPaths = executed.length ? executed[executed.length - 1][1].paths : [];
+  ok('只执行勾选的那一条', sub.ok && sentPaths.length === 1 && sentPaths[0].endsWith('b.txt'),
+    (sub.error || '') + ' sent=' + JSON.stringify(sentPaths));
+  ok('执行记录记下勾选数', sub.ok && sub.proposal.picked === 1, String(sub.proposal && sub.proposal.picked));
+}
+
+/* 15 勾选不能变成加东西的入口 */
+props.startTurn();
+const guardPick = await props.propose({ action: 'organize.apply', args: { paths: ['D:\\Users\\me\\Downloads'] } });
+if (guardPick.ok) {
+  const evil = await props.commit(guardPick.proposal.id, {
+    approvedBy: 'user',
+    paths: ['C:\\Windows']
+  });
+  ok('勾选项不在原提案里被拒', !evil.ok, evil.error);
+  const emptyPick = await props.commit(guardPick.proposal.id, { approvedBy: 'user', paths: [] });
+  ok('一项都没勾被拒', !emptyPick.ok, emptyPick.error);
+} else {
+  ok('勾选项不在原提案里被拒', false, guardPick.error);
+  ok('一项都没勾被拒', false, guardPick.error);
+}
+await clearQueue();
+
+/* 16 整页与抽屉共用同一份队列 */
+const sharedA = sandbox.AIProposals.shared({ API, store, actions, policy: { mode: 'confirm' } });
+const sharedB = sandbox.AIProposals.shared({ API, store, actions, policy: { mode: 'confirm' } });
+ok('shared 返回同一个实例', sharedA === sharedB);
+
 console.log(out.join('\n'));
 const failed = out.filter((x) => x.startsWith('FAIL')).length;
 console.log('\n' + (out.length - failed) + '/' + out.length + ' 通过，失败 ' + failed);

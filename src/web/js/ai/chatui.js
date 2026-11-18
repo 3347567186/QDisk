@@ -210,8 +210,12 @@
        模型只能通过 tools.js 的 propose_action 提一张卡片出来，
        真正执行是 proposals.commit，只由卡片上的按钮调用。 */
     const actions = (root.AIRegistry && window.API) ? root.AIRegistry.create({ API: window.API }) : null;
+    /* 全应用共用一份提案队列：整页和抽屉是两个 chat 实例，
+       各建各的会出现「这边执行完了，那边还挂着执行按钮」。 */
     const proposals = (root.AIProposals && actions)
-      ? root.AIProposals.create({ API: window.API, store: AIStore, actions: actions, policy: ui.agent })
+      ? (root.AIProposals.shared
+        ? root.AIProposals.shared({ API: window.API, store: AIStore, actions: actions, policy: ui.agent })
+        : root.AIProposals.create({ API: window.API, store: AIStore, actions: actions, policy: ui.agent }))
       : null;
     if (actions && AIPrompt.setCatalog) {
       /* 动作目录是稳定前缀的一部分：同一版本内一个字节都不变，缓存照样命中 */
@@ -424,28 +428,72 @@
     /* ---------------- 提案卡片 ----------------
        模型提的每一件事都长在这里：看得见数量、体积、风险、能不能撤销，
        才谈得上「要不要点」。执行按钮是唯一的执行入口。 */
-    const shownCards = new Set();
+    /* ---------------- 提案卡片 ----------------
+       模型提的每一件事都长在这里：看得见数量、体积、风险、能不能撤销，
+       才谈得上「要不要点」。执行按钮是唯一的执行入口。
+
+       一张卡可以只执行其中几条（批量确认）：勾选的行由用户决定，
+       勾完会用引擎再预演一次，卡片上的「N 项 / 多大」跟着真实数字走。 */
+    const cardNodes = new Map();
     const CONFIRM_WORD = () => T('删除', 'delete');
+    const PICK_SHOW_MAX = 10;
+
+    function fmtSize(n) {
+      const v = Number(n) || 0;
+      if (v < 1024) return v + ' B';
+      const u = ['KB', 'MB', 'GB', 'TB'];
+      let i = -1;
+      let x = v;
+      do { x /= 1024; i += 1; } while (x >= 1024 && i < u.length - 1);
+      return (x >= 100 ? x.toFixed(0) : x.toFixed(1)) + ' ' + u[i];
+    }
+
+    function leafOf(s) {
+      const t = String(s || '');
+      const i = Math.max(t.lastIndexOf('\\'), t.lastIndexOf('/'));
+      return i >= 0 ? t.slice(i + 1) : t;
+    }
 
     function pendingCards() {
+      syncCards();
+    }
+
+    /* 整页和抽屉共用一份队列，因此这里不能只往自己这边追加新卡：
+       别的视图已经处理掉的，这边也要跟着换成「已执行 / 已取消」。 */
+    function syncCards() {
       if (!proposals) return;
-      proposals.list().forEach((p) => {
-        if (shownCards.has(p.id)) return;
-        shownCards.add(p.id);
-        msgs.appendChild(proposalCard(p));
+      const live = proposals.list();
+      const ids = new Set(live.map((x) => x.id));
+      live.forEach((p) => {
+        const had = cardNodes.get(p.id);
+        if (had) {
+          if (had._repaint && had.dataset.status !== p.status) had._repaint();
+          return;
+        }
+        const node = proposalCard(p);
+        cardNodes.set(p.id, node);
+        msgs.appendChild(node);
         scrollEnd(false);
+      });
+      cardNodes.forEach((node, id) => {
+        if (ids.has(id)) return;
+        if (node.dataset.status === 'pending' && node._repaint) node._repaint();
       });
     }
 
     function proposalCard(p) {
-      const c = p.card || {};
-      const risk = Number(c.risk || 1);
-      const host = h('div', { class: 'ai-msg bot ai-prop r' + risk });
+      const host = h('div', { class: 'ai-msg bot ai-prop' });
+      host._repaint = paint;
       paint();
       return host;
 
       function paint() {
+        const c = p.card || {};
+        const risk = Number(c.risk || p.risk || 1);
         host.innerHTML = '';
+        host.dataset.status = p.status || 'pending';
+        host.className = 'ai-msg bot ai-prop r' + risk;
+
         host.appendChild(h('div', { class: 'ai-prop-head' },
           h('span', { class: 'ai-prop-title' }, c.title || p.label || p.action),
           h('span', { class: 'ai-chip' + (risk >= 3 ? ' danger' : risk === 2 ? ' warn' : '') },
@@ -454,7 +502,13 @@
             T(c.reversible ? '可撤销' : '不可撤销', c.reversible ? 'undoable' : 'no undo'))));
 
         if (p.why) host.appendChild(h('div', { class: 'ai-prop-why' }, T('理由：', 'Why: ') + p.why));
-        if (c.summary) host.appendChild(h('div', { class: 'ai-prop-sum' }, c.summary));
+
+        const sumLine = h('div', { class: 'ai-prop-sum' });
+        const sumText = h('span', { class: 'ai-prop-sum-text' }, c.summary || '');
+        const live = h('span', { class: 'ai-prop-live' });
+        sumLine.appendChild(sumText);
+        sumLine.appendChild(live);
+        host.appendChild(sumLine);
 
         const items = Array.isArray(c.items) ? c.items : [];
         if (items.length) {
@@ -469,6 +523,103 @@
             box.appendChild(h('div', { class: 'ai-prop-more' }, T('还有 ' + (items.length - 6) + ' 项', '+' + (items.length - 6) + ' more')));
           }
           host.appendChild(box);
+        }
+
+        /* 可勾选：动作里有「能放多条路径」的列，且提案还活着 */
+        const picks = Array.isArray(p.picks) ? p.picks : [];
+        const pickable = p.status === 'pending' && !!p.pickKey && picks.length > 1;
+        if (pickable && !(p._sel instanceof Set)) p._sel = new Set(picks);
+
+        let goBtn = null;
+        let timer = 0;
+        let armed = !p.needsWord;
+        let pickDebounce = 0;
+
+        function stopCountdown() {
+          if (timer) { clearInterval(timer); timer = 0; }
+        }
+
+        function selList() { return picks.filter((x) => p._sel.has(x)); }
+
+        /* 勾了哪些就先算哪些：数量与体积都来自引擎真预演，不是拿整批去比例拆分 */
+        function reprice() {
+          const chosen = selList();
+          if (!chosen.length) {
+            live.textContent = T('一项都没选', 'nothing selected');
+            if (goBtn) goBtn.disabled = true;
+            return;
+          }
+          if (chosen.length === picks.length) {
+            live.textContent = '';
+            if (goBtn) goBtn.disabled = !armed;
+            return;
+          }
+          live.textContent = T('已选 ' + chosen.length + ' / ' + picks.length + '，统计中…',
+            chosen.length + '/' + picks.length + ' selected, counting…');
+          if (goBtn) goBtn.disabled = true;
+          if (pickDebounce) clearTimeout(pickDebounce);
+          pickDebounce = setTimeout(async () => {
+            pickDebounce = 0;
+            let r = null;
+            try { r = await proposals.preview(p.id, chosen); } catch (e) { r = null; }
+            if (!r || !r.ok) {
+              live.textContent = T('已选 ' + chosen.length + ' / ' + picks.length, chosen.length + '/' + picks.length);
+              if (goBtn) goBtn.disabled = !armed;
+              return;
+            }
+            if (r.empty) {
+              live.textContent = T('这几项已经没有可执行的内容', 'nothing left to run');
+              if (goBtn) goBtn.disabled = true;
+              return;
+            }
+            live.textContent = T('已选 ' + r.count + ' 项 · ' + fmtSize(r.bytes), r.count + ' items · ' + fmtSize(r.bytes));
+            if (goBtn) goBtn.disabled = !armed;
+          }, 260);
+        }
+
+        if (pickable) {
+          const pickBox = h('div', { class: 'ai-prop-pickbox' });
+          const all = h('button', { class: 'ai-prop-mini', type: 'button' }, T('全选', 'All'));
+          all.addEventListener('click', () => {
+            picks.forEach((x) => p._sel.add(x));
+            stopCountdown();
+            paint();
+          });
+          const none = h('button', { class: 'ai-prop-mini', type: 'button' }, T('清空', 'None'));
+          none.addEventListener('click', () => {
+            p._sel.clear();
+            stopCountdown();
+            paint();
+          });
+          pickBox.appendChild(h('div', { class: 'ai-prop-picks-head' },
+            h('span', { class: 'ai-prop-picks-title' }, T('勾选要执行的项', 'Pick what to run')),
+            h('span', { class: 'ai-prop-picks-acts' }, all, none)));
+          const list = h('div', { class: 'ai-prop-picks' });
+          picks.slice(0, PICK_SHOW_MAX).forEach((path) => {
+            const on = p._sel.has(path);
+            const cb = h('input', { type: 'checkbox', class: 'ai-prop-cb' });
+            cb.checked = on;
+            const row = h('label', { class: 'ai-prop-pick' + (on ? ' on' : ' off') },
+              cb,
+              h('span', { class: 'ai-prop-pick-name' }, leafOf(path)),
+              h('span', { class: 'ai-prop-pick-path' }, path));
+            cb.addEventListener('change', () => {
+              if (cb.checked) p._sel.add(path); else p._sel.delete(path);
+              row.classList.toggle('on', cb.checked);
+              row.classList.toggle('off', !cb.checked);
+              /* 手动改过勾选就别再自动跑：用户正在挑东西 */
+              stopCountdown();
+              reprice();
+            });
+            list.appendChild(row);
+          });
+          pickBox.appendChild(list);
+          if (picks.length > PICK_SHOW_MAX) {
+            pickBox.appendChild(h('div', { class: 'ai-prop-more' },
+              T('另有 ' + (picks.length - PICK_SHOW_MAX) + ' 项未列出，默认包含；点「清空」可全部取消',
+                '+' + (picks.length - PICK_SHOW_MAX) + ' not listed, included by default')));
+          }
+          host.appendChild(pickBox);
         }
 
         const warns = Array.isArray(c.warnings) ? c.warnings : [];
@@ -491,7 +642,7 @@
               const r = await proposals.undo(p.id);
               ub.textContent = r.ok ? T('已撤销', 'Undone') : T('撤销失败', 'Undo failed');
               if (!r.ok) addNotice(r.error || '撤销失败', 'warn');
-              else pendingCardsRefresh();
+              else syncCards();
             });
             bar.appendChild(ub);
           }
@@ -504,14 +655,7 @@
           return;
         }
 
-        let timer = 0;
-        let armed = !p.needsWord;
-
-        function stopCountdown() {
-          if (timer) { clearInterval(timer); timer = 0; }
-        }
-
-        const go = h('button', { class: 'ai-prop-btn primary', type: 'button', disabled: !armed },
+        goBtn = h('button', { class: 'ai-prop-btn primary', type: 'button', disabled: !armed },
           T('执行', 'Run'));
         const no = h('button', { class: 'ai-prop-btn', type: 'button' }, T('取消', 'Cancel'));
 
@@ -522,18 +666,24 @@
             placeholder: T('输入「' + CONFIRM_WORD() + '」确认', 'type "' + CONFIRM_WORD() + '" to confirm'),
             oninput: () => {
               armed = inp.value.trim() === CONFIRM_WORD();
-              go.disabled = !armed;
+              goBtn.disabled = !armed || (pickable && !selList().length);
             }
           });
           bar.appendChild(inp);
         }
 
-        go.addEventListener('click', async () => {
+        goBtn.addEventListener('click', async () => {
           stopCountdown();
-          go.disabled = true;
+          goBtn.disabled = true;
           no.disabled = true;
-          go.textContent = T('执行中…', 'Running…');
-          const r = await proposals.commit(p.id, { approvedBy: 'user' });
+          goBtn.textContent = T('执行中…', 'Running…');
+          const pickedPaths = pickable ? selList() : undefined;
+          if (pickable && !pickedPaths.length) {
+            addNotice(T('一项都没勾，什么也没做', 'nothing checked'), 'warn');
+            paint();
+            return;
+          }
+          const r = await proposals.commit(p.id, { approvedBy: 'user', paths: pickedPaths });
           if (r.ok) {
             p.status = 'done';
             p.message = r.message;
@@ -553,18 +703,21 @@
 
         no.addEventListener('click', async () => {
           stopCountdown();
-          go.disabled = true;
+          goBtn.disabled = true;
           no.disabled = true;
           await proposals.deny(p.id, '用户取消');
           p.status = 'denied';
           paint();
         });
 
-        bar.appendChild(go);
+        bar.appendChild(goBtn);
         bar.appendChild(no);
 
-        /* 自动档：可撤销的小动作先给你 3 秒，看得见、随时能停 */
-        if (!p.needsWord && p.status === 'pending' && proposals.getPolicy().mode === 'auto') {
+        if (pickable && p._sel.size !== picks.length) reprice();
+
+        /* 自动档：可撤销的小动作先给你 3 秒，看得见、随时能停。
+           有勾选项的卡不自动跑——用户正在挑，倒计时会把他挑到一半的东西执行掉。 */
+        if (!p.needsWord && !pickable && p.status === 'pending' && proposals.getPolicy().mode === 'auto') {
           const left = h('span', { class: 'ai-prop-count' }, '3');
           const stop = h('button', { class: 'ai-prop-btn', type: 'button' }, T('停止', 'Stop'));
           stop.addEventListener('click', async () => {
@@ -581,19 +734,22 @@
             left.textContent = String(n);
             if (n <= 0) {
               stopCountdown();
-              go.click();
+              goBtn.click();
             }
           }, 1000);
         }
       }
     }
 
-    /* 撤销之后卡片上的按钮要换掉，简单重画一次可见的卡片 */
+    /* 撤销之后卡片上的按钮要换掉：只重画状态变过的那些，别把整屏卡片推倒重来 */
     function pendingCardsRefresh() {
-      Array.prototype.slice.call(msgs.querySelectorAll('.ai-prop')).forEach((n) => n.remove());
-      shownCards.clear();
-      pendingCards();
+      syncCards();
     }
+
+    /* 队列是全应用一份：谁执行、谁取消、谁过期，所有打开的视图都要跟着换状态 */
+    const unsubscribe = (proposals && proposals.subscribe)
+      ? proposals.subscribe(() => { try { pendingCardsRefresh(); } catch (e) { /* 画挂了不该影响执行 */ } })
+      : null;
 
     function addUser(text) {
       setEmpty(false);
@@ -964,7 +1120,7 @@
       composer,
       clear() {
         msgs.innerHTML = '';
-        shownCards.clear();
+        cardNodes.clear();
         if (proposals) proposals.newSession();
         state.history = [];
         state.session = null;
@@ -993,7 +1149,7 @@
         msgs.innerHTML = '';
         /* 新会话清空提案队列：上一个会话没确认的动作不能跨会话留着，
            否则「我上次好像点过什么」就成了猜谜。配额也从零开始。 */
-        shownCards.clear();
+        cardNodes.clear();
         if (proposals) proposals.newSession();
         state.session = {
           id: Date.now().toString(36),
@@ -1053,8 +1209,12 @@
       setThinking(v) { state.thinking = v; composer.setThinking(v); },
       setPermission(p) { state.permission = p; composer.setPermission(p); },
       /* 页面/抽屉收起时必须调它：composer 里挂着推理强度画布的 ticker、
-         菜单的 resize 监听和 motion 订阅，只清 DOM 会把它们留成常驻空转。 */
-      destroy() { try { composer.destroy(); } catch (e) { /* 忽略 */ } }
+         菜单的 resize 监听和 motion 订阅，只清 DOM 会把它们留成常驻空转。
+         提案队列是全应用共用的，退订一定要做，否则关掉的抽屉还在重画。 */
+      destroy() {
+        try { if (unsubscribe) unsubscribe(); } catch (e) { /* 退订失败不影响收尾 */ }
+        try { composer.destroy(); } catch (e) { /* 忽略 */ }
+      }
     };
   }
 
