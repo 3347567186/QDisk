@@ -210,7 +210,13 @@
     if (cache && !force) return cache;
     let cfg = {};
     try { cfg = await API.configGet(); } catch { cfg = {}; }
-    cache = normalize(cfg && cfg.ai);
+    const rawAi = (cfg && cfg.ai) || null;
+    cache = normalize(rawAi);
+    /* 迁移只改内存是没用的：下次启动还会从文件里读到那两笔旧账。
+       发现这次真的改过（迁完 ctxFixed 由 false 变 true）就立刻写回。 */
+    if (rawAi && rawAi.ctxFixed !== true && cache.ctxFixed === true) {
+      try { await API.configSet({ ai: cache }); } catch { /* 写不进去就下次再说 */ }
+    }
     return cache;
   }
 

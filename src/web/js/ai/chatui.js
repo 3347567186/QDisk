@@ -955,10 +955,11 @@
     /* 历史里的查证过程：和当轮长得一样——一行计数，展开是过程行。
        只读，不再执行任何东西；回看的价值是「当时凭什么这么说」。
        旧会话的 trace 没有 label/thought 也能渲染：退回工具名，没有思考就不出思考行。 */
-    function replayTrace(trace) {
+    function replayTrace(trace, saved) {
       const steps = (Array.isArray(trace) ? trace : [])
         .filter((t) => t && (t.tool || t.summary));
       if (!steps.length) return null;
+      const keep = saved || {};
       const procs = root.AIProcs.create({ onAppend: function () {} });
       steps.forEach((t) => {
         if (t.thought) procs.addThought(String(t.thought));
@@ -973,7 +974,16 @@
           result: t.result
         });
       });
-      procs.settle({ thoughts: procs.counts.thoughts, tools: procs.counts.tools });
+      /* 老会话没有 counts：退回「按 trace 数出来的工具数」，
+         至少不会凭空写出「执行 0 次思考」 */
+      const c = keep.counts || {};
+      procs.settle({
+        thoughts: Number(c.thoughts) || 0,
+        tools: Number(c.tools) || procs.counts.tools,
+        records: Number(c.records) || 0,
+        label: keep.status === 'stopped' ? T('已停止', 'Stopped')
+          : (keep.status === 'unfinished' ? T('查证未完成', 'Unfinished') : '')
+      });
       procs.close();
       return procs.el;
     }
@@ -1058,6 +1068,10 @@
             ? T('已停止', 'Stopped')
             : (!res.ok ? T('查证未完成', 'Unfinished') : '')
         });
+        /* 回放时 trace 里只有工具，没有「想了几次、记了几条」。
+           这两个数落盘放着，历史里的那一行才和当时一模一样 */
+        res.counts = { thoughts: c.pg.counts.thoughts, tools: c.pg.counts.tools, records: (res.evidence || []).length };
+        res.status = res.stopped ? 'stopped' : (!res.ok ? 'unfinished' : '');
       }
       paintAnswer(c.body, res.answer || '');
       /* 右键「复制这段」「引用这段」拿的是这条消息的正文，落定后补上 */
@@ -1344,6 +1358,8 @@
           entries: res.entries || [],
           followUps: res.followUps || [],
           compressed: res.compressed || 'none',
+          counts: res.counts || null,
+          status: res.status || '',
           usage: res.usage || null
         });
         if (!state.session.title || state.session.title === '新会话') state.session.title = q.slice(0, 30);
@@ -1574,7 +1590,7 @@
           const entries = (m.entries && m.entries.length)
             ? m.entries
             : AIEntries.fromText(m.content);
-          const steps = replayTrace(m.trace);
+          const steps = replayTrace(m.trace, m);
           if (steps) c.node.insertBefore(steps, c.body);
           finishAnswer({
             ok: m.ok !== false,
