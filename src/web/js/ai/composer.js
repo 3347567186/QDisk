@@ -87,6 +87,44 @@
     deep: ['深度', 'Deep']
   };
 
+  /* 动手档位：和「标准」并排的第二枚胶囊。
+     查证深度管「能看多少」，动手档位管「能改到什么程度」，是两条正交的轴，
+     所以不复用同一枚按钮，也不用同一个菜单。默认「只读」= 一个能改文件的工具都不发。 */
+  const MODE_OPTIONS = [
+    {
+      id: 'off',
+      label: ['只读', 'Read-only'],
+      desc: ['只查不改：没有任何能改文件的工具', 'Look only: no tool can change files'],
+      icon: 'shield'
+    },
+    {
+      id: 'confirm',
+      label: ['确认', 'Confirm'],
+      desc: ['每个动作先变成卡片，你点了才执行', 'Every action becomes a card first'],
+      icon: 'check'
+    },
+    {
+      id: 'auto',
+      label: ['自动', 'Auto'],
+      desc: ['可撤销的动作直接执行，3 秒内可停', 'Reversible actions run at once, stoppable'],
+      icon: 'spark'
+    },
+    {
+      id: 'full',
+      label: ['放手', 'Full'],
+      desc: ['回收站级也会自动；撤不回来的仍要点', 'Trash-level runs too; permanent still needs a tap'],
+      icon: 'alert',
+      tone: 'danger'
+    }
+  ];
+
+  const MODE_TEXT = {
+    off: ['只读', 'Read-only'],
+    confirm: ['确认', 'Confirm'],
+    auto: ['自动', 'Auto'],
+    full: ['放手', 'Full']
+  };
+
   function T(zh, en) { return UIx && UIx.T ? UIx.T(zh, en) : zh; }
   function icon(name, size) { return UIx.icon(name, size || 14); }
   function fmtTokens(n) {
@@ -108,6 +146,10 @@
   function thinkIndex(id) {
     const i = THINK_STOPS.findIndex(function (s) { return s.id === id; });
     return i < 0 ? 1 : i;
+  }
+  function modeIndex(id) {
+    const i = MODE_OPTIONS.findIndex(function (m) { return m.id === id; });
+    return i < 0 ? 0 : i;
   }
 
   /* ============================================================
@@ -234,6 +276,7 @@
     let model = o.model || (models[0] ? models[0].id || models[0] : '');
     let thinking = o.thinking || 'medium';
     let permission = o.permission || 'standard';
+    let agentMode = o.mode || 'off';
     let disabled = !!o.disabled;
     let busy = false;
     let stopping = false;
@@ -295,6 +338,26 @@
 
     left.appendChild(attachBtn);
     left.appendChild(permWrap);
+
+    /* 第二枚胶囊：动手档位。样式与「标准」同一套（.dac-perm），
+       只是换了图标与文案，菜单里多一句「这档会发生什么」。 */
+    const modeWrap = el('div');
+    modeWrap.style.position = 'relative';
+    modeWrap.style.display = 'inline-flex';
+    modeWrap.style.maxWidth = '100%';
+    const modeBtn = el('button', 'dac-perm dac-agent-mode');
+    modeBtn.type = 'button';
+    modeBtn.setAttribute('aria-haspopup', 'menu');
+    modeBtn.title = T('助手能动手到什么程度', 'How far the assistant may act');
+    const modeIc = el('span', 'dac-ic');
+    const modeLabel = el('span', 'dac-label');
+    const modeChev = el('span', 'dac-chev');
+    modeChev.appendChild(icon('chevron', 10));
+    modeBtn.appendChild(modeIc);
+    modeBtn.appendChild(modeLabel);
+    modeBtn.appendChild(modeChev);
+    modeWrap.appendChild(modeBtn);
+    left.appendChild(modeWrap);
 
     /* 容量环 */
     const capBtn = el('button', 'dac-cap');
@@ -476,7 +539,7 @@
     const modelMorph = createPopover(pill, modelMenu, modelPanel, {
       align: 'right',
       width: MENU_W,
-      onOpen: function () { permMorph.hide(); pill.setAttribute('aria-expanded', 'true'); effort.resize(); },
+      onOpen: function () { permMorph.hide(); modeMorph.hide(); pill.setAttribute('aria-expanded', 'true'); effort.resize(); },
       onClose: function () { pill.setAttribute('aria-expanded', 'false'); }
     });
 
@@ -533,7 +596,7 @@
     const permMorph = createPopover(permBtn, permMenu, permPanel, {
       align: 'left',
       width: PERM_W,
-      onOpen: function () { modelMorph.hide(); playPermPill(); },
+      onOpen: function () { modelMorph.hide(); modeMorph.hide(); playPermPill(); },
       onClose: function () { }
     });
 
@@ -565,6 +628,90 @@
         if (ck) ck.hidden = i !== index;
       });
       playPermPill();
+    }
+
+    /* ---------- 动手档位菜单 ---------- */
+    const modeMenu = el('div', 'dac-menu');
+    modeMenu.hidden = true;
+    const modePanel = el('div', 'dac-perm-panel');
+    const modeInner = el('div', 'dac-perm-inner');
+    const modeRowsBox = el('div', 'dac-rows');
+    modeRowsBox.style.display = 'flex';
+    modeRowsBox.style.flexDirection = 'column';
+    modeRowsBox.style.gap = '2px';
+    const modePill = el('div', 'dac-rows-pill');
+    modePill.style.borderRadius = '12px';
+    modeRowsBox.appendChild(modePill);
+
+    const modeRowEls = [];
+    MODE_OPTIONS.forEach(function (opt) {
+      const row = el('button', 'dac-perm-row');
+      row.type = 'button';
+      row.setAttribute('role', 'menuitem');
+      row.dataset.mode = opt.id;
+      if (opt.tone === 'danger') row.setAttribute('data-tone', 'danger');
+      const ic = el('span', 'dac-perm-ic');
+      ic.appendChild(icon(opt.icon, 12));
+      const bodyBox = el('div', 'dac-perm-body');
+      bodyBox.appendChild(el('div', 'dac-perm-title', T(opt.label[0], opt.label[1])));
+      bodyBox.appendChild(el('div', 'dac-perm-desc', T(opt.desc[0], opt.desc[1])));
+      const ck = el('span', 'dac-perm-check');
+      ck.appendChild(icon('check', 10));
+      ck.hidden = true;
+      row.appendChild(ic);
+      row.appendChild(bodyBox);
+      row.appendChild(ck);
+      row.addEventListener('click', function () {
+        agentMode = opt.id;
+        syncMode();
+        modeMorph.hide();
+        if (o.onModeChange) o.onModeChange(agentMode);
+      });
+      modeRowsBox.appendChild(row);
+      modeRowEls.push(row);
+    });
+    modeInner.appendChild(modeRowsBox);
+    modePanel.appendChild(modeInner);
+    modeMenu.appendChild(modePanel);
+
+    const modeMorph = createPopover(modeBtn, modeMenu, modePanel, {
+      align: 'left',
+      width: PERM_W,
+      onOpen: function () {
+        modelMorph.hide();
+        permMorph.hide();
+        playModePill();
+      },
+      onClose: function () { }
+    });
+
+    modeBtn.addEventListener('click', function () {
+      if (disabled) return;
+      modeMorph.toggle();
+    });
+
+    function playModePill() {
+      const index = modeIndex(agentMode);
+      placePill(modePill, modeRowEls, index);
+      const danger = MODE_OPTIONS[index] && MODE_OPTIONS[index].tone === 'danger';
+      modePill.style.background = danger
+        ? 'color-mix(in srgb, #e25507 10%, transparent)'
+        : 'color-mix(in srgb, var(--text-1) 7%, transparent)';
+    }
+
+    function syncMode() {
+      const index = modeIndex(agentMode);
+      const opt = MODE_OPTIONS[index];
+      modeIc.innerHTML = '';
+      modeIc.appendChild(icon(opt.icon, 12));
+      modeLabel.textContent = T(opt.label[0], opt.label[1]);
+      if (opt.tone === 'danger') modeBtn.setAttribute('data-tone', 'danger');
+      else modeBtn.removeAttribute('data-tone');
+      modeRowEls.forEach(function (row, i) {
+        const ck = row.querySelector('.dac-perm-check');
+        if (ck) ck.hidden = i !== index;
+      });
+      playModePill();
     }
 
     /* ---------- 胶囊 / 用量 ---------- */
@@ -961,6 +1108,7 @@
     rebuildModels();
     syncPill();
     syncPerm();
+    syncMode();
     syncUsage();
     autosize();
     syncSend();
@@ -998,6 +1146,8 @@
       },
       setThinking: function (v) { thinking = v; syncPill(); },
       setPermission: function (p) { permission = p; syncPerm(); },
+      setMode: function (m) { agentMode = m || 'off'; syncMode(); },
+      getMode: function () { return agentMode; },
       setModels: function (list) {
         models = (list || []).map(function (m) { return typeof m === 'string' ? { id: m, label: m } : m; });
         rebuildModels();
@@ -1030,6 +1180,7 @@
         if (sizeTick) { root.cancelAnimationFrame(sizeTick); sizeTick = 0; }
         modelMorph.destroy();
         permMorph.destroy();
+        modeMorph.destroy();
         effort.destroy();
         if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
       }

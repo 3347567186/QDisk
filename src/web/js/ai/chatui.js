@@ -269,6 +269,7 @@
       model: options.model || state.model,
       thinking: state.thinking,
       permission: state.permission,
+      mode: proposals ? proposals.getPolicy().mode : 'off',
       disabled: false,
       dir: () => {
         const c = ctxProvider() || {};
@@ -302,15 +303,16 @@
           composer.setUsage({ used: state.usedTokens || 0, budget: w });
           composer.setThinkBudgets(thinkBudgets({ ctxWindow: w }), w);
         }
-      }
+      },
+      /* 档位就在输入框那排「标准」旁边：改完立刻落盘，底栏那句话跟着变 */
+      onModeChange: (k) => { setMode(k); }
     });
     shell.appendChild(composer.el);
 
-    /* 底栏：左边一句人话说明当前边界，右边四个档位直接点。
-       档位是危险开关，必须一眼看得见、一下能改回来，不能埋进设置页深处。 */
+    /* 底栏只留一句人话：档位本体已经挪到输入框那排，
+       底栏再说一遍就是重复，但「现在允许到哪一档」必须还有一处常驻说明。 */
     const footText = h('span', { class: 'ai-foot-text' });
-    const modeBar = h('div', { class: 'ai-modes' });
-    const foot = h('div', { class: 'ai-foot' }, UIx.icon('shield'), footText, modeBar);
+    const foot = h('div', { class: 'ai-foot' }, UIx.icon('shield'), footText);
     shell.appendChild(foot);
 
     function paintFoot() {
@@ -318,15 +320,7 @@
       const m = MODE_LABEL[mode] || MODE_LABEL.off;
       foot.classList.toggle('armed', mode !== 'off');
       footText.textContent = T('助手权限：' + m[0] + ' · ' + m[1], 'Assistant: ' + m[0] + ' · ' + m[1]);
-      modeBar.innerHTML = '';
-      Object.keys(MODE_LABEL).forEach((k) => {
-        modeBar.appendChild(h('button', {
-          class: 'ai-mode' + (k === mode ? ' on' : '') + (k === 'full' ? ' danger' : ''),
-          type: 'button',
-          title: T(MODE_LABEL[k][1], MODE_LABEL[k][1]),
-          onclick: () => setMode(k)
-        }, T(MODE_LABEL[k][0], MODE_LABEL[k][0])));
-      });
+      if (composer && composer.setMode) composer.setMode(mode);
     }
 
     function setMode(k) {

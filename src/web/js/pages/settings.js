@@ -840,7 +840,7 @@
           type: 'button',
           'aria-pressed': m === pol.mode ? 'true' : 'false',
           onclick: () => saveAgent({ mode: m })
-        }, h('span', { text: { off: T('关闭', 'Off'), confirm: T('逐次确认', 'Confirm'), auto: T('自动', 'Auto'), full: T('放手', 'Full') }[m] })));
+        }, h('span', { text: { off: T('只读', 'Read-only'), confirm: T('确认', 'Confirm'), auto: T('自动', 'Auto'), full: T('放手', 'Full') }[m] })));
 
         const catBoxes = (window.AIProposals ? AIProposals.CATS : Object.keys(CAT_ZH)).map((c) => h('label', { class: 'check' },
           h('input', {
