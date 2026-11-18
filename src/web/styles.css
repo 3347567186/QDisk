@@ -2394,7 +2394,7 @@ body[data-motion="off"] .shot-flag { animation: none; }
   white-space: pre-wrap; word-break: break-word;
 }
 /* 回答正文：比思考更大、更亮，是这一屏真正要读的东西 */
-.ai-msg-body { font-size: var(--fs-body); line-height: 1.72; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
+/* 回答正文：这一屏真正要读的东西 —— 比思考行更大、更亮 */`n.ai-msg-body { font-size: 14px; line-height: 1.75; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
 /* 对话正文可选中复制（全局 * 是禁选的，这里显式放开，和思考正文一致） */
 .ai-msg-body, .ai-msg-body * { -webkit-user-select: text; user-select: text; }
 .ai-msg-body { cursor: text; }

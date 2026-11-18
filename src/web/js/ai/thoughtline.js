@@ -111,7 +111,14 @@
     copyBtn.addEventListener('click', function (ev) {
       ev.stopPropagation();
       ev.preventDefault();
-      const text = thoughtWrap ? thoughtWrap.textContent : '';
+      /* 只取正文节点：行首的「思考 ·」标签是装饰（aria-hidden），不该被复制进去。
+         分行是按句末标点切的，拼回去就是原来的连续文本。 */
+      const text = thoughtWrap
+        ? Array.prototype.map.call(
+            thoughtWrap.querySelectorAll('.tl-thought-text'),
+            function (n) { return n.textContent; }
+          ).join('')
+        : '';
       if (!text) return;
       try { UIx.copy(text); } catch (e) { /* 复制失败不该影响对话 */ }
       copyBtn.setAttribute('data-done', '');
