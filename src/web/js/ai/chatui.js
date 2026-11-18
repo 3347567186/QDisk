@@ -1374,6 +1374,9 @@
     }
 
     msgs.addEventListener('contextmenu', onContextMenu);
+    /* 输入框自己也要绑：它不在消息区里，而且 ui.js 对输入类不拦系统菜单，
+       不绑的话这里是浏览器原生那份（带拼写检查），跟别处不一致 */
+    if (composer && composer.input) composer.input.addEventListener('contextmenu', onContextMenu);
 
     renderEmpty();
     composer.focus();
