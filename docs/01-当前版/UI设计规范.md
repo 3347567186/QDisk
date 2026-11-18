@@ -425,3 +425,44 @@ AI 页是唯一一处不跟全站蓝色强调走的地方：它按 Claude 的外
 - 卡面摘要右侧留一个 `.ai-prop-live` 位置写「已选 3 项 · 27 MB」；全选时不写，
   避免和摘要重复。勾选数为 0 时执行按钮禁用，不弹提示。
 - 超过 10 条只列前 10 条，底下补一句「另有 N 项未列出，默认包含」——列表不能把卡撑爆。
+## 10. 整站 Claude 化（1.31.0 起）
+
+1.29 只改了 AI 页，这一版把令牌层整体换成 Claude，所有页面同时生效。新写样式一律用令牌，
+不要再写死颜色，否则深色主题和后续调整会漏掉。
+
+### 10.1 颜色分工
+
+| 令牌 | 浅色 | 用途 |
+|---|---|---|
+| `--canvas` | `#faf9f5` | 侧栏、窗口底：暖白 |
+| `--surface` | `#ffffff` | 主内容区、卡片 |
+| `--surface-2` | `#f4f2f3` | 气泡、表头、代码块底 |
+| `--line` | `rgba(22,22,22,.10)` | 卡片与分隔线 |
+| `--text-1/2/3` | `#161616` / `#615b5c` / `#8d8688` | 正文 / 次要 / 弱化 |
+| `--accent` | `#d97757` | 描边、焦点环、选中条、图标——**不写文字** |
+| `--accent-text` | `#b9553a` | 珊瑚色文字与链接（AA） |
+| `--accent-solid` | `#1f1e1d` | 主按钮填充，白字 |
+
+深色：`--canvas #191919`、`--surface #1f1f1f`、`--text-1 #fdfdfd`、`--accent-solid #f5f2ee`（主按钮反白）。
+
+### 10.2 几何
+
+- 圆角：4（小控件）/ 8（输入、代码块）/ 12（卡片）/ 胶囊（按钮、chip）。
+- 按钮一律胶囊，高度 30px；主按钮近黑，次按钮白底 1px 描边，ghost 无描边。
+- 卡片：`1px var(--line)` + 圆角 12，不加阴影；只有浮层用 `--shadow-2/3`。
+- 侧栏选中：浅底色块 `--nav-active`，不再有左侧彩色竖条。
+- 标题：卡片标题 14px/600（`.card-title h2` 已定），页面标题仍 15px。
+
+### 10.3 动效与焦点
+
+- 过渡统一 `--dur-1 120ms` / `--dur-2 160ms` / `--dur-3 220ms` + `--ease`。
+- 焦点环：`box-shadow: 0 0 0 3px var(--accent-ring)` + `border-color: var(--accent)`，
+  键盘可见，鼠标点击不显示。
+- 尊重 `prefers-reduced-motion`：既有全局降级块继续生效。
+
+### 10.4 回答正文的 Markdown
+
+`ai/md.js` 提供 `AIMd.render(text)`；输出类名 `md-table` / `md-pre` / `md-code` / `md-list` /
+`md-quote` / `md-hr` / `md-link`，样式见 `styles.css` 末尾的「回答正文的 Markdown」段。
+渲染前一律转义，链接只放行 http/https/mailto；`javascript:` 之类只保留链接文字。
+`chatui.js` 用 `paintAnswer()` 判断：`hasMarkup` 为真才渲染，否则退回纯文本。

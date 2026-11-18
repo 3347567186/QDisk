@@ -838,11 +838,25 @@
       return parts.length ? parts.join(' · ') : T('思考了', 'Thought');
     }
 
+    /* 回答正文：有 Markdown 结构就渲染，没有就原样显示。
+       模型偶尔会输出 <b> 之类的标签，AIMd 一律转义，所以这里不会引入
+       新的注入面；AIMd 不可用时退回纯文本，功能不受影响。 */
+    function paintAnswer(body, text) {
+      const md = root.AIMd;
+      if (md && md.hasMarkup && md.hasMarkup(text)) {
+        body.classList.add('md');
+        body.innerHTML = md.render(text);
+      } else {
+        body.classList.remove('md');
+        body.textContent = text;
+      }
+    }
+
     function finishAnswer(res) {
       if (!current) startAnswer();
       const c = current;
       if (c.tl) c.tl.settle({ doneLabel: doneLabelFor(c.steps, res, c.tl.thoughts) });
-      c.body.textContent = res.answer || '';
+      paintAnswer(c.body, res.answer || '');
       if (res.degraded && !res.ok) c.body.classList.add('degraded');
       if (res.stopped) c.body.classList.add('degraded');
 
