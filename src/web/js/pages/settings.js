@@ -702,7 +702,7 @@
         }
 
         const prov = state.aiProv || 'deepseek';
-        const provBox = h('select', {
+        const provSelect = h('select', {
           class: 'input',
           onchange: (e) => {
             state.aiProv = e.target.value;
@@ -716,6 +716,107 @@
         }, ...AIStore.PROVIDERS.map((p) => h('option', {
           value: p.id, text: T(p.zh, p.id), selected: p.id === prov
         })));
+
+        /* 模型池：从 dsh-xdpool 的厂商清单里挑一家，直接把地址与模型名填好。
+           只做选择器，不接管请求——请求仍走下面这套端点与 Key。 */
+        function applyPool(p, m) {
+          d.endpoint = p.endpoint;
+          d.model = m[0];
+          /* 厂商不再是内置那几家：切到「自定义」，避免下拉框显示成别人 */
+          state.aiProv = 'custom';
+          state.aiTest = null;
+          if (m[2] && !d.ctxFixed) {
+            const w = Math.round(Number(m[2]));
+            if (w >= 2000 && w <= 4000000) d.ctxWindow = w;
+          }
+          paint();
+          toast(T('已填入 ' + p.name + ' · ' + m[0], 'Filled ' + p.name + ' · ' + m[0]), 'ok');
+        }
+
+        function openPool() {
+          if (!window.AIPool) {
+            toast(T('模型池数据没加载', 'Model pool data is missing'), 'error');
+            return;
+          }
+          let m0 = null;
+          let expandedId = '';
+          const list = h('div', { class: 'pool-list' });
+          const meta = h('span', { class: 'small muted' });
+          const search = h('input', {
+            class: 'input pool-search', spellcheck: 'false',
+            placeholder: T('搜厂商、域名或模型名', 'Search provider, host or model'),
+            oninput: () => render(search.value),
+            onkeydown: (e) => {
+              if (e.key === 'Enter') {
+                const first = AIPool.find(search.value)[0];
+                if (!first || !first.models.length) return;
+                if (first.models.length === 1) { m0.close(); applyPool(first, first.models[0]); }
+                else { expandedId = first.id; render(search.value); }
+              } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const btn = list.querySelector('.pool-row');
+                if (btn) btn.focus();
+              }
+            }
+          });
+
+          function render(q) {
+            const shown = AIPool.find(q);
+            list.textContent = '';
+            meta.textContent = T('匹配 ' + shown.length + ' 家', shown.length + ' providers');
+            if (!shown.length) {
+              list.appendChild(h('div', { class: 'pool-empty', text: T('没有匹配的厂商或模型', 'No provider or model matches') }));
+              return;
+            }
+            shown.forEach((p) => {
+              const open = p.id === expandedId;
+              list.appendChild(h('button', {
+                class: 'pool-row' + (open ? ' open' : ''), type: 'button',
+                onclick: () => {
+                  if (p.models.length === 1) { m0.close(); applyPool(p, p.models[0]); return; }
+                  expandedId = open ? '' : p.id;
+                  render(search.value);
+                }
+              },
+                h('span', { class: 'pool-name', text: p.name }),
+                p.free ? h('span', { class: 'pool-tag free', text: T('免费额度', 'Free') }) : null,
+                p.local ? h('span', { class: 'pool-tag', text: T('本地', 'Local') }) : null,
+                h('span', { class: 'pool-host mono', text: AIPool.hostOf(p.endpoint) }),
+                h('span', { class: 'pool-count', text: String(p.models.length) })
+              ));
+              if (!open) return;
+              list.appendChild(h('div', { class: 'pool-models' },
+                p.note ? h('div', { class: 'pool-note', text: p.note }) : null,
+                h('div', { class: 'pool-chips' }, ...p.models.map((m) => h('button', {
+                  class: 'pool-chip', type: 'button', title: p.endpoint,
+                  onclick: () => { m0.close(); applyPool(p, m); }
+                }, h('span', { class: 'pool-chip-name', text: m[1] || m[0] }),
+                   h('span', { class: 'pool-chip-id mono', text: m[0] }))))
+              ));
+            });
+          }
+
+          m0 = UI.modal({
+            title: T('从模型池选择', 'Choose from the model pool'),
+            wide: true,
+            body: h('div', { class: 'pool' },
+              h('div', { class: 'pool-head' }, search, meta),
+              list,
+              h('div', { class: 'pool-source small muted', text: T(
+                '清单来自 dsh-xdpool 2.7.5：' + AIPool.providers.length + ' 家厂商、' + AIPool.count() + ' 个模型；地址与模型名会直接填好，Key 仍需自己申请',
+                'Catalog from dsh-xdpool 2.7.5: ' + AIPool.providers.length + ' providers, ' + AIPool.count() + ' models; endpoint and model are filled in, the key is still yours') })),
+            buttons: [{ id: 'close', label: T('关闭', 'Close') }]
+          });
+          render('');
+          search.focus();
+        }
+
+        const poolBtn = h('button', {
+          class: 'btn ghost sm pool-btn', type: 'button',
+          title: T('从模型池挑厂商和模型', 'Pick a provider and model from the pool'),
+          onclick: openPool
+        }, icon('layers', 14), h('span', { text: T('模型池', 'Model pool') }));
+        const provBox = h('div', { class: 'row pool-pick' }, provSelect, poolBtn);
 
         const endpointIn = h('input', {
           class: 'input mono', spellcheck: 'false', value: d.endpoint || '',

@@ -110,17 +110,30 @@
       scroller.classList.toggle('fade-bottom', !!canDown);
     }
 
+    function row(cls, text) {
+      var r = el('div', 'ai-tnav-row');
+      r.appendChild(el('span', 'ai-tnav-' + cls, text));
+      r.appendChild(el('i', 'ai-tnav-tick'));
+      return r;
+    }
+
     function showPreview(i) {
       hovering = i;
       var t = turns[i];
       if (!t) return;
       preview.textContent = '';
-      var a = el('div', 'ai-tnav-q', clip(t.prompt, 80) || ('第 ' + (i + 1) + ' 轮'));
-      preview.appendChild(a);
-      if (t.answer) preview.appendChild(el('div', 'ai-tnav-a', clip(t.answer, 160)));
+      /* 统计单独一行压在卡顶（参考图里那串 +21 −1 的位置），
+         两行正文因此能各占满整宽；行尾那一小截是刻度笔触。 */
+      if (t.meta) preview.appendChild(el('div', 'ai-tnav-stat', t.meta));
+      preview.appendChild(row('q', clip(t.prompt, 80) || ('第 ' + (i + 1) + ' 轮')));
+      if (t.answer) preview.appendChild(row('a', clip(t.answer, 160)));
       var mark = marks()[i];
-      var top = mark ? mark.offsetTop + 5 : INSET + i * PITCH;
-      preview.style.setProperty('--rail-c', (top - scroller.scrollTop) + 'px');
+      /* 刻度是绝对定位在居中的列表里，offsetTop 只是列表内坐标；
+         预览挂在 nav 上，得换成 nav 内的中心点，否则会飘到最上面。 */
+      var mr = mark ? mark.getBoundingClientRect() : null;
+      var nr = nav.getBoundingClientRect();
+      var c = mr ? (mr.top - nr.top + mr.height / 2) : (INSET + i * PITCH);
+      preview.style.setProperty('--rail-c', c + 'px');
       preview.classList.add('on');
       preview.setAttribute('aria-hidden', 'false');
     }

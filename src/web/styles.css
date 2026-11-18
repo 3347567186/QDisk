@@ -3417,22 +3417,37 @@ html[data-theme="dark"] .ai-page {
 .ai-tnav-mark[aria-current="true"]::before { transform: scaleX(1); background: var(--text-1); opacity: 1; }
 .ai-tnav-mark:focus-visible { outline: none; }
 .ai-tnav-mark:focus-visible::before { box-shadow: 0 0 0 2px var(--accent-ring); }
+/* 悬停预览：一张深色小卡，两行各一条，宽度只跟文字走。
+   白底浮层压在对话上会读成「界面没关干净」，深浅主题都用同一块深色。 */
 .ai-tnav-pop {
-  position: absolute; right: calc(100% + 10px); top: var(--rail-c, 0);
-  width: min(300px, 42vw); padding: 9px 12px; border-radius: var(--radius-lg);
-  background: var(--surface); border: 1px solid var(--line);
-  box-shadow: var(--shadow-2); opacity: 0; transform: translateY(2px);
-  transition: opacity 140ms var(--ease), transform 140ms var(--ease);
-  pointer-events: none; z-index: 8;
+  position: absolute; right: calc(100% + 8px); top: var(--rail-c, 0);
+  width: max-content; max-width: 236px; padding: 7px 9px 7px 11px;
+  border-radius: 10px; background: rgba(20, 20, 20, .97);
+  border: 1px solid rgba(255, 255, 255, .08);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .22), 0 2px 8px rgba(0, 0, 0, .12);
+  opacity: 0; transform: translate(4px, -50%); pointer-events: none; z-index: 8;
+  transition: opacity 120ms var(--ease), transform 120ms var(--ease);
 }
-.ai-tnav-pop.on { opacity: 1; transform: none; }
-.ai-tnav-q {
-  font-size: var(--fs-small); font-weight: 600; color: var(--text-1);
+.ai-tnav-pop.on { opacity: 1; transform: translate(0, -50%); }
+.ai-tnav-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ai-tnav-row + .ai-tnav-row { margin-top: 4px; }
+.ai-tnav-q, .ai-tnav-a {
+  flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ai-tnav-a {
-  margin-top: 3px; font-size: var(--fs-tiny); line-height: 1.5; color: var(--text-2);
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+.ai-tnav-q { font-size: var(--fs-small); font-weight: 600; color: #f4f2ef; }
+.ai-tnav-a { font-size: var(--fs-tiny); color: #9c9893; }
+/* 抽屉里对话更窄：预览再收一圈，别把正文挤出去 */
+.ai-drawer .ai-tnav-pop { max-width: 196px; }
+/* 每行末尾那一小截刻度：回答行比提问行略长，和右侧刻度条同一种笔触 */
+.ai-tnav-tick {
+  flex: none; width: 6px; height: 2px; border-radius: 2px; background: #6e6a66;
+}
+.ai-tnav-row + .ai-tnav-row .ai-tnav-tick { width: 14px; background: #8f8a85; }
+.ai-tnav-stat {
+  margin: -1px 0 4px; text-align: right;
+  font-size: 10px; line-height: 1.2; color: #8a8580;
+  font-family: var(--mono); letter-spacing: .02em;
 }
 
 /* 回到底部 */
@@ -3909,4 +3924,61 @@ html[data-theme="dark"] .ai-page {
 .tool-row.ai-hit { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .ai-jump { animation: none; }
+}
+
+/* ---------------- 模型池选择器（设置 → AI 助手） ---------------- */
+.pool-pick { align-items: center; }
+.pool-pick .input { flex: 1 1 auto; min-width: 0; }
+.pool-btn { flex: none; gap: 6px; }
+.pool-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.pool-search { flex: 1 1 auto; min-width: 0; }
+.pool-list {
+  max-height: min(52vh, 440px); overflow: auto;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface);
+}
+.pool-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px;
+  border: 0; border-bottom: 1px solid var(--line); background: none;
+  text-align: left; cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.pool-row:last-child { border-bottom: 0; }
+.pool-row:hover, .pool-row:focus-visible { background: var(--surface-2); }
+.pool-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pool-row.open { background: var(--surface-2); }
+.pool-name { font-size: var(--fs-small); font-weight: 600; color: var(--text-1); }
+.pool-tag {
+  flex: none; padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; line-height: 1.5; color: var(--text-2); background: var(--surface-2);
+}
+.pool-tag.free { color: #2f7a4f; background: rgba(60, 160, 100, .12); }
+.pool-host {
+  margin-left: auto; max-width: 42%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 11px; color: var(--text-3);
+}
+.pool-count { flex: none; min-width: 20px; text-align: right; font-size: 11px; color: var(--text-3); }
+.pool-models {
+  padding: 8px 12px 11px; background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  animation: pool-open var(--dur-2) var(--ease-out);
+}
+@keyframes pool-open { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.pool-note { margin-bottom: 7px; font-size: 11px; line-height: 1.55; color: var(--text-3); }
+.pool-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pool-chip {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  padding: 5px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); cursor: pointer;
+  transition: transform var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.pool-chip:hover { border-color: var(--text-3); transform: translateY(-1px); }
+.pool-chip:active { transform: scale(.98); }
+.pool-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pool-chip-name { font-size: var(--fs-small); color: var(--text-1); }
+.pool-chip-id { font-size: 10px; color: var(--text-3); }
+.pool-empty { padding: 26px 12px; text-align: center; font-size: var(--fs-small); color: var(--text-3); }
+.pool-source { margin-top: 9px; }
+@media (prefers-reduced-motion: reduce) {
+  .pool-row, .pool-chip, .pool-models { transition: none; animation: none; }
 }

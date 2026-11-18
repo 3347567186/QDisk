@@ -1145,6 +1145,20 @@
         }
         if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: T('缓存命中率 = 命中缓存的提示 token / 本步提示 token', 'Cache hit rate = cached prompt tokens / prompt tokens') }, parts.join(' · ')));
       }
+      /* 刻度条的悬停预览要读这一轮的答案和用量：答案本来只进 DOM，
+         这里回存到回合对象上，预览就不必去扒正文节点。 */
+      const closed = turns[turns.length - 1];
+      if (closed) {
+        closed.answer = res.answer || '';
+        if (res.usage) {
+          const bits = [];
+          if (res.usage.elapsed_ms) bits.push((res.usage.elapsed_ms / 1000).toFixed(1) + 's');
+          const used = (Number(res.usage.prompt_tokens) || 0) + (Number(res.usage.completion_tokens) || 0);
+          if (used) bits.push(used >= 1000 ? (used / 1000).toFixed(1) + 'k' : String(used));
+          closed.meta = bits.join(' · ');
+        }
+        if (rail) rail.setTurns(turns);
+      }
       c.extra.appendChild(bar);
 
       const chips = followChips(res.followUps, (q) => ask({ text: q }));
