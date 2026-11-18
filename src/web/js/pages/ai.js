@@ -163,7 +163,12 @@
           if (!inGroup.length) return;
           railList.appendChild(h('div', { class: 'ai-rail-group' }, g.label));
           inGroup.forEach((r) => {
-            const row = h('div', { class: 'ai-sess', 'data-id': r.id },
+            const row = h('div', {
+              class: 'ai-sess',
+              'data-id': r.id,
+              /* 行里不再印时间，把「标题 · 时间」放 tooltip，鼠标停一下就能看到 */
+              title: r.title + ' · ' + timeLabel(r.mtime)
+            },
               h('button', {
                 class: 'ai-sess-open',
                 type: 'button',

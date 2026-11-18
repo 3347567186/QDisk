@@ -4112,3 +4112,37 @@ html[data-theme="dark"] .ai-page {
   .ai-entry:hover, .ai-entry:active, .ai-ev-open:active { transform: none; }
   .ai-entries, .ai-replay, .ai-acts { animation: none; }
 }
+/* ---------------- 会话归档列表：改成参考实现那种紧凑清单 ---------------- */
+.ai-rail-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  margin: 0 8px; padding: 5px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.ai-rail-group {
+  font-size: 11px; font-weight: 500; color: var(--text-3); letter-spacing: .02em;
+  padding: 8px 8px 3px; flex: 0 0 auto;
+}
+.ai-rail-group:first-child { padding-top: 3px; }
+.ai-sess { border-radius: var(--radius); }
+.ai-sess-open { padding: 5px 8px; font-size: 12.5px; line-height: 1.45; }
+.ai-sess-title { letter-spacing: -0.005em; }
+/* 时间不再占行内宽度：静态只看标题，悬停时那一格换成删除按钮，
+   时间退到行的 tooltip 里，信息没丢但不跟标题抢宽度 */
+.ai-sess-time { display: none; }
+.ai-sess[data-active]::before { top: 5px; bottom: 5px; }
+.ai-sess-del { width: 20px; height: 20px; margin-right: 3px; }
+@media (max-width: 1000px) {
+  .ai-rail-list { margin: 0 4px; }
+}
+
+/* 过程行的 chevron：早前那版用元素自身的 border 画箭头（opacity 0、只有悬停才出现，
+   静态看跟不可展开的行一样），跟后面的 ::before 版本叠成了两个箭头。
+   这里收口：尺寸与静息可见度按后面那版走，元素自身不再画边。 */
+.ai-page .tl-step .ai-step-chev {
+  width: 14px; height: 14px; margin: 0 0 0 4px; opacity: .45;
+  border: 0; transform: none;
+}
+.ai-page .tl-step.openable:hover .ai-step-chev,
+.ai-page .tl-step.openable:focus-visible .ai-step-chev { opacity: .9; }
+.ai-page .tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(180deg); opacity: .9; margin-bottom: 0; }
