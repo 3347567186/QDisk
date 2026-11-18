@@ -35,6 +35,9 @@
     /* 单轮历史预算（token）。0 = 不写死，按模型窗口算（窗口 × 70%）：
        思考强度只决定查证轮数，不再切分上下文长度。 */
     turnBudget: 0,
+    /* 1.35.x 及更早存下来的「32K 窗口 + 8000 预算」是软件自己填的默认值，
+       不是用户的选择。这份老账只迁一次：迁完置 true，之后用户改什么都不再动。 */
+    ctxFixed: false,
     /* 端点能力记忆：键是「主机|模型」，值是学到的习惯（是否认 response_format、
        是否认 stream_options、能不能流式、要不要预留给思考、实测耗时）。
        不同模型差异很大，所以按模型各记一份，换模型就重新学。 */
@@ -157,7 +160,7 @@
     const budget = Number(raw.turnBudget);
     if (budget >= 2000 && budget <= 4000000) out.turnBudget = Math.round(budget);
     const win = Number(raw.ctxWindow);
-    if (win >= 2000 && win <= 2000000) out.ctxWindow = Math.round(win);
+    if (win >= 2000 && win <= 4000000) out.ctxWindow = Math.round(win);
     if (raw.modelCtx && typeof raw.modelCtx === 'object' && !Array.isArray(raw.modelCtx)) {
       const map = {};
       Object.keys(raw.modelCtx).slice(0, 200).forEach((k) => {
@@ -165,6 +168,20 @@
         if (typeof k === 'string' && k && k.length <= 120 && v >= 1000 && v <= 2000000) map[k] = Math.round(v);
       });
       out.modelCtx = map;
+    }
+    /* 旧默认值的迁移：模型没报过窗口时，1.35.x 把 32768 写进设置，还按 8000 token
+       分历史——「选深反而记得少」就是这两笔账造成的。它们由软件写入、不是用户选的值，
+       第一次加载时清掉，交给 inferCtx / 窗口比例压缩接管。迁完打标记，只做一次。 */
+    if (raw.ctxFixed === true) out.ctxFixed = true;
+    if (!out.ctxFixed) {
+      const legacyWin = [8192, 16384, 32768, 65536].indexOf(Number(out.ctxWindow)) >= 0;
+      const legacyBudget = Number(out.turnBudget) === 8000;
+      const reported = (out.modelCtx || {})[String(out.model || '')];
+      if (!reported) {
+        if (legacyWin) out.ctxWindow = 0;
+        if (legacyBudget) out.turnBudget = 0;
+      }
+      out.ctxFixed = true;
     }
     if (raw.caps && typeof raw.caps === 'object' && !Array.isArray(raw.caps)) {
       const caps = {};

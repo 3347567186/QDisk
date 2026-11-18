@@ -234,6 +234,9 @@
       if (run.parentNode) run.hidden = !running;
       if (word) runText.textContent = word;
       else runText.textContent = T('正在查证', 'Working');
+      /* 第一段思考还没到的时候，组头也得有字：只画一个 chevron 上去，
+         用户会以为这一组已经空了 */
+      paintTitle();
     }
 
     function setRecordCount(n) {
