@@ -673,7 +673,9 @@
 
         goBtn = h('button', { class: 'ai-prop-btn primary', type: 'button', disabled: !armed },
           T('执行', 'Run'));
+        /* 临时诊断：把按钮的可用状态写到窗口标题上，外部可读（不显示在界面上） */
         goBtn.dataset.dbg = (armed ? 'a1' : 'a0') + (p.needsWord ? 'n1' : 'n0') + (pickable ? 'p' + selList().length : '-');
+        try { document.title = 'DBG ' + goBtn.dataset.dbg + ' ' + (goBtn.disabled ? 'DIS' : 'EN'); } catch (e) { /* 忽略 */ }
         const no = h('button', { class: 'ai-prop-btn', type: 'button' }, T('取消', 'Cancel'));
 
         if (p.needsWord) {
@@ -690,8 +692,7 @@
         }
 
         goBtn.addEventListener('click', async () => {
-          goBtn.dataset.clicked = '1';
-          addNotice('DBG click ' + (goBtn.dataset.dbg || ''), 'info');
+          try { document.title = 'CLICKED'; } catch (e) { /* 忽略 */ }
           stopCountdown();
           goBtn.disabled = true;
           no.disabled = true;

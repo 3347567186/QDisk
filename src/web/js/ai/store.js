@@ -88,6 +88,11 @@
   }
 
   async function saveUi(patch) {
+    /* 必须先有基线再写：uiCache 为空时拿 UI_DEFAULTS 兜底，会把别处
+       已经存好的 agent 档位、上次会话一起冲成默认值（1.30.0–1.30.2 的档位一重启就丢）。 */
+    if (!uiCache) {
+      try { await loadUi(true); } catch (e) { /* 读不到就按默认写，至少不崩 */ }
+    }
     const next = normalizeUi(Object.assign({}, uiCache || UI_DEFAULTS, patch || {}));
     await API.configSet({ ai_ui: next });
     uiCache = next;
