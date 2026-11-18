@@ -875,6 +875,9 @@
           test && test.ok && test.warn
             ? h('div', { class: 'small', style: 'color:var(--warn)', text: test.warn })
             : null,
+          test && test.ok && test.note
+            ? h('div', { class: 'small muted', text: test.note })
+            : null,
           test && test.ok && test.hint
             ? h('div', { class: 'small muted', text: test.hint })
             : null,
@@ -964,9 +967,12 @@
             if (!payload || !choice) {
               state.aiTest = { ok: false, ms, msg: T('返回里没有 choices，可能地址不对', 'Response has no choices; check the URL') };
             } else {
+              const probe = await jsonProbe(send);
+              await learnCaps(probe.caps);
               state.aiTest = {
                 ok: true, ms,
-                warn: await jsonProbe(send),
+                warn: probe.warn,
+                note: probe.note,
                 hint: String(content).trim().slice(0, 80) || T('（返回为空内容，但连接是通的）', '(empty reply, but the connection works)')
               };
             }
@@ -991,31 +997,88 @@
           return String((ch && ch.message && ch.message.content) || '')
             .trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
         };
+        /* 顺手把这个模型的能力学下来（对话页复用同一套判定）：
+           认不认 response_format、要不要给思考留余量、实测多慢。
+           这样「测试连接」不再只是显示一个绿点，而是真的把坑先探掉。 */
+        const caps = {};
         const t0 = Date.now();
+        let calls = 0;
         try {
+          calls += 1;
           let res = await send({ messages, max_tokens: 800, response_format: { type: 'json_object' } });
-          /* 有的兼容端点不认 response_format，去掉再试一次，别误报 */
-          if (!res || res.status !== 200) res = await send({ messages, max_tokens: 800 });
+          let formatted = true;
+          /* 有的兼容端点不认 response_format，去掉再试一次，并把「不认」记住 */
+          if (!res || res.status !== 200) {
+            formatted = false;
+            caps.jsonMode = false;
+            calls += 1;
+            res = await send({ messages, max_tokens: 800 });
+          }
           let text = (res && res.status === 200) ? contentOf(res) : '';
           /* 推理模型先把预算花在 reasoning_content 上：给小了就只有思考没有正文 */
-          if (!text) {
-            res = await send({ messages, max_tokens: 1600, response_format: { type: 'json_object' } });
+          if (!text && res && res.status === 200) {
+            caps.reasoning = true;
+            caps.maxTokens = 1600;
+            calls += 1;
+            res = await send({
+              messages,
+              max_tokens: 1600,
+              response_format: formatted ? { type: 'json_object' } : undefined
+            });
             if (res && res.status === 200) text = contentOf(res);
           }
-          const secs = Math.round((Date.now() - t0) / 1000);
-          const slow = secs > 25 ? T('，而且这轮用了 ' + secs + ' 秒', ', and it took ' + secs + 's') : '';
+          const totalMs = Date.now() - t0;
+          caps.latencyMs = Math.max(1000, Math.round(totalMs / Math.max(1, calls)));
+          const secs = Math.round(totalMs / 1000);
+          const slow = secs > 25
+            ? T('；实测这个模型每次要 ' + secs + ' 秒，对话会明显慢', '; it took ' + secs + 's, so replies will be slow')
+            : '';
+          const learned = describeCaps(caps);
           if (!text) {
-            return T('端点两次都只回了空内容——推理模型会把 token 预算先花在思考上。换 glm-4.5-flash / deepseek-chat 这类非推理模型最省事' + slow,
-              'Empty content twice; switch to a non-reasoning model');
+            return {
+              warn: T('端点只回了空内容：它把预算全花在思考上了，换 glm-4.5-flash / deepseek-chat 这类非推理模型最省事' + slow,
+                'Empty content only; switch to a non-reasoning model' + slow),
+              note: learned,
+              caps
+            };
           }
           if (text.indexOf('{') >= 0) {
-            return slow ? T('格式没问题' + slow + '，对话会明显偏慢', 'Format OK' + slow + ', but replies are slow') : '';
+            return { warn: slow ? T('格式没问题' + slow, 'Format OK' + slow) : '', note: learned, caps };
           }
-          return T('这个模型不按 JSON 输出（它回的是「' + text.slice(0, 20) + '…」），对话会反复报「输出格式不对」。建议换 deepseek-chat、glm-4.5-flash 这类' + slow,
-            'This model ignores the JSON contract, so chats will keep failing. Switch models' + slow);
+          caps.noJson = true;
+          return {
+            warn: T('这个模型不按 JSON 输出（它回的是「' + text.slice(0, 20) + '…」）。对话时会自动按普通文本处理，不再报格式错' + slow,
+              'This model ignores the JSON contract; chats will fall back to plain text' + slow),
+            note: describeCaps(caps),
+            caps
+          };
         } catch (e) {
-          return '';
+          return { warn: '', note: '', caps: Object.keys(caps).length ? caps : null };
         }
+      }
+
+      /** 把学到的能力说成人话，让用户知道下次会怎么发请求 */
+      function describeCaps(caps) {
+        const bits = [];
+        if (caps.jsonMode === false) bits.push(T('不支持强制 JSON 模式', 'no forced JSON mode'));
+        if (caps.reasoning) bits.push(T('会先思考，预算已加大', 'thinks first, budget raised'));
+        if (caps.noJson) bits.push(T('不守 JSON 约定，按普通文本回答', 'ignores JSON, answers as text'));
+        if (caps.maxTokens) bits.push(T('单次上限 ' + caps.maxTokens + ' tokens', 'max_tokens ' + caps.maxTokens));
+        if (bits.length) bits.push(T('每轮约 ' + Math.round((caps.latencyMs || 0) / 1000) + ' 秒', '~' + Math.round((caps.latencyMs || 0) / 1000) + 's per turn'));
+        return bits.length ? T('已记住这个模型的能力：', 'Learned for this model: ') + bits.join('、') : '';
+      }
+
+      /** 能力记忆落在 ai.caps 里（键=主机|模型），对话页读到就直接照做 */
+      async function learnCaps(caps) {
+        const d = state.aiDraft;
+        if (!caps || !d || !window.AIAgent || !AIAgent.capKeyOf) return;
+        try {
+          const key = AIAgent.capKeyOf(d.endpoint, d.model);
+          const cur = await AIStore.load(true);
+          const all = Object.assign({}, cur.caps || {});
+          all[key] = Object.assign({}, all[key] || {}, caps, { updatedAt: Date.now() });
+          await AIStore.save({ caps: all });
+        } catch (e) { /* 记住能力失败不影响保存 */ }
       }
 
       /* 把 /chat/completions 地址换成同源的 /models */

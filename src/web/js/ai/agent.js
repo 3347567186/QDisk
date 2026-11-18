@@ -217,6 +217,24 @@
     return { msgs, level };
   }
 
+  /* ---------------- 端点能力记忆 ----------------
+     不同家的接口接受的字段不一样：有的不认 response_format，有的不认
+     stream_options，有的根本不支持流式；同一家的不同模型耗时也差两个数量级。
+     这里不按厂商名写死，而是「先按最全的请求发，报错就降级并记住」，
+     下次同一个端点+模型直接按记住的能力发请求。 */
+
+  /** 端点能力按「主机 + 模型名」记，换模型重新学：model 换了习惯也换 */
+  function capKeyOf(endpoint, model) {
+    let host = String(endpoint || '');
+    try { host = new URL(String(endpoint || '')).host; } catch (e) { host = String(endpoint || '').replace(/^https?:\/\//i, '').split('/')[0]; }
+    return (host || 'local') + '|' + String(model || 'default');
+  }
+
+  function readCaps(all, key) {
+    const box = all && typeof all === 'object' ? all[key] : null;
+    return box && typeof box === 'object' && !Array.isArray(box) ? Object.assign({}, box) : {};
+  }
+
   /* ---------------- 环路 ---------------- */
 
   function createAgent(deps) {
@@ -228,14 +246,42 @@
     const maxSteps = Number(settings.maxSteps) || DEFAULT_MAX_STEPS;
     const budget = Number(settings.turnBudget) || DEFAULT_TURN_BUDGET;
     const callTimeout = Number(settings.callTimeout) || DEFAULT_CALL_TIMEOUT;
+    const capKey = capKeyOf(settings.endpoint, settings.model);
+    const caps = readCaps(settings.caps, capKey);
+
+    /** 记住这个端点+模型的一个能力，落盘后下次直接照做 */
+    function remember(patch) {
+      Object.assign(caps, patch);
+      caps.updatedAt = Date.now();
+      if (typeof deps.learn === 'function') {
+        try { deps.learn(capKey, Object.assign({}, caps)); } catch (e) { /* 记忆失败不影响这一轮 */ }
+      }
+    }
+
+    /** 等待上限：用户设的、学到的耗时、默认值取最大；上限 300s（Rust 侧封顶） */
+    function waitMs() {
+      const seen = Number(caps.timeoutMs) || 0;
+      const measured = (Number(caps.latencyMs) || 0) * 3;
+      return Math.max(30000, Math.min(300000, Math.max(callTimeout, seen, measured)));
+    }
 
     /** 单次回复的 token 上限：按「回复字数 × 1.6 + 结构余量」估，
-     *  思考模式下回复更长（replyMax 由调用方按强度传入）。 */
+     *  思考模式下回复更长（replyMax 由调用方按强度传入）：
+     *  · 用户显式设了 maxTokens 就用它
+     *  · 见过截断就以学到的更大值为准（不把这类模型一直卡在截断）
+     *  · 再按上下文窗口封顶，别把 prompt 挤出去 */
     function replyTokens() {
+      const ctxWin = Number(settings.ctxWindow) || Number(settings.window) || 0;
+      const ceiling = ctxWin > 0
+        ? Math.min(MAX_REPLY_TOKENS, Math.max(1024, Math.floor(ctxWin * 0.25)))
+        : MAX_REPLY_TOKENS;
       const explicit = Number(settings.maxTokens);
-      if (explicit > 0) return Math.max(512, Math.min(MAX_REPLY_TOKENS, Math.round(explicit)));
+      const learned = Number(caps.maxTokens) || 0;
       const chars = Number(settings.replyMax) || REPLY_MAX_CHARS;
-      return Math.max(DEFAULT_REPLY_TOKENS, Math.min(MAX_REPLY_TOKENS, Math.round(chars * 1.6) + 320));
+      const base = explicit > 0
+        ? Math.max(512, Math.round(explicit))
+        : Math.max(DEFAULT_REPLY_TOKENS, Math.round(chars * 1.6) + 320);
+      return Math.max(512, Math.min(ceiling, Math.max(base, learned)));
     }
 
     function buildBody(messages, stream, maxTokens) {
@@ -246,10 +292,48 @@
         max_tokens: maxTokens || replyTokens(),
         stream: !!stream
       };
-      if (stream) body.stream_options = { include_usage: true };
-      if (settings.jsonMode !== false) body.response_format = { type: 'json_object' };
+      /* 能力是「学到的否定」：只有明确被拒过才不发这个字段 */
+      if (stream && caps.streamOptions !== false) body.stream_options = { include_usage: true };
+      if (settings.jsonMode !== false && caps.jsonMode !== false) body.response_format = { type: 'json_object' };
       return body;
     }
+
+    /** 4xx 里能认出「这个字段我不认」就把该能力关掉并返回要重试；
+     *  认不出但有 response_format 嫌疑时也先降级试一次。 */
+    function downgrade(status, detail, streamed) {
+      if ([400, 404, 415, 422].indexOf(status) < 0) return false;
+      const t = String(detail || '');
+      if (/response_format|json_object|json_schema/i.test(t)) {
+        if (caps.jsonMode === false) return false;
+        remember({ jsonMode: false });
+        return 'jsonMode';
+      }
+      if (/stream_options|include_usage/i.test(t)) {
+        if (caps.streamOptions === false) return false;
+        remember({ streamOptions: false });
+        return 'streamOptions';
+      }
+      if (streamed && /stream|sse|chunk|event-stream/i.test(t)) {
+        if (caps.stream === false) return false;
+        remember({ stream: false });
+        return 'stream';
+      }
+      if (caps.jsonMode !== false && /(400|422)/.test(String(status))) {
+        remember({ jsonMode: false });
+        return 'jsonMode';
+      }
+      if (streamed && caps.stream !== false) {
+        remember({ stream: false });
+        return 'stream';
+      }
+      return false;
+    }
+
+    const DOWN_MSG = {
+      jsonMode: '这个接口不支持强制 JSON 模式，已自动关掉重试',
+      streamOptions: '这个接口不认 stream_options，已自动去掉重试',
+      stream: '这个接口不支持流式返回，已自动改成分段拿结果'
+    };
 
     /** 一步模型调用：HTTP → 取 content → 解析 → 校验（失败修复一次）
      *  支持 SSE：transport 认 onDelta 时边读边把推理片段抛成 thought 事件，
@@ -257,6 +341,9 @@
     async function callModel(messages, ctxTools, calledTools, onEvent) {
       let repairLeft = 1;
       let tokenCap = replyTokens();
+      let downLeft = 3;       // 能力降级最多三次（json / stream_options / stream）
+      let slowLeft = 2;       // 超时放宽最多两次
+      let grewTokens = 0;     // 空回复时加预算最多两次
       for (;;) {
         let sseBuf = '';
         let sseText = '';
@@ -290,16 +377,51 @@
             if (d.content) sseText += d.content;
           }
         };
-        const wantStream = !!deps.streaming;
-        const res = await transport({
-          url: settings.endpoint || '',
-          headers: settings.apiKey ? { Authorization: 'Bearer ' + settings.apiKey } : {},
-          body: JSON.stringify(buildBody(messages, wantStream, tokenCap)),
-          timeoutMs: callTimeout,
-          onDelta: wantStream ? pump : null
-        });
+        const wantStream = !!deps.streaming && caps.stream !== false;
+        const sentAt = Date.now();
+        let res;
+        try {
+          res = await transport({
+            url: settings.endpoint || '',
+            headers: settings.apiKey ? { Authorization: 'Bearer ' + settings.apiKey } : {},
+            body: JSON.stringify(buildBody(messages, wantStream, tokenCap)),
+            timeoutMs: waitMs(),
+            onDelta: wantStream ? pump : null
+          });
+        } catch (e) {
+          const msg = String((e && e.message) || e);
+          /* 推理模型本来就慢，别让一次超时判死刑：记下实际耗时，放宽等一次 */
+          if (slowLeft > 0 && /超时|timeout|timed out|ETIMEDOUT|abort/i.test(msg)) {
+            slowLeft -= 1;
+            const spent = Date.now() - sentAt;
+            remember({
+              latencyMs: Math.max(Number(caps.latencyMs) || 0, spent),
+              timeoutMs: Math.min(300000, Math.max(waitMs(), Math.round(spent * 2.5)))
+            });
+            if (onEvent) {
+              onEvent({
+                type: 'notice',
+                level: 'warn',
+                message: '模型 ' + Math.round(spent / 1000) + ' 秒还没回完，已自动放宽等待时间重试'
+              });
+            }
+            continue;
+          }
+          throw e;
+        }
+        const spentMs = Date.now() - sentAt;
+        /* 记住这个模型的实际耗时：下次按它给等待上限，不用每次先撞墙 */
+        if (spentMs > 2000) remember({ latencyMs: Math.max(Number(caps.latencyMs) || 0, spentMs) });
         if (res && res.status && res.status !== 200) {
           const detail = String(res.body || '').slice(0, 300);
+          if (downLeft > 0) {
+            const what = downgrade(res.status, detail, wantStream);
+            if (what) {
+              downLeft -= 1;
+              if (onEvent) onEvent({ type: 'notice', level: 'warn', message: DOWN_MSG[what] || '接口不认这个参数，已自动换一种发法' });
+              continue;
+            }
+          }
           const err = new Error(`接口返回 HTTP ${res.status}${detail ? '：' + detail : ''}`);
           err.code = res.status === 401 || res.status === 403 ? 'auth'
             : (res.status === 429 ? 'rate' : 'http');
@@ -338,13 +460,27 @@
           usage = (payload && payload.usage) || {};
         }
         /* 见了 reasoning_content 就说明是推理模型：思考也吃 token 预算，
-           给宽一点，别让正文被挤成空串 */
-        if (reasoningSeen && tokenCap < 2400) tokenCap = 2400;
+           给宽一点，别让正文被挤成空串（学到后记下来，下次一开始就给够） */
+        if (reasoningSeen) {
+          if (caps.reasoning !== true) remember({ reasoning: true });
+          const wide = Math.max(2400, Math.round(replyTokens() * 2.5));
+          const room = Math.min(MAX_REPLY_TOKENS, wide);
+          if (tokenCap < room) tokenCap = room;
+        }
         const parsed = extractJson(content);
         if (parsed.error) {
+          /* 只回了思考、正文被挤空：加预算重来，不消耗「格式修一次」的配额 */
+          if (/空内容/.test(parsed.error) && grewTokens < 2 && tokenCap < MAX_REPLY_TOKENS) {
+            grewTokens += 1;
+            tokenCap = Math.min(MAX_REPLY_TOKENS, tokenCap * 2);
+            remember({ maxTokens: tokenCap });
+            if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型这次没回正文（可能把预算全花在思考上），已加大长度重试' });
+            continue;
+          }
           /* 被 max_tokens 截断：放宽长度重来，别算进「格式修一次」的配额 */
           if (finish === 'length' && tokenCap < MAX_REPLY_TOKENS) {
             tokenCap = Math.min(MAX_REPLY_TOKENS, tokenCap * 2);
+            remember({ maxTokens: tokenCap });
             messages.push({ role: 'assistant', content: String(content || '').slice(0, 200) });
             messages.push({
               role: 'user',
@@ -353,7 +489,8 @@
             if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出太长被截断，正在放宽长度重试' });
             continue;
           }
-          if (repairLeft > 0) {
+          /* 学到的「这个模型根本不吐 JSON」就直接兜底，不再白花一次修复调用 */
+          if (repairLeft > 0 && caps.noJson !== true) {
             repairLeft -= 1;
             messages.push({ role: 'assistant', content: String(content || '').slice(0, 400) });
             messages.push({
@@ -369,6 +506,8 @@
           if (prose) {
             const sv = validateStep(prose, ctxTools, calledTools);
             if (sv.ok) {
+              /* 记下来：这个模型不认 JSON，下一轮直接按散文兜，省一次调用 */
+              remember({ noJson: true });
               if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型没按 JSON 输出，已按普通回答显示' });
               return Object.assign({ usage, raw: prose, salvaged: true }, sv);
             }
@@ -387,6 +526,17 @@
             messages.push({ role: 'user', content: `你的输出不符合要求：${v.error}。请修正后重新输出一个 JSON 对象。` });
             if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出不符合约定，正在让模型改一次' });
             continue;
+          }
+          /* 修了一次仍不合约定：能提取出回答就照常给，别让整轮作废 */
+          if (typeof parsed.obj.answer === 'string' && parsed.obj.answer.trim()) {
+            return {
+              kind: 'answer',
+              answer: parsed.obj.answer.trim().slice(0, 1200),
+              evidence: [],
+              suggest: [],
+              usage,
+              loose: true
+            };
           }
           throw Object.assign(new Error('模型输出不符合约定：' + v.error), { code: 'bad_output' });
         }
@@ -565,9 +715,15 @@
     compressHistory,
     fallbackAnswer,
     suggestFollowUps,
+    capKeyOf,
+    readCaps,
+    salvageProse,
     estTokens,
     DEFAULT_MAX_STEPS,
-    DEFAULT_TURN_BUDGET
+    DEFAULT_TURN_BUDGET,
+    DEFAULT_CALL_TIMEOUT,
+    DEFAULT_REPLY_TOKENS,
+    MAX_REPLY_TOKENS
   };
   root.AIAgent = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;

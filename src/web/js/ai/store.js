@@ -32,7 +32,11 @@
     temperature: 0.2,
     jsonMode: true,
     maxSteps: 6,
-    turnBudget: 8000
+    turnBudget: 8000,
+    /* 端点能力记忆：键是「主机|模型」，值是学到的习惯（是否认 response_format、
+       是否认 stream_options、能不能流式、要不要预留给思考、实测耗时）。
+       不同模型差异很大，所以按模型各记一份，换模型就重新学。 */
+    caps: {}
   };
 
   /* 端点没报窗口时的保守兜底：32K。
@@ -76,6 +80,25 @@
         if (typeof k === 'string' && k && k.length <= 120 && v >= 1000 && v <= 2000000) map[k] = Math.round(v);
       });
       out.modelCtx = map;
+    }
+    if (raw.caps && typeof raw.caps === 'object' && !Array.isArray(raw.caps)) {
+      const caps = {};
+      Object.keys(raw.caps).slice(0, 60).forEach((k) => {
+        const v = raw.caps[k];
+        if (typeof k !== 'string' || !k || k.length > 200) return;
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+        const one = {};
+        ['jsonMode', 'streamOptions', 'stream', 'reasoning', 'noJson'].forEach((f) => {
+          if (typeof v[f] === 'boolean') one[f] = v[f];
+        });
+        ['maxTokens', 'latencyMs', 'timeoutMs'].forEach((f) => {
+          const n = Number(v[f]);
+          if (Number.isFinite(n) && n > 0 && n <= 400000) one[f] = Math.round(n);
+        });
+        one.updatedAt = Number(v.updatedAt) || Date.now();
+        caps[k] = one;
+      });
+      out.caps = caps;
     }
     return out;
   }

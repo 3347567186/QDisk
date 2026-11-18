@@ -488,6 +488,14 @@
         streaming: !!(window.API && window.API.aiHttpStream && window.__TAURI__),
         tools,
         prompt: AIPrompt,
+        /* 这个端点+模型学到的新习惯（不认 response_format、要等多久、会不会思考）
+           落回设置里，下次直接按它发请求，不用每轮重新试错 */
+        learn: (capKey, caps) => {
+          const all = Object.assign({}, settings.caps || {});
+          all[capKey] = Object.assign({}, caps, { updatedAt: Date.now() });
+          settings.caps = all;
+          try { Promise.resolve(AIStore.save({ caps: all })).catch(() => {}); } catch (e) { /* 记不住不影响这一轮 */ }
+        },
         settings: agentSettings
       });
 
