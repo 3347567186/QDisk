@@ -33,6 +33,7 @@
       UI.setLang(this.cfg.lang || 'zh-CN');
       applySidebar(!!this.cfg.sidebar_collapsed);
       buildNav(this);
+      initNavTip();
       window.addEventListener('hashchange', () => {
         const id = location.hash.replace('#', '');
         if (id && id !== this.current) navigate(id, false);
@@ -152,6 +153,7 @@
   }
   function applySidebar(collapsed) {
     document.getElementById('app').classList.toggle('collapsed', !!collapsed);
+    if (navTip) navTip.hide();
   }
 
   /**
@@ -247,6 +249,161 @@
     }
     // 语言切换会重建导航，提示层的文案跟着换，胶囊本身不重建
     if (navTip) navTip.refresh();
+  }
+
+  /* 折叠轨的流体提示：整个侧栏只有一个胶囊。它沿入口纵向移动、宽度随文案变化；
+     文案固定在各自入口的高度，被胶囊用 clip-path 裁切出来，形成上下滚动的切换。
+     这样做是为了不让每个按钮各弹一个气泡，也不把提示堆在右侧挡住内容。 */
+  let navTip = null;
+
+  function initNavTip() {
+    const nav = document.getElementById('nav');
+    const sidebar = document.querySelector('.sidebar');
+    if (!nav || !sidebar || navTip) return;
+    const root = h('div', { class: 'nav-tip', 'aria-hidden': 'true' },
+      h('div', { class: 'nav-tip-pill' }),
+      h('div', { class: 'nav-tip-labels' })
+    );
+    const measure = h('span', { class: 'nav-tip-measure', 'aria-hidden': 'true' });
+    root.appendChild(measure);
+    document.body.appendChild(root);
+    const labels = root.querySelector('.nav-tip-labels');
+    const pill = root.querySelector('.nav-tip-pill');
+    const H = 22;        // 胶囊高度：比 30px 的行高再收一圈
+    const PAD = 7;       // 文案左右留白
+    const OVERLAP = 14;  // 胶囊压进轨道右缘的宽度，尽量少盖右侧内容
+    const MIN_W = 36;
+    let on = false;
+    let current = null;
+    let lastY = 0;
+    let showTimer = 0;
+    let hideTimer = 0;
+
+    const isRail = () => document.getElementById('app').classList.contains('collapsed')
+      || (window.matchMedia && window.matchMedia('(max-width: 940px)').matches);
+
+    const labelOf = (it) => {
+      const lbl = it.querySelector('.lbl');
+      return (lbl ? lbl.textContent : (it.getAttribute('aria-label') || '')).trim();
+    };
+
+    function labelWidth(text) {
+      measure.textContent = text;
+      return Math.ceil(measure.getBoundingClientRect().width);
+    }
+
+    /* 文案各自钉在自己入口的中心线上，只有胶囊在动 */
+    function layoutLabels() {
+      const x = Math.round(sidebar.getBoundingClientRect().right - OVERLAP);
+      labels.style.setProperty('--tip-x', (x + PAD) + 'px');
+      labels.querySelectorAll('.nav-tip-label').forEach((span) => {
+        const it = nav.querySelector('.nav-item[data-id="' + span.dataset.id + '"]');
+        if (!it) { span.style.display = 'none'; return; }
+        span.style.display = '';
+        const r = it.getBoundingClientRect();
+        span.style.top = Math.round(r.top + r.height / 2) + 'px';
+      });
+    }
+
+    function place(it, animate) {
+      const nr = sidebar.getBoundingClientRect();
+      const r = it.getBoundingClientRect();
+      const x = Math.round(nr.right - OVERLAP);
+      const y = Math.round(r.top + r.height / 2 - H / 2);
+      const w = Math.max(MIN_W, labelWidth(labelOf(it)) + PAD * 2);
+      // 距离越远走得越久，但收在 320ms 内，快速划过多项时不拖影
+      const dur = animate ? Math.min(320, Math.round(170 + Math.abs(y - lastY) * 0.55)) : 0;
+      root.style.setProperty('--tip-dur', dur + 'ms');
+      if (!animate) {
+        pill.style.transition = 'none';
+        labels.style.transition = 'none';
+      }
+      pill.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0)';
+      pill.style.width = w + 'px';
+      labels.style.clipPath = 'inset(' + y + 'px ' + Math.max(0, window.innerWidth - (x + w)) + 'px '
+        + Math.max(0, window.innerHeight - (y + H)) + 'px ' + x + 'px round ' + (H / 2) + 'px)';
+      lastY = y;
+      if (!animate) {
+        void pill.offsetWidth; // 先把落点写进去，再放开过渡，否则会从上一个位置滑过来
+        pill.style.transition = '';
+        labels.style.transition = '';
+      }
+    }
+
+    function show(it) {
+      if (!it || !isRail()) return;
+      const first = !on;
+      current = it;
+      if (first) layoutLabels();
+      place(it, !first);
+      if (first) { on = true; root.classList.add('on'); }
+    }
+
+    function hide() {
+      clearTimeout(showTimer);
+      current = null;
+      if (!on) return;
+      on = false;
+      root.classList.remove('on');
+    }
+
+    nav.addEventListener('pointerover', (e) => {
+      if (e.pointerType && e.pointerType !== 'mouse' && e.pointerType !== 'pen') return;
+      const it = e.target.closest && e.target.closest('.nav-item');
+      if (!it || !nav.contains(it)) return;
+      clearTimeout(hideTimer);
+      if (!isRail()) { hide(); return; }
+      if (on) { show(it); return; } // 已经在：直接滑过去，不再闪一下
+      clearTimeout(showTimer);
+      showTimer = setTimeout(() => show(it), 80); // 只是路过时不亮
+    });
+    nav.addEventListener('pointerleave', () => {
+      clearTimeout(showTimer);
+      hideTimer = setTimeout(hide, 70);
+    });
+    // 点入口就切页了，胶囊没必要还留在原处
+    nav.addEventListener('click', (e) => {
+      if (e.target.closest && e.target.closest('.nav-item')) hide();
+    });
+    nav.addEventListener('focusin', (e) => {
+      const it = e.target.closest && e.target.closest('.nav-item');
+      if (it) show(it);
+    });
+    nav.addEventListener('focusout', (e) => {
+      if (e.relatedTarget && nav.contains(e.relatedTarget)) return;
+      hideTimer = setTimeout(hide, 60);
+    });
+    // 滚动/改窗口后入口位置变了，先收起，下次悬停再按新位置落
+    nav.addEventListener('scroll', hide, { passive: true });
+    window.addEventListener('resize', hide);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+
+    // 侧栏列宽在动（折叠过渡、改窗口）时跟着走，别把胶囊留在旧位置
+    if (window.ResizeObserver) {
+      new ResizeObserver(() => {
+        if (!on || !current) return;
+        layoutLabels();
+        place(current, false);
+      }).observe(sidebar);
+    }
+
+    navTip = {
+      refresh() {
+        hide();
+        labels.innerHTML = '';
+        nav.querySelectorAll('.nav-item').forEach((it) => {
+          labels.appendChild(h('span', {
+            class: 'nav-tip-label',
+            dataset: { id: it.dataset.id },
+            text: labelOf(it)
+          }));
+        });
+        layoutLabels();
+      },
+      hide,
+      sync() { if (!isRail()) hide(); }
+    };
+    navTip.refresh();
   }
 
   function renderChrome(id, cfg) {
