@@ -77,10 +77,15 @@
     return parts.join(' · ');
   }
 
-  /* 思考的第一句：折叠时给一行，别把整段推理摊在对话里 */
+  /* 思考的第一句：折叠时给一行，别把整段推理摊在对话里。
+     中英文都要切得开：中文按句末标点，英文按「句点 + 空格」，
+     这样「3.5 GB」「v1.2」不会被当成句子边界。 */
   function firstSentence(text) {
     const raw = String(text || '').replace(/\*\*/g, '').replace(/^[-*\s]+/, '');
-    const cut = raw.split(/[。！？\n]/).map(function (s) { return s.trim(); }).filter(Boolean)[0] || '';
+    const cut = raw
+      .split(/(?<=[。！？\n])|(?<=[.!?])\s+/)
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean)[0] || '';
     return cut.length > 64 ? cut.slice(0, 63) + '…' : cut;
   }
 
@@ -113,7 +118,8 @@
     const list = h('div', { class: 'pg-list' });
     const runDot = h('span', { class: 'pg-run-dots', 'aria-hidden': 'true' },
       h('i', {}), h('i', {}), h('i', {}));
-    const runText = h('span', { class: 'pg-run-text' });
+    /* 等待行是「现在在干什么」的唯一出口，读屏要能听到换词不重复播报 */
+    const runText = h('span', { class: 'pg-run-text', role: 'status', 'aria-live': 'polite' });
     const runTime = h('span', { class: 'pg-run-time' });
     const run = h('div', { class: 'pg-run' }, runDot, runText, runTime);
     const rows = h('div', { class: 'pg-rows' }, list, run);
@@ -195,7 +201,9 @@
         ic,
         h('span', { class: 'pg-label' }, labelOf(s)),
         h('span', { class: 'pg-dot', 'aria-hidden': 'true' }, '·'),
-        h('span', { class: 'pg-detail' }, detailText)
+        h('span', { class: 'pg-detail' }, detailText),
+        /* 耗时靠右贴着行尾：它是这一步的「多久」，不是展开里的内容 */
+        s.ms ? h('span', { class: 'pg-ms' }, Math.round(Number(s.ms)) + 'ms') : null
       );
       const inner = h('div', { class: 'pg-out-box' });
       const lines = [];
@@ -208,7 +216,6 @@
         }
         if (raw) lines.push(h('pre', {}, String(raw).slice(0, 4000)));
       }
-      if (s.ms) lines.push(h('div', { class: 'pg-ms' }, Math.round(Number(s.ms)) + 'ms'));
       if (!lines.length) lines.push(h('div', { class: 'pg-sum-line' }, T('没有返回内容', 'No output')));
       lines.forEach(function (l) { inner.appendChild(l); });
 
@@ -244,9 +251,17 @@
       el.removeAttribute('data-running');
       if (run.parentNode) run.parentNode.removeChild(run);
       paintTitle();
-      if (i.label) title.textContent = i.label;
+      /* 状态词是「附注」不是「替身」：计数是这一轮的事实，不能被
+         「已停止」三个字吃掉——用户要能同时看到查了几次、停在哪 */
+      if (i.label) {
+        const base = title.textContent;
+        title.textContent = /^\S*正在查证/.test(base) ? i.label : base + T(' · ', ' · ') + i.label;
+      }
       setOpen(false);
       started = 0;
+      /* 一问一答、没有思考也没有工具的一轮：这一组本来就是空的，
+         留一行「正在查证」等于给用户看一个假过程，直接收掉 */
+      if (!counts.thoughts && !counts.tools) el.hidden = true;
       onAppend();
     }
 

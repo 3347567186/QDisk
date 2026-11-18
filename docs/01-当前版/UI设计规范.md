@@ -187,23 +187,25 @@ Esc 只关最上面一层：`UI.preview` 与「清理截图」页自带的看图
 
 按钮 `translateY(-1px)` 上浮、图标 `rotate(-5deg)`、六色图标轮换、多光标搭建动画——它们只是装饰，且让界面显得跳跃。
 
-### 4.8 思路行（1.22.0 新增，AI 助手的思考动画）
+### 4.8 查证过程组（1.36.0 重做：照 DeepSeek Harness 一比一复刻）
 
-搬家自 React Bits 的 ThoughtLine（见 `THIRD_PARTY.md`），实现是 `js\ai\thoughtline.js` + `styles.css` 的
-「思路行（thoughtline.js）」段化名 `.tl*`；参数口径与原版一致（`label` / `doneLabel` / `glyph` /
-`steps` / `breathPeriod` / `breathDepth` / `shimmer` / `settleDuration` / `settleBlur` /
-`collapsible` / `collapseOnSettle` / `showTimer` / `onSettle`）。
+1.22.0 的思路行（React Bits ThoughtLine 的搬家版，`.tl*`，`thoughtline.js`）**已删除**。
+现在是 `js\ai\procs.js`（`AIProcs`）+ `styles.css` 末尾的 `.pg*` 段，形态取自 DeepSeek Harness
+的会话过程组（参考实现 `dsh-claude-style` v0.19.5，MIT，见 `THIRD_PARTY.md`）。
 
-| 阶段 | 视觉 | 口径 |
+| 部位 | 视觉 | 数值 |
 |---|---|---|
-| 跑着 | 四角星与句子在谷值→1 之间呼吸；一道亮带横扫句子 | `breathPeriod=1.6s`、`breathDepth=.45`；有微光时句子不呼吸，呼吸只留 glyph |
-| 过程 | 每步一行：跑着的是 0.4em 呼吸点，跑完变勾，失败变叹号（`--danger`） | 摘要超长省略号 + `title`；行只淡入位移 4px |
-| 落定 | 句子交叉淡入淡出 + 2px 模糊，计时器滑到句尾，过程折成一行 | `settleDuration=350ms`、`settleBlur=2px`；计时器用 `transform` 不碰布局 |
-| 折叠 | 点标题行摊开/收起，chevron 翻转 | `grid-template-rows: 0fr ↔ 1fr`，与 4.2 的折叠组同一手法 |
+| 组头 | `▸ 执行 N 次思考，调用 M 次工具，记录 K 条`，整行可点开/收起 | 高 26px，13px `--text-3`，chevron 11px，收起朝右、展开朝下 |
+| 过程行 | `[图标] 标签 · 明细`，无边框、无卡片 | 行高 28px，图标 15px，标签 13px `--text-2`，明细 mono 12px `--text-3`，超宽省略号 |
+| 思考行 | 点开在行下展开推理原文；展开中图标换 chevron | 13px / 1.7，`--text-2`，可选中，限高 `min(400px,50vh)` 内滚 |
+| 工具行 | 点开看参数与原始返回 | 等宽 11px，限高 168px 内滚 |
+| 展开动画 | `.pg-body` 用 `grid-template-rows: 0fr ↔ 1fr` | 220ms `--ease-out`，不碰高度数值 |
+| 等待行 | 三点 loader + 措辞 + 右侧计时 | 点 4px `--accent`，1.15s 错相呼吸；`prefers-reduced-motion` 下不动画 |
 
-- 颜色：工作态整行走 `--text-1`（微光渐变肩部 60% 不透明度，两套主题都够读）；落定句子 `opacity .8`、glyph 收到 `.4`；一行里只有失败标记用强调色，其余全是文字色。
-- 降级：`prefers-reduced-motion` 关微光、关位移、关过程行入场，只留淡入淡出；JS 侧同步把呼吸深度压到 0.2、周期 ×1.5（`AIMotion.prefersReduced()`）。
-- 无障碍：标题是 `<button>`（无步骤时 `tabindex=-1` 且不给 `aria-expanded`），整句结论写进 `role="status"` 的隐藏节点，朗读成「查了 3 项 · 用时 4.2 秒」。
+- 一轮结束：组自动折回一行，计数定格；停在「已停止 / 查证未完成」时组头右侧带同一句状态。
+- 计数口径：思考=流式推理片段合并后的段数，工具=实际执行次数，记录=依据条数。
+- 无障碍：组头是 `<button aria-expanded>`；行展开用 `aria-expanded` + `.pg-out` 的
+  `grid-template-rows` 过渡；思考正文与原始返回都可复制（右键菜单）。
 
 ### 4.9 AI 助手：归档左栏 + 锚定气泡（1.23.9 新增）
 
@@ -262,24 +264,27 @@ Esc 只关最上面一层：`UI.preview` 与「清理截图」页自带的看图
 | 上下文窗口 | `input.ai-ctx-in`（`max-width:180px`）+ 徽章 | 徽章三态：`端点上报` / `推断·手填` / `未上报，按默认` |
 | 失败提示 | `.small` 红字，紧跟字段 | 非 200 时显示 HTTP 码 + 响应片段，不静默 |
 
-**窗口值必须可追溯**，读取顺序：`context_length` → `max_model_len` → `context_window` →
-`max_context_length` → `n_ctx_train` → `context` → `max_input_tokens`；都没有就看模型名里的
-`8k/32k/128k`（×1024）推断；仍推不出返回 **0**，界面照实写「未上报，按默认」——
-**不允许拿兜底值冒充端点上报值**。兜底常量 `FALLBACK_CTX = 32768`。
+**窗口值必须可追溯**，读取顺序：端点上报（`context_length` → `max_model_len` →
+`context_window` → `max_context_length` → `n_ctx_train` → `context` → `max_input_tokens`）→
+模型名推断（`AIStore.inferCtx`：`deepseek-v4`/`gpt-5`/`gemini` 这代按 1M，`deepseek-v3.2`/
+`qwen`/`glm` 按 128K，`claude` 按 200K，`kimi` 按 256K）→ **兜底 1M**（`FALLBACK_CTX`）。
+界面照实写徽章的三种状态：`端点上报` / `推断·手填` / `未上报，按默认 1M`——
+**不允许拿兜底值冒充端点上报值**。
 
-三档推理强度按窗口比例分配：简单 25% / 中度 50% / 深度 75%，夹在 `[2000, 窗口-2000]`；
-composer 的上下文占用环分母 = 当前模型窗口，换模型时同步换分母。
-
-**档位上必须写出这一档的 token 数（1.23.18 起）**
+**思考强度不再分上下文（1.36.0 起）**：三档只改「查几轮」与「答案上限」
+（简单 3 轮 / 320、中度 6 / 600、深度 9 / 900），**与上下文窗口无关**。
+上下文压缩由 `agent.js` 在窗口的 50% / 70% / 85% 处自动踩，见方案 §6。
+composer 的上下文占用环分母 = 当前模型窗口，换模型时同步换分母；窗口未知时环保持隐藏，
+标题写「上下文窗口未知」，不拿 1 当分母假装 100%。
 
 | 位置 | 规格 | 说明 |
 |---|---|---|
-| 档位标签 | `.re-stop-name`（11px）+ `.re-stop-val`（10px 等宽灰字）两行 | `简单/16K`、`中度/32K`、`深度/48K`；窗口未知时不显示第二行，不编造 |
-| 弹层标题 | 左「推理强度」，右 `.dac-effort-meta`「窗口 64K」 | 两端对齐、11px 灰字、`tabular-nums`，让人一眼看出档位是窗口的分成 |
-| 无障碍 | `aria-valuetext` = 「中度 · 32K token」；每档按钮带 `title` | 读屏能听到档位 + 预算，不只有档位名 |
+| 档位标签 | `.re-stop-name`（11px）+ `.re-stop-val`（10px 等宽灰字）两行 | `简单/3 步`、`中度/6 步`、`深度/9 步`——标的是查证轮数，不是 token |
+| 弹层标题 | 左「推理强度」，右 `.dac-effort-meta`「上下文 1M」 | 两端对齐、11px 灰字、`tabular-nums`，把「窗口」和「强度」分开摆，避免再被读成同一件事 |
+| 无障碍 | `aria-valuetext` = 「中度 · 6 轮查证」；每档按钮带 `title` | 读屏能听到档位 + 轮数 |
 
-数字来源只有一个：`chatui.js` 的 `thinkBudgetOf(id, settings)`。滑块的显示与请求里的
-`budget` 都调它，**不允许两处各算一次**——否则界面标的数和实际塞进上下文的量会分叉。
+数字来源只有一个：`chatui.js` 的 `THINKING` 表（`steps` / `replyMax`）。滑块显示与请求里的
+`maxSteps` / `replyMax` 都读它，**不允许两处各算一次**。
 
 ---
 

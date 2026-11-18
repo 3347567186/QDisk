@@ -54,17 +54,25 @@ RAR 组件在首次使用 RAR 时下载，不随安装包分发。
 
 各 crate 的完整许可证文本可在 https://crates.io 对应版本页面查看。
 
-## 前端动效：React Bits「Thought Line」
+## 前端形态参考：DeepSeek Harness 的会话过程组（1.36.0 起）
 
+- 来源：`dsh-claude-style` v0.19.5 —— DeepSeek Harness 的界面皮肤包
+  （随 DSH 桌面版分发，安装在 `profiles/desktop/node_modules/dsh-claude-style`）
+- 许可证：**MIT**，Copyright (c) 2026 Nwflower
+- 落地方式：**只借形态，不复制代码**。视觉口径（过程行 28px 高、15px 图标、标签 sans / 明细 mono、
+  组头「执行 N 次思考，调用 M 次工具，记录 K 条」、展开思考限高 `min(400px, 50vh)`）来自对
+  DSH 运行窗口的原生像素实测与 `dsh-claude-style/docs/STYLE.md` 的「Process rows · 过程行」章节；
+  实现是本项目自己写的 `src\web\js\ai\procs.js` 与 `styles.css` 的 `.pg*` 段，全部走本项目 token。
+- 界面文案沿用本项目的「执行 / 调用 / 记录」口径，没有搬运原包的样式表或脚本。
+
+## 前端动效：React Bits「Thought Line」（1.22.0 引入，1.36.0 已移除）
+
+- 1.36.0 起 `thoughtline.js` 与其 `.tl*` 样式已删除，换成上一条的 `.pg*` 过程组；
+  下面保留原始许可记录，因为 1.22.0–1.35.x 的发行版仍包含该移植版。
 - 来源：https://www.reactbits.dev/micro/thought-line （仓库 https://github.com/DavidHDev/react-bits）
 - 许可证：**MIT + Commons Clause v1.0**（不是纯 MIT），Copyright (c) 2026 David Haz
-- 落地方式：**原生重写**，未引入原版的 `motion` / `@hugeicons/*` 依赖
-  - `src\web\js\ai\thoughtline.js`：按原版参数口径用原生 DOM 重写（呼吸、微光、落定、折叠）
-  - `src\web\styles.css` 的「思路行（thoughtline.js）」段：等价 CSS，全部走本项目 token
-  - 呼吸 / 微光 / 落定 / 计时器滑动 / 过程折叠的行为与原版一致，尺寸与配色改用 `--fs-*`、`--text-*` 等既有 token
 - 使用边界（照抄许可证的 Commons Clause）：可以作为**应用的一部分**随产品分发、也可以商用；
   **不得**把组件本身（含移植版）单独或打包出售、再许可、再分发，也不得做成托管服务。
-  本项目只是把它当成「整理助手 AI 对话里的一行动画」，不对外发布该组件。
 
 许可证原文：
 

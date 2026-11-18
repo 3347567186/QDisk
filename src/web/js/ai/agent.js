@@ -13,7 +13,10 @@
   'use strict';
 
   const DEFAULT_MAX_STEPS = 6;
-  const DEFAULT_TURN_BUDGET = 8000;      // token（按字符数/2 估算）
+  const DEFAULT_TURN_BUDGET = 8000;      // token（按字符数/2 估算），只在调用方显式给预算时用
+  /* 上下文窗口不知道的时候按 1M 算：DeepSeek V4 / GPT-5 这一代都在 1M 量级，
+     保守取 32K 会让「明明装得下」的对话先被掐掉，那才是真正的失忆。 */
+  const DEFAULT_WINDOW = 1000000;
   /* 20s 只够 chat 小模型；实测 glm-4.7-flash 单轮 118s、中转站推理模型 71s，
      超时会被当成失败，用户看到的是「AI 没能给出结论」。
      流式下这个值是「多久没收到新数据算断」，不是总时长。 */
@@ -238,9 +241,16 @@
 
   /* ---------------- 历史压缩（方案 §6） ---------------- */
 
-  function compressHistory(msgs, budget) {
-    let total = msgs.reduce((n, m) => n + estTokens(m.content), 0);
-    if (total <= budget) return { msgs, level: 'none' };
+  /* 上下文压缩：阈值按「模型窗口」的百分比算，不按写死的 token 数。
+     50% 以下不动；50–70% 软裁剪（工具结果留头尾）；
+     70–85% 硬裁剪（更早的工具结果压成一行）；
+     ≥85% 摘要压缩（更早的对话压成一行速记，保留路径与否定结论）。
+     窗口来自端点上报（没报就按模型名推断，默认 1M），所以同一套代码在 32K
+     和 1M 的模型上都不会「明明装得下却先掐掉」。 */
+  function compressHistory(msgs, window) {
+    const win = Math.max(4000, Number(window) || DEFAULT_WINDOW);
+    const total = () => msgs.reduce((n, m) => n + estTokens(m.content), 0);
+    if (total() <= win * 0.5) return { msgs, level: 'none' };
     const keepIdx = Math.max(1, msgs.length - KEEP_TURNS * 2);
     let level = 'soft';
     // 50–70%：软裁剪，工具结果留头 8 行 + 尾 2 行
@@ -252,8 +262,7 @@
         msgs[i] = { role: 'user', content: lines.slice(0, 8).concat(['…（已截断）'], lines.slice(-2)).join('\n') };
       }
     }
-    total = msgs.reduce((n, m) => n + estTokens(m.content), 0);
-    if (total <= budget) return { msgs, level };
+    if (total() <= win * 0.7) return { msgs, level };
     // 70–85%：硬裁剪，更早的工具结果压成一行
     level = 'hard';
     for (let i = 1; i < keepIdx; i += 1) {
@@ -262,8 +271,7 @@
       const head = m.content.split('\n')[0].slice(0, 60);
       msgs[i] = { role: 'user', content: head + ' …（早期结果已省略）' };
     }
-    total = msgs.reduce((n, m) => n + estTokens(m.content), 0);
-    if (total <= budget) return { msgs, level };
+    if (total() <= win * 0.85) return { msgs, level };
     // ≥85%：摘要压缩，把 keepIdx 之前压成一行速记（保留路径与否定结论）
     level = 'summary';
     const dropped = msgs.slice(1, keepIdx);
@@ -311,12 +319,11 @@
     const settings = deps.settings || {};
 
     const maxSteps = Number(settings.maxSteps) || DEFAULT_MAX_STEPS;
-    /* 历史预算不再由「思考强度」切分，而是跟着模型窗口走：
-       窗口 × 70%，至少 4000。窗口是端点上报的，没上报时上层已经按模型名推过。
-       这样调思考强度只改「查几轮」，不会把能记住的上下文自己截短。 */
+    /* 压缩阈值跟着「模型窗口」走，跟思考强度无关：
+       窗口是模型能力，不是深度旋钮。用户手填的 turnBudget 只当窗口用，
+       三档仍是窗口的 50/70/85%。 */
     const ctxWin = Number(settings.ctxWindow) || 0;
-    const budget = Number(settings.turnBudget) ||
-      (ctxWin > 0 ? Math.max(4000, Math.round(ctxWin * 0.7)) : DEFAULT_TURN_BUDGET);
+    const budget = Number(settings.turnBudget) || ctxWin || DEFAULT_WINDOW;
     const callTimeout = Number(settings.callTimeout) || DEFAULT_CALL_TIMEOUT;
     const capKey = capKeyOf(settings.endpoint, settings.model);
     const caps = readCaps(settings.caps, capKey);
@@ -917,6 +924,7 @@
     estTokens,
     DEFAULT_MAX_STEPS,
     DEFAULT_TURN_BUDGET,
+    DEFAULT_WINDOW,
     DEFAULT_CALL_TIMEOUT,
     DEFAULT_REPLY_TOKENS,
     MAX_REPLY_TOKENS

@@ -25,6 +25,12 @@
   'use strict';
 
   const M = root.AIMotion;
+  /* 这里只用到两个词，借 UI 的语言开关即可，不另造一套 */
+  const T = (zh, en) => {
+    const ui = root.UI;
+    if (ui && typeof ui.T === 'function') return ui.T(zh, en);
+    return typeof document !== 'undefined' && document.documentElement.lang === 'en-US' ? en : zh;
+  };
 
   /* ---------- 常量（全部照原版） ---------- */
   const TRACK_H = 30;
@@ -431,15 +437,18 @@
       return String(v);
     }
 
+    /* 档位旁边标的是「查几轮」。以前这里标 token（32K/64K），
+       等于把「想得深」和「记得少」绑在一起——现在两个旋钮彻底分开：
+       档位只管轮数，上下文窗口另有一处显示。 */
     function paintBudgets() {
       stops.forEach(function (stop, i) {
         const n = Number(budgets[stop.value] || 0);
         const v = stopVals[i];
         if (!v) return;
         if (n > 0) {
-          v.textContent = fmtTokens(n);
+          v.textContent = n + T(' 步', ' steps');
           v.hidden = false;
-          v.title = fmtTokens(n) + ' token';
+          v.title = n + T(' 轮查证', ' rounds');
         } else {
           v.textContent = '';
           v.hidden = true;
@@ -455,14 +464,14 @@
       const n = cur ? Number(budgets[cur.value] || 0) : 0;
       input.setAttribute('aria-valuenow', String(s));
       input.setAttribute('aria-valuetext', cur
-        ? cur.label + (n > 0 ? ' · ' + fmtTokens(n) + ' token' : '')
+        ? cur.label + (n > 0 ? ' · ' + n + T(' 轮查证', ' rounds') : '')
         : '');
       hit.style.left = 'calc((100% - ' + THUMB_HIT_W + 'px) * ' + ratio() + ' + ' +
         ((THUMB_HIT_W - KNOB) / 2) + 'px)';
       stopBtns.forEach(function (b, i) {
         b.setAttribute('aria-pressed', String(i === s));
         if (stops[i] && Number(budgets[stops[i].value] || 0) > 0) {
-          b.setAttribute('title', stops[i].label + ' · ' + fmtTokens(budgets[stops[i].value]) + ' token');
+          b.setAttribute('title', stops[i].label + ' · ' + budgets[stops[i].value] + T(' 轮查证', ' rounds'));
         } else {
           b.removeAttribute('title');
         }
@@ -595,13 +604,16 @@
         active = index;
         if (!dragging) { preview = index; syncAria(); motion.moveTo(ratio(), false); }
       },
-      /* list: [{ id: 'simple', budget: 16384 }, ...] —— 按模型窗口算好的真实 token 数 */
+      /* list: [{ id: 'simple', steps: 3 }, ...] —— 每档查几轮。
+         兼容旧的 {id, budget}：老调用方传 token 数时不再标 token，
+         只当「有值」处理，不会把 16384 印到界面上。 */
       setBudgets: function (list) {
         budgets = {};
         (list || []).forEach(function (s) {
           if (!s || !s.id) return;
-          const n = Number(s.budget || 0);
+          const n = Number(s.steps || 0);
           if (n > 0) budgets[s.id] = n;
+          else if (Number(s.budget || 0) > 0) budgets[s.id] = 0; /* 旧形状：不标数字 */
         });
         paintBudgets();
       },

@@ -539,6 +539,42 @@ for (const c of CASES) {
   results.push({ id: 'G29', group: '转义', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
 
+/* G30 上下文压缩：阈值必须跟着「模型窗口」走。
+   同一个 20 万 token 的来历，在 1M 窗口下不该被动（装得下），
+   在 32K 窗口下才该压。这条防的是「思考强度＝上下文预算」的旧行为回潮。 */
+{
+  const { compressHistory } = require('./agent.js');
+  const seed = (n) => {
+    const msgs = [{ role: 'system', content: '系统提示' }];
+    for (let i = 0; i < n; i += 1) {
+      msgs.push({ role: 'user', content: '用户问题 ' + i });
+      msgs.push({ role: 'user', content: '工具结果 list_dir\n' + 'D:\\Downloads\\big.iso 3GB\n'.repeat(200) });
+    }
+    msgs.push({ role: 'user', content: '最后的问题' });
+    return msgs;
+  };
+  const cases = [
+    ['1M 窗口下 4.8 万 token 不动', seed(20), 1000000, 'none'],
+    ['32K 窗口下同样内容开始软裁剪', seed(20), 32768, 'soft'],
+    ['默认窗口（未上报）按 1M 算', seed(20), 0, 'none']
+  ];
+  const bad = [];
+  for (const [name, msgs, win, want] of cases) {
+    // 深拷贝，避免 compressHistory 原地改影响下一个用例
+    const copy = JSON.parse(JSON.stringify(msgs));
+    const got = compressHistory(copy, win).level;
+    if (got !== want) bad.push(`${name}：得到 ${got}`);
+  }
+  /* 决定性的一条：同样的 38 万 token，1M 窗口不动、32K 窗口必须压。
+     两者只差窗口这一个变量——这就是「思考强度不该决定上下文」的机器判据。 */
+  const big = seed(150);
+  const wide = compressHistory(JSON.parse(JSON.stringify(big)), 1000000).level;
+  const narrow = compressHistory(JSON.parse(JSON.stringify(big)), 32768).level;
+  if (wide !== 'none') bad.push(`38 万 token 在 1M 窗口下被压了：${wide}`);
+  if (narrow === 'none') bad.push('38 万 token 在 32K 窗口下居然没压');
+  results.push({ id: 'G30', group: '压缩', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

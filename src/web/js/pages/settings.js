@@ -30,6 +30,13 @@
   const normClose = (v) => (v === 'quit' ? 'quit' : 'tray');
   const errText = UI.errText;
   const js = (e) => (e && e.message ? e.message : String(e));
+  /* 窗口大小的短标签：1M / 200K / 131K。模型名旁边只放这一格，不写 token 长串 */
+  const ctxLabel = (n) => {
+    const v = Math.max(0, Math.round(Number(n) || 0));
+    if (!v) return '';
+    if (v >= 1048576) return (v / 1048576).toFixed(v % 1048576 ? 1 : 0) + 'M';
+    return Math.round(v / 1024) + 'K';
+  };
 
   /* 当前挂载的页面；语言切换时按它重绘 */
   let active = null;
@@ -755,15 +762,16 @@
               title: id,
               onclick: () => {
                 d.model = id;
-                /* 换模型就跟着换窗口：端点报过就用报的值，没报就退回默认，不沿用上一个模型的 */
+                /* 换模型就跟着换窗口：端点报过就用报的值；没报过就按模型名推断，
+                   推断不出才落到 1M 默认。绝不沿用上一个模型的窗口。 */
                 const w = Number((d.modelCtx || {})[id] || 0);
-                d.ctxWindow = w || AIStore.FALLBACK_CTX;
+                d.ctxWindow = w || AIStore.inferCtx(id) || AIStore.FALLBACK_CTX;
                 state.aiTest = null;
                 paint();
               }
             }, h('span', { class: 'ai-model-name', text: id }),
-              Number((d.modelCtx || {})[id] || 0)
-                ? h('span', { class: 'ai-model-ctx', text: Math.round((d.modelCtx[id]) / 1024) + 'K' })
+              Number((d.modelCtx || {})[id] || 0) || AIStore.inferCtx(id)
+                ? h('span', { class: 'ai-model-ctx', text: ctxLabel(Number((d.modelCtx || {})[id] || 0) || AIStore.inferCtx(id)) })
                 : null,
               id === d.model ? icon('check', 12) : null)))
           )
@@ -786,17 +794,18 @@
 
         const modelCtxMap = (d.modelCtx && typeof d.modelCtx === 'object') ? d.modelCtx : {};
         const reported = Number(modelCtxMap[d.model] || 0);
-        const winNow = Number(d.ctxWindow) || AIStore.FALLBACK_CTX;
+        const guessed = AIStore.inferCtx(d.model) || 0;
+        const winNow = Number(d.ctxWindow) || guessed || AIStore.FALLBACK_CTX;
         const winSrc = reported
           ? T('端点上报', 'From endpoint')
-          : (Number(d.ctxWindow) ? T('推断/手填', 'Inferred') : T('未上报，按默认', 'Not reported'));
+          : (guessed ? T('按模型名推断', 'Inferred from model') : T('未上报，按默认 1M', 'Not reported; 1M default'));
 
         const ctxIn = h('input', {
-          class: 'input ai-ctx-in', type: 'number', min: '2000', max: '2000000', step: '1024',
+          class: 'input ai-ctx-in', type: 'number', min: '2000', max: '4000000', step: '1024',
           value: String(winNow),
           oninput: (e) => {
             const n = Math.round(Number(e.target.value) || 0);
-            if (n >= 2000 && n <= 2000000) d.ctxWindow = n;
+            if (n >= 2000 && n <= 4000000) d.ctxWindow = n;
           }
         });
 
@@ -903,8 +912,8 @@
             setRow(T('上下文窗口', 'Context window'),
               h('div', { class: 'row' }, ctxIn, h('span', { class: 'badge' + (reported ? ' ok' : ''), text: winSrc })),
               reported
-                ? T('读自端点 /models 的 max context length；对话预算按窗口的 25% / 50% / 75% 分配', 'Read from the endpoint; turns use 25/50/75% of it')
-                : T('端点没有报告这个值，先按默认 32K 处理，可以手动改；点「获取模型」会尝试读真实值', 'Not reported; 32K applies until you fetch models')),
+                ? T('读自端点 /models 的 max context length；助手按窗口的 70% 自动压缩，超了就压，不会失忆', 'Read from the endpoint; history is auto-compressed at 70% of the window')
+                : T('端点没有报告这个值：按模型名推断，推断不出按 1M。助手按窗口的 70% 自动压缩上下文', 'Not reported; inferred from the model name, else 1M. History is auto-compressed at 70%')),
             setRow(T('温度', 'Temperature'), tempIn, T('越低越稳，助手类任务建议 0–0.3', 'Lower is steadier; 0–0.3 suits assistant tasks')),
             setRow(T('查证轮数', 'Max tool steps'),
               h('div', { class: 'row' },

@@ -2465,268 +2465,6 @@ html[data-theme="dark"] .ai-page {
 }
 .ai-answer.degraded { font-size: 14px; line-height: 1.72; color: var(--cl-ink-2); }
 
-/* 查证过程：默认折成一行，点开才逐条显示
-   （1.22.0 起标题行由 thoughtline.js 渲染，下面 .ai-steps-head / .ai-steps
-    两条旧规则仅为兼容保留，无引用；行样式 .ai-step* 仍被思路行复用。） */
-.ai-steps-head {
-  align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
-  height: 22px; padding: 0 6px 0 2px; border: 0; border-radius: var(--radius-sm);
-  background: transparent; color: var(--text-3); font-size: var(--fs-small); cursor: pointer;
-  transition: color var(--dur-1) var(--ease), background var(--dur-2) var(--ease-out);
-}
-.ai-steps-head:hover { color: var(--text-1); background: var(--hover); }
-.ai-steps-head svg { width: 12px; height: 12px; }
-.ai-steps-caret { font-size: 9px; opacity: .6; transition: transform var(--dur-2) var(--ease-out); }
-.ai-steps-head.open .ai-steps-caret { transform: rotate(180deg); }
-.ai-steps {
-  border-left: 1px solid var(--line); margin: 2px 0 2px 6px; padding: 2px 0 2px 10px;
-  display: flex; flex-direction: column; gap: 3px;
-}
-.ai-step {
-  display: flex; align-items: center; gap: 6px; font-size: var(--fs-small);
-  color: var(--text-2); min-width: 0;
-}
-.ai-step svg { width: 11px; height: 11px; flex: 0 0 auto; color: var(--ok); }
-.ai-step.bad svg { color: var(--danger); }
-.ai-step-name { color: var(--text-1); flex: 0 0 auto; }
-.ai-step-sum {
-  color: var(--text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ai-step-ms { margin-left: auto; color: var(--text-3); font-family: var(--mono); font-size: var(--fs-tiny); }
-
-/* ---------- 思路行（thoughtline.js）· Claude 过程卡
-   ------------------------------------------------------------
-   整组是一张卡：1px 描边、8px 圆角；标题行 36px 高、左右内缩 12px；
-   明细行与标题行之间一道 0.5px 分隔；展开后卡内可滚，最高 min(400px, 50vh)。
-   参数口径仍是原版那五个变量（--tl-trough / --tl-period / --tl-shimmer /
-   --tl-settle / --tl-blur），只是把尺寸换成 Claude 的阶梯。 */
-.tl {
-  --tl-trough: .55;
-  --tl-period: 1.6s;
-  --tl-shimmer: 1.8s;
-  --tl-settle: 250ms;
-  --tl-blur: 2px;
-  --tl-glyph-done: .4;
-  --tl-ink: var(--cl-ink-2);
-  --tl-ease-out: var(--cl-ease);
-  --tl-ease-in-out: cubic-bezier(.77, 0, .175, 1);
-
-  display: flex; flex-direction: column; align-items: stretch;
-  width: 100%; min-width: 0; max-width: 100%;
-  border: 1px solid var(--cl-line-1); border-radius: var(--cl-r);
-  background: var(--cl-layer); overflow: hidden;
-  font-size: 13px; font-weight: 400; line-height: 1.45; color: var(--cl-ink-2);
-  animation: cl-card-in var(--cl-t-enter) var(--cl-ease-enter) both;
-}
-@keyframes cl-card-in { from { opacity: 0; transform: translateY(4px); } }
-.tl[data-working] { --tl-ink: var(--cl-ink-1); }
-
-.tl-head {
-  display: flex; align-items: center; gap: 8px; max-width: 100%;
-  height: 36px; margin: 0; padding: 0 12px; border: 0; border-radius: 0;
-  background: none; color: var(--cl-ink-2); font: inherit; text-align: left;
-  white-space: nowrap; cursor: default; outline: none;
-  transition: background var(--cl-t-surface) var(--cl-ease), color var(--cl-t-surface) var(--cl-ease);
-}
-.tl-head[data-toggle] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.tl-head[data-toggle]:hover { background: var(--hover); color: var(--cl-ink-1); }
-.tl[data-working] .tl-head { color: var(--cl-ink-1); }
-.tl-head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
-
-/* 等待行：16px 盒子里三颗点，错相呼吸 + 轻微上浮，逗号那样一下一下地动 */
-.tl-glyph {
-  display: inline-flex; flex: none; align-items: center; justify-content: center;
-  gap: 3px; width: 16px; height: 16px;
-  color: var(--cl-ink-2);
-  transition: opacity var(--tl-settle) var(--cl-ease);
-}
-.tl-glyph svg { display: block; width: 100%; height: 100%; }
-.tl-dot { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-.tl-dots i { display: block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-.tl[data-working] .tl-dots i { animation: cl-dot 1.15s var(--tl-ease-in-out) infinite; }
-.tl[data-working] .tl-dots i:nth-child(2) { animation-delay: .14s; }
-.tl[data-working] .tl-dots i:nth-child(3) { animation-delay: .28s; }
-@keyframes cl-dot {
-  0%, 60%, 100% { opacity: .26; transform: none; }
-  30% { opacity: 1; transform: translateY(-2px) scaleY(1.15); }
-}
-.tl:not([data-working]) .tl-glyph { opacity: var(--tl-glyph-done); }
-
-.tl-label { display: inline-grid; min-width: 0; }
-.tl-text {
-  grid-area: 1 / 1; width: max-content; max-width: 100%; opacity: 0;
-  transition: opacity var(--tl-settle) var(--cl-ease);
-}
-.tl-text[data-active] { opacity: 1; animation: tl-line-in var(--tl-settle) var(--cl-ease); }
-@keyframes tl-line-in { from { filter: blur(var(--tl-blur)); } }
-.tl-text--done[data-active] { opacity: .85; }
-
-.tl-breath { display: inline-block; }
-/* 微光：一道亮带扫过句子；墨色走独立变量，避免 currentColor 被设成 transparent。
-   color-mix 不支持的旧内核直接跳过整条规则，文字不会消失。 */
-@supports (color: color-mix(in srgb, red 50%, transparent)) {
-  .tl[data-working] .tl-breath[data-shimmer] {
-    background: linear-gradient(
-      100deg,
-      color-mix(in srgb, var(--tl-ink) 55%, transparent) 30%,
-      var(--tl-ink) 50%,
-      color-mix(in srgb, var(--tl-ink) 55%, transparent) 70%
-    );
-    background-size: 250% 100%;
-    background-position: 125% 0;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    -webkit-text-fill-color: transparent;
-    animation: tl-sheen var(--tl-shimmer) linear infinite;
-  }
-}
-@keyframes tl-sheen { to { background-position: -125% 0; } }
-
-/* 计时器推到行尾，样式是 caption：11.5px、等宽数字、更淡。
-   JS 的 placeTimer 仍会写 transform（原版那套「滑到句子末尾」），
-   这里用 !important 钉住，让它保持贴右，不跟着 label 宽度漂。 */
-.tl-timer {
-  margin-left: auto; flex: none;
-  font-size: 11.5px; color: var(--cl-ink-4);
-  font-variant-numeric: tabular-nums;
-  transform: none !important;
-  transition: opacity var(--tl-settle) ease;
-}
-.tl-timer[data-done] { opacity: .85; }
-
-.tl-chevron {
-  display: inline-flex; flex: none; margin-left: 2px; opacity: 0;
-  transition: opacity var(--cl-t-feedback) var(--cl-ease), transform var(--cl-t-surface) var(--cl-ease);
-}
-.tl-chevron svg { width: 14px; height: 14px; }
-.tl-chevron[data-on] { opacity: .5; }
-.tl[data-open] .tl-chevron { transform: rotate(180deg); }
-.tl-head[data-toggle]:hover .tl-chevron { opacity: .85; }
-
-.tl-sr {
-  position: absolute; width: 1px; height: 1px; overflow: hidden;
-  clip: rect(0 0 0 0); white-space: nowrap;
-}
-
-.tl-trace {
-  display: grid; grid-template-rows: 0fr;
-  transition: grid-template-rows var(--cl-t-open) var(--cl-ease);
-}
-.tl-trace[data-open] { grid-template-rows: 1fr; border-top: var(--cl-hair) solid var(--cl-line-1); }
-.tl-fold { min-height: 0; overflow-y: hidden; }
-/* 展开后卡内滚动：上限跟 Claude 一致，展开的思考随组滚、自己不出第二条滚动条 */
-.tl[data-open] .tl-fold { max-height: min(400px, 50vh); overflow-y: auto; overscroll-behavior: contain; }
-.tl-fold::-webkit-scrollbar { width: 8px; }
-.tl-fold::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
-
-/* 卡里的行：每行一条，36px 高、左右内缩 12px；行与行之间一道 0.5px 分隔，
-   首行上方不再多画一道（它紧贴标题行下面那道线）。工具调用与思考共用这套行。 */
-.tl-steps { display: flex; flex-direction: column; padding: 0; font-weight: 400; }
-.tl-step {
-  display: flex; align-items: center; gap: 8px; min-width: 0;
-  min-height: 36px; padding: 0 12px;
-  font-size: 13px; color: var(--cl-ink-2);
-}
-.tl-step + .tl-step,
-.tl-steps + .tl-thoughts,
-.tl-thoughts + .tl-steps { border-top: var(--cl-hair) solid var(--cl-line-1); }
-/* Claude 的行里不放图标：状态靠文字颜色（失败的调用转成危险色） */
-.tl-mark { display: none; }
-.tl-step.bad .ai-step-name { color: var(--danger); }
-
-/* 思考正文：整段折行、句与句紧挨着（不是一句一块）。
-   12.5px 二级灰、行高 1.7 —— 展开后是一段可读的推理，不跟回答抢注意力。 */
-.tl-thoughts {
-  display: flex; flex-direction: column; align-items: stretch;
-  padding: 10px 12px; min-width: 0;
-}
-.tl-thought-row {
-  padding: 0; min-width: 0;
-  font-size: 12.5px; line-height: 1.7; font-weight: 400;
-  color: var(--cl-ink-2);
-  animation: tl-row-in 200ms var(--cl-ease) both;
-}
-.tl-thought-text {
-  display: block; min-width: 0;
-  white-space: pre-wrap; word-break: break-word;
-  -webkit-user-select: text; -moz-user-select: text; user-select: text;
-  cursor: text;
-}
-/* 还在吐字：当前行末尾一根细游标（比整块淡入更稳，也不改布局） */
-.tl-thought-row[data-streaming] .tl-thought-text::after {
-  content: ''; display: inline-block; width: .4em; height: .82em;
-  margin-left: .1em; vertical-align: -.06em; border-radius: 1px;
-  background: currentColor; opacity: .5;
-  animation: tl-caret 1.05s steps(2, start) infinite;
-}
-@keyframes tl-row-in { from { opacity: 0; transform: translateY(-2px); } }
-@media (prefers-reduced-motion: reduce) {
-  .tl-thought-row { animation: none; }
-}
-
-/* 复制按钮：悬停标题行才显形（Claude 的行内操作都是 hover 才出现），
-   点它不会折叠整块（JS 里 stopPropagation） */
-.tl-copy {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 22px; margin-left: 0; padding: 0; flex: none;
-  border: 0; border-radius: var(--cl-r-sm); background: none; color: inherit;
-  opacity: 0; cursor: pointer;
-  transition: opacity var(--cl-t-surface) var(--cl-ease), background var(--cl-t-surface) var(--cl-ease),
-    color var(--cl-t-surface) var(--cl-ease);
-}
-.tl-copy[hidden] { display: none; }
-.tl-head:hover .tl-copy, .tl-copy:focus-visible { opacity: .9; }
-.tl-copy:hover { opacity: 1; background: var(--hover); color: var(--text-1); }
-.tl-copy svg { width: 13px; height: 13px; }
-.tl-copy[data-done] { opacity: 1; color: var(--ok); }
-.tl-copy[data-done] svg { display: none; }
-.tl-copy[data-done]::after { content: '✓'; font-size: 12px; line-height: 1; }
-
-/* 游标的关键帧留在下面；当前行的游标见 .tl-thought-row[data-streaming] */
-
-@keyframes tl-caret {
-  0%, 100% { opacity: .55; }
-  50% { opacity: 0; }
-}
-
-
-.tl-step .ai-step-sum { min-width: 0; }
-/* 行里的图标整体隐掉（Claude 的过程行只有文字），但保留节点与状态类，
-   失败那一步靠文字颜色区分 */
-.tl-mark { display: none; }
-.tl-step.bad .tl-mark { opacity: .9; }
-
-/* 正在跑的那一步：一颗呼吸的点（行里的图标已隐藏，这里只留给将来的行内用法） */
-.tl-pulse {
-  display: block; width: .4em; height: .4em; border-radius: 50%;
-  background: currentColor;
-  animation: tl-pulse 1.6s var(--tl-ease-in-out) infinite;
-}
-
-@keyframes tl-pulse {
-  0%, 100% { opacity: .55; }
-  50% { opacity: 1; }
-}
-
-@keyframes tl-step-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: none; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tl-text { filter: none; transition: opacity var(--tl-settle) ease; }
-  .tl-timer { transition: opacity var(--tl-settle) ease; }
-  .tl-trace { transition: none; }
-  .tl-step { animation: none; }
-  .tl-pulse { animation-duration: 2.4s; }
-  .tl-thought-row[data-streaming] .tl-thought-text::after { animation: none; opacity: .35; }
-  .tl[data-working] .tl-breath[data-shimmer] {
-    background: none; color: inherit; -webkit-text-fill-color: currentColor;
-    animation: none;
-  }
-}
-
 /* 依据 */
 .ai-ev-wrap { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
 .ai-ev-label { font-size: var(--fs-tiny); color: var(--text-3); line-height: 20px; }
@@ -3710,68 +3448,9 @@ html[data-theme="dark"] .ai-page {
 .ai-tobottom:hover { color: var(--text-1); background: var(--surface-2); }
 .ai-tobottom .ic, .ai-tobottom svg { width: 16px; height: 16px; transform: rotate(180deg); }
 
-/* ---------------- 思考行与过程行：照参考实现改成朴素的一行 ---------------- */
-.ai-page .tl { border: 0; background: none; border-radius: 0; overflow: visible; }
-.ai-page .tl-head { height: 24px; padding: 0; gap: 6px; }
-.ai-page .tl-glyph { width: 16px; height: 16px; }
-.ai-page .tl-label { font-size: var(--fs-small); color: var(--text-2); }
-.ai-page .tl-head:hover .tl-label { color: var(--text-1); }
-.ai-page .tl-trace[data-open] { border-top: 0; }
-.ai-page .tl[data-open] .tl-fold { max-height: none; overflow: visible; }
-.ai-page .tl-step {
-  height: 24px; padding: 0; font-size: var(--fs-small); color: var(--text-3);
-  border-top: 0; flex-wrap: wrap; cursor: default; border-radius: 6px;
-}
-.ai-page .tl-step.openable { cursor: pointer; }
-.ai-page .tl-step:hover { color: var(--text-2); background: none; }
-.ai-page .tl-step .ai-step-name { font-weight: 400; }
-.ai-page .tl-step .ai-step-name::after {
-  content: ''; display: inline-block; width: 2px; height: 2px; border-radius: 1px;
-  background: currentColor; opacity: .5; margin: 0 8px; vertical-align: middle;
-}
-.ai-page .tl-step .ai-step-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-page .tl-step .ai-step-ms { font-variant-numeric: tabular-nums; font-size: var(--fs-tiny); color: var(--text-3); opacity: .8; }
-.ai-page .tl-step .ai-step-chev {
-  width: 12px; height: 12px; margin-left: 6px; opacity: 0;
-  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg) translate(-2px, -2px); transition: opacity var(--dur-fast), transform var(--dur-fast);
-}
-.ai-page .tl-step:hover .ai-step-chev, .ai-page .tl-step:focus-visible .ai-step-chev { opacity: .8; }
-.ai-page .tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(-135deg) translate(-2px, -2px); opacity: .8; }
-.ai-page .tl-step.bad .ai-step-name { color: var(--danger); }
-.ai-page .tl-step-out { flex-basis: 100%; margin: 4px 0 4px 4px; }
-.ai-page .tl-step-out pre {
-  margin: 0; padding: 10px 12px; max-height: 150px; overflow: auto;
-  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  font-family: var(--mono); font-size: var(--fs-tiny); line-height: 1.6; color: var(--text-2);
-  white-space: pre-wrap; word-break: break-word;
-}
-.ai-page .tl-thoughts { padding: 4px 0 4px 22px; }
-.ai-page .tl-thought-row { padding: 0; }
-.ai-page .tl-thought-text { font-size: var(--fs-small); line-height: 1.62; color: var(--text-3); }
 @media (prefers-reduced-motion: reduce) {
   .ai-tnav-mark::before, .ai-tnav-pop, .ai-tobottom { transition: none; }
 }
-
-/* 思考行摘要：标题固定「思考」，圆点后面跟推理第一句 */
-.ai-page .tl-head .tl-sum::before {
-  content: ''; display: inline-block; width: 2px; height: 2px; border-radius: 1px;
-  background: currentColor; opacity: .45; margin: 0 8px 2px; vertical-align: middle;
-}
-.ai-page .tl-head .tl-sum {
-  flex: 1; min-width: 0; font-size: var(--fs-small); color: var(--text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ai-page .tl-step[aria-expanded="true"] { height: auto; min-height: 24px; padding-bottom: 6px; align-items: flex-start; }
-.ai-page .tl-step[aria-expanded="true"] .ai-step-name,
-.ai-page .tl-step[aria-expanded="true"] .ai-step-sum { line-height: 24px; }
-.ai-page .tl-step .ai-step-chev {
-  width: 5px; height: 5px; margin: 0 2px 2px 8px; align-self: center;
-  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg); transition: opacity var(--dur-fast), transform var(--dur-fast);
-  opacity: 0;
-}
-.ai-page .tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(-135deg); opacity: .8; margin-bottom: 6px; }
 
 /* ---------------- 设置：一张卡 + 行间细线（Claude 的分组方式） ---------------- */
 .set-stack { display: flex; flex-direction: column; gap: 12px; }
@@ -3892,37 +3571,6 @@ html[data-theme="dark"] .ai-page {
    现在左边腾出空间，放回去还差 10px 余量。 */
 .ai-drawer .dac-agent-mode .dac-chev { display: block; }
 
-/* 过程行：可展开的那条要有明确的「能点开」和展开动画，
-   静态截图上跟不可展开的行看不出区别，等于没有入口。 */
-.tl-step.openable { cursor: pointer; }
-.tl-step.openable:hover { background: var(--hover); }
-.tl-step.openable:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
-.ai-step-chev {
-  flex: 0 0 auto; width: 14px; height: 14px; margin-left: 4px; opacity: .45;
-  transition: transform var(--dur-2) var(--ease-out), opacity var(--dur-2);
-}
-.ai-step-chev::before {
-  content: ''; display: block; width: 6px; height: 6px; margin: 4px 0 0 3px;
-  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
-  transform: rotate(45deg);
-}
-.tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(180deg); opacity: .8; }
-.tl-step.openable:hover .ai-step-chev { opacity: .8; }
-
-/* 展开的过程明细：高度过渡而不是瞬间占位，收起时也不留一条空白 */
-.ai-step-out {
-  flex-basis: 100%; display: grid; grid-template-rows: 0fr;
-  transition: grid-template-rows var(--dur-2) var(--ease-out);
-}
-.ai-step-out[hidden] { display: grid; }
-.tl-step[aria-expanded="true"] .ai-step-out { grid-template-rows: 1fr; }
-.ai-step-out > pre {
-  min-height: 0; overflow: hidden auto; max-height: 168px; margin: 0;
-  padding: 0; font-family: var(--mono); font-size: 11px; line-height: 1.7;
-  color: var(--text-3); white-space: pre-wrap; word-break: break-word;
-}
-.tl-step[aria-expanded="true"] .ai-step-out > pre { padding: 6px 0 8px; }
-
 /* 抽屉（432px）里那排按钮重新排过：不再靠 overflow:hidden 硬裁，
    而是把「查证深度」收成图标（有 title 与 aria-label 兜底），
    给「动手档位」和模型名留出完整位置。 */
@@ -4038,45 +3686,6 @@ html[data-theme="dark"] .ai-page {
 .ai-ev-open:active { transform: scale(.92); }
 .ai-ev-open:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
 .ai-ev-open svg { width: 12px; height: 12px; }
-
-/* ---- 历史回放：查证过程折叠块 ---- */
-.ai-replay {
-  width: 100%; max-width: var(--card-max);
-  border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--surface-2); overflow: hidden;
-  animation: rise-in var(--dur-3) var(--ease) both;
-}
-.ai-replay > summary {
-  display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px;
-  font-size: var(--fs-tiny); color: var(--text-3); cursor: pointer; list-style: none;
-  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
-}
-.ai-replay > summary::-webkit-details-marker { display: none; }
-.ai-replay > summary:hover { color: var(--text-2); background: var(--hover); }
-.ai-replay > summary svg { width: 13px; height: 13px; flex: 0 0 auto; }
-.ai-replay-title { color: var(--text-3); }
-.ai-replay-n { color: var(--text-3); font-family: var(--mono); margin-left: 2px; }
-/* 展开箭头：用边框画三角，不用 emoji */
-.ai-replay > summary::after {
-  content: ''; margin-left: auto; width: 5px; height: 5px;
-  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
-  transform: rotate(45deg) translateY(-1px);
-  transition: transform var(--dur-2) var(--ease-out);
-}
-.ai-replay[open] > summary { border-bottom: 1px solid var(--line); }
-.ai-replay[open] > summary::after { transform: rotate(225deg) translateY(-1px); }
-.ai-replay-list { display: flex; flex-direction: column; padding: 4px 0; max-height: 260px; overflow: auto; }
-.ai-replay-row {
-  display: flex; align-items: baseline; gap: 8px; padding: 3px 9px;
-  font-size: var(--fs-tiny); color: var(--text-2);
-  transition: background var(--dur-1) var(--ease-out);
-}
-.ai-replay-row:hover { background: var(--hover); }
-.ai-replay-row.bad .ai-replay-sum { color: var(--danger); }
-.ai-replay-tool { font-family: var(--mono); color: var(--text-3); flex: 0 0 auto; }
-.ai-replay-sum { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-replay-ms { font-family: var(--mono); color: var(--text-3); flex: 0 0 auto; }
-
 /* ---- 会话执行记录 ---- */
 .ai-acts {
   display: flex; flex-direction: column; gap: 2px;
@@ -4149,3 +3758,124 @@ html[data-theme="dark"] .ai-page {
 .ai-page .tl-step.openable:hover .ai-step-chev,
 .ai-page .tl-step.openable:focus-visible .ai-step-chev { opacity: .9; }
 .ai-page .tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(180deg); opacity: .9; margin-bottom: 0; }
+
+/* ================= 查证过程组（procs.js）· 复刻 dsh-claude-style Process rows =================
+   一行计数 + 平铺过程行 + 可展开的思考/返回值。
+   度量照实测：行高 28px、图标 15px、标签 13px、摘要 12px 等宽、缩进 8px。
+   颜色全部走本项目 token（浅色与深色同一套变量，不在这里写死灰阶）。 */
+.pg {
+  --pg-indent: 0px;
+  width: 100%;
+  max-width: var(--card-max);
+  font-size: var(--fs-body);
+  animation: rise-in var(--dur-3) var(--ease) both;
+}
+/* 组头与过程行都从卡片左边缘起算：内缩由它们自己的 padding 决定，
+   不用负外边距去「回填」，否则行尾的耗时会比展开块短 8px。 */
+.pg-head {
+  display: flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 var(--pg-indent);
+  border-radius: var(--radius-sm);
+  color: var(--text-3); cursor: pointer;
+  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
+}
+.pg-head:hover { color: var(--text-2); background: var(--hover); }
+.pg-head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
+.pg-caret { display: inline-flex; flex: 0 0 auto; opacity: .75; }
+.pg-caret svg { width: 11px; height: 11px; }
+/* 收起时箭头指右（▸），展开时指下（▾）：只转，不换图标 */
+.pg-caret { transition: transform var(--dur-2) var(--ease-out); transform: rotate(-90deg); }
+.pg[data-open] .pg-caret { transform: rotate(0deg); }
+.pg-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg[data-running] .pg-title { color: var(--text-2); }
+
+/* 0fr → 1fr：高度由内容自己撑，不用测量，也不会塌闪 */
+.pg-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--dur-3) var(--ease); }
+.pg[data-open] .pg-body { grid-template-rows: 1fr; }
+.pg-rows { min-height: 0; overflow: hidden; }
+
+.pg-list { display: flex; flex-direction: column; padding: 2px 0 4px; }
+
+.pg-row {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 28px; padding: 0 var(--pg-indent);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-body); color: var(--text-2);
+  transition: background var(--dur-1) var(--ease-out);
+}
+.pg-row[data-openable] { cursor: pointer; }
+.pg-row[data-openable]:hover { background: var(--hover); }
+.pg-row[data-openable]:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
+.pg-ic { display: inline-flex; flex: 0 0 auto; color: var(--text-3); }
+.pg-ic svg { width: 15px; height: 15px; }
+.pg-label { flex: 0 0 auto; color: var(--text-2); }
+.pg-dot { flex: 0 0 auto; color: var(--text-3); opacity: .7; }
+/* 摘要用等宽：路径、参数、扩展名在这里是主要内容，不是装饰 */
+.pg-detail {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: var(--fs-small);
+  color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pg-row.bad .pg-label { color: var(--danger); }
+.pg-row.bad .pg-detail { color: var(--danger); }
+
+/* 行下内容：默认 0fr，展开 1fr；缩进对齐到标签起点 */
+.pg-out { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--dur-3) var(--ease); }
+.pg-row[aria-expanded="true"] + .pg-out { grid-template-rows: 1fr; }
+.pg-out-in { min-height: 0; overflow: hidden; padding-left: 21px; }
+.pg-out-box { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 8px; }
+.pg-thought {
+  font-family: var(--font-thought); font-size: var(--fs-body); line-height: 1.7;
+  color: var(--text-2); white-space: pre-wrap; word-break: break-word;
+  padding: 2px 0 8px; -webkit-user-select: text; user-select: text;
+}
+/* 展开的思考自身限高内滚：长推理不该把整轮对话顶下去 */
+.pg-row[aria-expanded="true"] + .pg-out .pg-thought {
+  max-height: min(400px, 50vh); overflow-y: auto; overscroll-behavior: contain;
+}
+.pg-thought::-webkit-scrollbar { width: 8px; }
+.pg-thought::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+/* 原始返回不铺底色：它还是这一行的一部分，铺了底就成了另一张卡 */
+.pg-out-in pre {
+  margin: 0; padding: 2px 0; max-height: 260px; overflow: auto;
+  background: none;
+  font-family: var(--mono); font-size: var(--fs-tiny); line-height: 1.6;
+  color: var(--text-3); white-space: pre-wrap; word-break: break-word;
+}
+.pg-sum-line { font-size: var(--fs-small); color: var(--text-2); }
+.pg-sum-line.bad { color: var(--danger); }
+/* 耗时在行尾：等宽、贴右、比摘要更淡，扫行时不会抢路径 */
+.pg-ms {
+  flex: 0 0 auto; margin-left: auto; padding-left: 10px;
+  font-family: var(--mono); font-size: var(--fs-tiny);
+  color: var(--text-3); opacity: .85;
+}
+
+/* 等待行：三点 + 措辞 + 右侧计时 */
+.pg-run { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 var(--pg-indent); color: var(--text-3); }
+.pg-run-dots { display: inline-flex; gap: 3px; flex: 0 0 auto; }
+.pg-run-dots i { display: block; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .45; }
+.pg[data-running] .pg-run-dots i { animation: pg-pulse 1.15s var(--ease-in-out, ease-in-out) infinite; }
+.pg[data-running] .pg-run-dots i:nth-child(2) { animation-delay: .14s; }
+.pg[data-running] .pg-run-dots i:nth-child(3) { animation-delay: .28s; }
+.pg-run-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-run-time { margin-left: auto; font-family: var(--mono); font-size: var(--fs-tiny); color: var(--text-3); }
+@keyframes pg-pulse {
+  0%, 100% { opacity: .28; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-1px); }
+}
+
+/* 自动压缩提示：一行小字，说明这一轮看到的是压缩后的历史 */
+.ai-compressed {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-tiny); color: var(--text-3);
+  padding: 2px 0;
+}
+.ai-compressed svg { width: 12px; height: 12px; flex: 0 0 auto; opacity: .8; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pg-head, .pg-row, .pg-caret, .pg-body, .pg-out { transition-property: color, background-color, border-color, opacity; }
+  .pg[data-running] .pg-run-dots i { animation: none; opacity: .7; }
+  .pg { animation: none; }
+}

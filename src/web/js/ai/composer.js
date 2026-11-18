@@ -281,7 +281,7 @@
     let busy = false;
     let stopping = false;
     let attachments = [];
-    let usage = o.usage || { used: 0, budget: 8000 };
+    let usage = o.usage || { used: 0, budget: 0 };
     let mentionState = null;
     let dirCache = null;
     let dirCacheKey = '';
@@ -732,18 +732,22 @@
     }
 
     function syncUsage() {
-      const budget = Math.max(1, usage.budget || 1);
-      const ratio = M.clamp((usage.used || 0) / budget, 0, 1);
+      /* 窗口未知（还没读到模型设置）时不要拿 1 当分母：那会显示成 100% 的
+         红色报警，看着像上下文爆了，其实只是不知道分母 */
+      const budget = Number(usage.budget) || 0;
+      const ratio = budget > 0 ? M.clamp((usage.used || 0) / budget, 0, 1) : 0;
       path.setAttribute('stroke-dashoffset', String(C * (1 - ratio)));
       let stroke = 'var(--text-2)';
       if (ratio >= 0.92) stroke = '#dc4b41';
       else if (ratio >= 0.8) stroke = '#d99015';
       path.setAttribute('stroke', stroke);
-      capBtn.title = T('上下文占用 ', 'Context ') + Math.round(ratio * 100) + '%';
+      capBtn.title = budget > 0
+        ? T('上下文占用 ', 'Context ') + Math.round(ratio * 100) + '%'
+        : T('上下文窗口未知', 'Context window unknown');
       capBtn.setAttribute('aria-label', capBtn.title);
       /* 0% 的时候那颗圆环就是个空圈，看着像多出来的控件（用户截图里就把它圈出来了）。
          没占用就不显示，用了一次之后淡入。 */
-      capBtn.classList.toggle('is-empty', ratio < 0.005);
+      capBtn.classList.toggle('is-empty', budget <= 0 || ratio < 0.005);
     }
 
     /* ---------- 输入 / 自适应高度 ---------- */
@@ -1052,8 +1056,12 @@
     });
 
     capBtn.addEventListener('click', function () {
-      UIx.toast(T('上下文占用 ', 'Context ') + Math.round(M.clamp((usage.used || 0) / Math.max(1, usage.budget || 1), 0, 1) * 100) +
-        '% · ' + (usage.used || 0) + ' / ' + (usage.budget || 0) + ' token', 'info', 2600);
+      const b = Number(usage.budget) || 0;
+      const msg = b > 0
+        ? T('上下文占用 ', 'Context ') + Math.round(M.clamp((usage.used || 0) / b, 0, 1) * 100) +
+          '% · ' + (usage.used || 0) + ' / ' + b + ' token'
+        : T('上下文窗口未知：先在设置里选模型', 'Context window unknown: pick a model in settings');
+      UIx.toast(msg, 'info', 2600);
     });
 
     sendBtn.addEventListener('click', function () {
@@ -1216,12 +1224,12 @@
         syncSend();
       },
       setReducedMotion: function (v) { effort.setReducedMotion(v); },
-      /* 档位上的 token 数字由上层按当前模型窗口算好传进来；window 写进标题右侧，
-         让人一眼看到「档位是窗口的 25/50/75%，窗口是模型自己报的」 */
+      /* 档位只标「查几轮」；window 写进标题右侧，说明上下文由模型能力决定，
+         不由这个滑块切分——这两件事以前被绑在一起，是设计错误 */
       setThinkBudgets: function (list, window) {
         effort.setBudgets(list);
         const win = Number(window) || 0;
-        effortMeta.textContent = win > 0 ? T('窗口 ', 'window ') + fmtTokens(win) : '';
+        effortMeta.textContent = win > 0 ? T('上下文 ', 'context ') + fmtTokens(win) : '';
         effort.resize();
         if (modelMorph.open) modelMorph.layout();
       },

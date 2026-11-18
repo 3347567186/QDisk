@@ -362,7 +362,7 @@
         const c = ctxProvider() || {};
         return c.dir || c.path || '';
       },
-      usage: { used: 0, budget: 8000 },
+      usage: { used: 0, budget: 0 },
       onSubmit: (payload) => { ask(payload); },
       onStop: () => {
         state.token.stopped = true;
@@ -381,15 +381,14 @@
         rememberUi({ permission: p });
       },
       onModelChange: (id) => {
-        /* 换模型就换窗口：每个模型的上下文长度是各自的能力，不共用上一个的 */
+        /* 换模型就换窗口：每个模型的上下文长度是各自的能力，不共用上一个的。
+           端点没报过这个模型的值时，按模型名推断（1M / 200K / 128K…），不留空。 */
         state.model = id;
         rememberUi({ model: id });
-        const w = Number((state.settings && state.settings.modelCtx && state.settings.modelCtx[id]) || 0);
-        if (w) {
-          state.ctxWindow = w;
-          composer.setUsage({ used: state.usedTokens || 0, budget: w });
-          composer.setThinkBudgets(thinkBudgets({ ctxWindow: w }), w);
-        }
+        const w = ctxWindowOf(Object.assign({}, state.settings, { model: id }));
+        state.ctxWindow = w;
+        composer.setUsage({ used: state.usedTokens || 0, budget: w });
+        composer.setThinkBudgets(thinkBudgets(), w);
       },
       /* 档位就在输入框那排「标准」旁边：改完立刻落盘，底栏那句话跟着变 */
       onModeChange: (k) => { setMode(k); }
@@ -463,16 +462,9 @@
       /* 上下文占用环的分母是模型真窗口，不是写死的 8000 */
       state.ctxWindow = ctxWindowOf(settings);
       composer.setUsage({ used: state.usedTokens || 0, budget: state.ctxWindow });
-      /* 三档滑块上标出来的 token 数，同一套公式，跟着窗口走 */
-      composer.setThinkBudgets(thinkBudgets(settings), state.ctxWindow);
+      /* 三档滑块标的是查证轮数，窗口单独在右边显示，不再混在一起 */
+      composer.setThinkBudgets(thinkBudgets(), state.ctxWindow);
       return list;
-    }
-
-    /* 单轮历史预算：跟窗口走，与思考强度无关（70%，夹在 [4000, 窗口-2000]）。
-       滑块上不再标 token 数，避免又变成「选深度＝改上下文」的暗示。 */
-    function historyBudget(settings) {
-      const win = ctxWindowOf(settings);
-      return Math.max(4000, Math.min(Math.round(win * 0.7), win - 2000));
     }
 
     /* 三档滑块标的是「查证轮数」，不是 token */
@@ -482,12 +474,19 @@
       });
     }
 
-    /* 模型窗口：端点报过就用报的值，没报按模型名推，推不出按 1M。
-       这三步都在 store 里，界面只负责用。 */
+    /* 模型窗口：按「这个模型」优先——设置里每个模型各存一份端点实测值，
+       全局 ctxWindow 只是兜底；都没报过就按模型名推，推不出按 1M。
+       绝不把「上一个模型的窗口」套到新模型上。 */
     function ctxWindowOf(settings) {
-      const n = Number(settings && settings.ctxWindow);
-      if (Number.isFinite(n) && n >= 2000 && n <= 4000000) return Math.round(n);
-      const guess = (AIStore && AIStore.inferCtx && AIStore.inferCtx(settings && settings.model)) || 0;
+      const s = settings || {};
+      const model = String(s.model || '');
+      const per = model && s.modelCtx ? Number(s.modelCtx[model]) : 0;
+      const cands = [per, Number(s.ctxWindow)];
+      for (let i = 0; i < cands.length; i += 1) {
+        const n = cands[i];
+        if (Number.isFinite(n) && n >= 2000 && n <= 4000000) return Math.round(n);
+      }
+      const guess = (AIStore && AIStore.inferCtx && AIStore.inferCtx(model)) || 0;
       if (guess) return guess;
       return (AIStore && AIStore.FALLBACK_CTX) || 1000000;
     }
@@ -891,71 +890,23 @@
       if (toBottom) toBottom.classList.remove('on');
     }
 
-    /* 思路行：一行呼吸中的句子 + 可折起的过程（thoughtline.js）。
-       label 是「正在做什么」，落定后换成「查了 N 项 · 用时」，计时器滑到句尾；
-       过程在跑的时候是摊开的，落定即折成一行，点一下可再摊开。 */
-    /* 一行摘要：参考实现折叠时显示的是「推理的第一句」，不是时长与段数。
-       取最近一段的第一行、去掉 ** 与列表符号，24 字以内。 */
-    function summaryOf(tl) {
-      const list = (tl && tl.thoughts) || [];
-      for (let i = list.length - 1; i >= 0; i--) {
-        const raw = String(list[i] || '');
-        const parts = raw.split(/[\n。！？]/).map(function (s) {
-          return s.replace(/\*\*/g, '').replace(/^[-*\s]+/, '').trim();
-        }).filter(Boolean);
-        if (parts.length) {
-          const line = parts[0];
-          return line.length > 24 ? line.slice(0, 24) + '…' : line;
-        }
-      }
-      return '';
-    }
-
-    /* 思路行：一行呼吸中的句子 + 可折起的过程（thoughtline.js）。
-       折叠态照参考实现：图标 + 「思考」+ 一句摘要 + chevron；时长不进标题，
-       只留在右下角的用量里。 */
+    /* 查证过程组（procs.js）：折叠时只有一行「执行 N 次思考，调用 M 次工具，记录 K 条」，
+       展开是平铺的过程行；跑到一半摊开，落定折回一行，点一下可再摊开。
+       口径照 dsh-claude-style 的 Process rows，颜色与字号用本项目的 token。 */
     function startAnswer(opts) {
       const replay = !!(opts && opts.replay);
-      /* 折叠态标题恒为「思考」，摘要另起一段放在圆点后面（跟参考实现一致：
-         标题不带时长、不带段数，那一句是推理的第一句） */
-      var sumEl = null;
-      const tl = replay ? null : root.AIThoughtLine.create({
-        label: T('思考', 'Thinking'),
-        glyph: 'dots',
-        collapsible: true,
-        collapseOnSettle: true,
-        /* 跑的时候右边是跳动的秒数（跟参考的「正在思考 9分57秒」同义）；
-           落定后这个秒数收掉，时长留在右下角的用量里，标题只留「思考 · 摘要」 */
-        showTimer: true,
-        copyLabel: T('复制思考过程', 'Copy reasoning'),
-        thoughtLabel: T('思考', 'Thinking'),
-        /* 思考正文不再内滚，长出来就把对话滚到底；顺手把摘要换成第一句 */
-        onAppend: () => {
-          const s = summaryOf(tl);
-          if (s) sumEl.textContent = s;
-          scrollEnd();
-        },
-        speak: (sec) => T(sec.toFixed(1) + ' 秒', sec.toFixed(1) + ' seconds')
-      });
-      if (tl) {
-        sumEl = h('span', { class: 'tl-sum' });
-        const head = tl.el.querySelector('.tl-head');
-        const timer = head && head.querySelector('.tl-timer');
-        if (head) {
-          if (timer) head.insertBefore(sumEl, timer);
-          else head.appendChild(sumEl);
-        }
-      }
+      const pg = replay ? null : root.AIProcs.create({ onAppend: () => scrollEnd() });
+      if (pg) pg.open();
       const body = h('div', { class: 'ai-msg-body ai-answer' });
       const extra = h('div', { class: 'ai-extra' });
       const node = h('div', { class: 'ai-msg bot' },
-        tl ? tl.el : null,
+        pg ? pg.el : null,
         body,
         extra
       );
       msgs.appendChild(node);
       scrollEnd(true);
-      current = { node, tl, body, extra, steps: [], replay, stopped: false };
+      current = { node, pg, body, extra, steps: [], replay, stopped: false };
       stamp(node, 'bot', '');
       const turn = turns[turns.length - 1];
       if (turn) turn.answerNode = node;
@@ -963,29 +914,21 @@
     }
 
     function pushStep(step) {
-      if (!current || !current.tl) return;
+      if (!current || !current.pg) return;
       current.steps.push(step);
-      current.tl.addStep({
-        text: step.label || step.tool,
+      /* 思考原文已经由流式片段边收边挂在「思考」行上，这里只补工具行，
+         不再把 ev.thought 重放一遍——否则同一段推理会出现两次。 */
+      current.pg.addStep({
+        tool: step.tool,
+        label: step.label,
+        args: step.args,
         summary: step.summary,
         error: step.error,
         ms: step.ms,
         ok: step.ok,
-        detail: step.result
+        result: step.result
       });
       scrollEnd();
-    }
-
-    /* 落定后的那句话：把「想了多少、查了什么」压成一句，时间由计时器接在后面 */
-    function doneLabelFor(steps, res, thoughts) {
-      const n = steps.length;
-      const t = thoughts || 0;
-      if (res.stopped) return T('已停止', 'Stopped');
-      if (!res.ok) return n ? T(`查了 ${n} 项 · 未完成`, `Checked ${n} · unfinished`) : T('查证失败', 'Failed');
-      const parts = [];
-      if (t) parts.push(T(`思考 ${t} 段`, `Thought ${t}×`));
-      if (n) parts.push(T(`调用 ${n} 次工具`, `${n} tool calls`));
-      return parts.length ? parts.join(' · ') : T('思考了', 'Thought');
     }
 
     /* 回答正文：有 Markdown 结构就渲染，没有就原样显示。
@@ -1009,29 +952,30 @@
       composer.focus();
     }
 
-    /* 历史里的查证过程：折叠成一行「查了 N 步」，展开是每步的工具与摘要。
-       只读，不再执行任何东西——回看的价值是「当时凭什么这么说」。 */
+    /* 历史里的查证过程：和当轮长得一样——一行计数，展开是过程行。
+       只读，不再执行任何东西；回看的价值是「当时凭什么这么说」。
+       旧会话的 trace 没有 label/thought 也能渲染：退回工具名，没有思考就不出思考行。 */
     function replayTrace(trace) {
       const steps = (Array.isArray(trace) ? trace : [])
         .filter((t) => t && (t.tool || t.summary));
       if (!steps.length) return null;
-      const wrap = h('details', { class: 'ai-replay' });
-      wrap.appendChild(h('summary', {},
-        UIx.icon('clock', 13),
-        h('span', { class: 'ai-replay-title' }, T('查证过程', 'Process')),
-        h('span', { class: 'ai-replay-n' }, steps.length + T(' 步', ' steps'))
-      ));
-      const list = h('div', { class: 'ai-replay-list' });
+      const procs = root.AIProcs.create({ onAppend: function () {} });
       steps.forEach((t) => {
-        const row = h('div', { class: 'ai-replay-row' + (t.ok === false ? ' bad' : '') });
-        row.appendChild(h('span', { class: 'ai-replay-tool' }, t.tool || '?'));
-        row.appendChild(h('span', { class: 'ai-replay-sum' },
-          String(t.summary || (t.ok === false ? T('失败', 'failed') : ''))));
-        if (t.ms) row.appendChild(h('span', { class: 'ai-replay-ms' }, Math.round(Number(t.ms)) + 'ms'));
-        list.appendChild(row);
+        if (t.thought) procs.addThought(String(t.thought));
+        procs.addStep({
+          tool: t.tool,
+          label: t.label,
+          args: t.args,
+          ok: t.ok,
+          ms: t.ms,
+          summary: t.summary,
+          error: (t.ok === false) ? (t.error || T('失败', 'failed')) : '',
+          result: t.result
+        });
       });
-      wrap.appendChild(list);
-      return wrap;
+      procs.settle({ thoughts: procs.counts.thoughts, tools: procs.counts.tools });
+      procs.close();
+      return procs.el;
     }
 
     /* 执行记录：这个会话里真正动过手的动作（已执行 / 已撤销）。
@@ -1103,11 +1047,17 @@
     function finishAnswer(res) {
       if (!current) startAnswer();
       const c = current;
-      if (c.tl) {
-        c.tl.settle({ doneLabel: doneLabelFor(c.steps, res, c.tl.thoughts) });
-        /* 落定后不再显示秒数：折叠态那一行只留「思考 · 摘要」 */
-        const tm = c.tl.el.querySelector('.tl-timer');
-        if (tm) tm.hidden = true;
+      /* 过程组落定：计数定格、等待行收掉、折回一行。
+         停止与失败也用同一行计数——「想到哪、查到哪」本身就是信息。 */
+      if (c.pg) {
+        c.pg.setRecords((res.evidence || []).length);
+        c.pg.settle({
+          thoughts: c.pg.counts.thoughts,
+          tools: c.pg.counts.tools,
+          label: res.stopped
+            ? T('已停止', 'Stopped')
+            : (!res.ok ? T('查证未完成', 'Unfinished') : '')
+        });
       }
       paintAnswer(c.body, res.answer || '');
       /* 右键「复制这段」「引用这段」拿的是这条消息的正文，落定后补上 */
@@ -1117,6 +1067,13 @@
 
       const ev = evidenceRow(res.evidence, res.trace);
       if (ev) c.extra.appendChild(ev);
+      /* 压缩过就在界面上说一声：用户有权知道「助手这一轮看到的是删节版」，
+         而不是事后疑惑「明明说过的它怎么不记得」 */
+      if (res.compressed && res.compressed !== 'none') {
+        c.extra.appendChild(h('div', { class: 'ai-compressed' },
+          UIx.icon('layers', 12),
+          h('span', {}, T('更早的对话已自动压缩，保留路径与结论', 'Earlier turns were compressed to fit the window'))));
+      }
       const cards = suggestCards(res.suggest);
       if (cards) c.extra.appendChild(cards);
 
@@ -1186,11 +1143,11 @@
     function budgetFor(thinking, settings) {
       const key = THINKING[thinking] ? thinking : 'medium';
       const t = THINKING[key];
-      /* 单轮能塞进上下文的消息预算：直接取滑块上标出来的那个数，
-         两边共用 thinkBudgetOf，不存在「显示的 32K、实际发 40K」 */
+      /* 三档只管「查几轮、答案多长」。上下文窗口是模型能力，原样交给 agent，
+         压缩阈值由它在窗口的 50/70/85% 处自动踩——想得深不该记得少。 */
       return {
         steps: Math.min(t.steps, Number(settings.maxSteps) || t.steps),
-        budget: thinkBudgetOf(key, settings),
+        window: ctxWindowOf(settings),
         replyMax: t.replyMax
       };
     }
@@ -1261,7 +1218,10 @@
         model: payload.model || settings.model,
         apiKey: settings.key,
         maxSteps: bud.steps,
-        turnBudget: bud.budget,
+        /* 窗口原样传下去：agent 按它的 50/70/85% 自动压缩，
+           不再由「深度档位」乘一个比例——那是两件事 */
+        ctxWindow: bud.window,
+        turnBudget: 0,
         /* 回复上限跟着思考强度走：agent 用它算 max_tokens，
            原来固定 700 会把长回答截成半截 JSON */
         replyMax: bud.replyMax
@@ -1312,18 +1272,31 @@
           resume: resume,
           onEvent: (ev) => {
             if (ev.type === 'step') {
+              /* 等待行的措辞跟着阶段走：同一条「还在跑」，
+                 说「正在查证」比说「正在思考」更接近用户此刻看到的事 */
+              if (current && current.pg) current.pg.setRunning(true, T('正在查证', 'Checking'));
               pushStep({
                 tool: ev.tool,
-                label: (AIPrompt.TOOLS[ev.tool] || {}).desc || ev.tool,
+                /* 行标签用工具自己的短名（磁盘 / 空文件夹 / 读文件），
+                    不再拿 prompt 里那句给模型看的长描述——那句子是给模型读的，
+                    摊在过程行里就是一大团 */
+                label: ev.label || (tools[ev.tool] || {}).label || ev.tool,
+                args: ev.args,
                 ok: ev.ok,
                 summary: ev.summary,
                 ms: ev.ms,
+                thought: ev.thought,
+                result: ev.result,
                 error: ev.error
               });
               /* 提案一落地就把卡片摆出来：用户不用等模型把话说完了才看到 */
               if (ev.tool === 'propose_action' && ev.ok) pendingCards();
             } else if (ev.type === 'thought') {
-              if (current && current.tl) current.tl.addThought(ev.text);
+              if (current && current.pg) {
+                /* 推理原文先挂在「思考」行上；下一步工具会把它折进过程组 */
+                current.pg.setRunning(true, T('正在推理', 'Reasoning'));
+                current.pg.addThought(ev.text);
+              }
             } else if (ev.type === 'notice') {
               addNotice(ev.message, ev.level);
             }
@@ -1370,6 +1343,7 @@
           suggest: res.suggest || [],
           entries: res.entries || [],
           followUps: res.followUps || [],
+          compressed: res.compressed || 'none',
           usage: res.usage || null
         });
         if (!state.session.title || state.session.title === '新会话') state.session.title = q.slice(0, 30);
@@ -1475,32 +1449,33 @@
       }
 
       const sel = selectionText();
-      const step = t.closest('.tl-step');
-      const think = t.closest('.tl');
+      const row = t.closest('.pg-row');
+      const grp = t.closest('.pg');
       const msg = t.closest('.ai-msg');
 
-      /* 思考块 / 过程行：引用的是这一块自己的文字，不是整条回答 */
-      if (step) {
-        const detail = step.getAttribute('aria-expanded') === 'true';
-        const name = (step.querySelector('.ai-step-name') || {}).textContent || '';
-        const sum = (step.querySelector('.ai-step-sum') || {}).textContent || '';
-        const out = step.querySelector('.ai-step-out pre');
-        const payload = [name, sum].filter(Boolean).join(' · ');
+      /* 过程行：引用/复制的是这一行自己的内容（参数、摘要、原始返回值） */
+      if (row) {
+        const label = (row.querySelector('.pg-label') || {}).textContent || '';
+        const detail = (row.querySelector('.pg-detail') || {}).textContent || '';
+        const out = row.nextElementSibling;
+        const raw = out ? textOf(out) : '';
+        const payload = [label, detail].filter(Boolean).join(' · ');
         UI.menu(e, [
           { header: T('这一步', 'This step') },
-          { label: T('引用结果', 'Quote result'), action: () => composer.insertQuote((out ? out.textContent : '') || payload, { role: 'bot' }) },
-          { label: T('复制', 'Copy'), action: () => writeClipboard(out ? out.textContent : payload) },
+          { label: T('引用结果', 'Quote result'), action: () => composer.insertQuote(raw || payload, { role: 'bot' }) },
+          { label: T('复制', 'Copy'), action: () => writeClipboard(raw || payload) },
           { sep: true },
-          { label: detail ? T('收起', 'Collapse') : T('展开原始结果', 'Show raw result'), action: () => step.click() }
+          { label: row.getAttribute('aria-expanded') === 'true' ? T('收起', 'Collapse') : T('展开原始结果', 'Show raw result'), action: () => row.click() }
         ]);
         return;
       }
-      if (think && !msg) {
-        const thoughts = think.querySelector('.tl-thoughts');
+      /* 组头：整组折叠/展开；旁边的等待行不算「思考块」，不给思考菜单 */
+      if (grp && !msg) {
         UI.menu(e, [
-          { header: T('思考过程', 'Reasoning') },
-          { label: T('引用这段思考', 'Quote reasoning'), action: () => composer.insertQuote(textOf(thoughts) || textOf(think), { role: 'bot' }) },
-          { label: T('复制', 'Copy'), action: () => writeClipboard(textOf(thoughts) || textOf(think)) }
+          { header: T('查证过程', 'Process') },
+          { label: grp.hasAttribute('data-open') ? T('收起过程', 'Collapse') : T('展开过程', 'Expand'),
+            action: () => { const hd = grp.querySelector('.pg-head'); if (hd) hd.click(); } },
+          { label: T('复制过程', 'Copy process'), action: () => writeClipboard(textOf(grp)) }
         ]);
         return;
       }
@@ -1610,6 +1585,7 @@
             followUps: [],
             trace: m.trace || [],
             entries: entries,
+            compressed: m.compressed || 'none',
             usage: m.usage || null,
             interrupted: false
           });
