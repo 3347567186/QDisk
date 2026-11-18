@@ -133,7 +133,9 @@
       if (counts.tools) parts.push(T('调用 ' + counts.tools + ' 次工具', counts.tools + ' tool calls'));
       if (counts.records) parts.push(T('记录 ' + counts.records + ' 条', counts.records + ' records'));
       const line = parts.join(T('，', ', '));
-      title.textContent = line || T('正在查证', 'Checking');
+      /* 还没数出东西的时候，组头就跟等待行说同一句话：
+         上面写「正在查证」、下面写「正在思考」，用户会以为这是两件事 */
+      title.textContent = line || (running && runText.textContent ? runText.textContent : T('正在查证', 'Checking'));
     }
 
     function setOpen(next) {
@@ -258,7 +260,7 @@
          「已停止」三个字吃掉——用户要能同时看到查了几次、停在哪 */
       if (i.label) {
         const base = title.textContent;
-        title.textContent = /^\S*正在查证/.test(base) ? i.label : base + T(' · ', ' · ') + i.label;
+        title.textContent = /正在(查证|思考|推理|整理)/.test(base) ? i.label : base + T(' · ', ' · ') + i.label;
       }
       setOpen(false);
       started = 0;

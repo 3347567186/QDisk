@@ -272,6 +272,7 @@
     trace: 24,
     summary: 300,
     error: 200,
+    thought: 400,
     result: 600,
     suggest: 6,
     evidence: 8,
@@ -301,6 +302,11 @@
     });
     if (Array.isArray(a.paths)) args.paths = a.paths.slice(0, LIMITS.paths);
     if (Object.keys(args).length) out.args = args;
+    /* 回放要用到「这一步是思考什么、工具叫什么」：label 是类别名（磁盘 / 空文件夹），
+       thought 是模型在调这个工具之前想的那段。以前这两样都没存，
+       历史里的过程行只剩英文工具名，思考更是整段消失 */
+    if (t.label) out.label = cut(t.label, 60);
+    if (t.thought) out.thought = cut(t.thought, LIMITS.thought);
     if (t.error) out.error = cut(t.error, LIMITS.error);
     if (t.result) {
       let json = '';
@@ -314,6 +320,17 @@
     const base = { role: m.role, content: String(m.content || ''), at: m.at || Date.now() };
     if (m.role !== 'assistant') return base;
     base.ok = m.ok !== false;
+    /* 这三样也是回放那一行要用的：计数（想了几次、调了几次、记了几条）、
+       状态词（已停止 / 未完成）、压缩提示 */
+    if (m.status) base.status = String(m.status);
+    if (m.counts && typeof m.counts === 'object') {
+      base.counts = {
+        thoughts: Number(m.counts.thoughts) || 0,
+        tools: Number(m.counts.tools) || 0,
+        records: Number(m.counts.records) || 0
+      };
+    }
+    if (m.compressed && m.compressed !== 'none') base.compressed = String(m.compressed);
     if (Array.isArray(m.trace) && m.trace.length) {
       base.trace = m.trace.slice(-LIMITS.trace).map(slimStep).filter(Boolean);
     }
