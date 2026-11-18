@@ -288,10 +288,15 @@
       const body = {
         model: settings.model || '',
         messages,
-        temperature: typeof settings.temperature === 'number' ? settings.temperature : 0.2,
-        max_tokens: maxTokens || replyTokens(),
         stream: !!stream
       };
+      /* OpenAI 的推理模型（o1/o3/gpt-5 这类）不认 max_tokens，要 max_completion_tokens；
+         有的模型连 temperature 都不接受。被拒过就按学到的参数名发 */
+      const tokenParam = caps.tokenParam === 'max_completion_tokens' ? 'max_completion_tokens' : 'max_tokens';
+      body[tokenParam] = maxTokens || replyTokens();
+      if (caps.noTemperature !== true) {
+        body.temperature = typeof settings.temperature === 'number' ? settings.temperature : 0.2;
+      }
       /* 能力是「学到的否定」：只有明确被拒过才不发这个字段 */
       if (stream && caps.streamOptions !== false) body.stream_options = { include_usage: true };
       if (settings.jsonMode !== false && caps.jsonMode !== false) body.response_format = { type: 'json_object' };
@@ -303,6 +308,20 @@
     function downgrade(status, detail, streamed) {
       if ([400, 404, 415, 422].indexOf(status) < 0) return false;
       const t = String(detail || '');
+      /* 参数名不同的模型（o1/o3/gpt-5 要 max_completion_tokens）：
+         报错里点名了就换成它，没点名但提到 max_tokens 不认也换 */
+      if (/max_completion_tokens/i.test(t) && caps.tokenParam !== 'max_completion_tokens') {
+        remember({ tokenParam: 'max_completion_tokens' });
+        return 'tokenParam';
+      }
+      if (/max_tokens/i.test(t) && !/max_completion_tokens/i.test(t) && caps.tokenParam !== 'max_completion_tokens') {
+        remember({ tokenParam: 'max_completion_tokens' });
+        return 'tokenParam';
+      }
+      if (/temperature/i.test(t) && caps.noTemperature !== true) {
+        remember({ noTemperature: true });
+        return 'temperature';
+      }
       if (/response_format|json_object|json_schema/i.test(t)) {
         if (caps.jsonMode === false) return false;
         remember({ jsonMode: false });
@@ -330,6 +349,8 @@
     }
 
     const DOWN_MSG = {
+      tokenParam: '这个模型要 max_completion_tokens 而不是 max_tokens，已自动换参数重试',
+      temperature: '这个模型不接受 temperature，已自动去掉重试',
       jsonMode: '这个接口不支持强制 JSON 模式，已自动关掉重试',
       streamOptions: '这个接口不认 stream_options，已自动去掉重试',
       stream: '这个接口不支持流式返回，已自动改成分段拿结果'
@@ -341,7 +362,7 @@
     async function callModel(messages, ctxTools, calledTools, onEvent) {
       let repairLeft = 1;
       let tokenCap = replyTokens();
-      let downLeft = 3;       // 能力降级最多三次（json / stream_options / stream）
+      let downLeft = 4;       // 能力降级最多四次（参数名 / 温度 / json / 流式）
       let slowLeft = 2;       // 超时放宽最多两次
       let grewTokens = 0;     // 空回复时加预算最多两次
       for (;;) {

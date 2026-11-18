@@ -88,9 +88,10 @@
         if (typeof k !== 'string' || !k || k.length > 200) return;
         if (!v || typeof v !== 'object' || Array.isArray(v)) return;
         const one = {};
-        ['jsonMode', 'streamOptions', 'stream', 'reasoning', 'noJson'].forEach((f) => {
+        ['jsonMode', 'streamOptions', 'stream', 'reasoning', 'noJson', 'noTemperature'].forEach((f) => {
           if (typeof v[f] === 'boolean') one[f] = v[f];
         });
+        if (v.tokenParam === 'max_tokens' || v.tokenParam === 'max_completion_tokens') one.tokenParam = v.tokenParam;
         ['maxTokens', 'latencyMs', 'timeoutMs'].forEach((f) => {
           const n = Number(v[f]);
           if (Number.isFinite(n) && n > 0 && n <= 400000) one[f] = Math.round(n);
