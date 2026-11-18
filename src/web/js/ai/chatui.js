@@ -1039,6 +1039,7 @@
       acts.push(entry);
       if (acts.length > 40) state.session.acts = acts.slice(-40);
       try { AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
+      refreshActs();
     }
 
     function markActUndone(action) {
@@ -1048,8 +1049,22 @@
         if (!acts[i].undone && acts[i].action === action) {
           acts[i].undone = true;
           try { AIStore.saveSession(state.session); } catch (e) { /* 同上 */ }
+          refreshActs();
           return;
         }
+      }
+    }
+
+    /* 执行记录挂在会话末尾。执行/撤销后要就地刷新——否则「我刚清掉的东西」
+       要等下次打开会话才看得到，等于又回到「找不回入口」。 */
+    function refreshActs() {
+      if (!state.session) return;
+      const old = msgs.querySelector('.ai-acts');
+      if (old) old.remove();
+      const node = actsBar(state.session.acts);
+      if (node) {
+        msgs.appendChild(node);
+        scrollEnd();
       }
     }
 
@@ -1148,6 +1163,9 @@
 
       const chips = followChips(res.followUps, (q) => ask({ text: q }));
       if (chips) c.extra.appendChild(chips);
+      /* 执行记录永远待在会话最末：新回答进来后把它挪下来，不然读起来像
+         「先记了账、才发生的事」。 */
+      refreshActs();
       scrollEnd();
       current = null;
     }
@@ -1566,11 +1584,9 @@
         state.session = session;
         state.history = [];
         lastAsk = null;
-        let lastUser = '';
         (session.messages || []).forEach((m) => {
           if (m.role === 'user') {
             addUser(m.content);
-            lastUser = m.content;
             state.history.push({ role: 'user', content: m.content });
             return;
           }
@@ -1596,8 +1612,7 @@
           });
           state.history.push({ role: 'assistant', content: m.content });
         });
-        const acts = actsBar(session.acts);
-        if (acts) msgs.appendChild(acts);
+        refreshActs();
         setEmpty(false);
         scrollEnd(true);
         notifySessions();

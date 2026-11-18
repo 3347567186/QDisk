@@ -222,7 +222,7 @@
         box.appendChild(h('button', {
           class: 'nav-item' + (item.id === app.current ? ' active' : ''),
           dataset: { id: item.id, icon: item.icon },
-          title: UI.T(item.zh, item.en),
+          'aria-label': UI.T(item.zh, item.en),
           onclick: () => goNav(item, mark)
         }, mark, h('span', { class: 'lbl' }, UI.T(item.zh, item.en))));
       });
@@ -239,12 +239,14 @@
         box.appendChild(h('button', {
           class: 'nav-item' + (item.id === app.current ? ' active' : ''),
           dataset: { id: item.id, icon: item.icon },
-          title: UI.T(item.zh, item.en),
+          'aria-label': UI.T(item.zh, item.en),
           onclick: () => goNav(item, mark)
         }, mark, h('span', { class: 'lbl' }, UI.T(item.zh, item.en))));
       });
       nav.appendChild(box);
     }
+    // 语言切换会重建导航，提示层的文案跟着换，胶囊本身不重建
+    if (navTip) navTip.refresh();
   }
 
   function renderChrome(id, cfg) {

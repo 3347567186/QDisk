@@ -132,6 +132,14 @@
     return msg || T('打不开这个位置', 'Could not open this location');
   }
 
+  /* 后端说「这个位置已经不在了：D:\x」时已经把路径写进句子里了，
+     再补一遍会变成「…D:\x D:\x」。只有后端给的是「打不开：…」这类
+     不带路径的短句，才把路径单独一行补上。 */
+  function failToast(e, path) {
+    const msg = toastOf(e);
+    UIx.toast(msg.indexOf(path) >= 0 ? msg : msg + '\n' + path, 'warn', 4200);
+  }
+
   async function open(p, opts) {
     const path = stripSlash(expand(p));
     if (!path) return { ok: false };
@@ -146,7 +154,7 @@
       await API.openPath(path);
       return { ok: true };
     } catch (e) {
-      UIx.toast(toastOf(e) + '\n' + path, 'warn', 4200);
+      failToast(e, path);
       return { ok: false, error: toastOf(e) };
     }
   }
@@ -158,7 +166,7 @@
       await API.reveal(path);
       return { ok: true };
     } catch (e) {
-      UIx.toast(toastOf(e) + '\n' + path, 'warn', 4200);
+      failToast(e, path);
       return { ok: false, error: toastOf(e) };
     }
   }

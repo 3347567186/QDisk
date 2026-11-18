@@ -1,0 +1,80 @@
+/* ---------- 折叠轨的流体提示 ----------
+   整个侧栏只有一个胶囊：它沿入口纵向移动、宽度随文案变化；文案本身固定在各入口的
+   高度，由胶囊的 clip-path 裁切显现。看到的是文字从胶囊边缘滚进滚出，而不是每个
+   按钮各弹一个气泡。胶囊只比行高小一圈，压在轨道右缘，尽量少占右侧内容。 */
+.nav-tip {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms var(--ease-out), visibility 0s linear 120ms;
+}
+.nav-tip.on {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 140ms var(--ease-out), visibility 0s linear 0s;
+}
+
+/* 移动的胶囊：位置用 transform，宽度跟着文案变 */
+.nav-tip-pill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 36px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--text-1);
+  color: var(--canvas);
+  box-shadow: 0 8px 22px -12px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .16);
+  transition: transform var(--tip-dur, 180ms) var(--ease), width var(--tip-dur, 180ms) var(--ease);
+  will-change: transform, width;
+}
+
+/* 文字层：不动，只被胶囊的裁切框切出来 */
+.nav-tip-labels {
+  position: absolute;
+  inset: 0;
+  transition: clip-path var(--tip-dur, 180ms) var(--ease);
+  will-change: clip-path;
+}
+.nav-tip-label {
+  position: absolute;
+  top: 0;
+  left: var(--tip-x, 56px);
+  height: 24px;
+  line-height: 24px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  white-space: nowrap;
+  color: var(--canvas);
+  transform: translateY(-50%);
+}
+.nav-tip-measure {
+  position: absolute;
+  top: 0;
+  left: -9999px;
+  height: 24px;
+  line-height: 24px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  white-space: nowrap;
+  visibility: hidden;
+}
+
+/* 深色下胶囊反色成近白，阴影收一点，免得在暗底上发灰 */
+html[data-theme="dark"] .nav-tip-pill {
+  box-shadow: 0 8px 22px -12px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .06);
+}
+
+/* 关掉动效时只留淡入淡出，位置直接落点 */
+body[data-motion="off"] .nav-tip-pill,
+body[data-motion="off"] .nav-tip-labels { transition-duration: 1ms !important; }
+@media (prefers-reduced-motion: reduce) {
+  .nav-tip-pill,
+  .nav-tip-labels { transition-duration: 1ms !important; }
+  .nav-tip, .nav-tip.on { transition-duration: 120ms; }
+}

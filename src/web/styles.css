@@ -4020,6 +4020,9 @@ html[data-theme="dark"] .ai-page {
 .ai-entry.compact .ai-entry-s { display: none; }
 .ai-entry.more { color: var(--text-3); border-style: dashed; font-family: var(--font); }
 .ai-entry.more:hover { color: var(--accent-text); }
+/* 卡片正文是列向 flex，子项默认拉满整行：位置胶囊得按内容宽，
+   否则一个小目录名会被撑成一条横杠，看着像输入框。 */
+.ai-card-body .ai-entry { align-self: flex-start; }
 
 /* ---- 依据行：每个依据右边一枚「去看这里」 ---- */
 .ai-ev-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
