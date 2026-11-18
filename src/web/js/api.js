@@ -95,6 +95,9 @@
         onChunk: ch
       });
     },
-    aiStore: (op, name, content) => invoke('ai_store', { op, name: name || null, content: content || null })
+    aiStore: (op, name, content) => invoke('ai_store', { op, name: name || null, content: content || null }),
+    /* 停止正在进行的模型请求：Rust 侧置取消旗标，读响应循环下一片就退出。
+       页面同时用逻辑取消（不等网络）兜住，这条只是把后台连接也断掉。 */
+    aiCancel: () => invoke('ai_cancel')
   };
 })();

@@ -23,8 +23,15 @@
   const MAX_REPLY_TOKENS = 8192;
   const REPLY_MAX_CHARS = 600;
   const KEEP_TURNS = 3;                  // 原文保护的最近轮数
+  /* 一步里最多并行给几个工具：彼此独立的一次查询合成一轮，
+     少一次往返就少一次整段 prompt 的重发（长上下文下这最费钱）。
+     上限 3 是提示词与校验共用的一条；再多模型容易挑错，收益也饱和。 */
+  const MAX_BATCH_TOOLS = 3;
 
   const estTokens = (text) => Math.ceil(String(text || '').length / 2);
+
+  /** 用户点「停止」时统一用这个错误穿出去：上层据此返回「已停止」而不是「调用失败」 */
+  const abortError = () => Object.assign(new Error('已停止'), { code: 'aborted' });
 
   const SUGGEST_ACTIONS = ['delete', 'archive', 'check', 'none'];
 
@@ -105,6 +112,12 @@
     if (tool === 'search_files') {
       if (typeof args.q !== 'string' || !args.q.trim()) return { ok: false, error: 'search_files 需要 q 字符串' };
     }
+    /* 分页参数：结果被截断时按 next_offset 再取一页。
+       上限 5000 是「翻得太深不如换个更小的目录」的那条线。 */
+    if (args.offset !== undefined) {
+      const off = Number(args.offset);
+      if (!Number.isFinite(off) || off < 0 || off > 5000) return { ok: false, error: 'offset 必须是 0–5000 的数' };
+    }
     const caps = NUM_CAP[tool];
     if (caps) {
       for (const k of Object.keys(caps)) {
@@ -125,8 +138,34 @@
     if (!obj || typeof obj !== 'object') return { ok: false, error: '不是 JSON 对象' };
     const hasTool = Object.prototype.hasOwnProperty.call(obj, 'tool') && obj.tool !== null && obj.tool !== undefined;
     const hasAnswer = Object.prototype.hasOwnProperty.call(obj, 'answer') && obj.answer !== null && obj.answer !== undefined;
+    const hasBatch = Array.isArray(obj.tools);
     if (hasTool && hasAnswer) return { ok: false, error: 'tool 与 answer 只能出现一个' };
-    if (!hasTool && !hasAnswer) return { ok: false, error: '必须包含 tool 或 answer' };
+    if (hasBatch && hasAnswer) return { ok: false, error: 'tools 与 answer 只能出现一个' };
+    if (hasBatch && hasTool) return { ok: false, error: 'tool 与 tools 只能出现一个' };
+    if (!hasTool && !hasAnswer && !hasBatch) return { ok: false, error: '必须包含 tool、tools 或 answer' };
+
+    /* 一步多个互不依赖的查询：{"tools":[{tool,args},...]}
+       执行上仍是顺序的（引擎调用本来就是串行的），省的是模型往返与整段重发。 */
+    if (hasBatch) {
+      const list = obj.tools;
+      if (!list.length) return { ok: false, error: 'tools 不能是空数组' };
+      if (list.length > MAX_BATCH_TOOLS) return { ok: false, error: `一次最多 ${MAX_BATCH_TOOLS} 个工具` };
+      const seen = new Set();
+      const calls = [];
+      for (const it of list) {
+        if (!it || typeof it !== 'object' || Array.isArray(it)) return { ok: false, error: 'tools 里每一项都要是对象' };
+        const name = String(it.tool || '').trim();
+        if (!name) return { ok: false, error: 'tools 里有一项缺少 tool' };
+        if (!ctxTools.includes(name)) return { ok: false, kind: 'forbidden', tool: name, error: `工具不存在：${name}` };
+        const a = checkArgs(name, it.args);
+        if (!a.ok) return { ok: false, error: a.error };
+        const key = name + '|' + JSON.stringify(a.args || {});
+        if (seen.has(key)) return { ok: false, error: 'tools 里有重复的同一调用' };
+        seen.add(key);
+        calls.push({ tool: name, args: a.args });
+      }
+      return { ok: true, kind: 'tools', tools: calls, thought: String(obj.thought || '').slice(0, 200) };
+    }
 
     if (hasTool) {
       const name = String(obj.tool || '').trim();
@@ -359,13 +398,14 @@
     /** 一步模型调用：HTTP → 取 content → 解析 → 校验（失败修复一次）
      *  支持 SSE：transport 认 onDelta 时边读边把推理片段抛成 thought 事件，
      *  正文 Delta 先攒起来，等这一轮结束再当完整 JSON 解析。 */
-    async function callModel(messages, ctxTools, calledTools, onEvent) {
+    async function callModel(messages, ctxTools, calledTools, onEvent, stop) {
       let repairLeft = 1;
       let tokenCap = replyTokens();
       let downLeft = 4;       // 能力降级最多四次（参数名 / 温度 / json / 流式）
       let slowLeft = 2;       // 超时放宽最多两次
       let grewTokens = 0;     // 空回复时加预算最多两次
       for (;;) {
+        if (stop && stop.isStopped()) throw abortError();
         let sseBuf = '';
         let sseText = '';
         let sawSse = false;
@@ -374,6 +414,8 @@
         let reasoningSeen = false;
         const pump = (piece) => {
           if (typeof piece !== 'string' || !piece) return;
+          /* 点了停止就别再往界面推字：网络那头可能还在吐，界面已经收尾了 */
+          if (stop && stop.isStopped()) return;
           sseBuf += piece;
           const lines = sseBuf.split('\n');
           sseBuf = lines.pop() || '';
@@ -402,14 +444,20 @@
         const sentAt = Date.now();
         let res;
         try {
-          res = await transport({
+          const sent = transport({
             url: settings.endpoint || '',
             headers: settings.apiKey ? { Authorization: 'Bearer ' + settings.apiKey } : {},
             body: JSON.stringify(buildBody(messages, wantStream, tokenCap)),
             timeoutMs: waitMs(),
             onDelta: wantStream ? pump : null
           });
+          /* 取消后后端仍会把这次请求跑完再报错，挂个空 catch 免得变成未处理拒绝 */
+          if (sent && typeof sent.catch === 'function') sent.catch(() => {});
+          /* 逻辑取消：不等网络，立即收手（Rust 侧另有旗标去断掉连接） */
+          res = await (stop ? stop.race(sent) : sent);
         } catch (e) {
+          /* 用户点了停止：不能当成接口超时去放宽重试 */
+          if ((e && e.code === 'aborted') || (stop && stop.isStopped())) throw abortError();
           const msg = String((e && e.message) || e);
           /* 推理模型本来就慢，别让一次超时判死刑：记下实际耗时，放宽等一次 */
           if (slowLeft > 0 && /超时|timeout|timed out|ETIMEDOUT|abort/i.test(msg)) {
@@ -572,37 +620,90 @@
       const ctx = (opts && opts.ctx) || {};
       const ctxTools = (ctx.tools && ctx.tools.length ? ctx.tools : Object.keys(tools)).filter((n) => tools[n]);
       const system = prompt.systemPrompt(ctxTools);
-      const messages = [{ role: 'system', content: system }];
 
-      // 历史：只带最近的对话原文，更早的靠压缩兜底
-      const history = Array.isArray(opts && opts.history) ? opts.history : [];
-      history.slice(-KEEP_TURNS * 2).forEach((m) => {
-        if (m && m.role && m.content) messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content) });
-      });
-      const ctxLine = prompt.contextLine(ctx);
-      /* 末尾再提醒一次格式：弱模型对 system 里的长规则不敏感，
-         贴在生成位置前的这句它才看得见 */
-      const tail = prompt.OUTPUT_REMINDER || '';
-      messages.push({ role: 'user', content: (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '') + tail });
+      /* 停止：`token.stopped` 只是旗标，真正让在飞请求立刻结束的是这里的 race。
+         Rust 侧还有 ai_cancel 去断掉连接，两边都不能省：
+         旗标管界面，断连管不把 token 白花完。 */
+      const waiters = [];
+      const stop = {
+        isStopped: () => !!token.stopped,
+        race: (p) => new Promise((resolve, reject) => {
+          waiters.push(reject);
+          Promise.resolve(p).then(resolve, reject);
+        })
+      };
+      token.onStop = () => {
+        token.stopped = true;
+        waiters.splice(0).forEach((fn) => fn(abortError()));
+      };
+      if (token.stopped) token.onStop();
 
-      const trace = [];
-      const calledTools = [];
-      const followUps = [];
+      let messages;
+      let trace = [];
+      let calledTools = [];
       let steps = 0;
       let usageTotal = { prompt_tokens: 0, completion_tokens: 0 };
       let compressed = 'none';
+      const followUps = [];
+
+      /* 断点：把这一轮已经花掉的上下文原样留下。
+         继续时从断点接着跑，已经查过的工具不必重查——重查一次就是重发一次整段 prompt。 */
+      const checkpoint = () => ({
+        v: 1,
+        messages: (messages || []).map((m) => ({ role: m.role, content: m.content })),
+        steps,
+        trace: trace.map((t) => ({ tool: t.tool, args: t.args, ok: t.ok, ms: t.ms, summary: t.summary })),
+        calledTools: calledTools.slice(),
+        compressed
+      });
+      const stoppedResult = () => ({
+        ok: false,
+        stopped: true,
+        interrupted: true,
+        answer: steps ? `已停止（查了 ${steps} 步）。点「继续」能从这儿接着查。` : '已停止。',
+        evidence: trace.filter((t) => t.ok).map((t) => ({ tool: t.tool })),
+        suggest: [],
+        followUps,
+        trace,
+        compressed,
+        checkpoint: checkpoint(),
+        usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
+      });
+
+      const resume = (opts && opts.resume) || null;
+      if (resume && Array.isArray(resume.messages) && resume.messages.length) {
+        messages = resume.messages.map((m) => ({ role: m.role, content: String(m.content) }));
+        steps = Number(resume.steps) || 0;
+        calledTools = Array.isArray(resume.calledTools) ? resume.calledTools.slice() : [];
+        trace = Array.isArray(resume.trace) ? resume.trace.slice() : [];
+        compressed = resume.compressed || 'none';
+        if (onEvent) onEvent({ type: 'resume', steps });
+      } else {
+        messages = [{ role: 'system', content: system }];
+        // 历史：只带最近的对话原文，更早的靠压缩兜底
+        const history = Array.isArray(opts && opts.history) ? opts.history : [];
+        history.slice(-KEEP_TURNS * 2).forEach((m) => {
+          if (m && m.role && m.content) messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content) });
+        });
+        const ctxLine = prompt.contextLine(ctx);
+        /* 末尾再提醒一次格式：弱模型对 system 里的长规则不敏感，
+           贴在生成位置前的这句它才看得见 */
+        const tail = prompt.OUTPUT_REMINDER || '';
+        messages.push({ role: 'user', content: (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '') + tail });
+      }
+
       let degraded = false;
 
       while (steps < maxSteps) {
-        if (token.stopped) {
-          return { ok: false, stopped: true, answer: '已停止。', evidence: [], suggest: [], trace, followUps, usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }, compressed };
-        }
+        if (stop.isStopped()) return stoppedResult();
         const c = compressHistory(messages, budget);
         compressed = c.level;
         let step;
         try {
-          step = await callModel(messages, ctxTools, calledTools, onEvent);
+          step = await callModel(messages, ctxTools, calledTools, onEvent, stop);
         } catch (e) {
+          /* 停止不是故障：不要走降级文案，直接把断点交给界面 */
+          if ((e && e.code === 'aborted') || stop.isStopped()) return stoppedResult();
           const msg = (e && e.message) || '模型调用失败';
           const code = (e && e.code) || 'error';
           if (code === 'auth' || code === 'rate') throw Object.assign(new Error(msg), { code });
@@ -623,6 +724,7 @@
           usageTotal.prompt_tokens += Number(step.usage.prompt_tokens) || 0;
           usageTotal.completion_tokens += Number(step.usage.completion_tokens) || 0;
         }
+        if (stop.isStopped()) return stoppedResult();
 
         if (step.kind === 'answer') {
           // evidence 只保留真正调用过的（校验已保证，这里再兜一层）
@@ -652,33 +754,47 @@
           continue;
         }
 
-        // tool 步：执行
-        const args = step.args || {};
-        if (onEvent) onEvent({ type: 'step-start', tool: step.tool, args });
-        const t0 = Date.now();
-        let result;
-        let ok = true;
-        let errorText = '';
-        try {
-          const runner = tools[step.tool];
-          if (!runner) throw new Error('工具不存在：' + step.tool);
-          result = await runner.run(args);
-        } catch (e) {
-          ok = false;
-          errorText = (e && e.message) || '工具执行失败';
-          result = { error: errorText };
+        /* 工具步：一步最多 MAX_BATCH_TOOLS 个互不依赖的查询。
+           执行仍是串行的（引擎调用本来就串行），省下的是模型往返与整段重发。 */
+        const calls = step.kind === 'tools' ? step.tools : [{ tool: step.tool, args: step.args || {} }];
+        const ran = [];
+        for (const call of calls) {
+          if (stop.isStopped()) return stoppedResult();
+          const args = call.args || {};
+          if (onEvent) onEvent({ type: 'step-start', tool: call.tool, args });
+          const t0 = Date.now();
+          let result;
+          let ok = true;
+          let errorText = '';
+          try {
+            const runner = tools[call.tool];
+            if (!runner) throw new Error('工具不存在：' + call.tool);
+            result = await stop.race(runner.run(args));
+          } catch (e) {
+            if ((e && e.code === 'aborted') || stop.isStopped()) return stoppedResult();
+            ok = false;
+            errorText = (e && e.message) || '工具执行失败';
+            result = { error: errorText };
+          }
+          const ms = Date.now() - t0;
+          const summary = ok && tools[call.tool].summary ? tools[call.tool].summary(args, result) : errorText;
+          trace.push({ tool: call.tool, args, ok, ms, summary, result });
+          calledTools.push(call.tool);
+          if (onEvent) onEvent({ type: 'step', tool: call.tool, args, ok, ms, summary, result, error: errorText });
+          ran.push({ tool: call.tool, args, ok, result });
         }
-        const ms = Date.now() - t0;
-        const summary = ok && tools[step.tool].summary ? tools[step.tool].summary(args, result) : errorText;
-        trace.push({ tool: step.tool, args, ok, ms, summary, result });
-        calledTools.push(step.tool);
-        if (onEvent) onEvent({ type: 'step', tool: step.tool, args, ok, ms, summary, result, error: errorText });
 
-        messages.push({ role: 'assistant', content: JSON.stringify({ tool: step.tool, args }) });
-        messages.push({
-          role: 'user',
-          content: '工具结果：' + JSON.stringify(result)
-        });
+        if (ran.length === 1) {
+          messages.push({ role: 'assistant', content: JSON.stringify({ tool: ran[0].tool, args: ran[0].args }) });
+          messages.push({ role: 'user', content: '工具结果：' + JSON.stringify(ran[0].result) });
+        } else {
+          messages.push({ role: 'assistant', content: JSON.stringify({ tools: ran.map((r) => ({ tool: r.tool, args: r.args })) }) });
+          /* 多个结果按序号对齐，逐个标出 id：模型才分得清哪份属于哪个调用 */
+          messages.push({
+            role: 'user',
+            content: '工具结果：\n' + ran.map((r, i) => `[${i + 1}] id=${r.tool}\n${JSON.stringify(r.result)}`).join('\n')
+          });
+        }
         steps += 1;
       }
 
@@ -695,6 +811,7 @@
         followUps,
         trace,
         compressed,
+        checkpoint: checkpoint(),
         usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
       };
     }

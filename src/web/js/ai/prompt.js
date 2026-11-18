@@ -11,17 +11,17 @@
   const TOOLS = {
     list_dir: {
       desc: '列出一个目录里的条目（目录在前），给出名字/类型/大小/修改时间',
-      params: { dir: 'string', limit: 'number≤200' },
+      params: { dir: 'string', limit: 'number≤200', offset: 'number≤5000' },
       args: ['dir']
     },
     top_files: {
       desc: '列出目录下最大的文件（含扩展名与所在子目录）',
-      params: { dir: 'string', limit: 'number≤50' },
+      params: { dir: 'string', limit: 'number≤50', offset: 'number≤5000' },
       args: ['dir']
     },
     empty_dirs: {
       desc: '找出可以删除的空文件夹，标出哪些是受保护的重要目录',
-      params: { dir: 'string', depth: 'number 1-3' },
+      params: { dir: 'string', depth: 'number 1-3', offset: 'number≤5000' },
       args: ['dir']
     },
     file_signals: {
@@ -31,12 +31,12 @@
     },
     installed_apps: {
       desc: '列出已安装程序（名称 + 安装路径），用 filter 按名称过滤',
-      params: { filter: 'string' },
+      params: { filter: 'string', offset: 'number≤5000' },
       args: []
     },
     search_files: {
       desc: '按文件名在全盘索引里搜索（需要用户已建索引）',
-      params: { q: 'string', limit: 'number≤20' },
+      params: { q: 'string', limit: 'number≤20', offset: 'number≤5000' },
       args: ['q']
     },
     organize_preview: {
@@ -57,16 +57,18 @@
     '你没有任何写操作能力：不能删除、移动、重命名、清理、解压、卸载。不要声称你已经做了这些事，也不要给用户一段命令让他自己执行。',
     '你看不到文件内容。禁止说「这个文件里写着…」这类话；只能根据名字、大小、类型、时间、签名、所属软件来判断。',
     '所有数字必须来自工具返回：不要自己换算、不要估算、不要四舍五入成「大约」。没查到的就说没查到，并说明要用哪个工具查。',
-    '需要信息时先调工具，不要凭常识猜。一次只调用一个工具。'
+    '需要信息时先调工具，不要凭常识猜。互不依赖的查询可以一次给出（最多 3 个），有依赖的必须等上一个结果再用下一个。'
   ].join('\n');
 
   const FORMAT = [
     '【输出格式·最高优先级】',
     '只输出一个 JSON 对象。第一个字符必须是 {，最后一个字符必须是 }。',
     '不要代码块围栏，不要解释，不要「好的」「以下是」，JSON 前后不要有任何文字。',
-    '二选一，不允许出现第三种形状：',
-    '要查东西：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
+    '三选一，不允许出现第四种形状：',
+    '要查一样：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
+    '要同时查几样（最多 3 个，必须互不依赖）：{"thought":"一句话","tools":[{"tool":"工具名","args":{...}},{"tool":"工具名","args":{...}}]}',
     '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
+    '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，不超过 300 字，结论先行，能用列表就用列表（每行以「· 」开头）。',
     'evidence 只能引用这一轮真正调用过的工具；suggest 只放你确实建议用户去处理的具体路径，没有就给空数组。',
     '不确定能不能答就先调工具，不要用普通文字回答。'

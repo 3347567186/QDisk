@@ -84,6 +84,25 @@
     return d;
   };
 
+  /* 分页：结果被剪裁不再等于数据丢了。
+     offset 跳过前几项，next_offset 指向下一页；模型按它续取即可。
+     fit() 可能再砍掉几条，所以裁剪之后要把 next_offset 收回实际条数，保证不漏项。 */
+  function pageFit(base, list, off, want) {
+    const from = Math.min(Math.max(0, Math.floor(off) || 0), list.length);
+    const items = list.slice(from, from + want);
+    const obj = Object.assign({}, base, { items });
+    if (from > 0) obj.offset = from;
+    if (from + items.length < list.length) obj.next_offset = from + items.length;
+    const out = fit(obj, CAP);
+    if (out && Array.isArray(out.items)) {
+      /* fit 也会砍条目：按「真正返回了几条」定下一页，模型才不会跳过中间几条 */
+      const next = from + out.items.length;
+      if (next < list.length) out.next_offset = next;
+      else delete out.next_offset;
+    }
+    return out;
+  }
+
   /* 构建工具表：deps = { API }，测试时可塞假的 */
   function makeTools(deps) {
     const API = deps.API;
@@ -93,15 +112,16 @@
         label: '列目录',
         run: async (args) => {
           const dir = needDir(args);
-          const limit = Math.min(Math.max(Number(args.limit) || 100, 1), 200);
-          const r = await withTimeout(API.listDir(dir, limit), TIMEOUT, '列目录');
+          const want = Math.min(Math.max(Number(args.limit) || 100, 1), 200);
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const r = await withTimeout(API.listDir(dir, Math.min(off + want, 200)), TIMEOUT, '列目录');
           const items = (r.items || []).map((it) => ({
             name: it.name,
             kind: it.kind === 'dir' ? 'dir' : 'file',
             size: it.kind === 'dir' ? undefined : fmtBytes(it.size),
             age: fmtAge(it.mtime)
           }));
-          return fit({ dir: r.dir, total: r.total, truncated: r.truncated, items }, CAP);
+          return pageFit({ dir: r.dir, total: r.total, truncated: r.truncated }, items, off, want);
         },
         summary: (args, r) => `列目录 ${args.dir} · ${r.total} 项`
       },
@@ -110,8 +130,9 @@
         label: '大文件排行',
         run: async (args) => {
           const dir = needDir(args);
-          const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
-          const r = await withTimeout(API.topFiles(dir, limit), TIMEOUT, '大文件排行');
+          const want = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const r = await withTimeout(API.topFiles(dir, Math.min(off + want, 50)), TIMEOUT, '大文件排行');
           const items = (r || []).map((it) => ({
             name: it.name,
             size: fmtBytes(it.size),
@@ -119,7 +140,7 @@
             dir: it.dir || '',
             age: fmtAge(it.mtime)
           }));
-          return fit({ dir, count: items.length, items }, CAP);
+          return pageFit({ dir, count: items.length }, items, off, want);
         },
         summary: (args, r) => `大文件排行 ${args.dir} · ${r.count} 个`
       },
@@ -138,7 +159,9 @@
             why: it.why || ''
           }));
           const empty = items.filter((i) => i.kind === 'empty').length;
-          return fit({ dir, depth, empty, protected: items.length - empty, items }, CAP);
+          const want = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          return pageFit({ dir, depth, empty, protected: items.length - empty }, items, off, want);
         },
         summary: (args, r) => `空文件夹 ${args.dir} · 可删 ${r.empty} / 受保护 ${r.protected}`
       },
@@ -176,8 +199,9 @@
           const hit = filter
             ? all.filter((it) => it.name.toLowerCase().includes(filter) || it.path.toLowerCase().includes(filter))
             : all;
-          const items = hit.slice(0, 20);
-          return fit({ total: all.length, matched: hit.length, filter, items }, CAP);
+          const want = 20;
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          return pageFit({ total: all.length, matched: hit.length, filter }, hit, off, want);
         },
         summary: (args, r) => `已安装程序 · 匹配 ${r.matched}/${r.total}`
       },
@@ -187,15 +211,16 @@
         run: async (args) => {
           const q = String((args && args.q) || '').trim();
           if (!q) throw new Error('缺少参数 q（要搜索的文件名关键词）');
-          const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 20);
-          const r = await withTimeout(API.engine('search.query', { q, limit }), TIMEOUT, '搜索文件');
+          const want = 20;
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const r = await withTimeout(API.engine('search.query', { q, limit: Math.min(off + want, 50) }), TIMEOUT, '搜索文件');
           const items = ((r && r.items) || []).map((it) => ({
             name: it.name,
             path: it.path,
             size: fmtBytes(it.size),
             age: fmtAge(it.mtime)
           }));
-          return fit({ q, total: r.total, source: r.source, hint: r.hint || '', items }, CAP);
+          return pageFit({ q, total: r.total, source: r.source, hint: r.hint || '' }, items, off, want);
         },
         summary: (args, r) => `搜索「${args.q}」· ${r.total} 条`
       },

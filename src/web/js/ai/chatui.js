@@ -199,6 +199,10 @@
       onSubmit: (payload) => { ask(payload); },
       onStop: () => {
         state.token.stopped = true;
+        /* 旗标只让环路在下一步前收手；在飞的这次请求要靠 onStop 立刻结束，
+           Rust 侧 ai_cancel 再去断连接——两边都做，才不用等接口自己超时。 */
+        try { if (typeof state.token.onStop === 'function') state.token.onStop(); } catch (e) { /* 收尾失败也要停 */ }
+        try { if (window.API && window.API.aiCancel) window.API.aiCancel(); } catch (e) { /* 断连失败不影响界面 */ }
         composer.setBusy(true, true);
       },
       onThinkingChange: (v) => { state.thinking = v; },
@@ -372,6 +376,13 @@
         class: 'btn sm ghost',
         onclick: () => { UIx.copy(res.answer || ''); }
       }, T('复制', 'Copy')));
+      /* 停了不是废掉：断点已经在手，接着查比重新问一遍省一整轮 */
+      if (res.interrupted && res.checkpoint) {
+        bar.appendChild(h('button', {
+          class: 'btn sm ghost',
+          onclick: () => { continueTurn(); }
+        }, T('继续', 'Continue')));
+      }
       bar.appendChild(h('button', {
         class: 'btn sm ghost',
         onclick: () => { retryLast(); }
@@ -416,6 +427,7 @@
     async function ask(input) {
       const payload = (input && typeof input === 'object') ? input : { text: String(input || '') };
       const q = String(payload.text || '').trim();
+      const resume = payload.resume || null;
       if ((!q && !(payload.attachments || []).length) || state.running) return;
       lastAsk = payload;
 
@@ -423,7 +435,8 @@
       state.permission = payload.permission || state.permission;
 
       const shown = q || T('（已附加 ', '(attached ') + (payload.attachments || []).length + T(' 个路径）', ' paths)');
-      addUser(q ? shown : shown);
+      /* 继续不是新问题：用户那条消息已经在断点里，再插一条会重复 */
+      if (!resume) addUser(q ? shown : shown);
 
       state.running = true;
       state.token = { stopped: false };
@@ -516,6 +529,7 @@
           ctx: ctx,
           history: state.history,
           token: state.token,
+          resume: resume,
           onEvent: (ev) => {
             if (ev.type === 'step') {
               pushStep({
@@ -580,6 +594,14 @@
     function retryLast() {
       if (!lastAsk || state.running) return;
       ask(lastAsk);
+    }
+
+    /* 从断点接着跑：不重发已经查过的工具，也不重复插用户消息 */
+    function continueTurn() {
+      const res = state.lastResult;
+      if (!res || !res.checkpoint || state.running) return;
+      const base = lastAsk || { text: '' };
+      ask(Object.assign({}, base, { resume: res.checkpoint }));
     }
 
     /* 会话列表变了（新建 / 落盘 / 载入）就让外面重画右侧的归档列表 */

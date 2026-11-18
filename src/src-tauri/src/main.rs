@@ -5,6 +5,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1530,6 +1531,10 @@ fn http_post(
                 let mut buf = vec![0u8; 64 * 1024];
                 let mut body_out: Vec<u8> = Vec::new();
                 loop {
+                    // 页面点了停止：不再等剩下的分片，直接把控制权还回去
+                    if AI_CANCEL.load(Ordering::SeqCst) {
+                        return Err("已取消".into());
+                    }
                     let mut available: u32 = 0;
                     if WinHttpQueryDataAvailable(request, &mut available) == 0 {
                         return Err("读取响应失败".into());
@@ -1559,6 +1564,19 @@ fn http_post(
         WinHttpCloseHandle(session);
         out
     }
+}
+
+/// AI 请求的取消旗标。页面点「停止」时置 true，正在读响应的循环
+/// 每个分片检查一次并立刻收手 —— 否则最长要等满 300 秒超时才返回。
+/// 同一时刻只会有一个 AI 请求（单窗口、单会话），所以用全局旗标就够，
+/// 不需要按请求 id 管理；新请求开始前会把它复位。
+static AI_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// 页面主动停止：不阻塞、不等网络，下一次分片检查就退出。
+#[tauri::command]
+fn ai_cancel() -> bool {
+    AI_CANCEL.store(true, Ordering::SeqCst);
+    true
 }
 
 /// 网络出口：唯一的对外请求命令。任何模型端点都走这里。
@@ -1608,6 +1626,8 @@ fn ai_http(req: Value) -> Result<Value, String> {
         }
     }
     let started = Instant::now();
+    // 新请求开始：上一次的「停止」不该影响这一次
+    AI_CANCEL.store(false, Ordering::SeqCst);
     let (status, text) = http_post(&url, &headers, &body, timeout, &method)?;
     Ok(json!({
         "status": status,
@@ -1719,6 +1739,10 @@ fn http_post_cb(
                 // 所以每次只推「能完整解码」的那一段，剩下的留到下一轮。
                 let mut emitted = 0usize;
                 loop {
+                    // 页面点了停止：立刻停读。已经推出去的分片页面会丢弃
+                    if AI_CANCEL.load(Ordering::SeqCst) {
+                        return Err("已取消".into());
+                    }
                     let mut available: u32 = 0;
                     if WinHttpQueryDataAvailable(request, &mut available) == 0 {
                         return Err("读取响应失败".into());
@@ -1806,6 +1830,8 @@ fn ai_http_stream(req: Value, on_chunk: tauri::ipc::Channel<String>) -> Result<V
         }
     }
     let started = Instant::now();
+    // 新请求开始：上一次的「停止」不该影响这一次
+    AI_CANCEL.store(false, Ordering::SeqCst);
     let (status, text) = http_post_cb(&url, &headers, &body, timeout, &method, &mut |piece| {
         // 页面关掉或切走的瞬间送不出去，属于正常情况，不打断读取
         let _ = on_chunk.send(piece.to_string());
@@ -2052,6 +2078,7 @@ fn main() {
             list_dir,
             ai_http,
             ai_http_stream,
+            ai_cancel,
             ai_store,
             history_list,
             store_apps,

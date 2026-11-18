@@ -28,6 +28,16 @@ const FAIL_FIRST = { armed: false };
 const fakeApi = {
   listDir: async (dir) => {
     if (/不存在/.test(dir)) throw new Error('目录不存在：' + dir);
+    /* 大目录：用来验分页（CAP 会砍条目，next_offset 必须跟着收） */
+    if (/many/.test(dir)) {
+      const items = Array.from({ length: 60 }, (_, i) => ({
+        name: 'file-' + String(i).padStart(2, '0') + '.log',
+        kind: 'file',
+        size: 1024 * (i + 1),
+        mtime: Math.floor(Date.now() / 1000) - i * 86400
+      }));
+      return { dir, total: items.length, shown: items.length, truncated: false, items };
+    }
     return { dir, total: FILES.length, shown: FILES.length, truncated: false, items: FILES };
   },
   topFiles: async (dir) => FILES.filter((f) => f.kind === 'file')
@@ -301,6 +311,39 @@ const CASES = [
     ],
     tools: ['list_dir'],
     longHistory: true
+  },
+
+  // 25 一步两个独立查询：只花一步，省一次整段重发
+  {
+    id: 'G25', group: '批量', q: '这目录里有什么、最大的又是哪个', ctx: { page: 'ai', dir: 'D:\\Downloads' },
+    script: [
+      JSON.stringify({ thought: '两件事互不依赖', tools: [
+        { tool: 'list_dir', args: { dir: 'D:\\Downloads' } },
+        { tool: 'top_files', args: { dir: 'D:\\Downloads' } }
+      ] }),
+      answer({ answer: '共 4 项；最大的是 a.iso，约 3 GB。', evidence: [{ tool: 'list_dir' }, { tool: 'top_files' }] })
+    ],
+    tools: ['list_dir', 'top_files'],
+    steps: 1
+  },
+
+  // 26 结果被剪裁时给出 next_offset，按它续取不漏项
+  {
+    id: 'G26', group: '分页', q: 'D:\\many 里都有什么', ctx: { page: 'ai', dir: 'D:\\many' },
+    script: [
+      toolStep('list_dir', { dir: 'D:\\many' }),
+      answer({ answer: '第一批文件已列出，后面还有，需要的话我接着取。', evidence: [{ tool: 'list_dir' }] })
+    ],
+    tools: ['list_dir'],
+    after: (res) => {
+      const r = (res.trace[0] && res.trace[0].result) || {};
+      const bad = [];
+      if (!Array.isArray(r.items) || !r.items.length) bad.push('分页结果没有 items');
+      if (typeof r.next_offset !== 'number' || r.next_offset <= 0) bad.push('没有给出 next_offset');
+      else if (r.next_offset > 60) bad.push('next_offset 越界：' + r.next_offset);
+      else if (r.next_offset !== r.items.length) bad.push(`next_offset ${r.next_offset} 与实返 ${r.items.length} 条不一致`);
+      return bad;
+    }
   }
 ];
 
@@ -358,8 +401,50 @@ for (const c of CASES) {
   if (est > 8000) reasons.push('估算 token 超预算：' + est);
 
   if (c.degraded && !res.degraded) reasons.push('期望降级但没有降级');
+  if (c.steps !== undefined && (res.usage ? res.usage.steps : 0) !== c.steps) {
+    reasons.push(`步数 ${res.usage ? res.usage.steps : 0} != ${c.steps}`);
+  }
+  if (typeof c.after === 'function') {
+    try { reasons.push(...(c.after(res) || [])); } catch (e) { reasons.push('附加断言抛异常：' + e.message); }
+  }
 
   results.push({ id: c.id, group: c.group, pass: reasons.length === 0, why: reasons.join('；'), tools: traceTools.join('>') || '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* ---------------- 追加：中断 → 断点 → 继续 ----------------
+   停止必须是「立刻」，不是「等这次请求超时」：
+   假模型故意慢 300ms，若取消没生效，用例耗时会把它暴露出来。 */
+{
+  const slow = async () => {
+    await new Promise((r) => setTimeout(r, 300));
+    return { status: 200, body: JSON.stringify({ choices: [{ message: { content: toolStep('list_dir', { dir: 'D:\\Downloads' }) } }] }) };
+  };
+  const token = { stopped: false };
+  const agent = createAgent({ transport: slow, tools, prompt, settings });
+  const running = agent.run({ userText: '列目录', ctx: { page: 'ai', dir: 'D:\\Downloads' }, token });
+  await new Promise((r) => setTimeout(r, 30));
+  const t0 = Date.now();
+  if (typeof token.onStop === 'function') token.onStop();
+  const res = await running;
+  const waited = Date.now() - t0;
+
+  const bad = [];
+  if (!res.stopped || !res.interrupted) bad.push('停止后没有标记 interrupted');
+  if (!res.checkpoint || !Array.isArray(res.checkpoint.messages) || res.checkpoint.messages.length < 2) bad.push('没有留下可用断点');
+  if (waited > 150) bad.push(`停止用了 ${waited}ms，像是等请求自己结束`);
+  if (res.trace.some((t) => !t.forbidden)) bad.push('停止后仍执行完了工具');
+  results.push({ id: 'G27', group: '中断', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+
+  /* 断点续跑：接着上一轮，不重发已查过的工具 */
+  const agent2 = createAgent({
+    transport: scripted([answer({ answer: '共 4 项：a.iso、setup.exe、data.bak 和子目录 sub。', evidence: [{ tool: 'list_dir' }] })]),
+    tools, prompt, settings
+  });
+  const res2 = await agent2.run({ resume: res.checkpoint, ctx: { page: 'ai', dir: 'D:\\Downloads' }, token: { stopped: false } });
+  const bad2 = [];
+  if (!res2.ok) bad2.push('续跑没有成功产出回答');
+  if ((res2.usage ? res2.usage.steps : 0) !== 0) bad2.push('续跑重新走了步数');
+  results.push({ id: 'G28', group: '续跑', pass: bad2.length === 0, why: bad2.join('；'), tools: '-', steps: res2.usage ? res2.usage.steps : 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;
