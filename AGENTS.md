@@ -39,13 +39,15 @@
 ## 构建（在仓库根目录执行）
 
 ```powershell
-.\build.ps1                    # 重建 exe，覆盖根目录的 tidy-assistant.exe
-.\build.ps1 -Bump patch        # 先递增版本号（patch|minor|major），再重建
-.\build.ps1 -Bump minor -Bundle -Portable   # 出安装包 + 便携包（自动清理旧版本）
+.\build.ps1                    # 默认全量：重建 exe + 打安装包 + 打便携包（自动清理旧版本）
+.\build.ps1 -Bump patch        # 先递增版本号（patch|minor|major），再全量构建
+.\build.ps1 -AppOnly           # 只重建 exe（临时验证外壳能不能编译时才用）
 .\build.ps1 -Engine            # 只重建 Python 引擎
 .\build.ps1 -Status            # 只看状态：版本 / 锁 / 编译进程 / release / 一致性
-.\build.ps1 -Bundle -Portable  # 用当前版本出安装包 + 便携包
+.\build.ps1 -Bundle -Portable  # 用当前版本补打安装包 + 便携包
 ```
+
+**默认必须出安装包与便携包**（2026-11-19 起）。1.35.x–1.36.x 期间一直用「只重建 exe」的旧默认，`release\` 里的安装包停在 1.34.1，用户装了安装包就等于装到旧功能——这是「功能没构建进去」的真实原因。要交给人安装，就得有新的 setup.exe。
 
 首次构建约 2 分钟（增量十几秒）。构建中间目录固定在 `D:\Builds\`（纯 ASCII）——**不要**把 target 放进 `%TEMP%`，这台机器的 DSH 临时目录带中文，`dlltool` 会直接失败。
 

@@ -1,13 +1,17 @@
 <#
   整理助手 构建脚本
   ------------------------------------------------------------------
-  .\build.ps1                           重建 Rust 外壳，覆盖根目录 tidy-assistant.exe
-  .\build.ps1 -Bundle                   顺带打 NSIS 安装包到 release\
-  .\build.ps1 -Portable                 把当前目录打成便携 zip 到 release\
+  .\build.ps1                           全量：重建外壳 + 打安装包 + 打便携包（默认）
+  .\build.ps1 -AppOnly                  只重建外壳，覆盖根目录 tidy-assistant.exe
+  .\build.ps1 -Bundle                   只补打 NSIS 安装包到 release\
+  .\build.ps1 -Portable                 只补打便携 zip 到 release\
   .\build.ps1 -Engine                   只重建 Python 引擎（覆盖 引擎\）
   .\build.ps1 -Bump patch|minor|major   递增版本号（写入 tauri.conf.json + Cargo.toml）
   .\build.ps1 -Version 2.1.0            直接指定版本号
   .\build.ps1 -Clean                    先删构建缓存再构建
+
+  默认全量是有原因的：只出 exe 时 release\ 里的安装包会停在老版本，
+  用户装了安装包就等于装到旧功能（1.36.8 记过这个坑）。
 
   版本规范见 docs\01-当前版\版本管理与发布规范.md：
   每次改动都要有版本号；release\ 只留最新与上一版（本脚本自动清理更旧的同类产物）。
@@ -22,6 +26,7 @@ param(
   [switch]$Engine,
   [switch]$Bundle,
   [switch]$Portable,
+  [switch]$AppOnly,
   [switch]$Clean,
   [switch]$Status,
   [string]$Version,
@@ -243,7 +248,14 @@ function Remove-OldReleases([string]$pattern) {
 
 # ---------------------------------------------------------------- 主流程（全程持锁）
 
-$mode     = if ($Engine) { 'engine' } elseif ($Portable -and -not $Bundle) { 'portable' } else { 'app' }
+# 默认就把「装得上、发得出」的整套产物一起做：根目录 exe + NSIS 安装包 + 便携 zip。
+# 历史教训（1.36.8 记录的坑）：1.35.x–1.36.x 一直用默认参数构建，只重编了根目录
+# tidy-assistant.exe，没带 -Bundle/-Portable，于是 release\ 里的安装包与便携包
+# 始终停在 1.34.1，用户装完自然看不到后来做的功能。
+# 临时只想快速验证外壳能不能编译时，才用 -AppOnly 跳过打包。
+if (-not $Engine -and -not $AppOnly) { $Bundle = $true; $Portable = $true }
+
+$mode     = if ($Engine) { 'engine' } elseif ($Bundle) { 'full' } elseif ($Portable) { 'portable' } else { 'app' }
 $appBuilt = (-not $Engine -and (-not $Portable -or $Bundle))
 
 Enter-TidyBuildLock -Root $root -Mode $mode | Out-Null

@@ -1481,6 +1481,23 @@
       const grp = t.closest('.pg');
       const msg = t.closest('.ai-msg');
 
+      /* 思考行：折叠的是这一段的原文，引用/复制就该拿原文 */
+      if (row && row.classList.contains('pg-think')) {
+        const box = row.nextElementSibling;
+        const src = box ? (box.querySelector('.pg-thought') || box) : null;
+        const words = src ? textOf(src) : '';
+        UI.menu(e, [
+          { header: T('思考过程', 'Reasoning') },
+          { label: T('引用这段思考', 'Quote reasoning'), disabled: !words,
+            action: () => composer.insertQuote(words, { role: 'bot' }) },
+          { label: T('复制', 'Copy'), disabled: !words, action: () => writeClipboard(words) },
+          { sep: true },
+          { label: row.getAttribute('aria-expanded') === 'true' ? T('收起原文', 'Collapse') : T('展开原文', 'Show reasoning'),
+            action: () => row.click() }
+        ]);
+        return;
+      }
+
       /* 过程行：引用/复制的是这一行自己的内容（参数、摘要、原始返回值） */
       if (row) {
         const label = (row.querySelector('.pg-label') || {}).textContent || '';
