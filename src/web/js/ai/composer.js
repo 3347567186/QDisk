@@ -1129,6 +1129,59 @@
       get value() { return input.value; },
       getValue: function () { return input.value; },
       setValue: function (v) { input.value = v || ''; autosize(); syncSend(); },
+      /* 在光标处（没有光标就文尾）插入一段纯文本，插完聚焦并把光标放它后面。
+         右键菜单的「引用对话」「粘贴」都走这里，保证插入点总在用户想接话的位置。 */
+      insertText: function (text) {
+        if (text == null) return;
+        var v = input.value || '';
+        var at = input.selectionStart;
+        if (typeof at !== 'number' || at < 0 || at > v.length) at = v.length;
+        var head = v.slice(0, at);
+        var tail = v.slice(at);
+        var body = String(text);
+        /* 上一段没换行就空一行再接引用，避免引用挤在句子里变成正文 */
+        if (head && !/\n\s*$/.test(head)) head += '\n\n';
+        else if (head && /\n[^\n]*\S[^\n]*\n$/.test(head)) head += '\n';
+        if (tail && !/^\n/.test(tail)) tail = '\n' + tail;
+        input.value = head + body + tail;
+        var caret = (head + body).length;
+        input.focus();
+        input.setSelectionRange(caret, caret);
+        autosize();
+        syncSend();
+      },
+      /* 引用一段对话：meta = {role:'user'|'bot', time:'22:14'}，正文每行加 「> 」 */
+      insertQuote: function (text, meta) {
+        var lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+        while (lines.length && !lines[0].trim()) lines.shift();
+        while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+        if (!lines.length) return;
+        var m = meta || {};
+        var who = m.role === 'bot' ? T('助手', 'Assistant') : T('我', 'Me');
+        var head = '> ' + T('引用', 'Quote') + ' · ' + who + (m.time ? ' ' + m.time : '') + '\n';
+        var body = lines.map(function (l) { return l ? '> ' + l : '>'; }).join('\n');
+        api.insertText(head + body + '\n');
+      },
+      clipboard: function (op) {
+        var v = input.value || '';
+        var a = input.selectionStart || 0;
+        var b = input.selectionEnd || 0;
+        if (op === 'cut') {
+          if (a === b) return '';
+          var cut = v.slice(a, b);
+          input.value = v.slice(0, a) + v.slice(b);
+          input.setSelectionRange(a, a);
+          autosize(); syncSend();
+          return cut;
+        }
+        if (op === 'copy') return a === b ? '' : v.slice(a, b);
+        if (op === 'selectAll') {
+          input.focus();
+          input.setSelectionRange(0, v.length);
+          return v;
+        }
+        return '';
+      },
       focus: function () { input.focus(); },
       setBusy: function (next, isStopping) {
         busy = !!next;

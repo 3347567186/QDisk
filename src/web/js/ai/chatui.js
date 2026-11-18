@@ -840,6 +840,7 @@
       msgs.appendChild(node);
       /* 每句话开一轮：导航条上一条刻度，跳转就落到这句话 */
       turns.push({ prompt: text, answer: '', userNode: node, answerNode: null });
+      stamp(node, 'user', text);
       if (rail) rail.setTurns(turns);
       scrollEnd(true);
     }
@@ -920,6 +921,7 @@
       msgs.appendChild(node);
       scrollEnd(true);
       current = { node, tl, body, extra, steps: [], replay, stopped: false };
+      stamp(node, 'bot', '');
       const turn = turns[turns.length - 1];
       if (turn) turn.answerNode = node;
       return current;
@@ -975,6 +977,8 @@
         if (tm) tm.hidden = true;
       }
       paintAnswer(c.body, res.answer || '');
+      /* 右键「复制这段」「引用这段」拿的是这条消息的正文，落定后补上 */
+      c.node.dataset.text = String(res.answer || '');
       if (res.degraded && !res.ok) c.body.classList.add('degraded');
       if (res.stopped) c.body.classList.add('degraded');
 
@@ -1244,6 +1248,132 @@
         try { options.onSessions(); } catch (e) { /* 外面的重画失败不该影响对话 */ }
       }
     }
+
+    /* ---------- 右键菜单 ----------
+       菜单本身用软件自带的 UI.menu（跟文件列表同一个面板），
+       这里只负责：这次点在哪、能引用哪一段、复制什么。 */
+    function stamp(node, role, text) {
+      if (!node) return;
+      node.dataset.role = role;
+      node.dataset.time = new Date().toTimeString().slice(0, 5);
+      node.dataset.text = String(text == null ? '' : text);
+    }
+
+    function selectionText() {
+      try {
+        const s = window.getSelection ? String(window.getSelection()) : '';
+        return s.trim();
+      } catch (e) { return ''; }
+    }
+
+    function writeClipboard(text) {
+      if (!text) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => UIx.copy(text));
+      } else UIx.copy(text);
+    }
+
+    function pasteIntoComposer() {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        composer.focus();
+        UIx.toast(T('请按 Ctrl+V 粘贴', 'Press Ctrl+V to paste'));
+        return;
+      }
+      navigator.clipboard.readText().then((t) => {
+        if (t) composer.insertText(t);
+        else composer.focus();
+      }).catch(() => {
+        composer.focus();
+        UIx.toast(T('读不到剪贴板，请按 Ctrl+V', 'Clipboard blocked, press Ctrl+V'));
+      });
+    }
+
+    /* 一段节点的纯文本：回答取正文，思考块去掉按钮与时间戳 */
+    function textOf(el) {
+      if (!el) return '';
+      const body = el.querySelector('.ai-msg-body');
+      return (body ? body.innerText : el.innerText || '').trim();
+    }
+
+    function onContextMenu(e) {
+      const t = e.target;
+      if (!t || !t.closest) return;
+      /* 输入框里也走自家菜单：系统那份会带一堆「拼写检查」之类没用的项 */
+      const inComposer = t.closest('.dac-field, textarea.dac-input');
+      if (inComposer) {
+        const sel = selectionText();
+        UI.menu(e, [
+          { header: T('输入框', 'Composer') },
+          { label: T('剪切', 'Cut'), disabled: !sel, action: () => writeClipboard(composer.clipboard('cut')) },
+          { label: T('复制', 'Copy'), disabled: !sel, action: () => writeClipboard(composer.clipboard('copy')) },
+          { label: T('粘贴', 'Paste'), action: pasteIntoComposer },
+          { sep: true },
+          { label: T('全选', 'Select all'), action: () => composer.clipboard('selectAll') },
+          { label: T('清空', 'Clear'), disabled: !composer.getValue(), action: () => composer.setValue('') }
+        ]);
+        return;
+      }
+
+      const sel = selectionText();
+      const step = t.closest('.tl-step');
+      const think = t.closest('.tl');
+      const msg = t.closest('.ai-msg');
+
+      /* 思考块 / 过程行：引用的是这一块自己的文字，不是整条回答 */
+      if (step) {
+        const detail = step.getAttribute('aria-expanded') === 'true';
+        const name = (step.querySelector('.ai-step-name') || {}).textContent || '';
+        const sum = (step.querySelector('.ai-step-sum') || {}).textContent || '';
+        const out = step.querySelector('.ai-step-out pre');
+        const payload = [name, sum].filter(Boolean).join(' · ');
+        UI.menu(e, [
+          { header: T('这一步', 'This step') },
+          { label: T('引用结果', 'Quote result'), action: () => composer.insertQuote((out ? out.textContent : '') || payload, { role: 'bot' }) },
+          { label: T('复制', 'Copy'), action: () => writeClipboard(out ? out.textContent : payload) },
+          { sep: true },
+          { label: detail ? T('收起', 'Collapse') : T('展开原始结果', 'Show raw result'), action: () => step.click() }
+        ]);
+        return;
+      }
+      if (think && !msg) {
+        const thoughts = think.querySelector('.tl-thoughts');
+        UI.menu(e, [
+          { header: T('思考过程', 'Reasoning') },
+          { label: T('引用这段思考', 'Quote reasoning'), action: () => composer.insertQuote(textOf(thoughts) || textOf(think), { role: 'bot' }) },
+          { label: T('复制', 'Copy'), action: () => writeClipboard(textOf(thoughts) || textOf(think)) }
+        ]);
+        return;
+      }
+
+      /* 某条消息：选中了文字就只引用选中那段，否则引用整条 */
+      if (msg) {
+        const role = msg.dataset.role || 'bot';
+        const body = textOf(msg);
+        const payload = sel || body;
+        const short = payload.length > 800 ? payload.slice(0, 800) + '…' : payload;
+        UI.menu(e, [
+          { header: role === 'user' ? T('你问的', 'You asked') : T('助手的回答', 'Assistant') },
+          { label: sel ? T('引用选中的话', 'Quote selection') : T('引用这段对话', 'Quote this turn'),
+            disabled: !payload, action: () => composer.insertQuote(short, { role: role, time: msg.dataset.time }) },
+          { label: sel ? T('复制选中的话', 'Copy selection') : T('复制这段', 'Copy this'),
+            disabled: !payload, action: () => writeClipboard(payload) },
+          { label: T('复制全文', 'Copy whole message'), disabled: !body, action: () => writeClipboard(body) },
+          { sep: true },
+          { label: T('粘贴到输入框', 'Paste into composer'), action: pasteIntoComposer }
+        ]);
+        return;
+      }
+
+      /* 空白处：只给「粘贴」和「全选对话」 */
+      UI.menu(e, [
+        { label: T('粘贴到输入框', 'Paste into composer'), action: pasteIntoComposer },
+        { label: T('复制整段对话', 'Copy transcript'), disabled: !msgs.children.length,
+          action: () => writeClipboard(Array.prototype.map.call(msgs.children,
+            (n) => ((n.dataset.role === 'user' ? '我：' : '助手：') + (n.dataset.text || textOf(n)))).join('\n\n')) }
+      ]);
+    }
+
+    msgs.addEventListener('contextmenu', onContextMenu);
 
     renderEmpty();
     composer.focus();
