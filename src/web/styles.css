@@ -3883,3 +3883,7 @@ html[data-theme="dark"] .ai-page {
 .ai-drawer .dac-right { gap: 6px; }
 
 .ai-dw-spacer { flex: 1 1 auto; }
+
+/* 箭头留着（不然「只读」看起来像纯文字，不像能点开）；抽屉里上一轮把它藏了，
+   现在左边腾出空间，放回去还差 10px 余量。 */
+.ai-drawer .dac-agent-mode .dac-chev { display: block; }
