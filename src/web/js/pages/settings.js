@@ -926,7 +926,25 @@
         if (!d.model) return toast(T('请先填模型名', 'Fill the model name first'), 'error');
         state.aiBusy = true; paint();
         try {
+          const prev = state.ai || {};
+          const changed = prev.endpoint !== d.endpoint || prev.model !== d.model;
           const next = await AIStore.save(d);
+          /* 换了端点或模型就是换了对象：旧的学习结论（不认 JSON、要等 118 秒）
+             不能继承，删掉让它重新学，否则新模型会背着上一任的毛病跑 */
+          if (changed && next && next.caps && window.AIAgent && AIAgent.capKeyOf) {
+            const key = AIAgent.capKeyOf(d.endpoint, d.model);
+            if (next.caps[key]) {
+              const kept = Object.assign({}, next.caps);
+              delete kept[key];
+              const cleaned = await AIStore.save({ caps: kept });
+              state.ai = cleaned;
+              state.aiDraft = Object.assign({}, cleaned);
+              state.aiTest = null;
+              state.aiBusy = false;
+              toast(T('AI 设置已保存（新模型会重新探测能力）', 'AI settings saved (capabilities will be re-learned)'), 'ok');
+              return;
+            }
+          }
           state.ai = next;
           state.aiDraft = Object.assign({}, next);
           toast(T('AI 设置已保存', 'AI settings saved'), 'ok');
@@ -1068,7 +1086,9 @@
         return bits.length ? T('已记住这个模型的能力：', 'Learned for this model: ') + bits.join('、') : '';
       }
 
-      /** 能力记忆落在 ai.caps 里（键=主机|模型），对话页读到就直接照做 */
+      /** 能力记忆落在 ai.caps 里（键=主机|模型），对话页读到就直接照做。
+       *  这里整体替换而不是合并：重测一次就是「重新认识这个模型」，
+       *  模型升级后旧结论（比如以前不认 JSON）要能被推翻。 */
       async function learnCaps(caps) {
         const d = state.aiDraft;
         if (!caps || !d || !window.AIAgent || !AIAgent.capKeyOf) return;
@@ -1076,7 +1096,7 @@
           const key = AIAgent.capKeyOf(d.endpoint, d.model);
           const cur = await AIStore.load(true);
           const all = Object.assign({}, cur.caps || {});
-          all[key] = Object.assign({}, all[key] || {}, caps, { updatedAt: Date.now() });
+          all[key] = Object.assign({}, caps, { updatedAt: Date.now() });
           await AIStore.save({ caps: all });
         } catch (e) { /* 记住能力失败不影响保存 */ }
       }
