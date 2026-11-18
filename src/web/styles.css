@@ -2227,6 +2227,60 @@ body[data-motion="off"] .shot-flag { animation: none; }
   --ai-rail-w: 208px;
 }
 .ai-page[data-rail="closed"] { --ai-rail-w: 56px; }
+
+/* ---------- Claude 皮肤（1.29.0，只作用在 .ai-page 里面）
+   ------------------------------------------------------------
+   令牌来自 dsh-claude-style 0.21.5 的调色板块与 docs\STYLE.md：
+   圆角 4 / 8 / 16，描边一律 1px，分隔线 0.5px，间距 4px 节奏，
+   动效 80 / 120 / 150 / 250 / 320ms。珊瑚橙只在这里换掉全站蓝，
+   别的页面读的是 :root 上的 --accent，不受影响。 */
+.ai-page {
+  --cl-layer: #ffffff;
+  --cl-sidebar: #fafafa;
+  --cl-line-1: #e9e9e9;
+  --cl-line-2: #dedede;
+  --cl-line-3: #cfcfcf;
+  --cl-ink-1: #161616;
+  --cl-ink-2: #70696b;
+  --cl-ink-3: #91888b;
+  --cl-ink-4: #b2acae;
+  --cl-bubble: #f4f2f3;
+  --cl-brand: #d97757;
+  --cl-brand-hover: #c46343;
+  --cl-focus: rgba(20, 20, 19, .45);
+  --cl-hair: .5px;
+  --cl-r-sm: 4px;
+  --cl-r: 8px;
+  --cl-r-lg: 16px;
+  --cl-ease: cubic-bezier(.22, 1, .36, 1);
+  --cl-ease-enter: cubic-bezier(.34, 1.3, .64, 1);
+  --cl-t-instant: 80ms;
+  --cl-t-feedback: 120ms;
+  --cl-t-surface: 150ms;
+  --cl-t-open: 250ms;
+  --cl-t-enter: 320ms;
+  --cl-t-exit: 120ms;
+  --accent: #d97757;
+  --accent-text: #b9553a;
+  --accent-hover: #c46343;
+  --accent-weak: rgba(217, 119, 87, .12);
+  --accent-ring: rgba(217, 119, 87, .30);
+}
+html[data-theme="dark"] .ai-page {
+  --cl-layer: #1f1f1f;
+  --cl-sidebar: #1f1f1f;
+  --cl-line-1: rgba(255, 255, 255, .09);
+  --cl-line-2: rgba(255, 255, 255, .18);
+  --cl-line-3: rgba(255, 255, 255, .26);
+  --cl-ink-1: #fdfdfd;
+  --cl-ink-2: #beb6b8;
+  --cl-ink-3: #9c9395;
+  --cl-ink-4: #7d7577;
+  --cl-bubble: rgba(255, 255, 255, .06);
+  --cl-focus: rgba(255, 255, 255, .5);
+  --accent-text: #e79a7d;
+  --accent-weak: rgba(217, 119, 87, .16);
+}
 .ai-main {
   flex: 1 1 0; min-width: 0; min-height: 0; position: relative;
   display: flex; justify-content: center;
@@ -2380,36 +2434,36 @@ body[data-motion="off"] .shot-flag { animation: none; }
   position: relative;
 }
 .ai-scroll::-webkit-scrollbar { width: 0; height: 0; }
-.ai-msgs { display: flex; flex-direction: column; gap: 18px; }
+.ai-msgs { display: flex; flex-direction: column; gap: 26px; }
 
-/* 消息：用户那句做成浅底块，助手回答就是正文，不加气泡边框 */
-.ai-msg { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.ai-msg-role {
-  font-size: var(--fs-tiny); color: var(--text-3); letter-spacing: .04em;
-}
+/* 消息：照 Claude 的做法——用户那句是右侧一块浅底气泡，助手回答就是正文。
+   两边都不再挂「你 / 助手」的标签：位置和底色已经说明了是谁在说。 */
+.ai-msg { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ai-msg-role { display: none; }
 .ai-msg.user { align-items: flex-end; }
 .ai-msg.user .ai-msg-body {
-  background: var(--surface-2); border: 1px solid var(--line); color: var(--text-1);
-  border-radius: var(--radius-lg); padding: 8px 11px; max-width: 86%;
+  background: var(--cl-bubble); border: 0; color: var(--cl-ink-1);
+  border-radius: var(--cl-r-lg) var(--cl-r-lg) var(--cl-r-sm) var(--cl-r-lg);
+  padding: 10px 14px; max-width: 80%;
   white-space: pre-wrap; word-break: break-word;
+  animation: cl-rise var(--cl-t-enter) var(--cl-ease-enter) both;
 }
-/* 回答正文：正常正文字号与字重。1.27.4 试过 14–15px 加粗，看着像标题，压回 13px 常规 */
-.ai-msg-body { font-size: var(--fs-body); line-height: 1.72; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
+@keyframes cl-rise { from { opacity: 0; transform: translateY(6px); } }
+/* 回答正文：14px / 1.72，比旧版松一点，Claude 的正文就是这样呼吸的 */
+.ai-msg-body { font-size: 14px; line-height: 1.72; color: var(--cl-ink-1); white-space: pre-wrap; word-break: break-word; }
 /* 对话正文可选中复制（全局 * 是禁选的，这里显式放开，和思考正文一致） */
 .ai-msg-body, .ai-msg-body * { -webkit-user-select: text; user-select: text; }
 .ai-msg-body { cursor: text; }
-.ai-msg-body.degraded { color: var(--text-2); }
-/* 结果正文：和正文同字号同字重，靠颜色（--text-1）与位置区分，不靠放大加粗。
-   思考那几行是 11.5px 次级灰，对照之下已经够了。 */
+.ai-msg-body.degraded { color: var(--cl-ink-2); }
+/* 结果正文与正文同字号同字重，靠颜色与位置区分，不靠放大加粗 */
 .ai-answer {
   padding-right: 2px;
-  font-size: var(--fs-body);
+  font-size: 14px;
   font-weight: 400;
   line-height: 1.72;
-  color: var(--text-1);
+  color: var(--cl-ink-1);
 }
-/* 兜底回答（degraded）不是结论，退回正文尺寸与次级色，别假装是答案 */
-.ai-answer.degraded { font-size: var(--fs-body); line-height: 1.72; color: var(--text-2); }
+.ai-answer.degraded { font-size: 14px; line-height: 1.72; color: var(--cl-ink-2); }
 
 /* 查证过程：默认折成一行，点开才逐条显示
    （1.22.0 起标题行由 thoughtline.js 渲染，下面 .ai-steps-head / .ai-steps
@@ -2440,85 +2494,83 @@ body[data-motion="off"] .shot-flag { animation: none; }
 }
 .ai-step-ms { margin-left: auto; color: var(--text-3); font-family: var(--mono); font-size: var(--fs-tiny); }
 
-/* ---------- 思路行（thoughtline.js）
+/* ---------- 思路行（thoughtline.js）· Claude 过程卡
    ------------------------------------------------------------
-   移植自 React Bits ThoughtLine（MIT，见 THIRD_PARTY.md）：一行会呼吸的
-   句子 + 一条可折起的过程。参数口径与原版一致，尺寸一律走 token：
-   --tl-trough 呼吸谷值、--tl-period 一次呼吸、--tl-shimmer 一道微光、
-   --tl-settle 落定时长、--tl-blur 交叉淡入的模糊、--tl-font 字号。
-   颜色只用 --text-* 与 --accent-text，深色主题自动成立。 */
+   整组是一张卡：1px 描边、8px 圆角；标题行 36px 高、左右内缩 12px；
+   明细行与标题行之间一道 0.5px 分隔；展开后卡内可滚，最高 min(400px, 50vh)。
+   参数口径仍是原版那五个变量（--tl-trough / --tl-period / --tl-shimmer /
+   --tl-settle / --tl-blur），只是把尺寸换成 Claude 的阶梯。 */
 .tl {
   --tl-trough: .55;
   --tl-period: 1.6s;
   --tl-shimmer: 1.8s;
-  --tl-settle: 350ms;
+  --tl-settle: 250ms;
   --tl-blur: 2px;
   --tl-glyph-done: .4;
-  --tl-ease-out: cubic-bezier(.23, 1, .32, 1);
+  --tl-ink: var(--cl-ink-2);
+  --tl-ease-out: var(--cl-ease);
   --tl-ease-in-out: cubic-bezier(.77, 0, .175, 1);
 
-  display: flex; flex-direction: column; align-items: flex-start;
-  width: 100%; min-width: 0;
-  font-size: var(--tl-font, var(--fs-small)); font-weight: 500; line-height: 1.2;
-  color: var(--text-3);
+  display: flex; flex-direction: column; align-items: stretch;
+  width: 100%; min-width: 0; max-width: 100%;
+  border: 1px solid var(--cl-line-1); border-radius: var(--cl-r);
+  background: var(--cl-layer); overflow: hidden;
+  font-size: 13px; font-weight: 400; line-height: 1.45; color: var(--cl-ink-2);
+  animation: cl-card-in var(--cl-t-enter) var(--cl-ease-enter) both;
 }
+@keyframes cl-card-in { from { opacity: 0; transform: translateY(4px); } }
+.tl[data-working] { --tl-ink: var(--cl-ink-1); }
 
 .tl-head {
-  display: inline-flex; align-items: center; gap: .3em; max-width: 100%;
-  margin: 0; padding: 2px 6px 2px 2px; border: 0; border-radius: var(--radius-sm);
-  background: none; color: inherit; font: inherit; text-align: left;
+  display: flex; align-items: center; gap: 8px; max-width: 100%;
+  height: 36px; margin: 0; padding: 0 12px; border: 0; border-radius: 0;
+  background: none; color: var(--cl-ink-2); font: inherit; text-align: left;
   white-space: nowrap; cursor: default; outline: none;
-  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
+  transition: background var(--cl-t-surface) var(--cl-ease), color var(--cl-t-surface) var(--cl-ease);
 }
 .tl-head[data-toggle] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.tl-head:hover { color: var(--text-1); background: var(--hover); }
-.tl[data-working] .tl-head { color: var(--text-1); }
-.tl-head:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-ring); }
+.tl-head[data-toggle]:hover { background: var(--hover); color: var(--cl-ink-1); }
+.tl[data-working] .tl-head { color: var(--cl-ink-1); }
+.tl-head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-ring); }
 
+/* 等待行：16px 盒子里三颗点，错相呼吸 + 轻微上浮，逗号那样一下一下地动 */
 .tl-glyph {
-  display: inline-flex; flex: none; width: 1.1em; height: 1.1em; margin-right: .2em;
-  color: var(--text-3);
-  transition: color var(--tl-settle) var(--tl-ease-out), opacity var(--tl-settle) var(--tl-ease-out);
+  display: inline-flex; flex: none; align-items: center; justify-content: center;
+  gap: 3px; width: 16px; height: 16px;
+  color: var(--cl-ink-2);
+  transition: opacity var(--tl-settle) var(--cl-ease);
 }
 .tl-glyph svg { display: block; width: 100%; height: 100%; }
-.tl-dot { width: .5em; height: .5em; margin: auto; border-radius: 50%; background: currentColor; }
-
-.tl[data-working] .tl-glyph {
-  color: var(--accent-text);
-  animation: tl-breath var(--tl-period) var(--tl-ease-in-out) infinite;
+.tl-dot { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.tl-dots i { display: block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.tl[data-working] .tl-dots i { animation: cl-dot 1.15s var(--tl-ease-in-out) infinite; }
+.tl[data-working] .tl-dots i:nth-child(2) { animation-delay: .14s; }
+.tl[data-working] .tl-dots i:nth-child(3) { animation-delay: .28s; }
+@keyframes cl-dot {
+  0%, 60%, 100% { opacity: .26; transform: none; }
+  30% { opacity: 1; transform: translateY(-2px) scaleY(1.15); }
 }
 .tl:not([data-working]) .tl-glyph { opacity: var(--tl-glyph-done); }
 
-.tl-label { display: inline-grid; }
+.tl-label { display: inline-grid; min-width: 0; }
 .tl-text {
-  grid-area: 1 / 1; width: max-content; opacity: 0;
-  transition: opacity var(--tl-settle) var(--tl-ease-out);
+  grid-area: 1 / 1; width: max-content; max-width: 100%; opacity: 0;
+  transition: opacity var(--tl-settle) var(--cl-ease);
 }
-/* 模糊只留在入场那一下：常驻 filter 会让每一行都变成独立滤镜图层，
-   句子攒多以后每次重绘都要重新光栅化整片，越聊越卡。 */
-.tl-text[data-active] {
-  opacity: 1;
-  animation: tl-line-in var(--tl-settle) var(--tl-ease-out);
-}
+.tl-text[data-active] { opacity: 1; animation: tl-line-in var(--tl-settle) var(--cl-ease); }
 @keyframes tl-line-in { from { filter: blur(var(--tl-blur)); } }
-.tl-text--done[data-active] { opacity: .8; }
+.tl-text--done[data-active] { opacity: .85; }
 
 .tl-breath { display: inline-block; }
-.tl[data-working] .tl-breath { animation: tl-breath var(--tl-period) var(--tl-ease-in-out) .14s infinite; }
-
-/* 微光：一道亮带扫过句子；此时句子不呼吸，呼吸只留给 glyph。
-   注意别用 currentColor 配渐变：这条规则自己会把 color 设成 transparent，
-   currentColor 跟着变透明，整句直接看不见。所以墨色走一份独立变量。
-   color-mix 不支持的旧内核直接跳过整条规则，避免文字变透明。 */
-.tl { --tl-ink: var(--text-2); }
-.tl[data-working] .tl-head { --tl-ink: var(--text-1); }
+/* 微光：一道亮带扫过句子；墨色走独立变量，避免 currentColor 被设成 transparent。
+   color-mix 不支持的旧内核直接跳过整条规则，文字不会消失。 */
 @supports (color: color-mix(in srgb, red 50%, transparent)) {
   .tl[data-working] .tl-breath[data-shimmer] {
     background: linear-gradient(
       100deg,
-      color-mix(in srgb, var(--tl-ink) 60%, transparent) 30%,
+      color-mix(in srgb, var(--tl-ink) 55%, transparent) 30%,
       var(--tl-ink) 50%,
-      color-mix(in srgb, var(--tl-ink) 60%, transparent) 70%
+      color-mix(in srgb, var(--tl-ink) 55%, transparent) 70%
     );
     background-size: 250% 100%;
     background-position: 125% 0;
@@ -2529,31 +2581,28 @@ body[data-motion="off"] .shot-flag { animation: none; }
     animation: tl-sheen var(--tl-shimmer) linear infinite;
   }
 }
+@keyframes tl-sheen { to { background-position: -125% 0; } }
 
-@keyframes tl-breath {
-  0%, 100% { opacity: var(--tl-trough); }
-  50% { opacity: 1; }
-}
-@keyframes tl-sheen {
-  to { background-position: -125% 0; }
-}
-
+/* 计时器推到行尾，样式是 caption：11.5px、等宽数字、更淡。
+   JS 的 placeTimer 仍会写 transform（原版那套「滑到句子末尾」），
+   这里用 !important 钉住，让它保持贴右，不跟着 label 宽度漂。 */
 .tl-timer {
+  margin-left: auto; flex: none;
+  font-size: 11.5px; color: var(--cl-ink-4);
   font-variant-numeric: tabular-nums;
-  opacity: .55;
-  transition:
-    opacity var(--tl-settle) ease,
-    transform var(--tl-settle) var(--tl-ease-in-out);
+  transform: none !important;
+  transition: opacity var(--tl-settle) ease;
 }
-.tl-timer[data-done] { opacity: .7; }
+.tl-timer[data-done] { opacity: .85; }
 
 .tl-chevron {
-  display: inline-flex; margin-left: .1em; opacity: 0;
-  transition: opacity 200ms ease, transform 200ms var(--tl-ease-out);
+  display: inline-flex; flex: none; margin-left: 2px; opacity: 0;
+  transition: opacity var(--cl-t-feedback) var(--cl-ease), transform var(--cl-t-surface) var(--cl-ease);
 }
-.tl-chevron svg { width: 1em; height: 1em; }
-.tl-chevron[data-on] { opacity: .55; }
+.tl-chevron svg { width: 14px; height: 14px; }
+.tl-chevron[data-on] { opacity: .5; }
 .tl[data-open] .tl-chevron { transform: rotate(180deg); }
+.tl-head[data-toggle]:hover .tl-chevron { opacity: .85; }
 
 .tl-sr {
   position: absolute; width: 1px; height: 1px; overflow: hidden;
@@ -2561,38 +2610,43 @@ body[data-motion="off"] .shot-flag { animation: none; }
 }
 
 .tl-trace {
-  align-self: stretch; display: grid; grid-template-rows: 0fr;
-  transition: grid-template-rows var(--tl-settle) var(--tl-ease-out);
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows var(--cl-t-open) var(--cl-ease);
 }
-.tl-trace[data-open] { grid-template-rows: 1fr; }
-.tl-fold { min-height: 0; overflow-y: clip; }
+.tl-trace[data-open] { grid-template-rows: 1fr; border-top: var(--cl-hair) solid var(--cl-line-1); }
+.tl-fold { min-height: 0; overflow-y: hidden; }
+/* 展开后卡内滚动：上限跟 Claude 一致，展开的思考随组滚、自己不出第二条滚动条 */
+.tl[data-open] .tl-fold { max-height: min(400px, 50vh); overflow-y: auto; overscroll-behavior: contain; }
+.tl-fold::-webkit-scrollbar { width: 8px; }
+.tl-fold::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
 
-.tl-steps {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: .45em 0 .15em 1.6em; font-weight: 400;
+/* 卡里的行：每行一条，36px 高、左右内缩 12px；行与行之间一道 0.5px 分隔，
+   首行上方不再多画一道（它紧贴标题行下面那道线）。工具调用与思考共用这套行。 */
+.tl-steps { display: flex; flex-direction: column; padding: 0; font-weight: 400; }
+.tl-step {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  min-height: 36px; padding: 0 12px;
+  font-size: 13px; color: var(--cl-ink-2);
 }
-/* 思考轨迹：一行一条「思考 · 句子」，11.5px、次级灰、行高 22px，超宽省略号。
-   这是「过程」的位置——想干什么、查到什么平铺成行，读得到但不跟下面的结果
-   抢注意力；完整文字仍然留在 DOM 里，复制按钮拿得到全量。
-   形状对齐 agent 轨迹列表：一枚小标签 + 一句灰色的话，行与行等距。 */
-.tl-thoughts {
-  display: flex; flex-direction: column; align-items: stretch;
-  padding: 2px 0 2px 1.6em; min-width: 0;
-}
+.tl-step + .tl-step,
+.tl-steps + .tl-thoughts,
+.tl-thoughts + .tl-steps { border-top: var(--cl-hair) solid var(--cl-line-1); }
+/* Claude 的行里不放图标：状态靠文字颜色（失败的调用转成危险色） */
+.tl-mark { display: none; }
+.tl-step.bad .ai-step-name { color: var(--danger); }
+
+/* 思考正文：一句一行、整段折行（不再是单行省略号）。
+   12.5px 二级灰、行高 1.68 —— 展开后是一段可读的推理，不跟回答抢注意力。 */
+.tl-thoughts { display: flex; flex-direction: column; align-items: stretch; min-width: 0; }
 .tl-thought-row {
-  display: flex; align-items: baseline; min-width: 0; height: 22px;
-  font-size: 11.5px; line-height: 22px; font-weight: 400;
-  color: var(--text-3);
-  animation: tl-row-in 200ms var(--ease-out) both;
+  padding: 10px 12px; min-width: 0;
+  font-size: 13px; line-height: 1.7; font-weight: 400;
+  color: var(--cl-ink-2);
+  animation: tl-row-in 200ms var(--cl-ease) both;
 }
-.tl-tag {
-  flex: 0 0 auto; color: var(--text-3);
-  -webkit-user-select: none; user-select: none;
-}
-.tl-tag::after { content: '·'; margin: 0 .45em; opacity: .55; }
 .tl-thought-text {
-  flex: 1 1 auto; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: block; min-width: 0;
+  white-space: pre-wrap; word-break: break-word;
   -webkit-user-select: text; -moz-user-select: text; user-select: text;
   cursor: text;
 }
@@ -2608,14 +2662,15 @@ body[data-motion="off"] .shot-flag { animation: none; }
   .tl-thought-row { animation: none; }
 }
 
-/* 复制按钮：正文出现后才显形；点它不会折叠整块（JS 里 stopPropagation） */
+/* 复制按钮：悬停标题行才显形（Claude 的行内操作都是 hover 才出现），
+   点它不会折叠整块（JS 里 stopPropagation） */
 .tl-copy {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; margin-left: .1em; padding: 0; flex: none;
-  border: 0; border-radius: var(--radius-sm); background: none; color: inherit;
-  opacity: .45; cursor: pointer;
-  transition: opacity var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out),
-    color var(--dur-2) var(--ease-out);
+  width: 22px; height: 22px; margin-left: 0; padding: 0; flex: none;
+  border: 0; border-radius: var(--cl-r-sm); background: none; color: inherit;
+  opacity: 0; cursor: pointer;
+  transition: opacity var(--cl-t-surface) var(--cl-ease), background var(--cl-t-surface) var(--cl-ease),
+    color var(--cl-t-surface) var(--cl-ease);
 }
 .tl-copy[hidden] { display: none; }
 .tl-head:hover .tl-copy, .tl-copy:focus-visible { opacity: .9; }
@@ -2634,14 +2689,12 @@ body[data-motion="off"] .shot-flag { animation: none; }
 
 
 .tl-step .ai-step-sum { min-width: 0; }
-.tl-mark {
-  display: inline-grid; flex: none; place-items: center; width: 1em; height: 1em;
-  opacity: .55;
-}
-.tl-mark svg { width: 1em; height: 1em; }
+/* 行里的图标整体隐掉（Claude 的过程行只有文字），但保留节点与状态类，
+   失败那一步靠文字颜色区分 */
+.tl-mark { display: none; }
 .tl-step.bad .tl-mark { opacity: .9; }
 
-/* 正在跑的那一步：一颗呼吸的点（落定后换成勾） */
+/* 正在跑的那一步：一颗呼吸的点（行里的图标已隐藏，这里只留给将来的行内用法） */
 .tl-pulse {
   display: block; width: .4em; height: .4em; border-radius: 50%;
   background: currentColor;
@@ -2943,6 +2996,15 @@ body[data-motion="off"] .shot-flag { animation: none; }
   transition: box-shadow .3s ease-out;
 }
 .dac-surface:focus-within { box-shadow: 0 10px 30px rgba(31, 38, 48, .13); }
+
+/* 输入框在 Claude 里是 16px 圆角、1px 描边、几乎不投影的一张卡；
+   焦点只加深一层投影，不拿强调色描边（强调色留给主按钮）。 */
+.ai-page .dac-surface {
+  border-radius: var(--cl-r-lg);
+  border: 1px solid var(--cl-line-1);
+  box-shadow: 0 2px 6px rgba(22, 22, 22, .04);
+}
+.ai-page .dac-surface:focus-within { box-shadow: 0 4px 16px rgba(22, 22, 22, .08); }
 
 .dac-body {
   position: relative; display: flex; width: 100%; flex-direction: column;

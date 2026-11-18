@@ -597,8 +597,8 @@
 
     function addUser(text) {
       setEmpty(false);
+      /* 不挂「你」的标签：右侧浅底气泡本身已经说明了是谁在说 */
       msgs.appendChild(h('div', { class: 'ai-msg user' },
-        h('div', { class: 'ai-msg-role' }, T('你', 'You')),
         h('div', { class: 'ai-msg-body' }, text)
       ));
       scrollEnd(true);
@@ -611,8 +611,11 @@
        过程在跑的时候是摊开的，落定即折成一行，点一下可再摊开。 */
     function startAnswer(opts) {
       const replay = !!(opts && opts.replay);
+      /* 过程卡里那颗 loader 换成 Claude 的三颗点（glyph:'dots'，见 thoughtline.js）；
+         落定后三点停住、转成二级灰，标题行换成「思考 N 段 · 调用 N 次工具」 */
       const tl = replay ? null : root.AIThoughtLine.create({
         label: T('正在思考…', 'Thinking…'),
+        glyph: 'dots',
         collapsible: true,
         collapseOnSettle: true,
         showTimer: true,
@@ -625,7 +628,6 @@
       const body = h('div', { class: 'ai-msg-body ai-answer' });
       const extra = h('div', { class: 'ai-extra' });
       const node = h('div', { class: 'ai-msg bot' },
-        h('div', { class: 'ai-msg-role' }, T('助手', 'Assistant')),
         tl ? tl.el : null,
         body,
         extra

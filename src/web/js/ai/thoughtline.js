@@ -84,10 +84,14 @@
 
     /* ---------------- DOM ---------------- */
 
-    /* glyph：sparkle（默认）| dot | none | 自定义 HTML 片段 */
+    /* glyph：dots（Claude 等待行，默认给对话用）| sparkle | dot | none | 自定义 HTML 片段 */
     let glyph = null;
     if (o.glyph !== 'none') {
-      if (o.glyph === 'sparkle') glyph = UIx.h('span', { class: 'tl-glyph', 'aria-hidden': 'true', html: SPARKLE });
+      if (o.glyph === 'dots') {
+        /* 三颗点：错相呼吸 + 轻微上浮，CSS 在 .tl[data-working] .tl-dots 里驱动 */
+        glyph = UIx.h('span', { class: 'tl-glyph tl-dots', 'aria-hidden': 'true' },
+          UIx.h('i'), UIx.h('i'), UIx.h('i'));
+      } else if (o.glyph === 'sparkle') glyph = UIx.h('span', { class: 'tl-glyph', 'aria-hidden': 'true', html: SPARKLE });
       else if (o.glyph === 'dot') glyph = UIx.h('span', { class: 'tl-glyph', 'aria-hidden': 'true' }, UIx.h('span', { class: 'tl-dot' }));
       else glyph = UIx.h('span', { class: 'tl-glyph', 'aria-hidden': 'true', html: String(o.glyph) });
     }
