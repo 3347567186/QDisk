@@ -51,13 +51,27 @@
     deep: { steps: 9, share: 0.75, replyMax: 900 }
   };
 
-  /* 权限档位决定「这一轮允许模型看见哪些工具」。写工具一个都没有。
-     1.25.0 起三档都能读任意路径（read_file / disk_roots）；「打开」只在标准与深度档，
-     因为 open_path 会拉起外部程序，交给更明确的选择。 */
+  /* 权限档位决定「这一轮允许模型看见哪些工具」。
+     1.28 起多了一组提案工具（propose_action / list_proposals / cancel_proposal / navigate）：
+     它们只生成待确认的卡片，不执行任何动作。真正的执行是 proposals.commit，
+     只有用户点按钮才会被调用，模型手里没有这个函数，也没有工具能间接调到它。
+     只读档仍然一个提案工具都不给——那是用户明确选的「只看不动」。 */
+  const PROPOSE_TOOLS = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
+
   const PERM_TOOLS = {
     readonly: ['list_dir', 'read_file', 'disk_roots', 'last_organize'],
-    standard: ['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'last_organize'],
-    deep: ['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize']
+    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
+    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
+  };
+
+  /* 动手档位：off 完全不提，confirm 每次点，auto 可撤销的小动作倒计时自动执行，
+     full 连删到回收站这类也自动（不可撤销的仍然要输确认词）。
+     默认 off —— 装完不认识你，就不该替你动手。 */
+  const MODE_LABEL = {
+    off: ['只读', '只查不改：没有任何能改文件的工具'],
+    confirm: ['确认', '每个动作都变成卡片，你点了才执行'],
+    auto: ['自动', '整理/解压这类可撤销的自动执行，3 秒内可停'],
+    full: ['放手', '删到回收站这类也自动；撤不回来的仍要点一下']
   };
 
   function permLabel(p) {
@@ -191,6 +205,41 @@
       }, 400);
     }
 
+    /* 动作层：registry 是 19 个动作的定义（每个都带自己的预演与执行体），
+       proposals 是待确认队列 + 预算 + 审计日志。两者都不交给模型——
+       模型只能通过 tools.js 的 propose_action 提一张卡片出来，
+       真正执行是 proposals.commit，只由卡片上的按钮调用。 */
+    const actions = (root.AIRegistry && window.API) ? root.AIRegistry.create({ API: window.API }) : null;
+    const proposals = (root.AIProposals && actions)
+      ? root.AIProposals.create({ API: window.API, store: AIStore, actions: actions, policy: ui.agent })
+      : null;
+    if (actions && AIPrompt.setCatalog) {
+      /* 动作目录是稳定前缀的一部分：同一版本内一个字节都不变，缓存照样命中 */
+      try { AIPrompt.setCatalog(actions.catalog()); } catch (e) { /* 目录拼不出来就少一段说明 */ }
+    }
+
+    let guardReady = null;
+    /* 路径闸门要知道三件事才能判：用户主目录、程序自己的目录、数据目录。
+       三个都由 Rust 报真值，不在前端猜；拿到之后配置一次就够。 */
+    function ensureGuard() {
+      if (!root.AIGuard) return Promise.resolve(null);
+      if (guardReady) return guardReady;
+      guardReady = (async () => {
+        let info = {};
+        let roots = {};
+        try { info = await window.API.appInfo(); } catch (e) { info = {}; }
+        try { roots = await window.API.agentRoots(); } catch (e) { roots = {}; }
+        root.AIGuard.configure({
+          home: roots.home || '',
+          appDir: info.exe_dir || '',
+          dataDir: info.data_dir || '',
+          roots: roots.roots || []
+        });
+        return root.AIGuard;
+      })();
+      return guardReady;
+    }
+
     let state = {
       running: false,
       token: { stopped: false },
@@ -246,11 +295,54 @@
     });
     shell.appendChild(composer.el);
 
-    const foot = h('div', { class: 'ai-foot' },
-      UIx.icon('shield'),
-      h('span', {}, T('只读助手：只查不改，不会删除或移动任何文件', 'Read-only: inspects only, never deletes or moves'))
-    );
+    /* 底栏：左边一句人话说明当前边界，右边四个档位直接点。
+       档位是危险开关，必须一眼看得见、一下能改回来，不能埋进设置页深处。 */
+    const footText = h('span', { class: 'ai-foot-text' });
+    const modeBar = h('div', { class: 'ai-modes' });
+    const foot = h('div', { class: 'ai-foot' }, UIx.icon('shield'), footText, modeBar);
     shell.appendChild(foot);
+
+    function paintFoot() {
+      const mode = proposals ? proposals.getPolicy().mode : 'off';
+      const m = MODE_LABEL[mode] || MODE_LABEL.off;
+      foot.classList.toggle('armed', mode !== 'off');
+      footText.textContent = T('助手权限：' + m[0] + ' · ' + m[1], 'Assistant: ' + m[0] + ' · ' + m[1]);
+      modeBar.innerHTML = '';
+      Object.keys(MODE_LABEL).forEach((k) => {
+        modeBar.appendChild(h('button', {
+          class: 'ai-mode' + (k === mode ? ' on' : '') + (k === 'full' ? ' danger' : ''),
+          type: 'button',
+          title: T(MODE_LABEL[k][1], MODE_LABEL[k][1]),
+          onclick: () => setMode(k)
+        }, T(MODE_LABEL[k][0], MODE_LABEL[k][0])));
+      });
+    }
+
+    function setMode(k) {
+      if (!proposals) return;
+      const p = Object.assign({}, proposals.getPolicy(), { mode: k });
+      proposals.setPolicy(p);
+      rememberUi({ agent: p });
+      paintFoot();
+      if (k === 'full') {
+        addNotice(T('「放手」已打开：能撤销的动作直接执行，永久删除仍要输入确认词。',
+          'Full auto on: reversible actions run at once; permanent deletes still need the word.'), 'warn');
+      } else if (k !== 'off') {
+        addNotice(T('已允许 AI 动手（' + (MODE_LABEL[k] || MODE_LABEL.off)[0] + '）。每个动作都会先变成一张卡片。',
+          'AI is allowed to act (' + k + '). Every action arrives as a card first.'), 'info');
+      }
+    }
+
+    paintFoot();
+
+    /* navigate 工具只做一件事：切页面。走 hash 路由，跟点侧栏是同一条路，
+       不会绕过页面自己的初始化，也不会把当前页面弄成半截状态。 */
+    function navigateTo(page) {
+      const p = String(page || '').trim();
+      if (!p) return { ok: false, error: '没给页面名' };
+      try { location.hash = '#' + p; } catch (e) { return { ok: false, error: '切不过去' }; }
+      return { ok: true, page: p };
+    }
 
     function scrollEnd(force) {
       /* 只有贴着底（80px 内）才跟着滚：用户往上翻历史时不该被新内容拽回去 */
@@ -327,6 +419,180 @@
         )
       ));
       emptyBox.appendChild(grid);
+    }
+
+    /* ---------------- 提案卡片 ----------------
+       模型提的每一件事都长在这里：看得见数量、体积、风险、能不能撤销，
+       才谈得上「要不要点」。执行按钮是唯一的执行入口。 */
+    const shownCards = new Set();
+    const CONFIRM_WORD = () => T('删除', 'delete');
+
+    function pendingCards() {
+      if (!proposals) return;
+      proposals.list().forEach((p) => {
+        if (shownCards.has(p.id)) return;
+        shownCards.add(p.id);
+        msgs.appendChild(proposalCard(p));
+        scrollEnd(false);
+      });
+    }
+
+    function proposalCard(p) {
+      const c = p.card || {};
+      const risk = Number(c.risk || 1);
+      const host = h('div', { class: 'ai-msg bot ai-prop r' + risk });
+      paint();
+      return host;
+
+      function paint() {
+        host.innerHTML = '';
+        host.appendChild(h('div', { class: 'ai-prop-head' },
+          h('span', { class: 'ai-prop-title' }, c.title || p.label || p.action),
+          h('span', { class: 'ai-chip' + (risk >= 3 ? ' danger' : risk === 2 ? ' warn' : '') },
+            T('风险 ' + risk, 'risk ' + risk)),
+          h('span', { class: 'ai-chip' + (c.reversible ? ' ok' : ' danger') },
+            T(c.reversible ? '可撤销' : '不可撤销', c.reversible ? 'undoable' : 'no undo'))));
+
+        if (p.why) host.appendChild(h('div', { class: 'ai-prop-why' }, T('理由：', 'Why: ') + p.why));
+        if (c.summary) host.appendChild(h('div', { class: 'ai-prop-sum' }, c.summary));
+
+        const items = Array.isArray(c.items) ? c.items : [];
+        if (items.length) {
+          const box = h('div', { class: 'ai-prop-items' });
+          items.slice(0, 6).forEach((it) => {
+            box.appendChild(h('div', { class: 'ai-prop-item' },
+              h('span', { class: 'ai-prop-item-t' }, it.t || ''),
+              it.s ? h('span', { class: 'ai-prop-item-s' }, it.s) : null,
+              it.d ? h('span', { class: 'ai-prop-item-d' }, it.d) : null));
+          });
+          if (items.length > 6) {
+            box.appendChild(h('div', { class: 'ai-prop-more' }, T('还有 ' + (items.length - 6) + ' 项', '+' + (items.length - 6) + ' more')));
+          }
+          host.appendChild(box);
+        }
+
+        const warns = Array.isArray(c.warnings) ? c.warnings : [];
+        if (warns.length) {
+          const w = h('div', { class: 'ai-prop-warn' });
+          warns.slice(0, 4).forEach((s) => w.appendChild(h('div', {}, '· ' + s)));
+          host.appendChild(w);
+        }
+        if (c.note) host.appendChild(h('div', { class: 'ai-prop-note' }, c.note));
+
+        const bar = h('div', { class: 'ai-prop-bar' });
+        host.appendChild(bar);
+
+        if (p.status === 'done') {
+          bar.appendChild(h('span', { class: 'ai-prop-done' }, T('已执行：', 'Done: ') + (p.message || '')));
+          if (p.undo) {
+            const ub = h('button', { class: 'ai-prop-btn', type: 'button' }, T('撤销', 'Undo'));
+            ub.addEventListener('click', async () => {
+              ub.disabled = true;
+              const r = await proposals.undo(p.id);
+              ub.textContent = r.ok ? T('已撤销', 'Undone') : T('撤销失败', 'Undo failed');
+              if (!r.ok) addNotice(r.error || '撤销失败', 'warn');
+              else pendingCardsRefresh();
+            });
+            bar.appendChild(ub);
+          }
+          return;
+        }
+
+        if (p.status !== 'pending') {
+          bar.appendChild(h('span', { class: 'ai-prop-done' },
+            T('已处理：' + (p.status || ''), 'Handled: ' + (p.status || ''))));
+          return;
+        }
+
+        let timer = 0;
+        let armed = !p.needsWord;
+
+        function stopCountdown() {
+          if (timer) { clearInterval(timer); timer = 0; }
+        }
+
+        const go = h('button', { class: 'ai-prop-btn primary', type: 'button', disabled: !armed },
+          T('执行', 'Run'));
+        const no = h('button', { class: 'ai-prop-btn', type: 'button' }, T('取消', 'Cancel'));
+
+        if (p.needsWord) {
+          const inp = h('input', {
+            class: 'ai-prop-word',
+            type: 'text',
+            placeholder: T('输入「' + CONFIRM_WORD() + '」确认', 'type "' + CONFIRM_WORD() + '" to confirm'),
+            oninput: () => {
+              armed = inp.value.trim() === CONFIRM_WORD();
+              go.disabled = !armed;
+            }
+          });
+          bar.appendChild(inp);
+        }
+
+        go.addEventListener('click', async () => {
+          stopCountdown();
+          go.disabled = true;
+          no.disabled = true;
+          go.textContent = T('执行中…', 'Running…');
+          const r = await proposals.commit(p.id, { approvedBy: 'user' });
+          if (r.ok) {
+            p.status = 'done';
+            p.message = r.message;
+            p.undo = (r.proposal && r.proposal.undo) || null;
+            paint();
+            try {
+              window.dispatchEvent(new CustomEvent('ai-action', { detail: { action: p.action, ok: true } }));
+            } catch (e) { /* 页面没监听就算了 */ }
+          } else {
+            /* 失败原因要留在卡片上：过期、预算超了、路径被拦，都各有各的话 */
+            addNotice(r.error || T('执行失败', 'Run failed'), 'warn');
+            p.status = 'failed';
+            paint();
+            bar.appendChild(h('span', { class: 'ai-prop-done' }, r.error || ''));
+          }
+        });
+
+        no.addEventListener('click', async () => {
+          stopCountdown();
+          go.disabled = true;
+          no.disabled = true;
+          await proposals.deny(p.id, '用户取消');
+          p.status = 'denied';
+          paint();
+        });
+
+        bar.appendChild(go);
+        bar.appendChild(no);
+
+        /* 自动档：可撤销的小动作先给你 3 秒，看得见、随时能停 */
+        if (!p.needsWord && p.status === 'pending' && proposals.getPolicy().mode === 'auto') {
+          const left = h('span', { class: 'ai-prop-count' }, '3');
+          const stop = h('button', { class: 'ai-prop-btn', type: 'button' }, T('停止', 'Stop'));
+          stop.addEventListener('click', async () => {
+            stopCountdown();
+            await proposals.deny(p.id, '用户停止倒计时');
+            p.status = 'denied';
+            paint();
+          });
+          bar.appendChild(h('span', { class: 'ai-prop-count-wrap' }, T('自动执行 ', 'auto in ') + '3s'));
+          bar.appendChild(stop);
+          let n = 3;
+          timer = setInterval(() => {
+            n -= 1;
+            left.textContent = String(n);
+            if (n <= 0) {
+              stopCountdown();
+              go.click();
+            }
+          }, 1000);
+        }
+      }
+    }
+
+    /* 撤销之后卡片上的按钮要换掉，简单重画一次可见的卡片 */
+    function pendingCardsRefresh() {
+      Array.prototype.slice.call(msgs.querySelectorAll('.ai-prop')).forEach((n) => n.remove());
+      shownCards.clear();
+      pendingCards();
     }
 
     function addUser(text) {
@@ -489,6 +755,7 @@
 
       const settings = await AIStore.load();
       applyModels(settings);
+      try { await ensureGuard(); } catch (e) { /* 闸门没配好也不挡住只读问答 */ }
       if (!AIStore.isConfigured(settings)) {
         state.running = false;
         composer.setBusy(false, false);
@@ -516,10 +783,17 @@
       }
 
       const bud = budgetFor(state.thinking, settings);
+      const policy = proposals ? proposals.getPolicy() : { mode: 'off' };
+      const canWrite = policy.mode !== 'off';
       const allowed = PERM_TOOLS[state.permission] || PERM_TOOLS.standard;
-      const allTools = AITools.makeTools({ API: window.API });
+      const allTools = AITools.makeTools({ API: window.API, proposals: proposals, navigate: navigateTo });
       const tools = {};
-      allowed.forEach((n) => { if (allTools[n]) tools[n] = allTools[n]; });
+      allowed.forEach((n) => {
+        /* 关掉动手之后提案工具也一起收起来：模型看不见，就不会提一张注定被拒的卡片 */
+        if (!canWrite && PROPOSE_TOOLS.indexOf(n) >= 0) return;
+        if (allTools[n]) tools[n] = allTools[n];
+      });
+      if (proposals) proposals.startTurn();
 
       /* 注意：AIStore 存的字段叫 key，agent 读的是 apiKey —— 这里对上，
          否则真实接口会因为没有 Authorization 头直接 401。 */
@@ -565,6 +839,7 @@
       ctx.tools = Object.keys(tools);
       ctx.permission = permLabel(state.permission);
       ctx.thinking = state.thinking;
+      ctx.canWrite = !!(tools.propose_action);
 
       startAnswer();
       let res;
@@ -585,6 +860,8 @@
                 ms: ev.ms,
                 error: ev.error
               });
+              /* 提案一落地就把卡片摆出来：用户不用等模型把话说完了才看到 */
+              if (ev.tool === 'propose_action' && ev.ok) pendingCards();
             } else if (ev.type === 'thought') {
               if (current && current.tl) current.tl.addThought(ev.text);
             } else if (ev.type === 'notice') {
@@ -685,6 +962,8 @@
       composer,
       clear() {
         msgs.innerHTML = '';
+        shownCards.clear();
+        if (proposals) proposals.newSession();
         state.history = [];
         state.session = null;
         state.lastResult = null;
@@ -710,6 +989,10 @@
       },
       newSession() {
         msgs.innerHTML = '';
+        /* 新会话清空提案队列：上一个会话没确认的动作不能跨会话留着，
+           否则「我上次好像点过什么」就成了猜谜。配额也从零开始。 */
+        shownCards.clear();
+        if (proposals) proposals.newSession();
         state.session = {
           id: Date.now().toString(36),
           title: '新会话',
@@ -735,6 +1018,9 @@
       /* 挂载时叫它：恢复上次的界面偏好（强度 / 权限 / 模型）与上次那个会话。
          记忆是锦上添花——读失败或会话文件没了就按默认值继续，不报错。 */
       async boot() {
+        /* 先把闸门的三个真值拿到手：万一用户一进来就让你动手，
+           配置还没到的话路径检查会漏判 */
+        try { await ensureGuard(); } catch (e) { /* 拿不到就让每次提议自己去查 */ }
         let prefs = null;
         try { prefs = await AIStore.loadUi(); } catch (e) { prefs = null; }
         if (prefs) {
@@ -742,6 +1028,8 @@
           this.setThinking(prefs.thinking);
           this.setPermission(prefs.permission);
           if (prefs.model) this.setModel(prefs.model);
+          if (prefs.agent && proposals) proposals.setPolicy(prefs.agent);
+          paintFoot();
         }
         if (ui.lastSession) {
           try {

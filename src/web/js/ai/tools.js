@@ -109,9 +109,10 @@
     return out;
   }
 
-  /* 构建工具表：deps = { API }，测试时可塞假的 */
+  /* 构建工具表：deps = { API, proposals, navigate }，测试时可塞假的 */
   function makeTools(deps) {
     const API = deps.API;
+    const proposals = deps.proposals;
 
     const table = {
       list_dir: {
@@ -332,6 +333,180 @@
           return fit({ count: (r || []).length, items: list }, CAP);
         },
         summary: (args, r) => `上次整理 · 共 ${r.count} 条记录`
+      },
+
+      /* ------------------------------------------------ 动作：提议 / 撤回 */
+      /* 这是模型唯一能「动手」的入口，而它动手的方式只是「递一个提案」。
+         真正执行在 proposals.commit()，那个函数不在工具表里，模型调不到。 */
+      propose_action: {
+        label: '提议动作',
+        run: async (args) => {
+          if (!proposals) throw new Error('动作通道没有接上（内部错误）');
+          const action = String((args && args.action) || '').trim();
+          if (!action) throw new Error('缺少参数 action（动作名，见动作目录）');
+          const r = await proposals.propose({
+            action,
+            args: (args && args.args) || {},
+            reason: String((args && args.reason) || '')
+          });
+          if (!r.ok) throw new Error(r.error);
+          const p = r.proposal;
+          return fit({
+            ok: true,
+            proposal_id: p.id,
+            status: r.auto ? 'countdown' : 'waiting_user',
+            action: p.action,
+            label: p.label,
+            count: p.card.count,
+            size: fmtBytes(p.card.bytes),
+            risk: p.risk,
+            reversible: p.reversible,
+            summary: p.card.summary,
+            note: r.auto
+              ? '卡片已出现，3 秒后自动执行。用户在倒计时里点「取消」就会停下。'
+              : '卡片已放到界面等用户点确认。现在不要说「已经完成」，只能说「已提交，等你确认」。'
+          }, CAP);
+        },
+        summary: (args, r) => `提议 ${args.action} · ${r.count} 项`
+      },
+
+      list_proposals: {
+        label: '待确认提案',
+        run: async () => {
+          if (!proposals) return { count: 0, items: [] };
+          const list = proposals.list().map((p) => ({
+            id: p.id,
+            action: p.action,
+            summary: p.card.summary,
+            count: p.card.count,
+            exe_in: Math.max(0, Math.round((p.expires - Date.now()) / 1000)) + 's'
+          }));
+          return fit({ count: list.length, items: list }, CAP);
+        },
+        summary: (args, r) => `待确认 ${r.count} 个`
+      },
+
+      cancel_proposal: {
+        label: '撤回提案',
+        run: async (args) => {
+          if (!proposals) throw new Error('动作通道没有接上');
+          const r = await proposals.cancel(String((args && args.id) || ''));
+          if (!r.ok) throw new Error(r.error);
+          return { ok: true, id: args.id };
+        },
+        summary: (args) => `撤回 ${args.id}`
+      },
+
+      /* 让模型能主动把用户带到某个页面（只切页面，不改任何东西） */
+      navigate: {
+        label: '跳转页面',
+        run: async (args) => {
+          const page = String((args && args.page) || '').trim();
+          const okPages = ['organize', 'tools', 'search', 'apps', 'archive', 'clean', 'settings', 'ai'];
+          if (okPages.indexOf(page) < 0) throw new Error('page 只能是 ' + okPages.join(' / '));
+          if (typeof deps.navigate === 'function') deps.navigate(page);
+          else location.hash = '#' + page;
+          return { page, opened: true };
+        },
+        summary: (args) => `跳转 ${args.page}`
+      },
+
+      /* ---------------------------------------------------- 只为动手做准备 */
+      archive_entries: {
+        label: '压缩包内容',
+        run: async (args) => {
+          const path = String((args && args.path) || '').trim();
+          if (!path) throw new Error('缺少参数 path（压缩包完整路径）');
+          const want = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const info = await withTimeout(API.archiveOpen(path, args.password || null), 25000, '读取压缩包');
+          const entries = ((info && info.entries) || []).map((e) => ({
+            name: e.name,
+            dir: e.dir === true,
+            size: e.dir ? undefined : fmtBytes(e.size)
+          }));
+          return pageFit({
+            path,
+            format: info && info.format,
+            encrypted: !!(info && info.encrypted),
+            total_size: fmtBytes(info && info.totalSize),
+            count: entries.length
+          }, entries, off, want);
+        },
+        summary: (args, r) => `压缩包 ${args.path} · ${r.count} 项`
+      },
+
+      /* 清理类动作需要真实路径作为参数；这个工具给出「清什么」的候选 */
+      clean_candidates: {
+        label: '清理候选',
+        run: async (args) => {
+          const kind = String((args && args.kind) || 'cache').trim().toLowerCase();
+          if (kind === 'shots') {
+            const days = Math.min(Math.max(Number(args.days) || 30, 1), 3650);
+            const r = await withTimeout(API.engine('shots.scan', { days }), 20000, '扫描截图');
+            const items = ((r && r.items) || []).map((it) => ({
+              path: it.path,
+              size: fmtBytes(it.size),
+              age: fmtAge(it.mtime),
+              shot: it.shot === true
+            }));
+            return pageFit({ kind, days, total: items.length, size: fmtBytes(r && r.size) }, items, 0, 25);
+          }
+          const r = await withTimeout(API.engine('cache.list', { include_custom: true }), 15000, '读取缓存清单');
+          const out = [];
+          for (const g of (r && r.groups) || []) {
+            const its = (g.items || []).filter((it) => it.exists !== false);
+            if (!its.length) continue;
+            const paths = [];
+            for (const it of its) {
+              for (const p of (it.paths || (it.path ? [it.path] : []))) paths.push(p);
+            }
+            out.push({
+              group: g.name || g.title || g.key || '',
+              level: its[0] && its[0].level,
+              paths: paths.slice(0, 6),
+              count: paths.length,
+              size: fmtBytes(its.reduce((n, it) => n + (Number(it.size) || 0), 0))
+            });
+          }
+          return fit({ kind, total_size: fmtBytes(r && r.total_size), groups: out.slice(0, 8) }, CAP);
+        },
+        summary: (args, r) => `清理候选 ${args.kind || 'cache'} · ${(r.groups || []).length} 组`
+      },
+
+      settings_read: {
+        label: '读设置',
+        run: async () => {
+          const r = await withTimeout(API.engine('settings.get', {}), TIMEOUT, '读取设置');
+          const keep = ['conflict_policy', 'recursive_depth', 'default_recursive', 'default_content',
+            'log_keep_days', 'shot_keep_days', 'shot_min_kb', 'shot_auto', 'cache_auto',
+            'shot_to_trash', 'cache_to_trash', 'tray_enabled', 'close_to_tray', 'close_action'];
+          const out = {};
+          for (const k of keep) if (r && r[k] !== undefined) out[k] = r[k];
+          const auto = await withTimeout(API.getAutostart().catch(() => null), TIMEOUT, '读开机启动').catch(() => null);
+          const sch = await withTimeout(API.scheduleGet().catch(() => null), TIMEOUT, '读定时任务').catch(() => null);
+          return fit({
+            settings: out,
+            autostart: auto,
+            schedule: sch ? { enabled: sch.enabled, time: sch.time, days: sch.days, cache: sch.cache, screenshots: sch.screenshots, exists: sch.exists } : null
+          }, CAP);
+        },
+        summary: (args, r) => '设置 ' + Object.keys(r.settings || {}).length + ' 项'
+      },
+
+      search_roots: {
+        label: '索引清单',
+        run: async () => {
+          const r = await withTimeout(API.engine('search.status', {}), TIMEOUT, '读取索引');
+          const items = ((r && r.entries) || []).slice(0, 8).map((it) => ({
+            root: it.root || it.path,
+            files: it.files,
+            ok: !it.why && it.exists !== false,
+            why: it.why || ''
+          }));
+          return fit({ count: (r && r.count) || items.length, indexed: r && r.indexed, items }, CAP);
+        },
+        summary: (args, r) => `索引 ${r.count} 个目录`
       }
     };
 

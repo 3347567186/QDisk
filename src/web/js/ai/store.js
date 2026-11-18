@@ -55,7 +55,11 @@
     permission: 'standard',
     model: '',
     lastSession: '',
-    railClosed: false
+    railClosed: false,
+    /* 动手策略（档位 / 类别开关 / 预算上限）。字段语义由 proposals.js 的
+       normalizePolicy 解释，这里只原样存取——策略改了界面要立刻生效，
+       所以不在这里做二次归一，免得两处规则打架。默认空对象 → 归一成 off。 */
+    agent: {}
   };
 
   const THINK_IDS = ['simple', 'medium', 'deep'];
@@ -71,6 +75,7 @@
     if (typeof raw.model === 'string') out.model = raw.model.trim().slice(0, 120);
     if (typeof raw.lastSession === 'string') out.lastSession = raw.lastSession.trim().slice(0, 80);
     if (typeof raw.railClosed === 'boolean') out.railClosed = raw.railClosed;
+    if (raw.agent && typeof raw.agent === 'object') out.agent = raw.agent;
     return out;
   }
 

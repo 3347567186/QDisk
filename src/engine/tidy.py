@@ -11132,7 +11132,37 @@ def _engine_files_delete(params):
     confirm = _engine_get(params, "confirm", False, bool)
 
     if not confirm:
-        return {"dry_run": True, "paths": paths, "mode": mode}
+        # 预演也要给足信息：每一项多大、为什么会被拒。AI 的审批卡片直接
+        # 用这份结果，界面上的「共 X 项 / Y GB」就是这个和，不另算一遍。
+        # 目录体积用 _tree_size 但限制文件数——预演不能因为一个 20 万文件的
+        # 目录卡住整个引擎（引擎是单线程的，卡住等于整机界面停摆）。
+        items = []
+        failed = []
+        total = 0
+        for p in paths:
+            why = _files_delete_guard_why(p)
+            exists = os.path.exists(p)
+            if not why and not exists:
+                why = "路径不存在"
+            size = None
+            files = 0
+            partial = False
+            if not why:
+                try:
+                    size, files = _tree_size(p, 20000)
+                    total += size
+                    if os.path.isdir(p) and files >= 20000:
+                        partial = True
+                except OSError:
+                    size = None
+            if why:
+                failed.append({"target": p, "why": why})
+            items.append({"path": p, "size": size, "files": files,
+                          "exists": exists, "why": why,
+                          "partial": partial})
+        return {"dry_run": True, "paths": paths, "mode": mode,
+                "items": items, "failed": failed,
+                "total_size": total, "count": len(paths) - len(failed)}
 
     deleted, failed, todo = [], [], []
     for p in paths:

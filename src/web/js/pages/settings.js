@@ -70,6 +70,7 @@
         theme: normTheme(cfg.theme),
         lang: normLang(cfg.lang),
         closeAction: normClose(cfg.close_action),
+        agentDraft: null,
         autostart: false,
         autostartBusy: false,
         loading: true,
@@ -812,6 +813,70 @@
               ? h('span', { class: 'badge', text: T('已填写，未测试', 'Set, untested') })
               : h('span', { class: 'badge warn', text: T('未配置', 'Not configured') })));
 
+        /* ---- 能动手到什么程度（默认关闭） ---- */
+        const pol = state.agentDraft
+          || (window.AIProposals ? AIProposals.defaultPolicy() : { mode: 'off', cats: {} });
+        const MODE_TIP = {
+          off: T('助手只有只读工具，任何能改文件的能力都不发给模型', 'Read-only: nothing that could change files is offered to the model'),
+          confirm: T('每个动作先变成一张卡片，你点了「执行」才真的动', 'Every action becomes a card; nothing runs until you click'),
+          auto: T('整理、解压这类能撤销的直接执行，卡片上留 3 秒停止', 'Reversible actions run after a 3-second stop window'),
+          full: T('连删除到回收站也自动；撤不回来的仍然要你点一下', 'Even recycle-bin deletes run; irreversible ones still need a click')
+        };
+        const CAT_ZH = { organize: '整理', files: '文件', archive: '压缩包', clean: '清理', apps: '程序', search: '索引', settings: '设置' };
+
+        function saveAgent(patch) {
+          const base = state.agentDraft || pol;
+          const next = window.AIProposals
+            ? AIProposals.normalizePolicy(Object.assign({}, base, patch))
+            : Object.assign({}, base, patch);
+          state.agentDraft = next;
+          /* 这一栏不进「保存」，改一下立刻生效：它是权限开关，不该有「改了没保存」的中间态 */
+          AIStore.saveUi({ agent: next });
+          paint();
+        }
+
+        const modeBtns = (window.AIProposals ? AIProposals.MODES : ['off', 'confirm', 'auto', 'full']).map((m) => h('button', {
+          class: 'ai-mode' + (m === pol.mode ? ' on' : '') + (m !== 'off' ? ' armed' : ''),
+          type: 'button',
+          'aria-pressed': m === pol.mode ? 'true' : 'false',
+          onclick: () => saveAgent({ mode: m })
+        }, h('span', { text: { off: T('关闭', 'Off'), confirm: T('逐次确认', 'Confirm'), auto: T('自动', 'Auto'), full: T('放手', 'Full') }[m] })));
+
+        const catBoxes = (window.AIProposals ? AIProposals.CATS : Object.keys(CAT_ZH)).map((c) => h('label', { class: 'check' },
+          h('input', {
+            type: 'checkbox',
+            checked: !!(pol.cats && pol.cats[c]),
+            disabled: pol.mode === 'off',
+            onchange: (e) => {
+              const cats = Object.assign({}, pol.cats, { [c]: e.target.checked });
+              saveAgent({ cats });
+            }
+          }),
+          h('span', { text: CAT_ZH[c] || c })));
+
+        const numIn = (key, lo, hi, def) => h('input', {
+          class: 'input', type: 'number', min: String(lo), max: String(hi), value: String(pol[key] || def),
+          onchange: (e) => saveAgent({ [key]: Math.max(lo, Math.min(hi, Number(e.target.value) || def)) })
+        });
+
+        const agentBlock = h('div', { class: 'agent-box' + (pol.mode === 'off' ? '' : ' on') },
+          h('div', { class: 'agent-head' },
+            h('div', null,
+              h('div', { class: 'agent-title', text: T('允许 AI 动手', 'Let the AI act') }),
+              h('div', { class: 'desc', text: MODE_TIP[pol.mode] || '' })),
+            h('div', { class: 'spacer' }),
+            h('span', { class: 'badge' + (pol.mode === 'off' ? '' : (pol.mode === 'full' ? ' warn' : ' ok')), text: pol.mode === 'off' ? T('只读', 'Read-only') : T('已开启', 'Enabled') })
+          ),
+          h('div', { class: 'ai-modes' }, ...modeBtns),
+          h('div', { class: 'agent-cats' }, ...catBoxes),
+          h('div', { class: 'agent-limits' },
+            h('div', { class: 'field' }, h('label', { text: T('每轮最多提案', 'Proposals per turn') }), numIn('maxOpsPerTurn', 1, 10, 2)),
+            h('div', { class: 'field' }, h('label', { text: T('每会话最多执行', 'Executions per session') }), numIn('maxOpsPerSession', 1, 200, 30)),
+            h('div', { class: 'field' }, h('label', { text: T('单次最多项目', 'Items per action') }), numIn('maxItems', 10, 20000, 200))
+          ),
+          h('div', { class: 'desc', text: T('每次执行都写进 ai\\journal 审计日志；把这一栏关掉，助手立刻退回只读', 'Every run is journalled under ai\\journal; turning this off returns the assistant to read-only') })
+        );
+
         const body = h('div', { class: 'stack' },
           h('div', { class: 'grid-2' },
             h('div', { class: 'field' },
@@ -881,6 +946,7 @@
           test && test.ok && test.hint
             ? h('div', { class: 'small muted', text: test.hint })
             : null,
+          agentBlock,
           h('div', { class: 'action-bar' },
             testBadge,
             h('div', { class: 'spacer' }),
@@ -910,6 +976,16 @@
           const s = await AIStore.load(true);
           state.ai = s;
           state.aiDraft = Object.assign({}, s);
+          /* 动手开关存的是 ai_ui.agent（界面偏好），不是 AI 配置本身：
+             它跟「哪个模型」无关，换模型不该把权限一起重置 */
+          try {
+            const ui = await AIStore.loadUi();
+            state.agentDraft = window.AIProposals
+              ? AIProposals.normalizePolicy(ui && ui.agent)
+              : null;
+          } catch (e2) {
+            state.agentDraft = null;
+          }
           const p = AIStore.PROVIDERS.find((x) => x.id !== 'custom' && x.endpoint === s.endpoint);
           state.aiProv = p ? p.id : 'custom';
         } catch (e) {
