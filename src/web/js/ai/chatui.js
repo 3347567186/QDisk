@@ -425,11 +425,19 @@
         onclick: () => { retryLast(); }
       }, T('重试', 'Retry')));
       if (res.usage) {
+        /* 右下角只留三样：思考时长、这轮 token 用量、缓存命中率。
+           命中率只给百分比，写「命中率」三个字反而要多读一遍。 */
+        const u = res.usage;
         const parts = [];
-        if (res.usage.steps) parts.push(res.usage.steps + T(' 步', ' steps'));
-        if (res.usage.elapsed_ms) parts.push((res.usage.elapsed_ms / 1000).toFixed(1) + 's');
-        if (res.usage.prompt_tokens) parts.push(res.usage.prompt_tokens + ' in / ' + (res.usage.completion_tokens || 0) + ' out');
-        if (parts.length) bar.appendChild(h('span', { class: 'ai-usage' }, parts.join(' · ')));
+        if (u.elapsed_ms) parts.push((u.elapsed_ms / 1000).toFixed(1) + 's');
+        const tokens = (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0);
+        if (tokens) parts.push(tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k token' : tokens + ' token');
+        /* 服务端没给这个字段就整段省略：显示 0% 等于替它宣称「没命中」 */
+        if (u.prompt_cache_hit_tokens !== undefined && Number(u.prompt_tokens) > 0) {
+          const hit = Number(u.prompt_cache_hit_tokens) || 0;
+          parts.push(Math.round((hit / Number(u.prompt_tokens)) * 100) + '%');
+        }
+        if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: T('缓存命中率 = 命中缓存的提示 token / 本步提示 token', 'Cache hit rate = cached prompt tokens / prompt tokens') }, parts.join(' · ')));
       }
       c.extra.appendChild(bar);
 

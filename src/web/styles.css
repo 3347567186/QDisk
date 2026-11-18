@@ -2393,22 +2393,21 @@ body[data-motion="off"] .shot-flag { animation: none; }
   border-radius: var(--radius-lg); padding: 8px 11px; max-width: 86%;
   white-space: pre-wrap; word-break: break-word;
 }
-/* 回答正文：比思考更大、更亮，是这一屏真正要读的东西 */
-.ai-msg-body { font-size: 14px; line-height: 1.75; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
+/* 回答正文：正常正文字号与字重。1.27.4 试过 14–15px 加粗，看着像标题，压回 13px 常规 */
+.ai-msg-body { font-size: var(--fs-body); line-height: 1.72; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
 /* 对话正文可选中复制（全局 * 是禁选的，这里显式放开，和思考正文一致） */
 .ai-msg-body, .ai-msg-body * { -webkit-user-select: text; user-select: text; }
 .ai-msg-body { cursor: text; }
 .ai-msg-body.degraded { color: var(--text-2); }
-/* 结果正文是这一屏的主角：15px、最深的墨色、首行再加一档字重，让「结论先行」
-   在视觉上成立。对照思考那几行（11.5px 次级灰），层级一眼分得开。 */
+/* 结果正文：和正文同字号同字重，靠颜色（--text-1）与位置区分，不靠放大加粗。
+   思考那几行是 11.5px 次级灰，对照之下已经够了。 */
 .ai-answer {
   padding-right: 2px;
-  font-size: 15px;
-  line-height: 1.78;
-  letter-spacing: .003em;
+  font-size: var(--fs-body);
+  font-weight: 400;
+  line-height: 1.72;
   color: var(--text-1);
 }
-.ai-answer::first-line { font-weight: 600; }
 /* 兜底回答（degraded）不是结论，退回正文尺寸与次级色，别假装是答案 */
 .ai-answer.degraded { font-size: var(--fs-body); line-height: 1.72; color: var(--text-2); }
 

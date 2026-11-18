@@ -642,7 +642,7 @@
       let trace = [];
       let calledTools = [];
       let steps = 0;
-      let usageTotal = { prompt_tokens: 0, completion_tokens: 0 };
+      let usageTotal = { prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0 };
       let compressed = 'none';
       const followUps = [];
 
@@ -723,6 +723,9 @@
         if (step.usage) {
           usageTotal.prompt_tokens += Number(step.usage.prompt_tokens) || 0;
           usageTotal.completion_tokens += Number(step.usage.completion_tokens) || 0;
+          /* 命中率：DeepSeek 用 prompt_cache_hit_tokens，OpenAI 兼容口放在 prompt_tokens_details.cached_tokens */
+          usageTotal.prompt_cache_hit_tokens += Number(step.usage.prompt_cache_hit_tokens ||
+            (step.usage.prompt_tokens_details && step.usage.prompt_tokens_details.cached_tokens) || 0) || 0;
         }
         if (stop.isStopped()) return stoppedResult();
 

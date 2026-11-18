@@ -248,10 +248,9 @@
        超宽直接省略号；完整文字仍留在 DOM 里，复制按钮与读屏都拿得到全量。 */
     function newRow() {
       curText = UIx.h('span', { class: 'tl-thought-text' });
-      curRow = UIx.h('div', { class: 'tl-thought-row', 'data-streaming': '' },
-        UIx.h('span', { class: 'tl-tag', 'aria-hidden': 'true' }, o.thoughtLabel),
-        curText
-      );
+      /* 行首不再挂「思考 ·」—— 每行都来一次，读起来全是噪音；
+         整块的「正在思考… / 思考了 N 秒」在标题行已经说过一次了。 */
+      curRow = UIx.h('div', { class: 'tl-thought-row', 'data-streaming': '' }, curText);
       thoughtWrap.appendChild(curRow);
       thoughtCount += 1;
     }
