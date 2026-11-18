@@ -14,7 +14,12 @@
 
   const DEFAULT_MAX_STEPS = 6;
   const DEFAULT_TURN_BUDGET = 8000;      // token（按字符数/2 估算）
-  const DEFAULT_CALL_TIMEOUT = 20000;
+  /* 20s 只够 chat 小模型；推理模型（deepseek-v4 系、o 系）实测单轮可到 70s+，
+     超时会被当成失败，用户看到的是「AI 没能给出结论」 */
+  const DEFAULT_CALL_TIMEOUT = 90000;
+  /* 原来硬编码 700：300 字中文 + evidence/suggest 会被截断成「JSON 没有闭合」 */
+  const DEFAULT_REPLY_TOKENS = 1400;
+  const MAX_REPLY_TOKENS = 8192;
   const REPLY_MAX_CHARS = 600;
   const KEEP_TURNS = 3;                  // 原文保护的最近轮数
 
@@ -62,6 +67,16 @@
       }
     }
     return { error: 'JSON 没有闭合' };
+  }
+
+  /** 弱模型（glm-4-flash 这类）会把回答直接写成散文，怎么要求都不给 JSON。
+   *  这时别硬失败：把整段文字当 answer 兜住，用户至少能看到答案。
+   *  只在「完全没有 { 的纯文本」时启用，避免把半截 JSON 猜错。 */
+  function salvageProse(text) {
+    const s = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+    if (!s || s.indexOf('{') >= 0) return null;
+    if (s.length < 4 || s.length > 1600) return null;
+    return { answer: s.slice(0, 1200), evidence: [], suggest: [] };
   }
 
   /* 参数类型/范围校验（方案 §7 第 3 条） */
@@ -213,12 +228,21 @@
     const budget = Number(settings.turnBudget) || DEFAULT_TURN_BUDGET;
     const callTimeout = Number(settings.callTimeout) || DEFAULT_CALL_TIMEOUT;
 
-    function buildBody(messages, stream) {
+    /** 单次回复的 token 上限：按「回复字数 × 1.6 + 结构余量」估，
+     *  思考模式下回复更长（replyMax 由调用方按强度传入）。 */
+    function replyTokens() {
+      const explicit = Number(settings.maxTokens);
+      if (explicit > 0) return Math.max(512, Math.min(MAX_REPLY_TOKENS, Math.round(explicit)));
+      const chars = Number(settings.replyMax) || REPLY_MAX_CHARS;
+      return Math.max(DEFAULT_REPLY_TOKENS, Math.min(MAX_REPLY_TOKENS, Math.round(chars * 1.6) + 320));
+    }
+
+    function buildBody(messages, stream, maxTokens) {
       const body = {
         model: settings.model || '',
         messages,
         temperature: typeof settings.temperature === 'number' ? settings.temperature : 0.2,
-        max_tokens: 700,
+        max_tokens: maxTokens || replyTokens(),
         stream: !!stream
       };
       if (stream) body.stream_options = { include_usage: true };
@@ -231,10 +255,12 @@
      *  正文 Delta 先攒起来，等这一轮结束再当完整 JSON 解析。 */
     async function callModel(messages, ctxTools, calledTools, onEvent) {
       let repairLeft = 1;
+      let tokenCap = replyTokens();
       for (;;) {
         let sseBuf = '';
         let sseText = '';
         let sawSse = false;
+        let sseFinish = '';
         let streamUsage = null;
         const pump = (piece) => {
           if (typeof piece !== 'string' || !piece) return;
@@ -255,6 +281,7 @@
             }
             const ch = obj.choices && obj.choices[0];
             const d = ch && ch.delta;
+            if (ch && ch.finish_reason) sseFinish = ch.finish_reason;
             if (!d) continue;
             if (d.reasoning_content && onEvent) onEvent({ type: 'thought', text: d.reasoning_content });
             if (d.content) sseText += d.content;
@@ -264,7 +291,7 @@
         const res = await transport({
           url: settings.endpoint || '',
           headers: settings.apiKey ? { Authorization: 'Bearer ' + settings.apiKey } : {},
-          body: JSON.stringify(buildBody(messages, wantStream)),
+          body: JSON.stringify(buildBody(messages, wantStream, tokenCap)),
           timeoutMs: callTimeout,
           onDelta: wantStream ? pump : null
         });
@@ -280,9 +307,11 @@
         let choice = null;
         let content = '';
         let usage = {};
+        let finish = '';
         if (streamed) {
           content = sseText;
           usage = streamUsage || {};
+          finish = sseFinish;
         } else {
           try {
             payload = JSON.parse(String((res && res.body) || ''));
@@ -294,18 +323,29 @@
           if (Array.isArray(content)) {
             content = content.map((c) => (typeof c === 'string' ? c : (c && c.text) || '')).join('');
           }
+          finish = (choice && choice.finish_reason) || '';
           /* 不认流式时，推理模型会把思考放在 reasoning_content 里：
              直接抛给界面，别浪费掉 */
           const reasoning = choice && choice.message && choice.message.reasoning_content;
           if (reasoning && onEvent) onEvent({ type: 'thought', text: reasoning });
-          if (!content && reasoning) {
-            // 推理模型偶尔只把正文放在 reasoning_content 里
-            content = reasoning;
-          }
+          /* 只有当 reasoning_content 本身就是合法 JSON 时才当正文用；
+             原先是无条件顶替，结果把一段思考文字塞给解析器，必然格式错 */
+          if (!content && reasoning && !extractJson(reasoning).error) content = reasoning;
           usage = (payload && payload.usage) || {};
         }
         const parsed = extractJson(content);
         if (parsed.error) {
+          /* 被 max_tokens 截断：放宽长度重来，别算进「格式修一次」的配额 */
+          if (finish === 'length' && tokenCap < MAX_REPLY_TOKENS) {
+            tokenCap = Math.min(MAX_REPLY_TOKENS, tokenCap * 2);
+            messages.push({ role: 'assistant', content: String(content || '').slice(0, 200) });
+            messages.push({
+              role: 'user',
+              content: '上次输出达到长度上限被截断了。请更简短：answer 不超过 150 字，suggest 最多 3 条，只输出一个完整的 JSON 对象。'
+            });
+            if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出太长被截断，正在放宽长度重试' });
+            continue;
+          }
           if (repairLeft > 0) {
             repairLeft -= 1;
             messages.push({ role: 'assistant', content: String(content || '').slice(0, 400) });
@@ -315,6 +355,16 @@
             });
             if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出格式不对，正在让模型改一次' });
             continue;
+          }
+          /* 改了一次还是纯散文（glm-4-flash 这类弱模型根本不认 JSON 约定）：
+             与其抛错让整轮作废，不如把这段文字当回答显示 —— 用户要的是答案 */
+          const prose = salvageProse(content);
+          if (prose) {
+            const sv = validateStep(prose, ctxTools, calledTools);
+            if (sv.ok) {
+              if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型没按 JSON 输出，已按普通回答显示' });
+              return Object.assign({ usage, raw: prose, salvaged: true }, sv);
+            }
           }
           throw Object.assign(new Error('模型输出无法解析：' + parsed.error), { code: 'bad_output' });
         }
@@ -352,7 +402,10 @@
         if (m && m.role && m.content) messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content) });
       });
       const ctxLine = prompt.contextLine(ctx);
-      messages.push({ role: 'user', content: (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '') });
+      /* 末尾再提醒一次格式：弱模型对 system 里的长规则不敏感，
+         贴在生成位置前的这句它才看得见 */
+      const tail = prompt.OUTPUT_REMINDER || '';
+      messages.push({ role: 'user', content: (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '') + tail });
 
       const trace = [];
       const calledTools = [];

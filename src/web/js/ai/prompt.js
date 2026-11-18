@@ -61,12 +61,20 @@
   ].join('\n');
 
   const FORMAT = [
-    '【输出格式】每次只输出一个 JSON 对象，不要代码块、不要解释文字。二选一：',
-    '需要查东西：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
+    '【输出格式·最高优先级】',
+    '只输出一个 JSON 对象。第一个字符必须是 {，最后一个字符必须是 }。',
+    '不要代码块围栏，不要解释，不要「好的」「以下是」，JSON 前后不要有任何文字。',
+    '二选一，不允许出现第三种形状：',
+    '要查东西：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
     '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
     '回答要求：中文，不超过 300 字，结论先行，能用列表就用列表（每行以「· 」开头）。',
-    'evidence 只能引用这一轮真正调用过的工具；suggest 只放你确实建议用户去处理的具体路径，没有就给空数组。'
+    'evidence 只能引用这一轮真正调用过的工具；suggest 只放你确实建议用户去处理的具体路径，没有就给空数组。',
+    '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
+
+  /* 贴在最后一条用户消息末尾：模型越靠近生成位置越守格式，
+     弱模型（glm-4-flash）光靠 system 里的要求会当没看见。 */
+  const OUTPUT_REMINDER = '\n\n（只输出一个 JSON 对象，不要代码块、不要解释）';
 
   /* 按页面裁剪工具（对应方案 §4：工具越多选得越差） */
   const PAGE_TOOLS = {
@@ -123,7 +131,7 @@
     return bits.length ? '【上下文】' + bits.join(' · ') : '';
   }
 
-  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText };
+  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText, OUTPUT_REMINDER, FORMAT };
   root.AIPrompt = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof window !== 'undefined' ? window : globalThis);

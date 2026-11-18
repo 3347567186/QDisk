@@ -804,7 +804,9 @@
           ? h('span', { class: 'badge', text: T('测试中…', 'Testing…') })
           : (test
             ? (test.ok
-              ? h('span', { class: 'badge ok', text: T('连接正常', 'Connected') + ' · ' + test.ms + ' ms' })
+              ? (test.warn
+                ? h('span', { class: 'badge warn', text: T('连通，但格式不合规', 'Connected, format mismatch') })
+                : h('span', { class: 'badge ok', text: T('连接正常', 'Connected') + ' · ' + test.ms + ' ms' }))
               : h('span', { class: 'badge warn', text: T('连接失败', 'Failed') }))
             : (AIStore.isConfigured(d)
               ? h('span', { class: 'badge', text: T('已填写，未测试', 'Set, untested') })
@@ -870,6 +872,9 @@
           test && !test.ok
             ? h('div', { class: 'small', style: 'color:var(--danger)', text: test.msg })
             : null,
+          test && test.ok && test.warn
+            ? h('div', { class: 'small', style: 'color:var(--warn)', text: test.warn })
+            : null,
           test && test.ok && test.hint
             ? h('div', { class: 'small muted', text: test.hint })
             : null,
@@ -929,25 +934,24 @@
         }
       }
 
-      /* 只发一次最小请求：能拿到 200 且 choices 有内容就算通。
-         不校验 JSON 模式——部分兼容接口不认 response_format。 */
+      /* 分两步：① 最小请求确认连通；② 带 response_format 要一次 JSON。
+         只做①的话，模型不认 JSON 约定也显示「连接正常」，
+         用户到对话页才撞上「输出格式不对」，等于测试骗了自己。 */
       async function testAi() {
         const d = state.aiDraft;
         if (state.aiTesting || !d) return;
         if (!d.endpoint || !d.model) return toast(T('先填接口地址与模型名', 'Fill endpoint and model first'), 'error');
         state.aiTesting = true; state.aiTest = null; paint();
         const t0 = Date.now();
+        const send = (body) => API.aiHttp({
+          url: d.endpoint,
+          headers: d.key ? { Authorization: 'Bearer ' + d.key } : {},
+          body: JSON.stringify(Object.assign({ model: d.model, stream: false }, body)),
+          /* 推理模型实测单轮可到 70s+，20s 会把它误判成连不通 */
+          timeoutMs: 90000
+        });
         try {
-          const res = await API.aiHttp({
-            url: d.endpoint,
-            headers: d.key ? { Authorization: 'Bearer ' + d.key } : {},
-            body: JSON.stringify({
-              model: d.model,
-              messages: [{ role: 'user', content: 'ping' }],
-              max_tokens: 8, stream: false
-            }),
-            timeoutMs: 20000
-          });
+          const res = await send({ messages: [{ role: 'user', content: 'ping' }], max_tokens: 8 });
           const ms = (res && res.elapsed_ms) || (Date.now() - t0);
           if (!res || res.status !== 200) {
             const detail = String((res && res.body) || '').slice(0, 200);
@@ -962,6 +966,7 @@
             } else {
               state.aiTest = {
                 ok: true, ms,
+                warn: await jsonProbe(send),
                 hint: String(content).trim().slice(0, 80) || T('（返回为空内容，但连接是通的）', '(empty reply, but the connection works)')
               };
             }
@@ -970,6 +975,34 @@
           state.aiTest = { ok: false, msg: errText(e) };
         } finally {
           state.aiTesting = false; paint();
+        }
+      }
+
+      /** 按对话时同样的要求试一次 JSON 输出；不合规就返回一句人话提示 */
+      async function jsonProbe(send) {
+        const messages = [
+          { role: 'system', content: '只输出一个 JSON 对象，其它什么都不要：{"ok":true}' },
+          { role: 'user', content: 'reply' }
+        ];
+        try {
+          let res = await send({ messages, max_tokens: 60, response_format: { type: 'json_object' } });
+          /* 有的兼容端点不认 response_format，去掉再试一次，别误报 */
+          if (!res || res.status !== 200) res = await send({ messages, max_tokens: 60 });
+          if (!res || res.status !== 200) return '';
+          let payload = null;
+          try { payload = JSON.parse(String(res.body || '')); } catch (e) { return ''; }
+          const ch = payload && payload.choices && payload.choices[0];
+          const text = String((ch && ch.message && ch.message.content) || '')
+            .trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+          if (!text) {
+            return T('端点这次返回了空内容（推理模型可能把话放在 reasoning_content，或 max_tokens 给小了），对话会不稳定',
+              'Empty content this time; replies may be unstable');
+          }
+          if (text.indexOf('{') >= 0) return '';
+          return T('这个模型不按 JSON 输出（它回的是「' + text.slice(0, 20) + '…」），对话会反复报「输出格式不对」。建议换 deepseek-chat、glm-4.5 这类，或者先关掉下面的「要求 JSON 模式」再试',
+            'This model ignores the JSON contract, so chats will keep failing. Switch models, or turn off "Request JSON mode"');
+        } catch (e) {
+          return '';
         }
       }
 

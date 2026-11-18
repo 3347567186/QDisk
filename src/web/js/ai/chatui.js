@@ -469,7 +469,10 @@
         model: payload.model || settings.model,
         apiKey: settings.key,
         maxSteps: bud.steps,
-        turnBudget: bud.budget
+        turnBudget: bud.budget,
+        /* 回复上限跟着思考强度走：agent 用它算 max_tokens，
+           原来固定 700 会把长回答截成半截 JSON */
+        replyMax: bud.replyMax
       });
 
       const agent = AIAgent.createAgent({
