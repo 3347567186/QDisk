@@ -386,29 +386,62 @@ fn save_text(name: String, content: String) -> Result<Option<String>, String> {
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
+/// 在资源管理器里定位一个位置：目录就打开它，文件就选中它。
+/// 同样先检查存在性——「定位了一个不存在的东西」等于没定位。
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
-    let p = PathBuf::from(&path);
+    let raw = path.trim().to_string();
+    if raw.is_empty() {
+        return Err("路径是空的".into());
+    }
+    if raw.chars().any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20) {
+        return Err("路径里有不能用的字符".into());
+    }
+    let p = PathBuf::from(&raw);
+    if !p.exists() {
+        return Err(format!("这个位置已经不在了：{raw}"));
+    }
     let mut cmd = Command::new("explorer.exe");
     if p.is_dir() {
-        cmd.arg(&path);
+        cmd.arg(&raw);
     } else {
-        cmd.arg(format!("/select,{}", path));
+        cmd.arg(format!("/select,{raw}"));
     }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.spawn().map_err(|e| e.to_string())?;
+    cmd.spawn().map_err(|e| format!("定位失败：{e}"))?;
     Ok(())
 }
 
+/// 打开一个本地位置或网址。
+///
+/// 以前这里不做任何检查：路径不存在也照样返回 Ok，用户点完看到的是
+/// 「什么都没发生」，然后是「这软件没用」。现在先把话说明白——
+/// 文件不在了就说不在，没权限就说没权限，能打开才打开。
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
+    let raw = path.trim().to_string();
+    if raw.is_empty() {
+        return Err("路径是空的".into());
+    }
+    /* 控制字符与引号不进命令行：那不是路径，是把参数拼坏的写法 */
+    if raw.chars().any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20) {
+        return Err("路径里有不能用的字符".into());
+    }
     #[cfg(windows)]
     {
+        let is_url = raw.starts_with("http://")
+            || raw.starts_with("https://")
+            || raw.starts_with("mailto:");
+        if !is_url && !Path::new(&raw).exists() {
+            return Err(format!("这个位置已经不在了：{raw}"));
+        }
         let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", "", &path]);
+        cmd.args(["/C", "start", ""]);
+        /* 显式加引号：带空格的路径（Program Files）不加就会被 cmd 拆成两截 */
+        cmd.raw_arg(format!("\"{raw}\""));
         cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.spawn().map_err(|e| e.to_string())?;
+        cmd.spawn().map_err(|e| format!("打不开：{e}"))?;
     }
     Ok(())
 }

@@ -130,15 +130,45 @@ test('链接只放行 http/https/mailto', (fail) => {
   eq(count(html, '<a '), 3, fail, '链接数量');
 });
 
-test('非白名单协议降级为纯文本', (fail) => {
-  const html = AIMd.render('[x](javascript:alert(1)) [y](data:text/html;base64,PHNjcmlwdD4=) [z](file:///C:/Windows)');
+test('危险协议降级为纯文本', (fail) => {
+  const html = AIMd.render('[x](javascript:alert(1)) [y](data:text/html;base64,PHNjcmlwdD4=)');
   lacks(html, '<a ', fail);
-  eq(html, '<p>x y z</p>', fail, '降级结果只剩文字');
+  eq(html, '<p>x y</p>', fail, '降级结果只剩文字');
   if (html.toLowerCase().indexOf('javascript:') >= 0) fail('输出里不该出现 javascript: 协议');
   if (html.toLowerCase().indexOf('data:') >= 0) fail('输出里不该出现 data: 协议');
-  if (html.toLowerCase().indexOf('file:') >= 0) fail('输出里不该出现 file: 协议');
   const upper = AIMd.render('[u](JaVaScRiPt:alert(1))');
   lacks(upper, '<a ', fail, '大小写混写');
+});
+
+test('本地路径：file:// 与盘符链接可点（1.35）', (fail) => {
+  const html = AIMd.render('[看这里](file:///D:/Downloads)');
+  has(html, 'class="md-path"', fail, 'file:// 变成路径入口');
+  has(html, 'data-path="D:\\Downloads"', fail, '反解码成 Windows 路径');
+  if (html.toLowerCase().indexOf('file:') >= 0) fail('输出里不该出现 file: 协议');
+  const drive = AIMd.render('[z](C:\\Windows)');
+  has(drive, 'data-path="C:\\Windows"', fail, '盘符链接');
+});
+
+test('本地路径：正文里的裸路径可点（1.35）', (fail) => {
+  const one = AIMd.render('去 D:\\Downloads 看看大文件');
+  has(one, '<a class="md-path" href="#" data-path="D:\\Downloads"', fail, '裸路径');
+  has(one, 'data-path="D:\\Downloads"', fail);
+  const code = AIMd.render('在 `D:\\Tools\\TidyAssistant` 下面');
+  has(code, '<code>', fail, '代码保留为 code');
+  has(code, 'data-path="D:\\Tools\\TidyAssistant"', fail, '行内代码路径');
+  const unc = AIMd.render('共享在 \\\\nas\\media 里');
+  has(unc, 'data-path="\\\\nas\\media"', fail, 'UNC 路径');
+  /* 不能把网址里的 s:/ 当盘符 */
+  const url = AIMd.render('见 https://example.com/a 和 ftp://x/y');
+  lacks(url, 'md-path', fail, '网址不产生路径入口');
+  /* 带空格的目录名要整段留下 */
+  const spaced = AIMd.render('C:\\Program Files (x86)\\Steam');
+  has(spaced, 'data-path="C:\\Program Files (x86)\\Steam"', fail, '带空格与括号');
+});
+
+test('hasMarkup：只含路径也算有语法（1.35）', (fail) => {
+  eq(AIMd.hasMarkup('C:\\Users\\a\\b'), true, fail, '路径要触发渲染');
+  eq(AIMd.hasMarkup('今天天气不错'), false, fail, '纯文字不触发');
 });
 
 /* ---------------- 表格 ---------------- */
@@ -277,7 +307,6 @@ test('hasMarkup 反例', (fail) => {
     'a_b_c',
     'snake_case_name',
     'file.txt',
-    'C:\\Users\\a\\b',
     '这是逗号，不是语法',
     '100% 完成',
     'a | b',

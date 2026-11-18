@@ -54,6 +54,10 @@
   --radius-lg: 12px;
   --radius-xl: 16px;
 
+  /* 对话流里卡片/折叠块的最大宽度。以前只写了 var(--card-max) 却没定义，
+     等于 max-width 被浏览器当成无效值丢掉——卡片会一直撑到整列宽。 */
+  --card-max: 572px;
+
   --row-h: 32px;
   --ctrl-h: 30px;
   /* 侧栏宽度：按内容定宽（164px 含 1px 右线），不再留大片右侧空白。
@@ -3944,3 +3948,167 @@ html[data-theme="dark"] .ai-page {
 .ai-drawer .dac-bar { gap: 6px; }
 /* 箭头两枚都留：有箭头才像能点开的下拉，没有就像普通标签 */
 .ai-drawer .dac-perm-btn .dac-chev { display: inline-flex; }
+
+/* ============================================================
+   结果位置入口（1.35.0）
+   ------------------------------------------------------------
+   一组同一件事的样式：回答里的路径、结果位置带、依据行的定位按钮、
+   历史回放的查证过程、会话执行记录。
+   共同点——都是「一个能去到某处的点」，所以视觉上必须一眼看得出
+   可点：悬停有底色和描边，按下回弹，键盘能 Tab 到。
+   ============================================================ */
+
+/* 正文里的路径。用虚线下划线而不是实线：位置是「可以去看一眼」，
+   不是「点开换页」，别做成普通超链接的样子。 */
+.md-path {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--line-strong);
+  border-radius: 3px;
+  padding: 0 1px;
+  cursor: pointer;
+  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out);
+}
+.md-path:hover { color: var(--accent-text); background: var(--accent-weak); border-bottom-color: var(--accent); }
+.md-path:active { background: var(--accent-ring); }
+.md-path:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; border-bottom-color: transparent; }
+/* 行内代码也常整段是路径：链接包着 code，点击归链接，别让 code 抢焦点 */
+.md-path code { pointer-events: none; }
+
+/* ---- 结果位置带 ---- */
+.ai-entries {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  animation: rise-in var(--dur-3) var(--ease) both;
+}
+.ai-entries-label {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: var(--fs-tiny); color: var(--text-3); flex: 0 0 auto;
+}
+.ai-entries-label svg { width: 13px; height: 13px; opacity: .85; }
+.ai-entries-list { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+
+.ai-entry {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; max-width: 340px; padding: 0 9px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
+  color: var(--text-2); font-size: var(--fs-tiny); cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out),
+    background var(--dur-2) var(--ease-out), transform var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out);
+}
+.ai-entry:hover {
+  border-color: var(--accent-ring); background: var(--accent-weak); color: var(--accent-text);
+  transform: translateY(-1px); box-shadow: 0 1px 2px rgba(22, 22, 22, .06);
+}
+.ai-entry:active { transform: scale(.97); box-shadow: none; }
+.ai-entry:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
+.ai-entry svg { width: 13px; height: 13px; flex: 0 0 auto; color: var(--icon-fg); transition: color var(--dur-2) var(--ease-out); }
+.ai-entry:hover svg { color: var(--accent-text); }
+.ai-entry-n {
+  font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 170px; color: var(--text-1);
+}
+.ai-entry-s {
+  font-family: var(--mono); color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px;
+}
+.ai-entry-s::before { content: '·'; margin-right: 3px; opacity: .6; }
+/* 卡片里空间小：只留名字，完整路径在 title 和右键菜单里 */
+.ai-entry.compact { height: 22px; padding: 0 7px; }
+.ai-entry.compact .ai-entry-n { max-width: 200px; }
+.ai-entry.compact .ai-entry-s { display: none; }
+.ai-entry.more { color: var(--text-3); border-style: dashed; font-family: var(--font); }
+.ai-entry.more:hover { color: var(--accent-text); }
+
+/* ---- 依据行：每个依据右边一枚「去看这里」 ---- */
+.ai-ev-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ai-ev-open {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; flex: 0 0 auto;
+  border: 1px solid transparent; border-radius: 999px; background: transparent;
+  color: var(--text-3); cursor: pointer;
+  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out), transform var(--dur-1) var(--ease-out);
+}
+.ai-ev-open:hover { color: var(--accent-text); background: var(--accent-weak); border-color: var(--accent-ring); }
+.ai-ev-open:active { transform: scale(.92); }
+.ai-ev-open:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
+.ai-ev-open svg { width: 12px; height: 12px; }
+
+/* ---- 历史回放：查证过程折叠块 ---- */
+.ai-replay {
+  width: 100%; max-width: var(--card-max);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface-2); overflow: hidden;
+  animation: rise-in var(--dur-3) var(--ease) both;
+}
+.ai-replay > summary {
+  display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px;
+  font-size: var(--fs-tiny); color: var(--text-3); cursor: pointer; list-style: none;
+  transition: color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
+}
+.ai-replay > summary::-webkit-details-marker { display: none; }
+.ai-replay > summary:hover { color: var(--text-2); background: var(--hover); }
+.ai-replay > summary svg { width: 13px; height: 13px; flex: 0 0 auto; }
+.ai-replay-title { color: var(--text-3); }
+.ai-replay-n { color: var(--text-3); font-family: var(--mono); margin-left: 2px; }
+/* 展开箭头：用边框画三角，不用 emoji */
+.ai-replay > summary::after {
+  content: ''; margin-left: auto; width: 5px; height: 5px;
+  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+.ai-replay[open] > summary { border-bottom: 1px solid var(--line); }
+.ai-replay[open] > summary::after { transform: rotate(225deg) translateY(-1px); }
+.ai-replay-list { display: flex; flex-direction: column; padding: 4px 0; max-height: 260px; overflow: auto; }
+.ai-replay-row {
+  display: flex; align-items: baseline; gap: 8px; padding: 3px 9px;
+  font-size: var(--fs-tiny); color: var(--text-2);
+  transition: background var(--dur-1) var(--ease-out);
+}
+.ai-replay-row:hover { background: var(--hover); }
+.ai-replay-row.bad .ai-replay-sum { color: var(--danger); }
+.ai-replay-tool { font-family: var(--mono); color: var(--text-3); flex: 0 0 auto; }
+.ai-replay-sum { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-replay-ms { font-family: var(--mono); color: var(--text-3); flex: 0 0 auto; }
+
+/* ---- 会话执行记录 ---- */
+.ai-acts {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface);
+  animation: rise-in var(--dur-3) var(--ease) both;
+}
+.ai-acts-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-tiny); color: var(--text-3); padding-bottom: 2px;
+}
+.ai-acts-head svg { width: 13px; height: 13px; flex: 0 0 auto; opacity: .85; }
+.ai-acts-n {
+  margin-left: auto; font-family: var(--mono); color: var(--text-3);
+  background: var(--hover); border-radius: 999px; padding: 0 6px; line-height: 16px;
+}
+.ai-acts-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 3px 2px; font-size: var(--fs-tiny); color: var(--text-2);
+  border-top: 1px solid transparent;
+  transition: opacity var(--dur-2) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.ai-acts-row:hover { background: var(--hover); border-radius: var(--radius-sm); }
+.ai-acts-row.undone { opacity: .6; }
+.ai-acts-row.undone .ai-acts-sum { text-decoration: line-through; text-decoration-color: var(--text-3); }
+.ai-acts-act { font-family: var(--mono); color: var(--text-1); flex: 0 0 auto; }
+.ai-acts-sum { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-acts-at { font-family: var(--mono); color: var(--text-3); flex: 0 0 auto; }
+.ai-acts-paths { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
+/* 尊重系统「减少动态效果」：位移与缩放全停，只留颜色变化 */
+@media (prefers-reduced-motion: reduce) {
+  .md-path, .ai-entry, .ai-ev-open, .ai-acts-row, .ai-replay > summary, .ai-replay > summary::after {
+    transition-property: color, background-color, border-color;
+  }
+  .ai-entry:hover, .ai-entry:active, .ai-ev-open:active { transform: none; }
+  .ai-entries, .ai-replay, .ai-acts { animation: none; }
+}

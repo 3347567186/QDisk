@@ -10,6 +10,11 @@
    HTML；链接只放行 http / https / mailto，其余协议降级成纯文本；代码块
    与行内代码在转义后立刻被「占位」，不再经过任何行内解析。
 
+   本地路径（1.35）：`file:///` 链接、独占一段的行内代码、正文里的裸路径
+   （D:\… 与 \\server\…）都渲染成 <a class="md-path" data-path="…">，
+   由 AIEntries 这层接管点击——回答里写「打开 D:\Downloads 看看」时，
+   那句话才是真的能点的。这里不做任何文件操作，只产出一个带路径的标签。
+
    支持的语法：标题 1-6、段落、无序 / 有序列表（一层嵌套）、围栏代码块、
    行内代码、粗体 / 斜体 / 删除线、链接、分隔线、引用、表格。
    未闭合或畸形的写法按普通文本处理，不抛异常。 */
@@ -31,6 +36,59 @@
 
   const LINK_RE = /\[([^\[\]\n]*)\]\(([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)\)/g;
   const SAFE_URL = /^(?:https?:|mailto:)/i;
+
+  /* ---------------- 本地路径 ----------------
+     只产标签，不做任何文件操作：点击由 AIEntries 接管。
+     路径从「已转义的文本」里认出来，属性值因此天然安全（引号已变成 &quot;）。
+     排除 & 是为了不吞掉 &amp; / &quot; 这类实体。 */
+  const RE_ABS_PATH = /(?:[A-Za-z]:[\\/]|\\\\[^\s\\<>"'])[^<>\s&"'`|?*，。；：！？、）】」』]*/;
+  const RE_INLINE_PATH = new RegExp(
+    '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\'&])'
+    + '(?:[^<>\\s&"\'`|?*，。；：！？、）】」』]|(?:[ ][A-Za-z0-9._()\\-]+)+[\\\\/])*'
+  );
+  /* 标签 | 前缀字符 | 路径：只处理标签之外的文本段，
+     否则 <a href="https://…"> 里的 s:/ 会被当成盘符。 */
+  const RE_TEXT_PATH = new RegExp('(<[^>]*>)|(^|[^A-Za-z0-9_.\\u0000])(' + RE_INLINE_PATH.source + ')', 'g');
+  const CJK_TAIL = /[.,;:!?，。；：、]+$/;
+
+  function trimPath(p) {
+    let s = p.replace(CJK_TAIL, '');
+    /* 收尾的右括号只有在前面没有对应的左括号时才去掉：
+       C:\Program Files (x86) 该留，见 D:\Downloads) 该去 */
+    while (/[)\]}]$/.test(s)) {
+      const open = (s.match(/[(\[{]/g) || []).length;
+      const close = (s.match(/[)\]}]/g) || []).length;
+      if (close <= open) break;
+      s = s.slice(0, -1);
+    }
+    return s;
+  }
+
+  function pathAnchor(p, inner) {
+    return '<a class="md-path" href="#" data-path="' + p + '" title="' + p + '">'
+      + (inner || p) + '</a>';
+  }
+
+  function asPath(text) {
+    const t = String(text || '').trim();
+    if (t.length < 4) return '';
+    if (!/^(?:[A-Za-z]:[\\/]|\\\\[^\\])/.test(t)) return '';
+    if (/\s{2,}|[<>"|?*]/.test(t)) return '';
+    /* 整段就是一个路径：允许中间有空格（Program Files），但不允许空段 */
+    if (/[\\/]{2,}$/.test(t) && t.length < 5) return '';
+    return t;
+  }
+
+  function fileUrlToPath(href) {
+    let s = String(href || '').replace(/^file:\/{2,}/i, '');
+    /* file:///D:/x -> /D:/x；file://server/share/x -> server/share/x（补回 UNC 前缀） */
+    if (/^\/[A-Za-z]:/.test(s)) s = s.slice(1);
+    else if (/^[A-Za-z0-9._-]+\//.test(s) && !/^[A-Za-z]:/.test(s)) s = '\\\\' + s;
+    try { s = decodeURIComponent(s); } catch (e) { /* 非法编码就原样用 */ }
+    s = s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    return s.replace(/\//g, '\\');
+  }
 
   /* 强调：bold -> del -> em(*)，顺序不能反，否则 ** 会被单个 * 规则拆坏。
      * 规则要求左边界不是单词字符，数学式 2*3*4 不会被当成斜体。 */
@@ -58,20 +116,48 @@
       return html === undefined ? '' : html;
     });
 
-    /* 1. 行内代码：先转义再占位，内部不再解析任何语法 */
-    src = src.replace(/`([^`\n]*)`/g, (m, code) => put('<code>' + code + '</code>'));
+    /* 1. 行内代码：先转义再占位，内部不再解析任何语法。
+       整段就是一个路径时，包成可点标签——安装命令那是代码，路径不是。 */
+    src = src.replace(/`([^`\n]*)`/g, (m, code) => {
+      const p = asPath(code);
+      if (p) return put(pathAnchor(p, '<code>' + code + '</code>'));
+      return put('<code>' + code + '</code>');
+    });
 
     /* 2. 链接：label 先做强调（此时仍是占位符，不会误伤代码内容） */
     src = src.replace(LINK_RE, (m, label, url, offset) => {
       if (offset > 0 && src.charAt(offset - 1) === '!') return m; /* 图片不支持，原样留字 */
       const href = String(url).trim();
-      if (!SAFE_URL.test(href)) return label; /* 非白名单协议 -> 纯文本 */
+      /* file:// 链接 = 用户/AI 明确指的本地位置，交给我们自己打开，
+         而不是交给浏览器（WebView2 里那一步什么都不会发生） */
+      if (/^file:/i.test(href)) {
+        const p = fileUrlToPath(href);
+        if (asPath(p)) return put(pathAnchor(p, resolve(emphasis(label)) || p));
+        return label;
+      }
+      if (!SAFE_URL.test(href)) {
+        /* [看看](D:\Downloads) 这种写法也常出现：目标是本地位置就做成入口，
+           其它协议（javascript:/data:/vbscript:）仍然降级成纯文本 */
+        if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(href) && asPath(href)) {
+          return put(pathAnchor(href, resolve(emphasis(label)) || href));
+        }
+        return label;
+      }
       return put('<a class="md-link" href="' + href + '" rel="noopener noreferrer" target="_blank">'
         + resolve(emphasis(label)) + '</a>');
     });
 
     /* 3. 强调：此时文本已全部转义、代码已占位 */
     src = emphasis(src);
+
+    /* 3.5 正文里的裸路径：只在标签之外的文本段里认，
+       否则会把 <a href="https://…"> 里的 s:/ 当成盘符链接掉。 */
+    src = src.replace(RE_TEXT_PATH, (m, tag, pre, path) => {
+      if (tag) return tag;
+      const p = trimPath(path);
+      if (!asPath(p)) return m;
+      return pre + pathAnchor(p, p);
+    });
 
     /* 4. 硬换行：只作用在占位符之外，代码里的换行保持原样 */
     src = breaks ? src.replace(/\n/g, '<br>') : src.replace(/\n/g, ' ');
@@ -380,7 +466,9 @@
     code: /`[^`\n]+`/,
     link: /\[[^\[\]\n]+\]\([^()\s]*(?:\([^()\s]*\)[^()\s]*)*\)/,
     emStar: /(^|[^\w*])\*(?![\s*])[^*\n]+?\*(?![\w*])/,
-    emUnderscore: /(^|[^\w_])_(?![\s_])[^_\n]+?_(?![\w_])/
+    emUnderscore: /(^|[^\w_])_(?![\s_])[^_\n]+?_(?![\w_])/,
+    /* 本地路径：只有它也要走渲染，否则「打开 D:\x 看看」整段还是死文字 */
+    path: /(^|[\s(（"'「【>])(?:[A-Za-z]:[\\/]|\\\\[^\s\\])/
   };
 
   function hasMarkup(text) {
@@ -406,6 +494,7 @@
     if (MARK_RE.link.test(src)) return true;
     if (MARK_RE.emStar.test(src)) return true;
     if (MARK_RE.emUnderscore.test(src)) return true;
+    if (MARK_RE.path.test(src)) return true;
     return false;
   }
 

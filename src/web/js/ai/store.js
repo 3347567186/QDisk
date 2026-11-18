@@ -207,6 +207,110 @@
     return null;
   }
 
+  /* ---------------- 会话落盘：白名单 + 上限 ----------------
+     只落「回看要用到」的东西：正文、查证过程、依据、建议、可点入口、用量、
+     执行记录。原始工具结果可能几十 KB（一次 list_dir 就够呛），所以按长度
+     决定保不保——留在会话里是为了解释「当时凭什么这么说」，不是为了存全量。
+
+     上限写在这里而不是散在各处：会话文件小，读回来才快，坏一个也只坏一条。 */
+  const LIMITS = {
+    messages: 60,
+    trace: 24,
+    summary: 300,
+    error: 200,
+    result: 600,
+    suggest: 6,
+    evidence: 8,
+    entries: 16,
+    acts: 40,
+    paths: 8
+  };
+
+  function cut(v, n) {
+    const s = v == null ? '' : String(v);
+    return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  function slimStep(t) {
+    if (!t) return null;
+    const out = {
+      tool: t.tool || '',
+      ok: t.ok !== false,
+      ms: Math.max(0, Math.round(Number(t.ms) || 0)),
+      summary: cut(t.summary, LIMITS.summary)
+    };
+    const a = t.args || {};
+    /* 参数只留位置类字段：这些是回放「当时查了哪里」唯一有用的部分 */
+    const args = {};
+    ['dir', 'path', 'kind', 'pattern', 'depth'].forEach((k) => {
+      if (a[k] !== undefined && a[k] !== null && a[k] !== '') args[k] = a[k];
+    });
+    if (Array.isArray(a.paths)) args.paths = a.paths.slice(0, LIMITS.paths);
+    if (Object.keys(args).length) out.args = args;
+    if (t.error) out.error = cut(t.error, LIMITS.error);
+    if (t.result) {
+      let json = '';
+      try { json = JSON.stringify(t.result); } catch { json = ''; }
+      if (json && json.length <= LIMITS.result) out.result = t.result;
+    }
+    return out;
+  }
+
+  function slimMsg(m) {
+    const base = { role: m.role, content: String(m.content || ''), at: m.at || Date.now() };
+    if (m.role !== 'assistant') return base;
+    base.ok = m.ok !== false;
+    if (Array.isArray(m.trace) && m.trace.length) {
+      base.trace = m.trace.slice(-LIMITS.trace).map(slimStep).filter(Boolean);
+    }
+    if (Array.isArray(m.evidence) && m.evidence.length) {
+      base.evidence = m.evidence.slice(-LIMITS.evidence).map((e) => ({
+        tool: e && e.tool ? String(e.tool) : '',
+        ok: !e || e.ok !== false,
+        summary: cut(e && e.summary, LIMITS.summary)
+      }));
+    }
+    if (Array.isArray(m.suggest) && m.suggest.length) {
+      base.suggest = m.suggest.slice(0, LIMITS.suggest).map((s) => ({
+        action: (s && s.action) || 'check',
+        why: cut(s && s.why, LIMITS.summary),
+        paths: ((s && s.paths) || []).slice(0, 5)
+      }));
+    }
+    if (Array.isArray(m.entries) && m.entries.length) {
+      base.entries = m.entries.slice(0, LIMITS.entries).map((e) => ({
+        p: String(e && e.p ? e.p : ''),
+        k: e && e.k === 'file' ? 'file' : 'dir',
+        n: String((e && e.n) || ''),
+        s: String((e && e.s) || ''),
+        src: String((e && e.src) || 'tool')
+      }));
+    }
+    if (m.usage) {
+      const u = m.usage;
+      base.usage = {
+        steps: Number(u.steps) || 0,
+        elapsed_ms: Number(u.elapsed_ms) || 0,
+        prompt_tokens: Number(u.prompt_tokens) || 0,
+        completion_tokens: Number(u.completion_tokens) || 0,
+        prompt_cache_hit_tokens: Number(u.prompt_cache_hit_tokens) || 0
+      };
+    }
+    return base;
+  }
+
+  function slimAct(a) {
+    if (!a || !a.action) return null;
+    return {
+      at: a.at || Date.now(),
+      action: String(a.action),
+      ok: a.ok !== false,
+      undone: !!a.undone,
+      summary: cut(a.summary || a.message, LIMITS.summary),
+      paths: (a.paths || []).slice(0, LIMITS.paths)
+    };
+  }
+
   async function saveSession(session) {
     if (!session || !session.id) throw new Error('会话缺少 id');
     const payload = {
@@ -214,8 +318,11 @@
       title: String(session.title || '新会话').slice(0, 60),
       created: session.created || Date.now(),
       updated: Date.now(),
-      messages: (session.messages || []).slice(-60)
+      version: 2,
+      messages: (session.messages || []).slice(-LIMITS.messages).map(slimMsg)
     };
+    const acts = (session.acts || []).slice(-LIMITS.acts).map(slimAct).filter(Boolean);
+    if (acts.length) payload.acts = acts;
     await API.aiStore('write', 's-' + payload.id + '.json', JSON.stringify(payload));
     await pruneSessions();
     return payload;

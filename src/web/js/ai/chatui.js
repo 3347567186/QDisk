@@ -17,6 +17,9 @@
   const UIx = root.UI;
   const h = UIx.h;
   const T = UIx.T;
+  /* 结果位置入口：打开/定位/复制路径的唯一实现。index.html 里必须排在
+     本文件之前，否则下面所有 AIEntries.* 都会在运行期才炸。 */
+  const AIEntries = root.AIEntries;
 
   const PAGE_LABEL = {
     tools: ['空间工具', 'Space tools'],
@@ -101,6 +104,17 @@
     return out;
   }
 
+  /* 依据行：点开看原始结果；顺手给一个「去这个地方」的入口。
+     以前这里只能看 JSON，看完还得自己照着路径去资源管理器里找。 */
+  function evPath(hit) {
+    if (!hit) return '';
+    const a = hit.args || {};
+    const r = hit.result || {};
+    const cand = [a.dir, a.path, (a.paths || [])[0], r.dir, r.path, r.home, (r.paths || [])[0]];
+    for (const c of cand) if (c && typeof c === 'string') return c;
+    return '';
+  }
+
   function evidenceRow(list, trace) {
     if (!list || !list.length) return null;
     const box = h('div', { class: 'ai-ev' });
@@ -109,11 +123,21 @@
       const detail = h('div', { class: 'ai-ev-detail', hidden: true },
         hit ? h('pre', { class: 'ai-ev-pre' }, JSON.stringify(hit.result, null, 2)) : h('div', {}, T('没有保留原始结果', 'No raw result'))
       );
+      const chipRow = h('div', { class: 'ai-ev-row' });
       const btn = h('button', {
         class: 'ai-ev-chip',
         onclick: () => { detail.hidden = !detail.hidden; }
       }, UIx.icon('file'), h('span', {}, ev.tool));
-      box.appendChild(btn);
+      chipRow.appendChild(btn);
+      const p = evPath(hit);
+      if (p) {
+        chipRow.appendChild(h('button', {
+          class: 'ai-ev-open',
+          title: p,
+          onclick: (e) => { e.stopPropagation(); AIEntries.open(p); }
+        }, UIx.icon('folder')));
+      }
+      box.appendChild(chipRow);
       box.appendChild(detail);
     });
     const wrap = h('div', { class: 'ai-ev-wrap' },
@@ -123,6 +147,8 @@
     return wrap;
   }
 
+  /* 建议卡片：路径不再是死文字，主按钮直接打开第一个位置。
+     「跳页面」降级成次级按钮——它以前是主按钮，用户点完发现还在原地。 */
   function suggestCards(list) {
     if (!list || !list.length) return null;
     const wrap = h('div', { class: 'ai-suggest' });
@@ -132,19 +158,21 @@
       const label = ACTION_LABEL[s.action] || ACTION_LABEL.check;
       const body = h('div', { class: 'ai-card-body' });
       s.paths.slice(0, 5).forEach((p) => {
-        body.appendChild(h('div', { class: 'ai-card-path', title: p },
-          UIx.icon('file'),
-          h('span', { class: 'ai-card-path-t' }, p)
-        ));
+        body.appendChild(AIEntries.chip(p, { compact: true, src: 'suggest' }));
       });
       if (s.paths.length > 5) {
         body.appendChild(h('div', { class: 'ai-card-more' }, T('还有 ', 'and ') + (s.paths.length - 5) + T(' 项', ' more')));
       }
+      const first = s.paths[0];
       const btns = h('div', { class: 'ai-card-bar' },
         h('button', {
           class: 'btn sm',
+          onclick: () => { AIEntries.open(first); }
+        }, UIx.icon('folder', 14), T(label[0], label[1])),
+        h('button', {
+          class: 'btn sm ghost',
           onclick: () => { location.hash = '#' + page; }
-        }, T(label[0], label[1])),
+        }, T('去' + (page === 'tools' ? '工具页' : '整理页'), 'Open page')),
         h('button', {
           class: 'btn sm ghost',
           onclick: () => { UIx.copy(s.paths.join('\r\n')); }
@@ -718,7 +746,7 @@
               const r = await proposals.undo(p.id);
               ub.textContent = r.ok ? T('已撤销', 'Undone') : T('撤销失败', 'Undo failed');
               if (!r.ok) addNotice(r.error || '撤销失败', 'warn');
-              else syncCards();
+              else { markActUndone(p.action); syncCards(); }
             });
             bar.appendChild(ub);
           }
@@ -733,9 +761,6 @@
 
         goBtn = h('button', { class: 'ai-prop-btn primary', type: 'button', disabled: !armed },
           T('执行', 'Run'));
-        /* 临时诊断：把按钮的可用状态写到窗口标题上，外部可读（不显示在界面上） */
-        goBtn.dataset.dbg = (armed ? 'a1' : 'a0') + (p.needsWord ? 'n1' : 'n0') + (pickable ? 'p' + selList().length : '-');
-        try { document.title = 'DBG ' + goBtn.dataset.dbg + ' ' + (goBtn.disabled ? 'DIS' : 'EN'); } catch (e) { /* 忽略 */ }
         const no = h('button', { class: 'ai-prop-btn', type: 'button' }, T('取消', 'Cancel'));
 
         if (p.needsWord) {
@@ -752,7 +777,6 @@
         }
 
         goBtn.addEventListener('click', async () => {
-          try { document.title = 'CLICKED'; } catch (e) { /* 忽略 */ }
           stopCountdown();
           goBtn.disabled = true;
           no.disabled = true;
@@ -768,6 +792,14 @@
             p.status = 'done';
             p.message = r.message;
             p.undo = (r.proposal && r.proposal.undo) || null;
+            recordAct({
+              at: Date.now(),
+              action: p.action,
+              ok: true,
+              summary: String(r.message || ''),
+              paths: (pickedPaths && pickedPaths.length ? pickedPaths : picks).slice(0, 8),
+              undoable: !!p.undo
+            });
             paint();
             try {
               window.dispatchEvent(new CustomEvent('ai-action', { detail: { action: p.action, ok: true } }));
@@ -967,6 +999,89 @@
       }
     }
 
+    /* 右键「让助手看看这里」：把路径填进输入框而不是直接发出去，
+       用户可以补一句想干什么（清掉 / 分类 / 看看有多大）再发。 */
+    function askAboutPath(p) {
+      composer.insertText(T('看看 ', 'Look at ') + p + T(' 里有什么可以清的', ' and tell me what can be cleaned up'));
+      composer.focus();
+    }
+
+    /* 历史里的查证过程：折叠成一行「查了 N 步」，展开是每步的工具与摘要。
+       只读，不再执行任何东西——回看的价值是「当时凭什么这么说」。 */
+    function replayTrace(trace) {
+      const steps = (Array.isArray(trace) ? trace : [])
+        .filter((t) => t && (t.tool || t.summary));
+      if (!steps.length) return null;
+      const wrap = h('details', { class: 'ai-replay' });
+      wrap.appendChild(h('summary', {},
+        UIx.icon('clock', 13),
+        h('span', { class: 'ai-replay-title' }, T('查证过程', 'Process')),
+        h('span', { class: 'ai-replay-n' }, steps.length + T(' 步', ' steps'))
+      ));
+      const list = h('div', { class: 'ai-replay-list' });
+      steps.forEach((t) => {
+        const row = h('div', { class: 'ai-replay-row' + (t.ok === false ? ' bad' : '') });
+        row.appendChild(h('span', { class: 'ai-replay-tool' }, t.tool || '?'));
+        row.appendChild(h('span', { class: 'ai-replay-sum' },
+          String(t.summary || (t.ok === false ? T('失败', 'failed') : ''))));
+        if (t.ms) row.appendChild(h('span', { class: 'ai-replay-ms' }, Math.round(Number(t.ms)) + 'ms'));
+        list.appendChild(row);
+      });
+      wrap.appendChild(list);
+      return wrap;
+    }
+
+    /* 执行记录：这个会话里真正动过手的动作（已执行 / 已撤销）。
+       以前这些只在内存活 10 分钟，关掉就再也找不到「我当时清了什么」。 */
+    function recordAct(entry) {
+      if (!state.session || !entry) return;
+      const acts = state.session.acts || (state.session.acts = []);
+      acts.push(entry);
+      if (acts.length > 40) state.session.acts = acts.slice(-40);
+      try { AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
+    }
+
+    function markActUndone(action) {
+      if (!state.session) return;
+      const acts = state.session.acts || [];
+      for (let i = acts.length - 1; i >= 0; i--) {
+        if (!acts[i].undone && acts[i].action === action) {
+          acts[i].undone = true;
+          try { AIStore.saveSession(state.session); } catch (e) { /* 同上 */ }
+          return;
+        }
+      }
+    }
+
+    function actsBar(acts) {
+      const list = (Array.isArray(acts) ? acts : []).filter((a) => a && a.action);
+      if (!list.length) return null;
+      const wrap = h('div', { class: 'ai-acts' });
+      wrap.appendChild(h('div', { class: 'ai-acts-head' },
+        UIx.icon('shield', 13),
+        h('span', {}, T('这个会话执行过的操作', 'Actions in this session')),
+        h('span', { class: 'ai-acts-n' }, String(list.length))));
+      list.forEach((a) => {
+        const row = h('div', { class: 'ai-acts-row' + (a.undone ? ' undone' : '') });
+        row.appendChild(h('span', { class: 'ai-acts-act' }, String(a.action)));
+        row.appendChild(h('span', { class: 'ai-acts-sum' },
+          String(a.summary || a.message || (a.ok === false ? T('失败', 'failed') : '')),
+          a.undone ? T(' · 已撤销', ' · undone') : ''));
+        if (a.at) {
+          const d = new Date(Number(a.at) || a.at);
+          row.appendChild(h('span', { class: 'ai-acts-at' },
+            String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')));
+        }
+        if (a.paths && a.paths.length) {
+          const box = h('div', { class: 'ai-acts-paths' });
+          a.paths.slice(0, 3).forEach((p) => box.appendChild(AIEntries.chip(p, { compact: true })));
+          row.appendChild(box);
+        }
+        wrap.appendChild(row);
+      });
+      return wrap;
+    }
+
     function finishAnswer(res) {
       if (!current) startAnswer();
       const c = current;
@@ -987,6 +1102,14 @@
       const cards = suggestCards(res.suggest);
       if (cards) c.extra.appendChild(cards);
 
+      /* 这一轮真正碰过的位置：整条答完就能直接点到那个目录，
+         而不是读完一句「打开 D:\Downloads 看看」然后自己去翻。 */
+      res.entries = (res.entries && res.entries.length)
+        ? res.entries
+        : AIEntries.collect(res.trace, res.suggest);
+      const loc = AIEntries.bar(res.entries, { onAsk: askAboutPath });
+      if (loc) c.extra.appendChild(loc);
+
       const bar = h('div', { class: 'ai-msg-bar' });
       bar.appendChild(h('button', {
         class: 'btn sm ghost',
@@ -999,10 +1122,13 @@
           onclick: () => { continueTurn(); }
         }, T('继续', 'Continue')));
       }
-      bar.appendChild(h('button', {
-        class: 'btn sm ghost',
-        onclick: () => { retryLast(); }
-      }, T('重试', 'Retry')));
+      /* 历史回放没有 lastAsk，「重试」会是个点不动的按钮——那种不如不给 */
+      if (!res.replay) {
+        bar.appendChild(h('button', {
+          class: 'btn sm ghost',
+          onclick: () => { retryLast(); }
+        }, T('重试', 'Retry')));
+      }
       if (res.usage) {
         /* 右下角只留三样：思考时长、这轮 token 用量、缓存命中率。
            命中率只给百分比，写「命中率」三个字反而要多读一遍。 */
@@ -1211,7 +1337,20 @@
       if (state.history.length > 40) state.history = state.history.slice(-40);
       if (state.session) {
         state.session.messages.push({ role: 'user', content: q, at: Date.now() });
-        state.session.messages.push({ role: 'assistant', content: res.answer || '', at: Date.now(), ok: res.ok });
+        /* 回答不是一段文字就完：查证过程、依据、建议、可点入口一起落盘，
+           否则回到历史里只剩一句「打开 D:\… 看看」，入口全丢了。 */
+        state.session.messages.push({
+          role: 'assistant',
+          content: res.answer || '',
+          at: Date.now(),
+          ok: res.ok,
+          trace: res.trace || [],
+          evidence: res.evidence || [],
+          suggest: res.suggest || [],
+          entries: res.entries || [],
+          followUps: res.followUps || [],
+          usage: res.usage || null
+        });
         if (!state.session.title || state.session.title === '新会话') state.session.title = q.slice(0, 30);
         try { await AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
         /* 记住「正在聊的这个会话」：下次进 AI 页直接接着聊，
@@ -1374,6 +1513,10 @@
     }
 
     msgs.addEventListener('contextmenu', onContextMenu);
+    /* 回答正文里的路径与链接统一由 AIEntries 接管：
+       点路径 = 打开那个位置，点外链 = 交给系统浏览器（WebView2 里
+       target="_blank" 没有窗口处理器，点了什么都不会发生）。 */
+    AIEntries.bind(msgs, { onAsk: askAboutPath });
     /* 输入框自己也要绑：它不在消息区里，而且 ui.js 对输入类不拦系统菜单，
        不绑的话这里是浏览器原生那份（带拼写检查），跟别处不一致 */
     if (composer && composer.input) composer.input.addEventListener('contextmenu', onContextMenu);
@@ -1416,17 +1559,45 @@
       loadSession(session) {
         resetTurns();
         msgs.innerHTML = '';
+        cardNodes.clear();
+        /* 会话里存过的提案不再重放成可点卡片：过期的东西点了只会失败。
+           执行过的动作另有一条「执行记录」，那才是事后要回看的东西。 */
+        if (proposals) proposals.newSession();
         state.session = session;
         state.history = [];
+        lastAsk = null;
+        let lastUser = '';
         (session.messages || []).forEach((m) => {
-          if (m.role === 'user') addUser(m.content);
-          else {
-            /* 历史消息没有保留查证过程，所以不挂思路行（否则会出现「思考了 0.0s」） */
-            startAnswer({ replay: true });
-            finishAnswer({ ok: true, answer: m.content, evidence: [], suggest: [], followUps: [], trace: [] });
+          if (m.role === 'user') {
+            addUser(m.content);
+            lastUser = m.content;
+            state.history.push({ role: 'user', content: m.content });
+            return;
           }
-          state.history.push({ role: m.role, content: m.content });
+          const c = startAnswer({ replay: true });
+          /* 老会话只有一段文字，新会话带着查证过程与入口一起回来。
+             后者直接重放，前者从正文里认路径，两种都能点到位置。 */
+          const entries = (m.entries && m.entries.length)
+            ? m.entries
+            : AIEntries.fromText(m.content);
+          const steps = replayTrace(m.trace);
+          if (steps) c.node.insertBefore(steps, c.body);
+          finishAnswer({
+            ok: m.ok !== false,
+            replay: true,
+            answer: m.content,
+            evidence: m.evidence || [],
+            suggest: m.suggest || [],
+            followUps: [],
+            trace: m.trace || [],
+            entries: entries,
+            usage: m.usage || null,
+            interrupted: false
+          });
+          state.history.push({ role: 'assistant', content: m.content });
         });
+        const acts = actsBar(session.acts);
+        if (acts) msgs.appendChild(acts);
         setEmpty(false);
         scrollEnd(true);
         notifySessions();
