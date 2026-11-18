@@ -454,6 +454,14 @@
       return i >= 0 ? t.slice(i + 1) : t;
     }
 
+    /* 勾选行里名字已经在左边，右边再整条路径就是同一个名字写两遍：
+       只留所在目录，用户对「在哪个文件夹」更敏感。 */
+    function dirOf(s) {
+      const t = String(s || '');
+      const i = Math.max(t.lastIndexOf('\\'), t.lastIndexOf('/'));
+      return i > 0 ? t.slice(0, i) : '';
+    }
+
     function pendingCards() {
       syncCards();
     }
@@ -510,8 +518,14 @@
         sumLine.appendChild(live);
         host.appendChild(sumLine);
 
+        /* 可勾选：动作里有「能放多条路径」的列，且提案还活着。
+           能勾的时候不再单列一份同样的清单——同一批文件写两遍，用户得读两遍才敢点。 */
+        const picks = Array.isArray(p.picks) ? p.picks : [];
+        const pickable = p.status === 'pending' && !!p.pickKey && picks.length > 1;
+        if (pickable && !(p._sel instanceof Set)) p._sel = new Set(picks);
+
         const items = Array.isArray(c.items) ? c.items : [];
-        if (items.length) {
+        if (items.length && !pickable) {
           const box = h('div', { class: 'ai-prop-items' });
           items.slice(0, 6).forEach((it) => {
             box.appendChild(h('div', { class: 'ai-prop-item' },
@@ -524,11 +538,6 @@
           }
           host.appendChild(box);
         }
-
-        /* 可勾选：动作里有「能放多条路径」的列，且提案还活着 */
-        const picks = Array.isArray(p.picks) ? p.picks : [];
-        const pickable = p.status === 'pending' && !!p.pickKey && picks.length > 1;
-        if (pickable && !(p._sel instanceof Set)) p._sel = new Set(picks);
 
         let goBtn = null;
         let timer = 0;
@@ -602,7 +611,7 @@
             const row = h('label', { class: 'ai-prop-pick' + (on ? ' on' : ' off') },
               cb,
               h('span', { class: 'ai-prop-pick-name' }, leafOf(path)),
-              h('span', { class: 'ai-prop-pick-path' }, path));
+              h('span', { class: 'ai-prop-pick-path' }, dirOf(path)));
             cb.addEventListener('change', () => {
               if (cb.checked) p._sel.add(path); else p._sel.delete(path);
               row.classList.toggle('on', cb.checked);
