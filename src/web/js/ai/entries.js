@@ -184,6 +184,13 @@
     items.push({ label: T('打开', 'Open'), icon: 'external', action: () => { open(path); } });
     items.push({ label: T('在资源管理器中显示', 'Show in Explorer'), icon: 'folder', action: () => { reveal(path); } });
     items.push({ label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copy(path) });
+    /* 从这里也能把这批文件带到工具页去看：跳转要带路径，空着切页没用 */
+    items.push({ label: T('在空间工具里查看', 'Show in space tools'), icon: 'scan',
+      action: () => {
+        const app = root.App;
+        if (app && typeof app.jump === 'function') app.jump('tools', { paths: [path], action: 'check' });
+        else location.hash = '#tools';
+      } });
     if (typeof o.onAsk === 'function') {
       items.push({ sep: true });
       items.push({ label: T('让助手看看这里', 'Ask the assistant about it'), icon: 'search', action: () => o.onAsk(path) });

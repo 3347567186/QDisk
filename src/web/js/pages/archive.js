@@ -1769,6 +1769,15 @@
   window.Pages.archive = {
     title: ['压缩包', 'Archives'],
     subtitle: ['压缩、解压与查看', 'Compress, extract, preview'],
-    mount
+    mount,
+    /* AI 说「这几个压缩包可以看看」时，跳进来要直接把这个包打开，
+       而不是停在一个让你自己再选一次的空页面。 */
+    jump(payload) {
+      const paths = ((payload && payload.paths) || []).filter(Boolean).map(String);
+      const arc = paths.find((p) => /\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst)$/i.test(p));
+      if (!arc) return undefined;
+      const run = openArchive(arc, null);
+      return run && typeof run.catch === 'function' ? run.catch(() => {}) : run;
+    }
   };
 })();

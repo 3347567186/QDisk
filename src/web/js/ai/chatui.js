@@ -147,6 +147,15 @@
     return wrap;
   }
 
+  /* 「去工具页」必须带上这一条的路径：只切页等于让用户看一张空表。
+     载荷交给 App.jump，目标页在挂载时取走（见 app.js 的 App.takeJump）。 */
+  function jumpToPage(page, s) {
+    const paths = ((s && s.paths) || []).filter(Boolean).map(String);
+    const payload = { paths: paths, action: (s && s.action) || 'check', why: (s && s.why) || '' };
+    if (root.App && typeof root.App.jump === 'function') { root.App.jump(page, payload); return; }
+    location.hash = '#' + page;
+  }
+
   /* 建议卡片：路径不再是死文字，主按钮直接打开第一个位置。
      「跳页面」降级成次级按钮——它以前是主按钮，用户点完发现还在原地。 */
   function suggestCards(list) {
@@ -171,8 +180,9 @@
         }, UIx.icon('folder', 14), T(label[0], label[1])),
         h('button', {
           class: 'btn sm ghost',
-          onclick: () => { location.hash = '#' + page; }
-        }, T('去' + (page === 'tools' ? '工具页' : '整理页'), 'Open page')),
+          onclick: () => { jumpToPage(page, s); }
+        }, T('在' + (PAGE_LABEL[page] || PAGE_LABEL.tools)[0] + '里查看',
+             'Open in ' + (PAGE_LABEL[page] || PAGE_LABEL.tools)[1])),
         h('button', {
           class: 'btn sm ghost',
           onclick: () => { UIx.copy(s.paths.join('\r\n')); }

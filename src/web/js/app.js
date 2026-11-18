@@ -434,14 +434,15 @@
     navProg.classList.remove('on');
   }
 
-  async function navigate(id, updateHash = true) {
+  async function navigate(id, updateHash = true, opts = {}) {
     const page = (window.Pages || {})[id];
     if (!page) { toast(UI.T('页面尚未加载', 'Page not loaded'), 'warn'); return; }
     const root = document.getElementById('page');
 
     /* 已经在这一页：只同步导航状态，不重建 DOM。
-       以前重复挂载会整页重播进场动画，看起来就是「每次点一下都闪一下刷新」。 */
-    if (App._mountedId === id && root && root.querySelector('.page-body')) {
+       以前重复挂载会整页重播进场动画，看起来就是「每次点一下都闪一下刷新」。
+       opts.force：带着载荷重新进来时必须重挂载，否则页面还留着上一次的结果。 */
+    if (!(opts && opts.force) && App._mountedId === id && root && root.querySelector('.page-body')) {
       if (updateHash && location.hash !== '#' + id) history.replaceState(null, '', '#' + id);
       document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
       UI.closeMenu();
@@ -507,6 +508,36 @@
     API.configSet({ last_page: id }).catch(() => {});
   }
   window.navigate = navigate;
+
+  /* ---------------- 跨页跳转：带载荷 ----------------
+     navigate 只负责「切到哪一页」，不带任何上下文。AI 回答里的「去工具页」
+     以前只调 location.hash，于是目标页打开是空的，用户以为按钮坏了。
+     跳转要说清「把什么带过去」：
+       App.jump('tools', { paths: [...], action: 'check', why: '...' })
+     目标页实现 page.jump(payload) 就地接收（切页后调用，页面已挂载完）。
+     没有 jump 的页面退回普通切页，不报错。 */
+  App.jump = async function (id, payload) {
+    const page = (window.Pages || {})[id];
+    if (!page) { toast(UI.T('页面尚未加载', 'Page not loaded'), 'warn'); return; }
+    const data = payload || {};
+    const pageEl = document.getElementById('page');
+    const mounted = App._mountedId === id && pageEl && pageEl.querySelector('.page-body');
+    if (mounted) {
+      updateHashOf(id);
+      document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+      UI.closeMenu();
+    } else {
+      await navigate(id, true, { force: true });
+    }
+    if (typeof page.jump === 'function') {
+      try { await page.jump(data); } catch (e) { toast((e && e.message) || String(e), 'error'); }
+    }
+  };
+  function updateHashOf(id) {
+    if (location.hash === '#' + id) return false;
+    try { history.replaceState(null, '', '#' + id); } catch { /* ignore */ }
+    return true;
+  }
 
   async function pollEngine(first) {
     // 窗口最小化/切到后台时不打扰引擎，回来后的下一次心跳会自愈

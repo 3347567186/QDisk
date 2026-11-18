@@ -10,6 +10,10 @@
 
   const errText = UI.errText;
 
+  /* 从 AI 回答里的「去工具页」跳进来时执行的接收器。
+     页面没挂载过时是 null，mount() 里会把它指到本次挂载的 applyJump。 */
+  let liveJump = null;
+
   /* 扩展名 → 类别。用来看「这是什么文件」，不参与删除判断。 */
   const CATS = [
     { key: 'installer', label: ['安装包', 'Installer'], exts: ['msi', 'msix', 'appx', 'iso', 'img', 'dmg', 'pkg', 'deb', 'rpm'], tone: 'accent' },
@@ -187,9 +191,128 @@
       { open: false, hint: T('只删空目录，1–3 层内判断', 'Empty dirs only, 1–3 levels deep') }
     );
 
+    const jumpBox = h('div', { class: 'ai-jump', hidden: true });
+    root.appendChild(jumpBox);
     root.appendChild(bigSection);
     root.appendChild(emptySection);
     setActions();
+
+    /* ---------------- 来自助手的跳转 ----------------
+       AI 的「去工具页」以前只切页，什么也不带，用户过来看到的是一张空表。
+       现在这份载荷里有它提到过的位置和它想干的事，规则只有一条：
+       跳进来必须**看得见东西**——先把位置列出来，再把目录填进扫描框、立刻扫，
+       扫完把助手提到的行标出来并滚到它。 */
+    const stripSlash = (p) => String(p || '').replace(/[\\/]+$/, '');
+    const parentOf = (p) => {
+      const s = stripSlash(p);
+      const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+      return i > 0 ? s.slice(0, i) : s;
+    };
+    const isFile = (p) => (window.AIEntries && window.AIEntries.kindOf
+      ? window.AIEntries.kindOf(stripSlash(p)) === 'file'
+      : /\.[A-Za-z0-9]{1,8}$/.test(stripSlash(p)));
+
+    function openSection(sec) {
+      if (!sec) return;
+      const head = sec.querySelector('.section-head');
+      if (head && head.getAttribute('aria-expanded') !== 'true') {
+        head.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }
+    }
+
+    function closeSection(sec) {
+      if (!sec) return;
+      const head = sec.querySelector('.section-head');
+      if (head && head.getAttribute('aria-expanded') === 'true') {
+        head.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }
+    }
+
+    function paintJump(paths, why, dir) {
+      const chipOf = (p) => (window.AIEntries && window.AIEntries.chip
+        ? window.AIEntries.chip(p, { compact: true, src: 'jump' })
+        : h('span', { class: 'ai-jump-path mono' }, p));
+      const list = h('div', { class: 'ai-jump-list' }, ...paths.slice(0, 6).map(chipOf));
+      if (paths.length > 6) {
+        list.appendChild(h('span', { class: 'ai-jump-more' },
+          T('还有 ' + (paths.length - 6) + ' 个位置', '+' + (paths.length - 6) + ' more')));
+      }
+      jumpBox.replaceChildren(
+        h('div', { class: 'ai-jump-head' },
+          icon('spark', 14),
+          h('span', { class: 'ai-jump-title' }, T('助手提到的位置', 'Paths the assistant found')),
+          h('span', { class: 'ai-jump-sub' }, why || '')),
+        list,
+        h('div', { class: 'ai-jump-bar' },
+          dir ? h('span', { class: 'ai-jump-dir mono', title: dir }, dir) : null,
+          h('button', {
+            class: 'btn sm ghost',
+            onclick: () => { jumpBox.hidden = true; }
+          }, T('收起', 'Hide')))
+      );
+      jumpBox.hidden = false;
+    }
+
+    function markBig(paths) {
+      const set = new Set(paths.map((p) => normPath(p)));
+      let first = null;
+      bigList.querySelectorAll('.tool-row').forEach((row) => {
+        const p = normPath(row.dataset.path || '');
+        if (!p || !set.has(p)) return;
+        row.classList.add('ai-hit');
+        if (!row.querySelector('.ai-hit-tag')) {
+          const nameRow = row.querySelector('.row');
+          if (nameRow) nameRow.appendChild(h('span', { class: 'tag store ai-hit-tag' }, T('助手提到', 'From AI')));
+        }
+        if (!first) first = row;
+      });
+      if (first && first.scrollIntoView) first.scrollIntoView({ block: 'nearest' });
+    }
+
+    function markEmpty(paths) {
+      const set = new Set(paths.map((p) => normPath(p)));
+      let first = null;
+      emptyList.querySelectorAll('.tool-row').forEach((row) => {
+        const p = normPath(row.dataset.path || '');
+        if (!p || !set.has(p)) return;
+        row.classList.add('ai-hit');
+        if (!first) first = row;
+      });
+      if (first && first.scrollIntoView) first.scrollIntoView({ block: 'nearest' });
+    }
+
+    async function applyJump(data) {
+      const paths = ((data && data.paths) || [])
+        .filter(Boolean).map((p) => stripSlash(String(p)));
+      if (!paths.length) return;
+      const want = String((data && data.action) || 'check');
+      const files = paths.filter(isFile);
+      const dirs = paths.filter((p) => !isFile(p));
+      const dir = dirs[0] || parentOf(files[0]) || '';
+      paintJump(paths, String((data && data.why) || ''), dir);
+
+      /* 空文件夹这一类去空目录那一块；其余都走大文件排行 */
+      if (want === 'delete' && dirs.length && !files.length) {
+        openSection(emptySection);
+        /* 空目录这件事就在这一块里完成，大文件那块先收起，别让用户对着空表 */
+        closeSection(bigSection);
+        if (dir) emptyInput.value = dir;
+        if (dir) {
+          await scanEmpty();
+          markEmpty(paths);
+        }
+        if (emptySection.scrollIntoView) emptySection.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (dir) bigInput.value = dir;
+      if (dir) {
+        await scanBig();
+        markBig(paths);
+      } else {
+        bigHint.textContent = T('助手给的是文件，选一个目录再扫', 'Pick a folder to scan');
+      }
+      if (bigSection.scrollIntoView) bigSection.scrollIntoView({ block: 'nearest' });
+    }
 
     /* ---------------- 大文件逻辑 ---------------- */
     let bigItems = [];
@@ -318,7 +441,7 @@
         if (cat) tags.push(h('span', { class: 'tag' + (cat.tone === 'accent' ? ' store' : '') }, T(cat.label[0], cat.label[1])));
         if (it.company) tags.push(h('span', { class: 'tag' }, it.company));
 
-        const row = h('div', { class: 'tool-row' },
+        const row = h('div', { class: 'tool-row', dataset: { path: it.path || '' } },
           h('span', { class: 'muted small', style: { width: '26px' } }, String(i + 1)),
           h('div', { class: 'grow' },
             h('div', { class: 'row' },
@@ -454,7 +577,7 @@
           if (cb.checked) emptyChecked.add(it.path); else emptyChecked.delete(it.path);
           refreshEmptyBtn();
         });
-        const row = h('div', { class: 'tool-row' },
+        const row = h('div', { class: 'tool-row', dataset: { path: it.path || '' } },
           cb,
           h('div', { class: 'grow' },
             h('div', { class: 'mono small ellipsis', title: it.path }, it.path),
@@ -524,7 +647,12 @@
     emptyDel.addEventListener('click', deleteEmpty);
     emptyInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') scanEmpty(); });
 
-    return function unmount() { /* 无外部资源需要释放 */ };
+    liveJump = applyJump;
+
+    return function unmount() {
+      /* 页面卸载后跳转接收器必须失效，否则 AI 的跳转会把结果写进已经拆掉的 DOM */
+      liveJump = null;
+    };
   }
 
   function dirOf(p) {
@@ -558,6 +686,8 @@
   window.Pages.tools = {
     title: ['空间工具', 'Space tools'],
     subtitle: ['大文件来源与风险、空文件夹清理', 'Large files with origin and risk, empty folders'],
-    mount
+    mount,
+    /* AI 回答里的「去工具页」落到这里：带路径进来就要看得见东西 */
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

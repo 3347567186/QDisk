@@ -3879,3 +3879,34 @@ html[data-theme="dark"] .ai-page {
   .pg[data-running] .pg-run-dots i { animation: none; opacity: .7; }
   .pg { animation: none; }
 }
+
+/* ---- 来自助手的跳转（AI 回答 → 空间工具） ----
+   横幅先列出助手提到的位置，再把目录填进扫描框；扫到的行用左侧强调线标出来。
+   以前这一步没有横幅也没有扫描，跳过来就是一张空表。 */
+.ai-jump {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  animation: rise-in var(--dur-3) var(--ease) both;
+}
+.ai-jump[hidden] { display: none; }
+.ai-jump-head { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-small); color: var(--text-2); }
+.ai-jump-head svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--accent); }
+.ai-jump-title { flex: 0 0 auto; font-weight: 600; color: var(--text-1); }
+.ai-jump-sub { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+.ai-jump-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-jump-more { align-self: center; font-size: var(--fs-tiny); color: var(--text-3); }
+.ai-jump-path { font-size: var(--fs-tiny); color: var(--text-3); }
+.ai-jump-bar { display: flex; align-items: center; gap: 8px; }
+.ai-jump-dir {
+  flex: 1 1 auto; min-width: 0;
+  font-size: var(--fs-tiny); color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-row.ai-hit { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .ai-jump { animation: none; }
+}
