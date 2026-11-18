@@ -3856,3 +3856,6 @@ html[data-theme="dark"] .ai-page {
 .set-row .agent-limits .field { margin: 0; }
 .set-row .agent-limits .field label { font-size: var(--fs-tiny); color: var(--text-3); }
 @media (max-width: 720px) { .set-row .agent-limits { grid-template-columns: 1fr; } }
+
+.set-row .set-body > .input { width: 100%; box-sizing: border-box; }
+.set-row .set-body > .row > .input { width: auto; }
