@@ -3918,3 +3918,15 @@ html[data-theme="dark"] .ai-page {
   color: var(--text-3); white-space: pre-wrap; word-break: break-word;
 }
 .tl-step[aria-expanded="true"] .ai-step-out > pre { padding: 6px 0 8px; }
+
+/* 抽屉（432px）里那排按钮重新排过：不再靠 overflow:hidden 硬裁，
+   而是把「查证深度」收成图标（有 title 与 aria-label 兜底），
+   给「动手档位」和模型名留出完整位置。 */
+.ai-drawer .dac-left { overflow: visible; }
+.ai-drawer .dac-perm-btn .dac-label { display: none; }
+.ai-drawer .dac-perm-btn { padding: 0 9px; }
+.ai-drawer .dac-perm-btn .dac-chev { display: none; }
+.ai-drawer .dac-agent-mode { padding: 0 9px; }
+.ai-drawer .dac-agent-mode .dac-label { display: inline; }
+.ai-drawer .dac-agent-mode .dac-chev { display: inline-flex; }
+.ai-drawer .dac-pill { max-width: 150px; }

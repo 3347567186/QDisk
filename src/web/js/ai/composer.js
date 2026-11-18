@@ -324,7 +324,7 @@
     permWrap.style.position = 'relative';
     permWrap.style.display = 'inline-flex';
     permWrap.style.maxWidth = '100%';
-    const permBtn = el('button', 'dac-perm');
+    const permBtn = el('button', 'dac-perm dac-perm-btn');
     permBtn.type = 'button';
     permBtn.setAttribute('aria-haspopup', 'menu');
     const permIc = el('span', 'dac-ic');
@@ -621,6 +621,8 @@
       permIc.innerHTML = '';
       permIc.appendChild(icon(opt.icon, 12));
       permLabel.textContent = T(opt.label[0], opt.label[1]);
+      /* 抽屉里这枚只剩图标（放不下两行文字），title 让它仍然说得清是什么 */
+      permBtn.title = T('查证深度：' + opt.label[0], 'Lookup depth: ' + opt.label[1]);
       if (opt.tone === 'danger') permBtn.setAttribute('data-tone', 'danger');
       else permBtn.removeAttribute('data-tone');
       permRowEls.forEach(function (row, i) {
