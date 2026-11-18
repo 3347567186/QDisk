@@ -202,14 +202,14 @@
 ```
 
 ```json
-{"seq":42,"at":"2026-11-18T18:20:11.482Z","phase":"commit","id":"p1x9k3",
- "action":"files.delete","paramsHash":"a1b2c3d4","items":12,"bytes":3006477107,
- "result":"ok","prev":"9f2c"}
+{"n":42,"at":"2026-11-18T18:20:11.482Z","phase":"commit","id":"p1x9k3","action":"files.delete",
+ "cat":"files","items":12,"bytes":3006477107,"hash":"a1b2c3d4","result":"ok","why":"","p":"9f2c","h":"7d1e"}
 ```
 
-- `paramsHash` 是参数的 djb2 摘要；`prev` 是上一行 `seq+hash` 的滚动摘要。
+- `n` 是行号，`hash` 是这次参数的摘要，`p` 是上一行的 `h`，`h` 是「上一行摘要 + 本行内容」的摘要。
 - 这是**防误改**，不是防篡改：djb2 不是密码学哈希，声明清楚比假装安全更有用。
-- 按月份分文件，不自动清理（用户想看「它到底动过什么」时，这份日志是唯一凭据）。
+- 按月份分文件（`journal-202611.jsonl`），不自动清理——用户想看「它到底动过什么」时，
+  这份日志是唯一凭据。
 
 ---
 
@@ -258,14 +258,33 @@
 
 ## 十四、测试
 
-`D:\Builds\ai-actions-selftest.mjs`（vm 沙箱加载 guard / registry / proposals + 假引擎）覆盖：
+### 动作层（`src\web\js\ai\actions.selftest.mjs`）
+
+用 vm 沙箱加载 guard / registry / proposals，配一个假引擎，覆盖 24 条：
 
 动作目录完整性、提案成功、卡片项数与字节、无 `approvedBy` 拒绝执行、用户确认后执行并带撤销、
 系统目录被拦、关闭档拒绝、每轮提案上限、TTL 过期、整理可撤销、设置可撤销回旧值、
 审计含 propose / approve / commit、自动档只跑可撤销、放手档不自动跑不可逆、
 永久删除要确认词、删空目录不自动。
 
-跑法：`node D:\Builds\ai-actions-selftest.mjs`，全绿为通过（当前 20 条）。
+跑法：`node src\web\js\ai\actions.selftest.mjs`，失败时退出码 1。
+
+### 只读助手回归（`src\web\js\ai\agent.selftest.mjs`）
+
+31 条黄金集：schema 合法率 29/29、越权拦截 3/3、工具序列 31/31、单轮 token ≤ 8000。
+
+跑法：`node src\web\js\ai\agent.selftest.mjs`。
+
+### 真实模型抽样（发版前手动跑一次）
+
+用真实 system prompt（含动作目录）喂真实模型，看它是否会逐字挑对动作名。
+1.28.x 上测过三个场景，都通过：
+
+| 用户说法 | 模型实际输出 | 结果 |
+|---|---|---|
+| 「把 X 里的文件按类型整理」 | `list_dir` → `organize_preview` → `propose_action{action:"organize.apply",args:{paths:[X]}}` | 动作名逐字正确，`bind()` 补默认值 `policy:"rename"` |
+| 「如果有空文件夹帮我删掉」 | `empty_dirs` → 结果缺失时改用 `list_dir` → 如实回答「没有空文件夹」 | 不硬编动作、不幻觉 |
+| 任何带 Windows 路径的请求 | 偶尔输出未转义反斜杠 `"D:\Tools\_aitest"` | `extractJson` 的 `fixEscapes()` 按字面补一层，解析成功 |
 
 ---
 
@@ -278,6 +297,8 @@
 4. **抽屉里的对话是另一份会话**：它的提案计数与主对话页分开，两边都从同一份档位读。
 5. **动作目录随版本走**：`AIPrompt.setCatalog()` 灌进去的目录文本在同一个版本内固定，
    保证 system prompt 前缀字节不变、KV cache 不失效。
+6. **系统盘按用户主目录所在盘推断**：Windows 装在非 C 盘时，`guard.js` 的系统目录判断会偏，
+   此时以引擎自己的闸门为准（两层都过才动，偏的一面只会更严或漏给引擎兜）。
 
 ---
 

@@ -38,6 +38,15 @@
   /* ---------------- 输出解析 ---------------- */
 
   /** 从模型返回的 content 里取出 JSON 对象：容忍 ```json 围栏与前后废话 */
+  /* 模型写 Windows 路径时经常忘了转义："D:\Tools\_aitest" 里的 \T \_ 不是合法转义，
+     JSON.parse 直接抛错。这不是模型「答错」，只是漏了反斜杠，按字面意思补一层就对了。
+     只补不合法的那些，合法转义（\" \\ \/ \b \f \n \r \t \uXXXX）原样保留。 */
+  function fixEscapes(raw) {
+    return String(raw)
+      .replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
+      .replace(/\\u(?![0-9a-fA-F]{4})/g, '\\\\u');
+  }
+
   function extractJson(text) {
     let s = String(text || '').trim();
     if (!s) return { error: '模型返回了空内容' };
@@ -61,16 +70,21 @@
       else if (c === '}') {
         depth -= 1;
         if (depth === 0) {
-          const raw = s.slice(start, i + 1);
+          let raw = s.slice(start, i + 1);
+          let obj = null;
           try {
-            const obj = JSON.parse(raw);
-            if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-              return { error: '输出的不是 JSON 对象' };
+            obj = JSON.parse(raw);
+          } catch (e0) {
+            try {
+              obj = JSON.parse(fixEscapes(raw));
+            } catch (e1) {
+              return { error: 'JSON 解析失败：' + (e0 && e0.message ? e0.message : e0) };
             }
-            return { obj };
-          } catch (e) {
-            return { error: 'JSON 解析失败：' + (e && e.message ? e.message : e) };
           }
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            return { error: '输出的不是 JSON 对象' };
+          }
+          return { obj };
         }
       }
     }
