@@ -1509,7 +1509,7 @@ fn agent_read(path: String, offset: Option<u64>, max_chars: Option<usize>) -> Re
             _ => cut.len(),
         };
         next = Some(off + consumed as u64);
-    } else if off + n as u64 < size {
+    } else if (off + n as u64) < size {
         next = Some(off + n as u64);
     }
     Ok(json!({
