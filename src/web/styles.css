@@ -2223,7 +2223,7 @@ body[data-motion="off"] .shot-flag { animation: none; }
   display: flex; flex-direction: row; min-height: 0; height: 100%;
   align-items: stretch; gap: 0;
   /* 左栏宽度走变量：展开/收起只改这一个数。
-     收起不是消失，而是收成一条图标栏——新对话、展开、每个会话的记号还留着。 */
+     收起不是消失，而是收成一条只有两枚按钮的窄栏（展开、新对话）。 */
   --ai-rail-w: 208px;
 }
 .ai-page[data-rail="closed"] { --ai-rail-w: 56px; }
@@ -2249,55 +2249,33 @@ body[data-motion="off"] .shot-flag { animation: none; }
     opacity var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease),
     border-right-width var(--dur-3) var(--ease);
 }
-/* 收起：宽度收到 56px，分隔线、留白都留着，内容按图标重排（见下方 collapsed 段），
-   只有文字淡出。收起后仍是一条可用的导航栏，不是一块空白。 */
+/* 收起：宽度收到 56px，只留两枚按钮——展开、新对话，上下排成一列。
+   会话列表整列收起（哪条会话展开再看），栏本身仍是可用的开关。
+   两枚按钮**同宽同高、同边距**：高度差 4px 就会读成「歪」，所以这里统一 36。 */
 .ai-page[data-rail="closed"] .ai-rail {
   padding-right: 0; margin-right: 12px; opacity: 1;
   gap: 4px;
   border-right-color: var(--line);
 }
-/* 收起态的三样东西：展开、新对话、会话记号。
-   文字与删除按钮淡出，鼠标位置和点击目标都落在 34px 的方块上。 */
 .ai-page[data-rail="closed"] .ai-rail-top {
-  flex-direction: column; gap: 6px; padding-bottom: 10px;
+  flex-direction: column; align-items: center; gap: 6px; padding: 2px 0 8px;
 }
 /* 收起时「新对话」只剩一个 +，文字收宽淡出而不是直接消失；
    gap 在文字宽度归零后仍会占位，会把 + 挤偏，所以这里清零。 */
-.ai-page[data-rail="closed"] .ai-new {
-  flex: 0 0 auto; width: 34px; height: 34px; padding: 0; gap: 0; justify-content: center;
+.ai-page[data-rail="closed"] .ai-new,
+.ai-page[data-rail="closed"] .ai-rail-toggle {
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; gap: 0;
+  justify-content: center; border-radius: var(--radius);
 }
 .ai-page[data-rail="closed"] .ai-new span {
   max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap; pointer-events: none;
 }
+.ai-page[data-rail="closed"] .ai-rail-toggle svg { transform: rotate(180deg); }
 /* 收起态只有两个按钮：展开、新对话。会话列表整块让位（不占高度、不可点） */
 .ai-page[data-rail="closed"] .ai-rail-list {
   flex: 0 0 0; min-height: 0; height: 0; padding: 0;
   opacity: 0; visibility: hidden; overflow: hidden; pointer-events: none;
 }
-.ai-page[data-rail="closed"] .ai-rail-top { align-items: center; }
-.ai-page[data-rail="closed"] .ai-rail-toggle { width: 34px; height: 30px; }
-.ai-page[data-rail="closed"] .ai-rail-toggle svg { transform: rotate(180deg); }
-.ai-page[data-rail="closed"] .ai-rail-group {
-  flex: 0 0 0; height: 0; padding: 0; opacity: 0; overflow: hidden;
-  pointer-events: none;
-}
-.ai-page[data-rail="closed"] .ai-rail-empty { opacity: 0; height: 0; padding: 0; overflow: hidden; }
-.ai-page[data-rail="closed"] .ai-sess { justify-content: center; }
-.ai-page[data-rail="closed"] .ai-sess-open {
-  flex: 0 0 auto; width: 34px; height: 34px; padding: 0;
-  justify-content: center; align-items: center;
-}
-/* 文字与删除按钮不硬切：宽度收到 0、透明度一起淡出，跟着栏宽动画走完 */
-.ai-page[data-rail="closed"] .ai-sess-title,
-.ai-page[data-rail="closed"] .ai-sess-time {
-  flex: 0 0 0; min-width: 0; max-width: 0; opacity: 0; overflow: hidden;
-  pointer-events: none;
-}
-.ai-page[data-rail="closed"] .ai-sess-del {
-  flex: 0 0 0; width: 0; margin: 0; opacity: 0; overflow: hidden; pointer-events: none;
-}
-.ai-page[data-rail="closed"] .ai-sess-glyph { width: 22px; opacity: 1; margin-right: 0; }
-.ai-page[data-rail="closed"] .ai-sess[data-active]::before { left: -6px; }
 .ai-rail-top { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding-bottom: 6px; }
 .ai-rail-toggle {
   flex: 0 0 auto; width: 26px; height: 32px; padding: 0; border-radius: var(--radius);
@@ -2332,6 +2310,8 @@ body[data-motion="off"] .shot-flag { animation: none; }
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
   display: flex; flex-direction: column; gap: 1px; padding: 2px 0 8px;
   scrollbar-width: thin;
+  transition: flex-basis var(--dur-3) var(--ease), height var(--dur-3) var(--ease),
+    padding var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease);
 }
 .ai-rail-group {
   font-size: var(--fs-tiny); color: var(--text-3); letter-spacing: .04em;
@@ -2375,25 +2355,10 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .ai-sess:hover .ai-sess-del, .ai-sess-del:focus-visible { opacity: 1; }
 .ai-sess-del:hover { color: var(--danger); background: var(--surface-3); }
 .ai-sess-del svg { width: 12px; height: 12px; }
-/* 收起态的会话记号：一个 22px 的圆角方块，放标题首字。
-   展开时宽度与透明度都收到 0（不是 display:none），这样才能跟着栏宽动画
-   一起出现/消失；margin-right 抵掉行内的 8px gap，展开时不留缝。 */
-.ai-sess-glyph {
-  flex: 0 0 auto; width: 0; height: 22px; opacity: 0; overflow: hidden;
-  display: grid; place-items: center; border-radius: 6px;
-  margin-right: -8px;
-  background: var(--surface-3); color: var(--text-2);
-  font-size: var(--fs-tiny); font-weight: 600; line-height: 1;
-  user-select: none;
-  transition: width var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease),
-    margin-right var(--dur-3) var(--ease), background var(--dur-1) var(--ease),
-    color var(--dur-1) var(--ease);
-}
-.ai-sess:hover .ai-sess-glyph { background: var(--accent-weak); color: var(--accent-text); }
-.ai-sess[data-active] .ai-sess-glyph { background: var(--accent); color: #fff; }
-
 /* 侧栏底部不再挂「设置」入口：AI 的配置与习惯都在输入框的模型菜单里，
-   侧栏只放会话本身，底栏与它一起删掉，不给空壳留样式。 */
+   侧栏只放会话本身，底栏与它一起删掉，不给空壳留样式。
+   （1.27.1 起收起态也不再放会话记号方块：56px 里一行只够两个按钮，
+     认不出标题的缩写不如不给，要看会话就展开。） */
 
 /* 窄窗（最小 1000×660）把左栏收窄，别把对话区挤成一条缝。
    只改宽度变量，收起态仍然走 56px —— 否则窄窗下收起会突然变回 176px。 */
@@ -2429,12 +2394,23 @@ body[data-motion="off"] .shot-flag { animation: none; }
   white-space: pre-wrap; word-break: break-word;
 }
 /* 回答正文：比思考更大、更亮，是这一屏真正要读的东西 */
-.ai-msg-body { font-size: 14px; line-height: 1.75; font-weight: 400; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
+.ai-msg-body { font-size: var(--fs-body); line-height: 1.72; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
 /* 对话正文可选中复制（全局 * 是禁选的，这里显式放开，和思考正文一致） */
 .ai-msg-body, .ai-msg-body * { -webkit-user-select: text; user-select: text; }
 .ai-msg-body { cursor: text; }
 .ai-msg-body.degraded { color: var(--text-2); }
-.ai-answer { padding-right: 2px; }
+/* 结果正文是这一屏的主角：15px、最深的墨色、首行再加一档字重，让「结论先行」
+   在视觉上成立。对照思考那几行（11.5px 次级灰），层级一眼分得开。 */
+.ai-answer {
+  padding-right: 2px;
+  font-size: 15px;
+  line-height: 1.78;
+  letter-spacing: .003em;
+  color: var(--text-1);
+}
+.ai-answer::first-line { font-weight: 600; }
+/* 兜底回答（degraded）不是结论，退回正文尺寸与次级色，别假装是答案 */
+.ai-answer.degraded { font-size: var(--fs-body); line-height: 1.72; color: var(--text-2); }
 
 /* 查证过程：默认折成一行，点开才逐条显示
    （1.22.0 起标题行由 thoughtline.js 渲染，下面 .ai-steps-head / .ai-steps
@@ -2596,35 +2572,41 @@ body[data-motion="off"] .shot-flag { animation: none; }
   display: flex; flex-direction: column; gap: 3px;
   padding: .45em 0 .15em 1.6em; font-weight: 400;
 }
-/* 思考正文：模型推理的原始文字，边生成边追加。
-   1.25.0：不再困在 168px 的内滚小框里 —— 随页面自然长高、可拖动选中复制；
-   字体用衬线体（--font-thought）13.5px，和回答正文的 Inter/雅黑 13px 明显区分。
-   流式批次做透明度淡入（.tl-chunk），减少动态时直接落字。缩进仍与过程行对齐。 */
-.tl-thought {
-  padding: .3em 2px .2em 1.9em;
-  font-family: var(--font-thought);
-  font-size: 12.5px;
-  font-weight: 400;
-  line-height: 1.7;
-  letter-spacing: .012em;
-  color: var(--text-2);
-  white-space: pre-wrap;
-  word-break: break-word;
-  -webkit-user-select: text;
-  -moz-user-select: text;
-  user-select: text;
+/* 思考轨迹：一行一条「思考 · 句子」，11.5px、次级灰、行高 22px，超宽省略号。
+   这是「过程」的位置——想干什么、查到什么平铺成行，读得到但不跟下面的结果
+   抢注意力；完整文字仍然留在 DOM 里，复制按钮拿得到全量。
+   形状对齐 agent 轨迹列表：一枚小标签 + 一句灰色的话，行与行等距。 */
+.tl-thoughts {
+  display: flex; flex-direction: column; align-items: stretch;
+  padding: 2px 0 2px 1.6em; min-width: 0;
+}
+.tl-thought-row {
+  display: flex; align-items: baseline; min-width: 0; height: 22px;
+  font-size: 11.5px; line-height: 22px; font-weight: 400;
+  color: var(--text-3);
+  animation: tl-row-in 200ms var(--ease-out) both;
+}
+.tl-tag {
+  flex: 0 0 auto; color: var(--text-3);
+  -webkit-user-select: none; user-select: none;
+}
+.tl-tag::after { content: '·'; margin: 0 .45em; opacity: .55; }
+.tl-thought-text {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  -webkit-user-select: text; -moz-user-select: text; user-select: text;
   cursor: text;
 }
-.tl-thought:empty { display: none; }
-/* 思考是次要信息：全程用次级灰，别和回答抢注意力 */
-.tl:not([data-working]) .tl-thought { color: var(--text-2); }
-
-/* 流式批次：只动透明度，不动布局（inline 元素做 transform 会断行） */
-.tl-chunk { animation: tl-chunk-in 260ms var(--ease-out) both; }
-.tl-chunk--tail { animation-duration: 120ms; }
-@keyframes tl-chunk-in { from { opacity: 0; } }
+/* 还在吐字：当前行末尾一根细游标（比整块淡入更稳，也不改布局） */
+.tl-thought-row[data-streaming] .tl-thought-text::after {
+  content: ''; display: inline-block; width: .4em; height: .82em;
+  margin-left: .1em; vertical-align: -.06em; border-radius: 1px;
+  background: currentColor; opacity: .5;
+  animation: tl-caret 1.05s steps(2, start) infinite;
+}
+@keyframes tl-row-in { from { opacity: 0; transform: translateY(-2px); } }
 @media (prefers-reduced-motion: reduce) {
-  .tl-chunk { animation: none; }
+  .tl-thought-row { animation: none; }
 }
 
 /* 复制按钮：正文出现后才显形；点它不会折叠整块（JS 里 stopPropagation） */
@@ -2644,19 +2626,7 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .tl-copy[data-done] svg { display: none; }
 .tl-copy[data-done]::after { content: '✓'; font-size: 12px; line-height: 1; }
 
-/* 还在吐字时，句尾跟一根细细的游标 */
-.tl-thought[data-streaming]::after {
-  content: '';
-  display: inline-block;
-  width: .42em;
-  height: .92em;
-  margin-left: .12em;
-  vertical-align: -.11em;
-  border-radius: 1px;
-  background: currentColor;
-  opacity: .55;
-  animation: tl-caret 1.05s steps(2, start) infinite;
-}
+/* 游标的关键帧留在下面；当前行的游标见 .tl-thought-row[data-streaming] */
 
 @keyframes tl-caret {
   0%, 100% { opacity: .55; }
@@ -2695,7 +2665,7 @@ body[data-motion="off"] .shot-flag { animation: none; }
   .tl-trace { transition: none; }
   .tl-step { animation: none; }
   .tl-pulse { animation-duration: 2.4s; }
-  .tl-thought[data-streaming]::after { animation: none; opacity: .35; }
+  .tl-thought-row[data-streaming] .tl-thought-text::after { animation: none; opacity: .35; }
   .tl[data-working] .tl-breath[data-shimmer] {
     background: none; color: inherit; -webkit-text-fill-color: currentColor;
     animation: none;

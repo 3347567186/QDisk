@@ -263,13 +263,14 @@
       curText = null;
     }
 
-    /* 句末标点就收行；没收到的半句留在当前行，下一批继续往里接 */
+    /* 句末标点就收行（中文 。！？；、换行，英文句点后跟空白）；没收到的半句
+       留在当前行，下一批继续往里接。英文只认「点 + 空白」，避免把 1.27.2 拆开。 */
     function writeThought(buf) {
       ensureWrap();
       if (!curRow) newRow();
       let rest = buf;
       while (rest) {
-        const m = rest.match(/[\n。！？；]+/);
+        const m = rest.match(/[\n。！？；]|\.(?=\s)/);
         if (!m) {
           curText.appendChild(document.createTextNode(rest));
           break;
