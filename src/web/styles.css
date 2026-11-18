@@ -2428,7 +2428,7 @@ html[data-theme="dark"] .ai-page {
 .ai-scroll {
   flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden;
   scrollbar-width: none; -ms-overflow-style: none;
-  padding: 4px 2px 18px; overscroll-behavior: contain;
+  padding: 4px 30px 18px 2px; overscroll-behavior: contain;
   /* 必须自己成为定位祖先：思路行里的 .tl-sr 是无坐标的 absolute，
      定位祖先一旦落到 body，它就会跑出滚动容器、把整个文档撑高出一条外层滚动条。 */
   position: relative;
@@ -3382,16 +3382,16 @@ html[data-theme="dark"] .ai-page {
 
 /* ---------------- 回合导航（右侧刻度条） ---------------- */
 .ai-tnav {
-  position: absolute; right: 12px; top: 10px; bottom: 116px; width: 28px;
+  position: absolute; right: 6px; top: 10px; bottom: 116px; width: 20px;
   display: flex; align-items: center; z-index: 7; pointer-events: none;
 }
 .ai-tnav[hidden] { display: none; }
 .ai-tnav-frame {
-  position: relative; width: 28px; max-height: 100%;
+  position: relative; width: 20px; max-height: 100%;
   pointer-events: auto;
 }
 .ai-tnav-scroll {
-  position: relative; width: 28px; max-height: 100%; overflow: hidden;
+  position: relative; width: 20px; max-height: 100%; overflow: hidden;
   scrollbar-width: none; -ms-overflow-style: none;
 }
 .ai-tnav-scroll::-webkit-scrollbar { display: none; }
@@ -3401,14 +3401,14 @@ html[data-theme="dark"] .ai-page {
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 24px), transparent);
   mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 24px), transparent);
 }
-.ai-tnav-list { position: relative; width: 28px; }
+.ai-tnav-list { position: relative; width: 20px; }
 .ai-tnav-mark {
-  position: absolute; left: 0; width: 28px; height: 10px; padding: 0;
+  position: absolute; left: 0; width: 20px; height: 10px; padding: 0;
   border: 0; background: none; cursor: pointer; display: flex; align-items: center;
   justify-content: flex-end;
 }
 .ai-tnav-mark::before {
-  content: ''; display: block; width: 20px; height: 2px; border-radius: 2px;
+  content: ''; display: block; width: 14px; height: 2px; border-radius: 2px;
   background: var(--text-3); transform: scaleX(.6); transform-origin: right center;
   transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), opacity var(--dur-fast);
   opacity: .9;
@@ -3417,16 +3417,22 @@ html[data-theme="dark"] .ai-page {
 .ai-tnav-mark[aria-current="true"]::before { transform: scaleX(1); background: var(--text-1); opacity: 1; }
 .ai-tnav-mark:focus-visible { outline: none; }
 .ai-tnav-mark:focus-visible::before { box-shadow: 0 0 0 2px var(--accent-ring); }
-/* 悬停预览：一张深色小卡，两行各一条，宽度只跟文字走。
-   白底浮层压在对话上会读成「界面没关干净」，深浅主题都用同一块深色。 */
+/* 悬停预览：一张小卡，两行各一条，宽度只跟文字走。
+   底色/描边/文字全走主题令牌，浅色深色各自可读，不写死黑色。 */
 .ai-tnav-pop {
-  position: absolute; right: calc(100% + 8px); top: var(--rail-c, 0);
+  position: absolute; right: calc(100% + 6px); top: var(--rail-c, 0);
   width: max-content; max-width: 236px; padding: 7px 9px 7px 11px;
-  border-radius: 10px; background: rgba(20, 20, 20, .97);
-  border: 1px solid rgba(255, 255, 255, .08);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, .22), 0 2px 8px rgba(0, 0, 0, .12);
+  border-radius: 10px; background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-2);
+  color: var(--text-1);
   opacity: 0; transform: translate(4px, -50%); pointer-events: none; z-index: 8;
   transition: opacity 120ms var(--ease), transform 120ms var(--ease);
+}
+html[data-theme="dark"] .ai-tnav-pop {
+  background: #262625;
+  border-color: rgba(255, 255, 255, .10);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .45), 0 2px 8px rgba(0, 0, 0, .30);
 }
 .ai-tnav-pop.on { opacity: 1; transform: translate(0, -50%); }
 .ai-tnav-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -3435,18 +3441,18 @@ html[data-theme="dark"] .ai-page {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ai-tnav-q { font-size: var(--fs-small); font-weight: 600; color: #f4f2ef; }
-.ai-tnav-a { font-size: var(--fs-tiny); color: #9c9893; }
+.ai-tnav-q { font-size: var(--fs-small); font-weight: 600; color: var(--text-1); }
+.ai-tnav-a { font-size: var(--fs-tiny); color: var(--text-2); }
 /* 抽屉里对话更窄：预览再收一圈，别把正文挤出去 */
 .ai-drawer .ai-tnav-pop { max-width: 196px; }
 /* 每行末尾那一小截刻度：回答行比提问行略长，和右侧刻度条同一种笔触 */
 .ai-tnav-tick {
-  flex: none; width: 6px; height: 2px; border-radius: 2px; background: #6e6a66;
+  flex: none; width: 6px; height: 2px; border-radius: 2px; background: var(--text-3);
 }
-.ai-tnav-row + .ai-tnav-row .ai-tnav-tick { width: 14px; background: #8f8a85; }
+.ai-tnav-row + .ai-tnav-row .ai-tnav-tick { width: 14px; background: var(--text-2); }
 .ai-tnav-stat {
   margin: -1px 0 4px; text-align: right;
-  font-size: 10px; line-height: 1.2; color: #8a8580;
+  font-size: 10px; line-height: 1.2; color: var(--text-3);
   font-family: var(--mono); letter-spacing: .02em;
 }
 
