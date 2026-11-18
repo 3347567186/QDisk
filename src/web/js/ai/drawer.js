@@ -55,7 +55,6 @@
   function open(opts) {
     const options = opts || {};
     if (current) close();
-    const title = options.title || T('问 AI', 'Ask AI');
 
     const mask = h('div', { class: 'ai-drawer-mask' });
     const body = h('div', { class: 'ai-drawer-body' });
@@ -76,10 +75,7 @@
       h('div', { class: 'ai-drawer-head' },
         newBtn,
         histBtn,
-        h('div', { class: 'ai-drawer-title' },
-          h('span', { class: 'ai-dw-title', text: title }),
-          h('span', { class: 'ai-dw-sub', text: T('贴着当前页问', 'About this page') })
-        ),
+        h('div', { class: 'ai-dw-spacer' }),
         h('button', {
           class: 'btn sm ghost',
           title: T('在新页面打开', 'Open full page'),

@@ -3881,3 +3881,5 @@ html[data-theme="dark"] .ai-page {
 .ai-drawer .dac-agent-mode .dac-chev { display: none; }
 .ai-drawer .dac-pill { max-width: 132px; }
 .ai-drawer .dac-right { gap: 6px; }
+
+.ai-dw-spacer { flex: 1 1 auto; }
