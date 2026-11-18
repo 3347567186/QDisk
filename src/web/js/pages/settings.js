@@ -859,80 +859,78 @@
           onchange: (e) => saveAgent({ [key]: Math.max(lo, Math.min(hi, Number(e.target.value) || def)) })
         });
 
-        const agentBlock = h('div', { class: 'agent-box' + (pol.mode === 'off' ? '' : ' on') },
-          h('div', { class: 'agent-head' },
-            h('div', null,
-              h('div', { class: 'agent-title', text: T('允许 AI 动手', 'Let the AI act') }),
-              h('div', { class: 'desc', text: MODE_TIP[pol.mode] || '' })),
-            h('div', { class: 'spacer' }),
-            h('span', { class: 'badge' + (pol.mode === 'off' ? '' : (pol.mode === 'full' ? ' warn' : ' ok')), text: pol.mode === 'off' ? T('只读', 'Read-only') : T('已开启', 'Enabled') })
-          ),
-          h('div', { class: 'ai-modes' }, ...modeBtns),
-          h('div', { class: 'agent-cats' }, ...catBoxes),
-          h('div', { class: 'agent-limits' },
-            h('div', { class: 'field' }, h('label', { text: T('每轮最多提案', 'Proposals per turn') }), numIn('maxOpsPerTurn', 1, 10, 2)),
-            h('div', { class: 'field' }, h('label', { text: T('每会话最多执行', 'Executions per session') }), numIn('maxOpsPerSession', 1, 200, 30)),
-            h('div', { class: 'field' }, h('label', { text: T('单次最多项目', 'Items per action') }), numIn('maxItems', 10, 20000, 200))
-          ),
-          h('div', { class: 'desc', text: T('每次执行都写进 ai\\journal 审计日志；把这一栏关掉，助手立刻退回只读', 'Every run is journalled under ai\\journal; turning this off returns the assistant to read-only') })
+        /* 一张卡、若干行、行间 0.5px 细线：分组标题只在卡内出现一次，
+           不再「每条一块」——那样十几项会散成十几张卡，扫读成本高。 */
+        const setRow = (label, node, desc, tail) => h('div', { class: 'set-row' },
+          h('div', { class: 'set-label', text: label }),
+          h('div', { class: 'set-body' },
+            node,
+            desc ? h('div', { class: 'desc', text: desc }) : null,
+            tail || null)
         );
+        const setCap = (text, tail) => h('div', { class: 'set-cap' },
+          h('span', { class: 'set-cap-text', text }),
+          tail || null);
 
-        const body = h('div', { class: 'stack' },
-          h('div', { class: 'grid-2' },
-            h('div', { class: 'field' },
-              h('label', { text: T('服务商', 'Provider') }), provBox
-            ),
-            h('div', { class: 'field' },
-              h('label', { text: T('模型', 'Model') }),
+        const agentBadge = h('span', {
+          class: 'badge' + (pol.mode === 'off' ? '' : (pol.mode === 'full' ? ' warn' : ' ok')),
+          text: pol.mode === 'off' ? T('只读', 'Read-only') : T('已开启', 'Enabled')
+        });
+
+        const body = h('div', { class: 'stack set-stack' },
+          h('div', { class: 'set-card' },
+            setCap(T('连接', 'Connection'), h('span', { class: 'set-cap-tail', text: AIStore.isConfigured(d) ? T('已配置', 'Configured') : T('未配置', 'Not configured') })),
+            setRow(T('服务商', 'Provider'), provBox),
+            setRow(T('接口地址', 'Endpoint'), endpointIn,
+              T('OpenAI 兼容的 /chat/completions 地址；本地 Ollama 可用 127.0.0.1', 'Any OpenAI-compatible /chat/completions URL; local Ollama works too')),
+            setRow(T('API Key', 'API key'),
+              h('div', { class: 'row' },
+                keyIn,
+                h('button', {
+                  class: 'btn ghost sm', title: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show'),
+                  onclick: () => { state.aiKeyShown = !state.aiKeyShown; paint(); }
+                }, h('span', { text: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show') }))
+              ),
+              T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported')),
+
+            setCap(T('模型', 'Model')),
+            setRow(T('模型名', 'Model'),
               h('div', { class: 'row' }, modelIn, fetchBtn),
-              h('div', { class: 'desc', text: T('填接口文档里的模型名，也可以点「获取模型」让端点自己报', 'Type a model name, or let the endpoint list them') }),
-              state.aiModelsErr
-                ? h('div', { class: 'small', style: 'color:var(--danger)', text: state.aiModelsErr })
-                : null,
-              modelPicker
-            )
-          ),
-          h('div', { class: 'field' },
-            h('label', { text: T('接口地址', 'Endpoint') }), endpointIn,
-            h('div', { class: 'desc', text: T('OpenAI 兼容的 /chat/completions 地址；本地 Ollama 可用 127.0.0.1', 'Any OpenAI-compatible /chat/completions URL; local Ollama works too') })
-          ),
-          h('div', { class: 'field' },
-            h('label', { text: T('API Key', 'API key') }),
-            h('div', { class: 'row' },
-              keyIn,
-              h('button', {
-                class: 'btn ghost sm', title: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show'),
-                onclick: () => { state.aiKeyShown = !state.aiKeyShown; paint(); }
-              }, h('span', { text: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show') }))
-            ),
-            h('div', { class: 'desc', text: T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported. Requests go straight to the URL above.') })
-          ),
-          h('div', { class: 'grid-2' },
-            h('div', { class: 'field' },
-              h('label', { text: T('温度', 'Temperature') }), tempIn,
-              h('div', { class: 'desc', text: T('越低越稳，助手类任务建议 0–0.3', 'Lower is steadier; 0–0.3 suits assistant tasks') })
-            ),
-            h('div', { class: 'field' },
-              h('label', { text: T('每次最多查证轮数', 'Max tool steps') }),
+              T('填接口文档里的模型名，也可以点「获取模型」让端点自己报', 'Type a model name, or let the endpoint list them'),
+              h('div', null,
+                state.aiModelsErr ? h('div', { class: 'small', style: 'color:var(--danger)', text: state.aiModelsErr }) : null,
+                modelPicker)),
+            setRow(T('上下文窗口', 'Context window'),
+              h('div', { class: 'row' }, ctxIn, h('span', { class: 'badge' + (reported ? ' ok' : ''), text: winSrc })),
+              reported
+                ? T('读自端点 /models 的 max context length；对话预算按窗口的 25% / 50% / 75% 分配', 'Read from the endpoint; turns use 25/50/75% of it')
+                : T('端点没有报告这个值，先按默认 32K 处理，可以手动改；点「获取模型」会尝试读真实值', 'Not reported; 32K applies until you fetch models')),
+            setRow(T('温度', 'Temperature'), tempIn, T('越低越稳，助手类任务建议 0–0.3', 'Lower is steadier; 0–0.3 suits assistant tasks')),
+            setRow(T('查证轮数', 'Max tool steps'),
               h('div', { class: 'row' },
                 h('span', { class: 'badge', text: String(d.maxSteps) + T(' 步', ' steps') }),
-                h('span', { class: 'small muted', text: T('超预算时会先给结论，不会无限查', 'Stops with a conclusion instead of looping') })
-              )
-            )
-          ),
-          h('div', { class: 'field' },
-            h('label', { text: T('上下文窗口', 'Context window') }),
-            h('div', { class: 'row' },
-              ctxIn,
-              h('span', { class: 'badge' + (reported ? ' ok' : ''), text: winSrc })
-            ),
-            h('div', { class: 'desc', text: reported
-              ? T('读自端点 /models 的 max context length；对话预算按窗口的 25% / 50% / 75% 分配', 'Read from the endpoint model list; turns use 25/50/75% of it')
-              : T('端点没有报告这个值，先按默认 32K 处理，可以手动改；点「获取模型」会尝试读真实值', 'Not reported by the endpoint; default 32K applies until you fetch models') })
-          ),
-          h('div', { class: 'row wrap' },
-            h('label', { class: 'check' }, enabledCb, h('span', { text: T('启用 AI 助手', 'Enable AI assistant') })),
-            h('label', { class: 'check' }, jsonCb, h('span', { text: T('要求 JSON 模式', 'Request JSON mode') }))
+                h('span', { class: 'small muted', text: T('超预算时会先给结论，不会无限查', 'Stops with a conclusion instead of looping') }))),
+
+            setCap(T('行为', 'Behaviour')),
+            setRow(T('开关', 'Switches'),
+              h('div', { class: 'row wrap' },
+                h('label', { class: 'check' }, enabledCb, h('span', { text: T('启用 AI 助手', 'Enable AI assistant') })),
+                h('label', { class: 'check' }, jsonCb, h('span', { text: T('要求 JSON 模式', 'Request JSON mode') })))),
+
+            setCap(T('允许 AI 动手', 'Let the AI act'), agentBadge),
+            setRow(T('档位', 'Mode'),
+              h('div', { class: 'ai-modes' }, ...modeBtns),
+              MODE_TIP[pol.mode] || ''),
+            setRow(T('能力范围', 'Capabilities'),
+              h('div', { class: 'agent-cats' }, ...catBoxes),
+              pol.mode === 'off' ? T('档位在「只读」时这些开关不生效', 'Inactive while the mode is read-only') : null),
+            setRow(T('上限', 'Limits'),
+              h('div', { class: 'agent-limits' },
+                h('div', { class: 'field' }, h('label', { text: T('每轮最多提案', 'Proposals per turn') }), numIn('maxOpsPerTurn', 1, 10, 2)),
+                h('div', { class: 'field' }, h('label', { text: T('每会话最多执行', 'Executions per session') }), numIn('maxOpsPerSession', 1, 200, 30)),
+                h('div', { class: 'field' }, h('label', { text: T('单次最多项目', 'Items per action') }), numIn('maxItems', 10, 20000, 200))
+              ),
+              T('每次执行都写进 ai\\journal 审计日志；把档位切回「只读」，助手立刻失去动手能力', 'Every run is journalled under ai\\journal; switching back to read-only revokes everything'))
           ),
           test && !test.ok
             ? h('div', { class: 'small', style: 'color:var(--danger)', text: test.msg })
@@ -946,7 +944,6 @@
           test && test.ok && test.hint
             ? h('div', { class: 'small muted', text: test.hint })
             : null,
-          agentBlock,
           h('div', { class: 'action-bar' },
             testBadge,
             h('div', { class: 'spacer' }),
