@@ -518,6 +518,27 @@ for (const c of CASES) {
   results.push({ id: 'G28', group: '续跑', pass: bad2.length === 0, why: bad2.join('；'), tools: '-', steps: res2.usage ? res2.usage.steps : 0 });
 }
 
+/* G29 路径转义：模型写 "D:\tools" 时 \t 是合法转义，解析成制表符会把路径写坏；
+   两种漏写反斜杠的写法都要能还原成 D:\Tools */
+{
+  const { extractJson } = require('./agent.js');
+  const cases = [
+    ['{"answer":"D:\\tools 里最大"}', (o) => o.answer, 'D:\\Tools 里最大', '药丸制表符还原'],
+    ['{"answer":"D:\\\\Tools ok"}', (o) => o.answer, 'D:\\Tools ok', '正确双写不动'],
+    ['{"answer":"D:\\Tools 没转义"}', (o) => o.answer, 'D:\\Tools 没转义', '漏转义走 fixEscapes'],
+    ['{"tool":"list_dir","args":{"dir":"D:\\tools"}}', (o) => o.args.dir, 'D:\\Tools', '工具参数里的路径']
+  ];
+  const bad = [];
+  for (const [src, pick, want, name] of cases) {
+    const r = extractJson(src);
+    if (r.error) { bad.push(`${name}：解析失败 ${r.error}`); continue; }
+    let got = '';
+    try { got = pick(r.obj); } catch (e) { bad.push(`${name}：取不到字段`); continue; }
+    if (got !== want) bad.push(`${name}：得到 ${JSON.stringify(got)}`);
+  }
+  results.push({ id: 'G29', group: '转义', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

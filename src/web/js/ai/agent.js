@@ -47,6 +47,20 @@
       .replace(/\\u(?![0-9a-fA-F]{4})/g, '\\\\u');
   }
 
+  /** 模型写 "D:\tools" 时 JSON 里的 \t 是合法转义，fixEscapes 管不了，
+   *  解析出来就是一个制表符，显示成 "D:	ools"。回答里本来不允许出现制表符
+   *  （格式规定一行一条），所以把制表符还原成「\T」——路径就对了。 */
+  function repairStrings(node) {
+    if (typeof node === 'string') return node.replace(/\t/g, '\\T');
+    if (Array.isArray(node)) return node.map(repairStrings);
+    if (node && typeof node === 'object') {
+      const out = {};
+      for (const k of Object.keys(node)) out[k] = repairStrings(node[k]);
+      return out;
+    }
+    return node;
+  }
+
   function extractJson(text) {
     let s = String(text || '').trim();
     if (!s) return { error: '模型返回了空内容' };
@@ -84,7 +98,7 @@
           if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
             return { error: '输出的不是 JSON 对象' };
           }
-          return { obj };
+          return { obj: repairStrings(obj) };
         }
       }
     }
