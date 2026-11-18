@@ -2222,29 +2222,16 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .ai-page {
   display: flex; flex-direction: row; min-height: 0; height: 100%;
   align-items: stretch; gap: 0;
-  /* 左栏宽度走变量：收起时整体归零，展开/收起只改这一个数 */
+  /* 左栏宽度走变量：展开/收起只改这一个数。
+     收起不是消失，而是收成一条图标栏——新对话、展开、每个会话的记号还留着。 */
   --ai-rail-w: 208px;
 }
-.ai-page[data-rail="closed"] { --ai-rail-w: 0px; }
+.ai-page[data-rail="closed"] { --ai-rail-w: 56px; }
 .ai-main {
   flex: 1 1 0; min-width: 0; min-height: 0; position: relative;
   display: flex; justify-content: center;
   transition: padding-left var(--dur-3) var(--ease);
 }
-/* 收起后开关挪到这块留白里，不用浮在正文上面，也就永远不会压住内容 */
-.ai-page[data-rail="closed"] .ai-main { padding-left: 34px; }
-.ai-main-toggle {
-  position: absolute; left: 0; top: 2px; display: none;
-  width: 26px; height: 26px; padding: 0; border-radius: var(--radius);
-  border: 1px solid transparent; background: none; color: var(--text-3);
-  cursor: pointer; align-items: center; justify-content: center;
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
-    border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
-}
-.ai-page[data-rail="closed"] .ai-main-toggle { display: inline-flex; }
-.ai-main-toggle:hover { background: var(--hover); color: var(--text-1); border-color: var(--line); }
-.ai-main-toggle:active { transform: scale(.94); }
-.ai-main-toggle svg { width: 14px; height: 14px; }
 .ai-page-chat {
   flex: 1 1 0; min-width: 0; min-height: 0; width: 100%; max-width: 760px;
   display: flex; flex-direction: column;
@@ -2262,13 +2249,48 @@ body[data-motion="off"] .shot-flag { animation: none; }
     opacity var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease),
     border-right-width var(--dur-3) var(--ease);
 }
-/* 收起：宽度、间距、内边距一起归零，右分隔线淡出；内容跟着一起压缩，不留下半个字。
-   分隔线还要把 1px 的宽度一起收掉，否则浮在 0 宽的盒子上还剩 1px。 */
+/* 收起：宽度收到 56px，分隔线、留白都留着，内容按图标重排（见下方 collapsed 段），
+   只有文字淡出。收起后仍是一条可用的导航栏，不是一块空白。 */
 .ai-page[data-rail="closed"] .ai-rail {
-  margin-right: 0; padding-right: 0; opacity: 0;
-  border-right-color: transparent; border-right-width: 0;
+  padding-right: 0; margin-right: 12px; opacity: 1;
+  gap: 4px;
+  border-right-color: var(--line);
 }
-.ai-page[data-rail="closed"] .ai-rail > * { pointer-events: none; }
+/* 收起态的三样东西：展开、新对话、会话记号。
+   文字与删除按钮淡出，鼠标位置和点击目标都落在 34px 的方块上。 */
+.ai-page[data-rail="closed"] .ai-rail-top {
+  flex-direction: column; gap: 6px; padding-bottom: 10px;
+}
+.ai-page[data-rail="closed"] .ai-new {
+  flex: 0 0 auto; width: 34px; height: 34px; padding: 0; justify-content: center;
+}
+/* 收起时「新对话」只剩一个 +，文字收宽淡出而不是直接消失 */
+.ai-page[data-rail="closed"] .ai-new span {
+  max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap; pointer-events: none;
+}
+.ai-page[data-rail="closed"] .ai-rail-toggle { width: 34px; height: 30px; }
+.ai-page[data-rail="closed"] .ai-rail-toggle svg { transform: rotate(180deg); }
+.ai-page[data-rail="closed"] .ai-rail-group {
+  flex: 0 0 0; height: 0; padding: 0; opacity: 0; overflow: hidden;
+  pointer-events: none;
+}
+.ai-page[data-rail="closed"] .ai-rail-empty { opacity: 0; height: 0; padding: 0; overflow: hidden; }
+.ai-page[data-rail="closed"] .ai-sess { justify-content: center; }
+.ai-page[data-rail="closed"] .ai-sess-open {
+  flex: 0 0 auto; width: 34px; height: 34px; padding: 0;
+  justify-content: center; align-items: center;
+}
+/* 文字与删除按钮不硬切：宽度收到 0、透明度一起淡出，跟着栏宽动画走完 */
+.ai-page[data-rail="closed"] .ai-sess-title,
+.ai-page[data-rail="closed"] .ai-sess-time {
+  flex: 0 0 0; min-width: 0; max-width: 0; opacity: 0; overflow: hidden;
+  pointer-events: none;
+}
+.ai-page[data-rail="closed"] .ai-sess-del {
+  flex: 0 0 0; width: 0; margin: 0; opacity: 0; overflow: hidden; pointer-events: none;
+}
+.ai-page[data-rail="closed"] .ai-sess-glyph { width: 22px; opacity: 1; margin-right: 0; }
+.ai-page[data-rail="closed"] .ai-sess[data-active]::before { left: -6px; }
 .ai-rail-top { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding-bottom: 6px; }
 .ai-rail-toggle {
   flex: 0 0 auto; width: 26px; height: 32px; padding: 0; border-radius: var(--radius);
@@ -2279,7 +2301,10 @@ body[data-motion="off"] .shot-flag { animation: none; }
 }
 .ai-rail-toggle:hover { background: var(--hover); color: var(--text-1); border-color: var(--line); }
 .ai-rail-toggle:active { transform: scale(.94); }
-.ai-rail-toggle svg { width: 14px; height: 14px; }
+.ai-rail-toggle svg {
+  width: 14px; height: 14px;
+  transition: transform var(--dur-3) var(--ease);
+}
 .ai-new {
   flex: 1 1 auto; min-width: 0; width: auto; height: 32px; display: flex; align-items: center; gap: 7px;
   padding: 0 9px; border-radius: var(--radius); border: 1px solid var(--line);
@@ -2291,6 +2316,10 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .ai-new:hover { background: var(--hover); border-color: var(--line-strong); }
 .ai-new:active { transform: scale(.985); }
 .ai-new svg { width: 13px; height: 13px; flex: 0 0 auto; }
+.ai-new span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: max-width var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease);
+}
 
 .ai-rail-list {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden;
@@ -2321,10 +2350,13 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .ai-sess-title {
   flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap;
+  transition: max-width var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease);
 }
 .ai-sess-time {
   flex: 0 0 auto; font-size: var(--fs-tiny); color: var(--text-3);
   font-family: var(--mono); font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  transition: max-width var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease);
 }
 .ai-sess-del {
   flex: 0 0 auto; width: 22px; height: 22px; margin-right: 4px;
@@ -2336,13 +2368,32 @@ body[data-motion="off"] .shot-flag { animation: none; }
 .ai-sess:hover .ai-sess-del, .ai-sess-del:focus-visible { opacity: 1; }
 .ai-sess-del:hover { color: var(--danger); background: var(--surface-3); }
 .ai-sess-del svg { width: 12px; height: 12px; }
+/* 收起态的会话记号：一个 22px 的圆角方块，放标题首字。
+   展开时宽度与透明度都收到 0（不是 display:none），这样才能跟着栏宽动画
+   一起出现/消失；margin-right 抵掉行内的 8px gap，展开时不留缝。 */
+.ai-sess-glyph {
+  flex: 0 0 auto; width: 0; height: 22px; opacity: 0; overflow: hidden;
+  display: grid; place-items: center; border-radius: 6px;
+  margin-right: -8px;
+  background: var(--surface-3); color: var(--text-2);
+  font-size: var(--fs-tiny); font-weight: 600; line-height: 1;
+  user-select: none;
+  transition: width var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease),
+    margin-right var(--dur-3) var(--ease), background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+.ai-sess:hover .ai-sess-glyph { background: var(--accent-weak); color: var(--accent-text); }
+.ai-sess[data-active] .ai-sess-glyph { background: var(--accent); color: #fff; }
 
 /* 侧栏底部不再挂「设置」入口：AI 的配置与习惯都在输入框的模型菜单里，
    侧栏只放会话本身，底栏与它一起删掉，不给空壳留样式。 */
 
-/* 窄窗（最小 1000×660）把左栏收窄，别把对话区挤成一条缝 */
+/* 窄窗（最小 1000×660）把左栏收窄，别把对话区挤成一条缝。
+   只改宽度变量，收起态仍然走 56px —— 否则窄窗下收起会突然变回 176px。 */
 @media (max-width: 1120px) {
-  .ai-rail { flex-basis: 176px; width: 176px; margin-right: 14px; }
+  .ai-page { --ai-rail-w: 176px; }
+  .ai-page[data-rail="closed"] { --ai-rail-w: 56px; }
+  .ai-rail { margin-right: 14px; }
 }
 
 .ai-shell { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
@@ -2538,9 +2589,9 @@ body[data-motion="off"] .shot-flag { animation: none; }
   padding: .45em 0 .15em 1.6em; font-weight: 400;
 }
 /* 思考正文：模型推理的原始文字，边生成边追加。
-   1.25.0：不再困在 168px 的内滚小框里 —— 随页面自然长高，字号回到正文档
-   （13px），可拖动选中复制；流式批次做透明度淡入（.tl-chunk），
-   减少动态时直接落字。缩进仍与过程行对齐。 */
+   1.25.0：不再困在 168px 的内滚小框里 —— 随页面自然长高、可拖动选中复制；
+   字体用衬线体（--font-thought）13.5px，和回答正文的 Inter/雅黑 13px 明显区分。
+   流式批次做透明度淡入（.tl-chunk），减少动态时直接落字。缩进仍与过程行对齐。 */
 .tl-thought {
   padding: .3em 2px .2em 1.9em;
   font-family: var(--font-thought);

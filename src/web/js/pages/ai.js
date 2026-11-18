@@ -22,6 +22,7 @@
       const newBtn = h('button', {
         class: 'ai-new',
         type: 'button',
+        title: T('新对话', 'New chat'),
         onclick: () => {
           chat.newSession();
           activeId = chat.session ? chat.session.id : null;
@@ -30,8 +31,9 @@
         }
       }, icon('plus'), h('span', {}, T('新对话', 'New chat')));
 
-      /* 收起/展开左栏：状态记在 localStorage，下次进来还是上次的样子。
-         收起后开关不会消失，而是挪到对话区左上角的留白里（那里永远不会压住内容）。 */
+      /* 收起/展开左栏：收起不是整栏消失，而是收成 56px 的图标栏——
+         展开按钮、新对话、每个会话的首字记号都还在，只是文字淡出。
+         状态存在 ai_ui（app.json），换缓存/重装后仍然记得。 */
       const RAIL_KEY = 'ai.rail.closed';
       const railToggle = h('button', {
         class: 'ai-rail-toggle',
@@ -39,7 +41,7 @@
         title: T('收起归档栏（Ctrl+B）', 'Collapse archive (Ctrl+B)'),
         'aria-label': T('收起归档栏', 'Collapse archive'),
         'aria-expanded': 'true',
-        onclick: () => setRail(true, true)
+        onclick: () => setRail(page.dataset.rail !== 'closed', true)
       }, icon('chevron-left'));
 
       const rail = h('aside', { class: 'ai-rail' },
@@ -49,26 +51,24 @@
 
       /* ---------- 右栏 ---------- */
       const chatRoot = h('div', { class: 'ai-page-chat' });
-      const mainToggle = h('button', {
-        class: 'ai-main-toggle',
-        type: 'button',
-        title: T('展开归档栏（Ctrl+B）', 'Show archive (Ctrl+B)'),
-        'aria-label': T('展开归档栏', 'Show archive'),
-        'aria-expanded': 'false',
-        onclick: () => setRail(false, true)
-      }, icon('chevron-right'));
-      const main = h('div', { class: 'ai-main' }, mainToggle, chatRoot);
+      const main = h('div', { class: 'ai-main' }, chatRoot);
       const page = h('div', { class: 'page-fill ai-page' }, rail, main);
 
       function setRail(closed, focus) {
         page.dataset.rail = closed ? 'closed' : 'open';
         railClosed = !!closed;
+        /* 开关始终在图标栏上，所以文案跟着状态换，方向也换 */
         railToggle.setAttribute('aria-expanded', String(!closed));
-        mainToggle.setAttribute('aria-expanded', String(!closed));
+        railToggle.setAttribute('title', closed
+          ? T('展开归档栏（Ctrl+B）', 'Show archive (Ctrl+B)')
+          : T('收起归档栏（Ctrl+B）', 'Collapse archive (Ctrl+B)'));
+        railToggle.setAttribute('aria-label', closed
+          ? T('展开归档栏', 'Show archive')
+          : T('收起归档栏', 'Collapse archive'));
         try { localStorage.setItem(RAIL_KEY, closed ? '1' : '0'); } catch (e) { /* 隐私模式忽略 */ }
         /* 同一份偏好也记进 app.json：换 WebView 缓存、重装后仍然记得收起状态 */
         try { Promise.resolve(AIStore.saveUi({ railClosed: !!closed })).catch(() => {}); } catch (e) { /* 记不住不影响收起 */ }
-        if (focus) (closed ? mainToggle : railToggle).focus();
+        if (focus) railToggle.focus();
       }
 
       let railClosed = false;
@@ -96,6 +96,15 @@
           if (n.dataset.id === activeId) n.setAttribute('data-active', '');
           else n.removeAttribute('data-active');
         });
+      }
+
+      /* 收起成图标栏时，每个会话只剩一个方块：取标题第一个可见字符当记号
+         （中文用本字、英文用大写首字母），都没有就用一个点，保证方块不空。 */
+      function glyphOf(title) {
+        const s = String(title || '').replace(/^[\s\p{P}\p{S}]+/u, '');
+        if (!s) return '·';
+        const first = Array.from(s)[0];
+        return /[a-z]/.test(first) ? first.toUpperCase() : first;
       }
 
       function dayGroup(ms) {
@@ -179,6 +188,7 @@
                   }
                 }
               },
+                h('span', { class: 'ai-sess-glyph', 'aria-hidden': 'true' }, glyphOf(r.title)),
                 h('span', { class: 'ai-sess-title' }, r.title),
                 h('span', { class: 'ai-sess-time' }, timeLabel(r.mtime))
               ),
