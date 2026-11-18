@@ -485,10 +485,15 @@
           if (had._repaint && had.dataset.status !== p.status) had._repaint();
           return;
         }
+        /* 卡片是「现在就要你处理」的东西：追加前只要用户没翻到很远的历史里，
+           就把视图钉到卡片底部。scrollEnd(false) 的 80px 判据在这里不够用——
+           一张卡动辄两百多像素高，追加完 gap 已经超了，尾巴（勾选区下半 +
+           执行/取消）会停在输入框下面点不到。 */
+        const near = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 400;
         const node = proposalCard(p);
         cardNodes.set(p.id, node);
         msgs.appendChild(node);
-        scrollEnd(false);
+        if (near) requestAnimationFrame(() => scrollEnd(true));
       });
       cardNodes.forEach((node, id) => {
         if (ids.has(id)) return;
