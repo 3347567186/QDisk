@@ -25,7 +25,28 @@ const FILES = [
 
 const FAIL_FIRST = { armed: false };
 
+const OPENED = [];
+
 const fakeApi = {
+  /* 全盘读文件：文本按 offset 续读，binary 只回元信息 */
+  fileRead: async (path, offset, chars) => {
+    if (/binary/.test(path)) return { path, size: 4096, kind: 'binary', text: '' };
+    if (/missing/.test(path)) throw new Error('打不开：系统找不到指定的文件');
+    const full = '第一行配置\n第二行：端口 8080\n第三行：缓存目录 D:\\Cache\n';
+    const from = Math.max(0, Math.floor(Number(offset) || 0));
+    const text = full.slice(from, from + (Number(chars) || 700));
+    const next = from + text.length < full.length ? from + text.length : undefined;
+    return {
+      path,
+      size: full.length,
+      encoding: 'utf-8',
+      text,
+      eof: next == null,
+      next_offset: next
+    };
+  },
+  openPath: async (path) => { OPENED.push(path); return null; },
+  agentRoots: async () => ({ roots: ['C:\\', 'D:\\'], home: 'C:\\Users\\Tester' }),
   listDir: async (dir) => {
     if (/不存在/.test(dir)) throw new Error('目录不存在：' + dir);
     /* 大目录：用来验分页（CAP 会砍条目，next_offset 必须跟着收） */
@@ -342,6 +363,56 @@ const CASES = [
       if (typeof r.next_offset !== 'number' || r.next_offset <= 0) bad.push('没有给出 next_offset');
       else if (r.next_offset > 60) bad.push('next_offset 越界：' + r.next_offset);
       else if (r.next_offset !== r.items.length) bad.push(`next_offset ${r.next_offset} 与实返 ${r.items.length} 条不一致`);
+      return bad;
+    }
+  },
+
+  // 29 读任意文件的文本内容：内容必须真来自工具，不能凭空编
+  {
+    id: 'G29', group: '读文件', q: 'D:\\Downloads\\conf.ini 里写的什么', ctx: { page: 'ai', dir: 'D:\\Downloads' },
+    script: [
+      toolStep('read_file', { path: 'D:\\Downloads\\conf.ini' }),
+      answer({ answer: '配置里写着端口 8080，缓存目录 D:\\Cache。', evidence: [{ tool: 'read_file' }] })
+    ],
+    tools: ['read_file'],
+    after: (res) => {
+      const r = (res.trace[0] && res.trace[0].result) || {};
+      const bad = [];
+      if (!r.text || r.text.indexOf('8080') < 0) bad.push('读文件结果里没有原文 8080');
+      if (!r.size) bad.push('缺文件大小');
+      return bad;
+    }
+  },
+
+  // 30 打开目录：走 open_path，真的落到系统调用
+  {
+    id: 'G30', group: '打开', q: '帮我打开下载文件夹', ctx: { page: 'ai', dir: 'D:\\Downloads' },
+    script: [
+      toolStep('open_path', { path: 'D:\\Downloads' }),
+      answer({ answer: '已经用资源管理器打开了 D:\\Downloads。', evidence: [{ tool: 'open_path' }] })
+    ],
+    tools: ['open_path'],
+    after: (res) => {
+      const bad = [];
+      if (OPENED.indexOf('D:\\Downloads') < 0) bad.push('没有真正调用打开接口');
+      const r = (res.trace[0] && res.trace[0].result) || {};
+      if (r.opened !== true) bad.push('打开结果缺 opened:true');
+      return bad;
+    }
+  },
+
+  // 31 磁盘根：全盘访问的起点
+  {
+    id: 'G31', group: '磁盘', q: '这台电脑有哪些盘', ctx: { page: 'ai', dir: 'D:\\Downloads' },
+    script: [
+      toolStep('disk_roots', {}),
+      answer({ answer: '有 C:\\ 和 D:\\ 两个盘，主目录在 C:\\Users\\Tester。', evidence: [{ tool: 'disk_roots' }] })
+    ],
+    tools: ['disk_roots'],
+    after: (res) => {
+      const r = (res.trace[0] && res.trace[0].result) || {};
+      const bad = [];
+      if (!Array.isArray(r.roots) || r.roots.length !== 2) bad.push('磁盘根数量不对');
       return bad;
     }
   }

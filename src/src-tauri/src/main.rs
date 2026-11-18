@@ -1399,6 +1399,143 @@ fn list_dir(dir: String, limit: Option<usize>) -> Result<Value, String> {
     }))
 }
 
+// ---------------------------------------------------------------- agent 文件访问
+// 用户明确要求「agent 能看整台电脑的文件」：这里只补只读能力（读文本、枚举磁盘），
+// 写入/删除仍然只属于整理流程本身。解码顺序 UTF-8 → GBK，GBK 走系统 API，
+// 不引第三方编码库（Cargo 不增加任何依赖）。
+
+/// 一段字节 → (编码名, 文本)。UTF-16LE 认 BOM，其余先试 UTF-8，再落 GBK。
+fn decode_text(bytes: &[u8]) -> (&'static str, String) {
+    if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() > 2 {
+        let body = &bytes[2..];
+        let units: Vec<u16> = body
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return ("utf-16le", String::from_utf16_lossy(&units));
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return ("utf-8", s.to_string());
+    }
+    #[cfg(windows)]
+    if let Some(s) = gbk_decode(bytes) {
+        return ("gbk", s);
+    }
+    ("unknown", String::from_utf8_lossy(bytes).to_string())
+}
+
+/// 代码页 936 解码（Windows 自带，零新依赖）。
+#[cfg(windows)]
+fn gbk_decode(bytes: &[u8]) -> Option<String> {
+    use std::ptr;
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    let n = unsafe {
+        MultiByteToWideChar(936, 0, bytes.as_ptr(), bytes.len() as i32, ptr::null_mut(), 0)
+    };
+    if n <= 0 {
+        return None;
+    }
+    let mut out = vec![0u16; n as usize];
+    let got = unsafe {
+        MultiByteToWideChar(936, 0, bytes.as_ptr(), bytes.len() as i32, out.as_mut_ptr(), n)
+    };
+    if got <= 0 {
+        return None;
+    }
+    out.truncate(got as usize);
+    Some(String::from_utf16_lossy(&out))
+}
+
+/// 把文本按 GBK 量出字节数：算下一页偏移用，避免中文按字数当字节数跳错。
+#[cfg(windows)]
+fn gbk_byte_len(text: &str) -> usize {
+    use std::ptr;
+    use windows_sys::Win32::Globalization::WideCharToMultiByte;
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let n = unsafe {
+        WideCharToMultiByte(936, 0, wide.as_ptr(), wide.len() as i32, ptr::null_mut(), 0, ptr::null(), ptr::null_mut())
+    };
+    if n <= 0 {
+        text.len()
+    } else {
+        n as usize
+    }
+}
+
+/// 读一段文件内容：给 agent 的「这个文件里写了什么」。
+/// 只读、有上限、可续读；二进制只回元信息，不把乱码塞进上下文。
+#[tauri::command(async)]
+fn agent_read(path: String, offset: Option<u64>, max_chars: Option<usize>) -> Result<Value, String> {
+    let p = PathBuf::from(path.trim());
+    if p.as_os_str().is_empty() {
+        return Err("缺少文件路径".into());
+    }
+    let meta = std::fs::metadata(&p).map_err(|e| format!("打不开 {}：{e}", p.display()))?;
+    if meta.is_dir() {
+        return Err(format!("这是文件夹，用 list_dir 看：{}", p.display()));
+    }
+    let size = meta.len();
+    let off = offset.unwrap_or(0).min(size);
+    let want = max_chars.unwrap_or(700).clamp(50, 4000);
+    let mut f = std::fs::File::open(&p).map_err(|e| format!("打不开 {}：{e}", p.display()))?;
+    {
+        use std::io::{Seek, SeekFrom};
+        f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+    }
+    let mut buf = vec![0u8; 8192];
+    let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(json!({ "path": p.to_string_lossy(), "size": size, "eof": true, "text": "" }));
+    }
+    buf.truncate(n);
+    let nul = buf.iter().filter(|b| **b == 0).count();
+    if nul > buf.len() / 8 && !buf.starts_with(&[0xFF, 0xFE]) {
+        return Ok(json!({
+            "path": p.to_string_lossy(),
+            "size": size,
+            "kind": "binary",
+            "text": ""
+        }));
+    }
+    let (enc, text) = decode_text(&buf);
+    let total_chars = text.chars().count();
+    let cut: String = text.chars().take(want).collect();
+    let mut next: Option<u64> = None;
+    if total_chars > want {
+        let consumed = match enc {
+            "utf-8" => cut.len(),
+            "gbk" => gbk_byte_len(&cut),
+            "utf-16le" => cut.encode_utf16().count() * 2 + 2,
+            _ => cut.len(),
+        };
+        next = Some(off + consumed as u64);
+    } else if off + n as u64 < size {
+        next = Some(off + n as u64);
+    }
+    Ok(json!({
+        "path": p.to_string_lossy(),
+        "size": size,
+        "encoding": enc,
+        "text": cut,
+        "next_offset": next,
+        "eof": next.is_none(),
+    }))
+}
+
+/// 枚举本机磁盘根 + 用户主目录，给 agent 一个「从哪儿看起」的起点。
+#[tauri::command]
+fn agent_roots() -> Value {
+    let mut roots: Vec<String> = Vec::new();
+    for c in b'A'..=b'Z' {
+        let root = format!("{}:\\", c as char);
+        if Path::new(&root).exists() {
+            roots.push(root);
+        }
+    }
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    json!({ "roots": roots, "home": home })
+}
+
 /// 解析 http(s) 地址：返回 (是否 https, host, port, path+query)
 fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
     let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
@@ -2079,6 +2216,8 @@ fn main() {
             ai_http,
             ai_http_stream,
             ai_cancel,
+            agent_read,
+            agent_roots,
             ai_store,
             history_list,
             store_apps,

@@ -1,8 +1,10 @@
-/* AI 助手 · 8 个只读工具
+/* AI 助手 · 11 个只读工具（1.25.0 起含全盘读文件与打开）
    ------------------------------------------------------------
    设计约束（方案 §4、§10）：
    · 这张表里没有任何写操作。模型的 tool 名不在表里 → 直接拒绝，
      永远到不了引擎，所以「不删文件」是结构性的，不是提示词承诺。
+   · 唯一有副作用的是 open_path：它只用系统默认程序「打开」，
+     不运行可执行文件（见 EXEC_EXT），也不改文件内容。
    · 每个工具都返回已经剪裁过的小对象：单条结果上限 CAP 字符（≈400 token）。
    · 每个工具 8 秒超时；失败把可读原因抛给 agent，由 agent 回给模型换参数。 */
 (function (root) {
@@ -10,6 +12,10 @@
 
   const CAP = 1100;          // 单条工具结果字符上限
   const TIMEOUT = 8000;      // 单工具超时
+
+  /* 不自动运行的程序类型：打开 .exe/.lnk 等于让模型替你双击任意文件。
+     要让 agent 看这些文件的内容，用 read_file；要看签名，用 file_signals。 */
+  const EXEC_EXT = ['exe', 'msi', 'bat', 'cmd', 'ps1', 'scr', 'com', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'lnk', 'reg', 'hta'];
 
   const fmtBytes = (n) => {
     const v = Number(n) || 0;
@@ -124,6 +130,56 @@
           return pageFit({ dir: r.dir, total: r.total, truncated: r.truncated }, items, off, want);
         },
         summary: (args, r) => `列目录 ${args.dir} · ${r.total} 项`
+      },
+
+      /* 全盘可读：任意绝对路径的文本文件，分段读（next_offset 续读同一文件） */
+      read_file: {
+        label: '读文件',
+        run: async (args) => {
+          const path = String((args && args.path) || '').trim();
+          if (!path) throw new Error('缺少参数 path（文件完整路径）');
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const want = Math.min(Math.max(Number(args.chars) || 700, 100), 900);
+          const r = await withTimeout(API.fileRead(path, off, want), TIMEOUT, '读取文件');
+          if (r && r.kind === 'binary') {
+            return { path: r.path || path, size: fmtBytes(r.size), kind: 'binary', note: '二进制文件，不读内容（要看签名用 file_signals）' };
+          }
+          return fit({
+            path: r.path || path,
+            size: fmtBytes(r.size),
+            encoding: r.encoding,
+            text: r.text || '',
+            eof: r.eof === true,
+            next_offset: r.next_offset == null ? undefined : r.next_offset
+          }, CAP);
+        },
+        summary: (args, r) => `读文件 ${args.path} · ${r.kind === 'binary' ? '二进制' : (r.text || '').length + ' 字'}`
+      },
+
+      /* 打开：目录→资源管理器，文件→系统默认程序；可执行文件一律不运行 */
+      open_path: {
+        label: '打开',
+        run: async (args) => {
+          const path = String((args && args.path) || '').trim();
+          if (!path) throw new Error('缺少参数 path（要打开的完整路径）');
+          const ext = (path.split('.').pop() || '').toLowerCase();
+          if (EXEC_EXT.indexOf(ext) >= 0) {
+            throw new Error('不自动运行程序（.' + ext + '）。要看内容用 read_file，要看签名用 file_signals');
+          }
+          await withTimeout(API.openPath(path), TIMEOUT, '打开');
+          return { path, opened: true };
+        },
+        summary: (args) => `打开 ${args.path}`
+      },
+
+      /* 磁盘根：给「全盘」一个起点，省掉模型猜盘符 */
+      disk_roots: {
+        label: '磁盘',
+        run: async () => {
+          const r = await withTimeout(API.agentRoots(), TIMEOUT, '枚举磁盘');
+          return fit({ roots: (r && r.roots) || [], home: (r && r.home) || '' }, CAP);
+        },
+        summary: (args, r) => `磁盘 ${r.roots.length} 个`
       },
 
       top_files: {

@@ -14,6 +14,21 @@
       params: { dir: 'string', limit: 'number≤200', offset: 'number≤5000' },
       args: ['dir']
     },
+    read_file: {
+      desc: '读任意文件的文本内容（自动识别 UTF-8/GBK），长文件用返回的 next_offset 续读',
+      params: { path: 'string', offset: 'number', chars: 'number≤900' },
+      args: ['path']
+    },
+    open_path: {
+      desc: '用系统默认程序打开一个文件或文件夹（不会运行 exe/bat 等程序）',
+      params: { path: 'string' },
+      args: ['path']
+    },
+    disk_roots: {
+      desc: '列出本机磁盘根目录（C:\\、D:\\ …）和用户主目录',
+      params: {},
+      args: []
+    },
     top_files: {
       desc: '列出目录下最大的文件（含扩展名与所在子目录）',
       params: { dir: 'string', limit: 'number≤50', offset: 'number≤5000' },
@@ -55,7 +70,9 @@
     '你是「整理助手」内置的文件整理顾问，只回答与文件、磁盘空间、目录结构、已安装程序有关的问题。',
     '与这些无关的请求（写代码、闲聊、翻译、代写文案）一律拒绝，只用一句「我只管文件和空间这一块」，并给一个你能做的事作为引导。',
     '你没有任何写操作能力：不能删除、移动、重命名、清理、解压、卸载。不要声称你已经做了这些事，也不要给用户一段命令让他自己执行。',
-    '你看不到文件内容。禁止说「这个文件里写着…」这类话；只能根据名字、大小、类型、时间、签名、所属软件来判断。',
+    '你可以读任意路径的文本文件（read_file），也可以用默认程序打开文件或文件夹（open_path）。open_path 只是帮用户打开看，不算修改；exe/bat 这类程序不会被运行。',
+    '文件内容只能来自 read_file 的返回：引用原文要照抄关键句，不要脑补没读到的段落；结果里带 next_offset 就先说「只看到前一段」，需要时再续读。',
+    '路径可以写任意绝对路径（C:\\、D:\\ 或盘符根目录），不确定从哪看先用 disk_roots 再逐层 list_dir。',
     '所有数字必须来自工具返回：不要自己换算、不要估算、不要四舍五入成「大约」。没查到的就说没查到，并说明要用哪个工具查。',
     '需要信息时先调工具，不要凭常识猜。互不依赖的查询可以一次给出（最多 3 个），有依赖的必须等上一个结果再用下一个。'
   ].join('\n');
@@ -80,12 +97,12 @@
 
   /* 按页面裁剪工具（对应方案 §4：工具越多选得越差） */
   const PAGE_TOOLS = {
-    ai: ['list_dir', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize'],
-    tools: ['top_files', 'empty_dirs', 'file_signals', 'installed_apps'],
-    organize: ['list_dir', 'organize_preview', 'last_organize', 'installed_apps'],
-    search: ['search_files', 'list_dir', 'installed_apps'],
-    apps: ['installed_apps', 'list_dir'],
-    archive: ['list_dir', 'top_files']
+    ai: ['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize'],
+    tools: ['top_files', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps'],
+    organize: ['list_dir', 'read_file', 'organize_preview', 'last_organize', 'installed_apps'],
+    search: ['search_files', 'list_dir', 'read_file', 'installed_apps'],
+    apps: ['installed_apps', 'list_dir', 'read_file'],
+    archive: ['list_dir', 'read_file', 'top_files']
   };
 
   function toolText(names) {

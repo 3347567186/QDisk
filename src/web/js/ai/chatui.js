@@ -51,11 +51,13 @@
     deep: { steps: 9, share: 0.75, replyMax: 900 }
   };
 
-  /* 权限档位决定「这一轮允许模型看见哪些工具」。写工具一个都没有。 */
+  /* 权限档位决定「这一轮允许模型看见哪些工具」。写工具一个都没有。
+     1.25.0 起三档都能读任意路径（read_file / disk_roots）；「打开」只在标准与深度档，
+     因为 open_path 会拉起外部程序，交给更明确的选择。 */
   const PERM_TOOLS = {
-    readonly: ['list_dir', 'last_organize'],
-    standard: ['list_dir', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'last_organize'],
-    deep: ['list_dir', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize']
+    readonly: ['list_dir', 'read_file', 'disk_roots', 'last_organize'],
+    standard: ['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'last_organize'],
+    deep: ['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize']
   };
 
   function permLabel(p) {
@@ -320,6 +322,9 @@
         collapsible: true,
         collapseOnSettle: true,
         showTimer: true,
+        copyLabel: T('复制思考过程', 'Copy reasoning'),
+        /* 思考正文不再内滚，长出来就把对话滚到底 */
+        onAppend: () => scrollEnd(),
         speak: (sec) => T(sec.toFixed(1) + ' 秒', sec.toFixed(1) + ' seconds')
       });
       const body = h('div', { class: 'ai-msg-body ai-answer' });

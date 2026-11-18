@@ -51,6 +51,9 @@
       settleDuration: 350,
       settleBlur: 2,
       fontSize: 0,          /* 0 = 跟随 CSS 的 --tl-font（默认 --fs-small） */
+      copyLabel: '复制',
+      copiedLabel: '已复制',
+      onAppend: null,
       speak: null,
       onSettle: null
     }, opts || {});
@@ -72,7 +75,6 @@
     let thoughtEl = null;
     let thoughtBuf = '';
     let thoughtRaf = 0;
-    let stick = true;
 
     /* ---------------- DOM ---------------- */
 
@@ -90,6 +92,26 @@
     const doneText = UIx.h('span', { class: 'tl-text tl-text--done' }, o.doneLabel);
     const stack = UIx.h('span', { class: 'tl-label', 'aria-hidden': 'true' }, workText, doneText);
     const timer = UIx.h('span', { class: 'tl-timer', 'aria-hidden': 'true' }, '0.0s');
+
+    /* 复制：整段思考正文一键带走（正文本身也可直接拖动选中）。
+       按钮在思路行标题里，点它不能连带折起/摊开整块，所以 stopPropagation。 */
+    const copyBtn = UIx.h('button', {
+      type: 'button',
+      class: 'tl-copy',
+      title: o.copyLabel,
+      'aria-label': o.copyLabel,
+      hidden: ''
+    }, UIx.icon('copy'));
+    copyBtn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      const text = thoughtEl ? thoughtEl.textContent : '';
+      if (!text) return;
+      try { UIx.copy(text); } catch (e) { /* 复制失败不该影响对话 */ }
+      copyBtn.setAttribute('data-done', '');
+      root.setTimeout(function () { if (!dead) copyBtn.removeAttribute('data-done'); }, 1200);
+    });
+
     const chevron = UIx.h('span', { class: 'tl-chevron', 'aria-hidden': 'true' }, UIx.icon('chevron'));
     const sr = UIx.h('span', { class: 'tl-sr', role: 'status' }, o.label);
 
@@ -101,16 +123,24 @@
     if (glyph) parts.push(glyph);
     parts.push(stack);
     if (o.showTimer) parts.push(timer);
+    parts.push(copyBtn);
     if (o.collapsible) parts.push(chevron);
     parts.push(sr);
 
-    const head = o.collapsible
-      ? UIx.h('button', { type: 'button', class: 'tl-head', tabindex: '-1' }, parts)
-      : UIx.h('div', { class: 'tl-head' }, parts);
+    /* 标题行用 div + role=button：里面还要放「复制」按钮，
+       嵌套 <button> 是非法结构，浏览器会把内层按钮拆到外层去。 */
+    const head = UIx.h('div', { class: 'tl-head', tabindex: '-1' }, parts);
 
     if (o.collapsible) {
-      head.addEventListener('click', function () {
+      head.addEventListener('click', function (ev) {
+        if (ev.target && ev.target.closest && ev.target.closest('.tl-copy')) return;
         if (toggleable()) setOpen(!open);
+      });
+      head.addEventListener('keydown', function (ev) {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        if (!toggleable()) return;
+        ev.preventDefault();
+        setOpen(!open);
       });
     }
 
@@ -142,9 +172,11 @@
       if (t) {
         head.setAttribute('data-toggle', '');
         head.tabIndex = 0;
+        head.setAttribute('role', 'button');
       } else {
         head.removeAttribute('data-toggle');
         head.tabIndex = -1;
+        head.removeAttribute('role');
       }
       if (t) chevron.setAttribute('data-on', '');
       else chevron.removeAttribute('data-on');
@@ -198,24 +230,30 @@
       return row;
     }
 
-    /* 思考正文：模型吐一段推理，就往里追一段。
-       追加走 rAF 合批（一帧最多写一次 DOM），只有用户本来就在底部时才自动跟随，
-       自己滚上去看前文时不会被拽回底部。 */
+    /* 思考正文逐帧追加。1.25.0 起不再在 168px 的小框里内滚：正文随页面自然长高，
+       每批文字包一层 .tl-chunk 做淡入（减少动态时直接落纯文本），
+       复制按钮在正文出现后才显形。 */
     function flushThought() {
       thoughtRaf = 0;
       if (dead || !thoughtEl || !thoughtBuf) return;
-      thoughtEl.appendChild(document.createTextNode(thoughtBuf));
+      const buf = thoughtBuf;
       thoughtBuf = '';
-      if (stick) thoughtEl.scrollTop = thoughtEl.scrollHeight;
+      if (reduce) {
+        thoughtEl.appendChild(document.createTextNode(buf));
+      } else {
+        const span = document.createElement('span');
+        span.className = 'tl-chunk';
+        span.textContent = buf;
+        thoughtEl.appendChild(span);
+      }
+      copyBtn.hidden = false;
+      if (typeof o.onAppend === 'function') o.onAppend();
     }
 
     function addThought(text) {
       if (dead || typeof text !== 'string' || !text) return;
       if (!thoughtEl) {
         thoughtEl = UIx.h('div', { class: 'tl-thought', 'data-streaming': '', role: 'log' });
-        thoughtEl.addEventListener('scroll', function () {
-          stick = thoughtEl.scrollHeight - thoughtEl.scrollTop - thoughtEl.clientHeight < 24;
-        });
         fold.insertBefore(thoughtEl, stepsEl);
         refreshToggle();
         if (working) setOpen(true);
@@ -253,9 +291,16 @@
       /* 收尾时把攒着的最后一段同步写完，不然会丢尾巴 */
       if (thoughtRaf) { root.cancelAnimationFrame(thoughtRaf); thoughtRaf = 0; }
       if (thoughtEl && thoughtBuf) {
-        thoughtEl.appendChild(document.createTextNode(thoughtBuf));
+        const tail = thoughtBuf;
         thoughtBuf = '';
-        thoughtEl.scrollTop = thoughtEl.scrollHeight;
+        if (reduce) thoughtEl.appendChild(document.createTextNode(tail));
+        else {
+          const span = document.createElement('span');
+          span.className = 'tl-chunk tl-chunk--tail';
+          span.textContent = tail;
+          thoughtEl.appendChild(span);
+        }
+        copyBtn.hidden = false;
       }
       if (thoughtEl) thoughtEl.removeAttribute('data-streaming');
       const i = info || {};

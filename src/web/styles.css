@@ -2375,6 +2375,9 @@ body[data-motion="off"] .shot-flag { animation: none; }
   white-space: pre-wrap; word-break: break-word;
 }
 .ai-msg-body { font-size: var(--fs-body); line-height: 1.72; color: var(--text-1); white-space: pre-wrap; word-break: break-word; }
+/* 对话正文可选中复制（全局 * 是禁选的，这里显式放开，和思考正文一致） */
+.ai-msg-body, .ai-msg-body * { -webkit-user-select: text; user-select: text; }
+.ai-msg-body { cursor: text; }
 .ai-msg-body.degraded { color: var(--text-2); }
 .ai-answer { padding-right: 2px; }
 
@@ -2538,22 +2541,50 @@ body[data-motion="off"] .shot-flag { animation: none; }
   display: flex; flex-direction: column; gap: 3px;
   padding: .45em 0 .15em 1.6em; font-weight: 400;
 }
-/* 思考正文：模型推理的原始文字，边生成边追加；只在块内滚动，不吃页面滚动 */
+/* 思考正文：模型推理的原始文字，边生成边追加。
+   1.25.0：不再困在 168px 的内滚小框里 —— 随页面自然长高，字号回到正文档
+   （13px），可拖动选中复制；流式批次做透明度淡入（.tl-chunk），
+   减少动态时直接落字。缩进仍与过程行对齐。 */
 .tl-thought {
-  max-height: 168px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: .25em 2px .1em 1.9em;   /* 1.9em × .84 ≈ 1.6 个根 em，和过程行的缩进对齐 */
-  font-size: .84em;
+  padding: .3em 2px .2em 1.9em;
+  font-size: var(--fs-body);
   font-weight: 400;
-  line-height: 1.62;
+  line-height: 1.72;
   color: var(--text-1);
   white-space: pre-wrap;
   word-break: break-word;
-  scrollbar-width: thin;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+  cursor: text;
 }
 .tl-thought:empty { display: none; }
 .tl:not([data-working]) .tl-thought { color: var(--text-2); }
+
+/* 流式批次：只动透明度，不动布局（inline 元素做 transform 会断行） */
+.tl-chunk { animation: tl-chunk-in 260ms var(--ease-out) both; }
+.tl-chunk--tail { animation-duration: 120ms; }
+@keyframes tl-chunk-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .tl-chunk { animation: none; }
+}
+
+/* 复制按钮：正文出现后才显形；点它不会折叠整块（JS 里 stopPropagation） */
+.tl-copy {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin-left: .1em; padding: 0; flex: none;
+  border: 0; border-radius: var(--radius-sm); background: none; color: inherit;
+  opacity: 0; cursor: pointer;
+  transition: opacity var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out),
+    color var(--dur-2) var(--ease-out);
+}
+.tl-copy[hidden] { display: none; }
+.tl-head:hover .tl-copy, .tl-copy:focus-visible, .tl:not([data-working]) .tl-copy { opacity: .55; }
+.tl-copy:hover { opacity: 1; background: var(--hover); color: var(--text-1); }
+.tl-copy svg { width: 13px; height: 13px; }
+.tl-copy[data-done] { opacity: 1; color: var(--ok); }
+.tl-copy[data-done] svg { display: none; }
+.tl-copy[data-done]::after { content: '✓'; font-size: 12px; line-height: 1; }
 
 /* 还在吐字时，句尾跟一根细细的游标 */
 .tl-thought[data-streaming]::after {
