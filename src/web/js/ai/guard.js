@@ -89,14 +89,6 @@
     return { home: cfg.home, sysDrive: cfg.sysDrive, appDir: cfg.appDir, dataDir: cfg.dataDir };
   }
 
-  /* 「只禁这一层、不禁它下面」的路径：个人目录本身删不得，里面的文件可以删 */
-  function exactDenied(list) {
-    for (const p of list) {
-      if (p && low(norm(p)) === low(p) && low(cfg.home) === low(norm(p))) return p;
-    }
-    return '';
-  }
-
   /* 返回拒绝原因；空串表示通过。opts.allowApp/opts.allowData 用于极少数
      明确要动程序目录或数据目录的动作（目前没有动作会打开它们）。 */
   function denyWhy(raw, opts) {
