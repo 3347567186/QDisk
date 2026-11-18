@@ -673,6 +673,7 @@
 
         goBtn = h('button', { class: 'ai-prop-btn primary', type: 'button', disabled: !armed },
           T('执行', 'Run'));
+        goBtn.dataset.dbg = (armed ? 'a1' : 'a0') + (p.needsWord ? 'n1' : 'n0') + (pickable ? 'p' + selList().length : '-');
         const no = h('button', { class: 'ai-prop-btn', type: 'button' }, T('取消', 'Cancel'));
 
         if (p.needsWord) {
@@ -689,6 +690,8 @@
         }
 
         goBtn.addEventListener('click', async () => {
+          goBtn.dataset.clicked = '1';
+          addNotice('DBG click ' + (goBtn.dataset.dbg || ''), 'info');
           stopCountdown();
           goBtn.disabled = true;
           no.disabled = true;
