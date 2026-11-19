@@ -570,6 +570,65 @@
       return false;
     }
 
+    /* 把接口原始错误翻成人话：用户不该在答案里看到一整段 JSON。
+       真实截图：正文直接是「接口返回 HTTP 402：{"error":{"message":"This request
+       requires more credits, or fewer max_tokens…","code":"402"}}」——
+       用户既不知道发生了什么，也不知道自己能做什么，还白点一次「重试」。 */
+    function rawReason(detail) {
+      const s = String(detail || '').trim();
+      if (!s) return '';
+      try {
+        const j = JSON.parse(s);
+        const m = (j && j.error && (j.error.message || j.error.code)) || (j && j.message) || '';
+        if (m) return String(m).replace(/\s+/g, ' ').slice(0, 160);
+      } catch (e) { /* 不是 JSON 就按原文取第一行 */ }
+      return s.split('\n')[0].replace(/\s+/g, ' ').slice(0, 160);
+    }
+
+    /** 状态码 → 用户能看懂的一句话 + 该不该给「重试」 */
+    function explainHttp(status, detail, retryAfter) {
+      const why = rawReason(detail);
+      const tail = why ? '（接口原话：' + why + '）' : '';
+      if (status === 402) {
+        /* 余额不足：和额度用完一样，重试是白等 */
+        return {
+          code: 'quota',
+          quota: true,
+          message: '这个密钥的余额不够了' + tail + '。充值、换一个模型，或在设置里换成自己的密钥。'
+        };
+      }
+      if (status === 429) {
+        if (retryAfter > 60) {
+          const mins = Math.round(retryAfter / 60);
+          const hours = Math.round(mins / 60);
+          return {
+            code: 'quota',
+            quota: true,
+            message: '免费额度用完了：接口说还要等 '
+              + (hours >= 1 ? hours + ' 小时' : mins + ' 分钟')
+              + '才恢复。可以换一个模型，或在设置里换成自己的密钥。'
+          };
+        }
+        return {
+          code: 'rate',
+          message: '接口现在太忙了' + tail + '，等一会儿再问一次就行。'
+        };
+      }
+      if (status === 401 || status === 403) {
+        return {
+          code: 'auth',
+          message: '密钥没被接口接受' + tail + '。到设置里检查 AI 密钥与端点。'
+        };
+      }
+      if (status === 404) {
+        return {
+          code: 'http',
+          message: '接口找不到这个模型或地址' + tail + '。到设置里换一个模型。'
+        };
+      }
+      return { code: 'http', message: '接口返回 HTTP ' + status + (why ? '：' + why : '') };
+    }
+
     const DOWN_MSG = {
       tokenParam: '这个模型要 max_completion_tokens 而不是 max_tokens，已自动换参数重试',
       temperature: '这个模型不接受 temperature，已自动去掉重试',
@@ -698,8 +757,10 @@
             const secs = /retry[ -]?after[\s:]*(\d+)/i.exec(detail);
             if (secs) retryAfter = Number(secs[1]) || 0;
           }
-          /* ≥60 秒基本就是「今天用完了」或长时段限流，别让用户盯着假转圈 */
-          const worthWaiting = rateLimited ? retryAfter > 0 && retryAfter <= 60 : true;
+          /* ≥60 秒基本就是「今天用完了」或长时段限流，别让用户盯着假转圈。
+             没给等待时间的 429 才是真拥塞——那正是该退避的情况，
+             原来的判断写成「必须给了时间才重试」，和上面的意图反了。 */
+          const worthWaiting = rateLimited ? retryAfter <= 60 : true;
           if ((transient || (rateLimited && worthWaiting)) && busyLeft > 0) {
             busyLeft -= 1;
             const wait = retryAfter > 0
@@ -716,22 +777,14 @@
             if (stop && stop.isStopped()) throw abortError();
             continue;
           }
-          const err = new Error(`接口返回 HTTP ${res.status}${detail ? '：' + detail : ''}`);
-          err.code = res.status === 401 || res.status === 403 ? 'auth'
-            : (res.status === 429 ? 'rate' : 'http');
-          /* 额度用完要直说什么时候恢复，而不是丢一句 HTTP 429，
-             也别给「重试」按钮骗用户点 —— 点了也不会成功。 */
-          if (rateLimited) {
-            err.code = 'quota';
-            err.quota = true;
-            if (retryAfter > 60) {
-              const mins = Math.round(retryAfter / 60);
-              const hours = Math.round(mins / 60);
-              err.message = '免费额度用完了：接口说还要等 '
-                + (hours >= 1 ? hours + ' 小时' : mins + ' 分钟')
-                + '才恢复。可以换一个模型，或在设置里换成自己的密钥。';
-            }
-          }
+          /* 错误必须翻成人话再往上抛：正文里摆一段原始 JSON，
+             用户既看不懂也做不了什么（真实截图里就是这样）。 */
+          const said = explainHttp(res.status, detail, retryAfter);
+          const err = new Error(said.message);
+          err.code = said.code;
+          err.status = res.status;
+          /* 额度用完 / 余额不足：点了必然失败，界面据此不给「重试」 */
+          if (said.quota) err.quota = true;
           throw err;
         }
         const streamed = wantStream && sawSse;

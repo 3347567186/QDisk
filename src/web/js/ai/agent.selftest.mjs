@@ -5,16 +5,18 @@
    检查项（方案 §13 的五条硬指标）：
      1. schema 合法率 = 100%
      2. 越权拦截率 = 100%
-     3. 期望工具序列完全匹配 ≥ 20 条（当前 40 条）
+     3. 期望工具序列完全匹配 ≥ 20 条（当前 42 条）
      4. 回答里的数字必须能在工具返回里找到
      5. 单轮估算 token 不超预算
-   另有针对真实故障的回归（G32–G38）：
+   另有针对真实故障的回归（G32–G40）：
      部分结果自报家门（整盘扫描超时不再假装扫完）、
      编造体积先打回、改正后仍编则如实降级、
      历史回合把「查过什么/哪步失败」带进下一轮、
      断点能落盘再捡回来、
      503 退避重试并告知用户、
-     额度用完不白重试且直说多久恢复。 */
+     额度用完不白重试且直说多久恢复、
+     余额不足（402）不许把原始 JSON 当答案、
+     短时限流（429）仍要退避重试。 */
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -801,6 +803,59 @@ for (const c of CASES) {
   if (n !== 1) bad.push('额度用完还白重试了 ' + (n - 1) + ' 次');
   if (err && !/小时|分钟/.test(String(err.message))) bad.push('没告诉用户多久恢复：' + (err && err.message));
   results.push({ id: 'G38', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* ---------------- 追加：余额不足（402）不许把原始 JSON 当答案 ----------------
+   真实截图：1.38.4 的答案正文就是一整段
+   「接口返回 HTTP 402：{"error":{"message":"This request requires more credits…"}}」，
+   底下还配一个点了必然失败的「重试」。用户既看不懂也做不了什么。 */
+{
+  let n = 0;
+  const broke = async () => {
+    n += 1;
+    return {
+      status: 402,
+      body: '{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 74000 tokens, but can only afford 0","type":"invalid_request_error","code":"402"}}'
+    };
+  };
+  const agent = createAgent({ transport: broke, tools, prompt, settings });
+  let err = null;
+  try {
+    await agent.run({ userText: '最近什么最占空间', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  } catch (e) { err = e; }
+  const msg = String((err && err.message) || '');
+  const bad = [];
+  if (!err) bad.push('余额不足却当成成功返回了');
+  if (err && !err.quota) bad.push('没有把余额不足标成 quota（界面还会给「重试」）');
+  if (n !== 1) bad.push('余额不足还白重试了 ' + (n - 1) + ' 次');
+  if (!/余额/.test(msg)) bad.push('没告诉用户是余额不够：' + msg);
+  if (/\{"/.test(msg)) bad.push('答案里还摆着原始 JSON：' + msg.slice(0, 80));
+  if (msg.length > 260) bad.push('错误文案太长，用户读不完（' + msg.length + ' 字）');
+  results.push({ id: 'G39', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* ---------------- 追加：短时限流（429 无长等待）仍要退避重试 ----------------
+   和 G38 相反的一面：没给「还要等多久」的 429 是一时拥塞，
+   必须退避重试，不能直接判死。 */
+{
+  let n = 0;
+  const busy = async () => {
+    n += 1;
+    if (n === 1) return { status: 429, body: '{"error":{"message":"rate limit exceeded, please slow down"}}' };
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '接口刚才限流了一下，现在查到了：下载文件夹里有 4 项。' }) } }],
+        usage: { prompt_tokens: 700, completion_tokens: 30 }
+      })
+    };
+  };
+  const agent = createAgent({ transport: busy, tools, prompt, settings });
+  const res = await agent.run({ userText: '下载文件夹里有什么', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  const bad = [];
+  if (!res.ok) bad.push('短时限流之后自动重试仍没成功');
+  if (n < 2) bad.push('短时限流没有触发重试，只请求了 ' + n + ' 次');
+  results.push({ id: 'G40', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;
