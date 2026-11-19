@@ -1266,6 +1266,33 @@ class TestRules(EngineCase):
         self.assertFalse(r["ok"], r)
         self.assertTrue(r["error"])
 
+    def test_validate_accepts_text_without_file(self):
+        """编辑器草稿没存盘也要能校验：给了 text 就不该去找文件。"""
+        folder, dest = self.new_folder(), self.new_folder()
+        with open(self.make_yaml(folder, dest), encoding="utf-8") as f:
+            text = f.read()
+        res = self.rpc_ok("rules.validate", {"text": text})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["rule_count"], 1)
+
+    def test_validate_text_reports_line(self):
+        res = self.rpc_ok("rules.validate", {"text": "rules:\n  - name: [oops\n"})
+        self.assertFalse(res["ok"], res)
+        self.assertEqual(len(res["errors"]), 1, res)
+        self.assertGreaterEqual(res["errors"][0]["line"], 1)
+
+    def test_preview_accepts_text_without_file(self):
+        folder, dest = self.new_folder(), self.new_folder()
+        src = os.path.join(folder, "a.txt")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("hello")
+        with open(self.make_yaml(folder, os.path.join(dest, "out")),
+                  encoding="utf-8") as f:
+            text = f.read()
+        res = self.rpc_ok("rules.preview", {"text": text, "folder": folder})
+        self.assertEqual(res["total"], 1, res)
+        self.assertTrue(os.path.isfile(src))       # 预演不落盘
+
     def test_preview_lists_move_without_touching_disk(self):
         folder, dest = self.new_folder(), self.new_folder()
         src = os.path.join(folder, "a.txt")
@@ -1341,6 +1368,56 @@ class TestRules(EngineCase):
         r = self.rpc("rules.run", {"path": path, "folder": self.new_folder()})
         self.assertFalse(r["ok"], r)
         self.assertTrue(r["error"])
+
+
+class TestRulesExplain(EngineCase):
+    """rules.explain：解释分类与跳过原因，只读当前 rules.json。"""
+
+    def test_categories_have_exts(self):
+        res = self.rpc_ok("rules.explain", {})
+        self.assertTrue(res["fallback"])
+        self.assertTrue(res["cat_order"])
+        self.assertTrue(res["categories"])
+        # 每个分类的扩展名必须能在 rules.json 的 ext_to_cat 里找到
+        for c in res["categories"]:
+            self.assertIn("cat", c)
+            self.assertIn("ext_count", c)
+            self.assertEqual(len(c["exts"]), min(c["ext_count"], 24))
+
+    def test_single_category(self):
+        res = self.rpc_ok("rules.explain", {"cat": "03_文档"})
+        cat = res.get("category") or {}
+        self.assertEqual(cat.get("cat"), "03_文档")
+        self.assertGreater(cat.get("ext_count", 0), 0)
+        self.assertIn(".pdf", cat["exts"])
+        self.assertNotIn("categories", res)   # 单分类时不再重复列全表
+
+    def test_match_file_by_name(self):
+        res = self.rpc_ok("rules.explain", {"name": "报告.PDF"})
+        m = res.get("matched") or {}
+        self.assertEqual(m.get("ext"), ".pdf")
+        self.assertEqual(m.get("cat"), "03_文档")
+        self.assertTrue(m.get("why"))
+
+    def test_match_unknown_ext_falls_back(self):
+        res = self.rpc_ok("rules.explain", {"name": "x.qqqzzz"})
+        m = res.get("matched") or {}
+        self.assertEqual(m.get("cat"), res["fallback"])
+        self.assertIn("兜底", m.get("why", ""))
+
+    def test_skip_reasons_have_why(self):
+        res = self.rpc_ok("rules.explain", {})
+        reasons = res["skip_reasons"]
+        self.assertGreaterEqual(len(reasons), 8)
+        for r in reasons:
+            self.assertTrue(r["reason"])
+            self.assertTrue(r["why"])
+
+    def test_never_lists(self):
+        res = self.rpc_ok("rules.explain", {})
+        self.assertIn(".lnk", res["never"]["exts"])
+        self.assertIn("thumbs.db", res["never"]["names"])
+        self.assertIn("~$", res["never"]["prefixes"])
 
 
 class TestMigrate(EngineCase):
@@ -1658,7 +1735,7 @@ class TestScanParams(EngineCase):
         self.assertEqual(res["applied"],
                          {"skip_shortcuts": True, "force": False,
                           "by_date": False, "conflict": None,
-                          "min_age_minutes": None,
+                          "min_age_minutes": None, "paths": [],
                           "exclude_exts": [], "exclude_dirs": []})
         self.assertEqual(self.names(res), ["a.pdf", "b.jpg"])
         self.assertEqual(res["total"], 2)

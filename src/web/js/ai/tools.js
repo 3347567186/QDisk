@@ -344,6 +344,38 @@
         summary: (args, r) => `整理预演 · ${r.total} 个文件 / ${r.groups.length} 个类别`
       },
 
+      /* 分类与跳过的「为什么」：规则来自引擎当前的 rules.json，
+         不是模型凭常识猜。解释分类、解释某个文件为什么落到那一类、
+         解释某条跳过原因到底是什么意思，都走这一个工具。 */
+      explain_rules: {
+        label: '分类规则',
+        run: async (args) => {
+          const params = {};
+          const cat = String((args && args.cat) || '').trim();
+          const name = String((args && args.name) || '').trim();
+          if (cat) params.cat = cat;
+          if (name) params.name = name;
+          const r = await withTimeout(API.engine('rules.explain', params), TIMEOUT, '读取分类规则');
+          const out = {
+            fallback: r.fallback,
+            cat_order: r.cat_order || [],
+            never: r.never || {},
+            skip_reasons: (r.skip_reasons || []).map((x) => x.reason + '：' + x.why),
+            content: r.content || {}
+          };
+          if (r.category) out.category = r.category;
+          else {
+            out.categories = (r.categories || []).map((c) => ({
+              cat: c.cat, count: c.ext_count, exts: (c.exts || []).join(' ')
+            }));
+          }
+          if (r.matched) out.matched = r.matched;
+          return fit(out, CAP);
+        },
+        summary: (args, r) => '分类规则' + (r.matched ? ' · ' + r.matched.name + ' → ' + r.matched.cat : '') +
+          (r.category ? ' · ' + r.category.cat : '')
+      },
+
       last_organize: {
         label: '上次整理',
         run: async () => {

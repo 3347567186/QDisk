@@ -151,6 +151,17 @@ const fakeApi = {
         applied: {}
       };
     }
+    if (method === 'rules.explain') {
+      return {
+        fallback: '15_其他',
+        cat_order: ['03_文档', '15_其他'],
+        never: { exts: ['.lnk', '.lock'], names: ['thumbs.db'], prefixes: ['~$'] },
+        skip_reasons: [{ reason: '快捷方式/锁文件', why: '按规则不动' }],
+        content: { enabled: true, min_score: 5, exts: ['.txt'], rules: [] },
+        categories: [{ cat: '03_文档', ext_count: 2, exts: ['.pdf', '.docx'] }],
+        matched: { name: 'a.pdf', ext: '.pdf', cat: '03_文档', why: '按扩展名 .pdf 归到 03_文档' }
+      };
+    }
     throw new Error('未知方法：' + method);
   },
   historyList: async () => [{ file: 'h1.json', time: '2026-11-17 10:00:00', folder: 'D:\\Downloads', moved: 7, created: 2 }]
@@ -453,6 +464,23 @@ const CASES = [
       const r = (res.trace[0] && res.trace[0].result) || {};
       const bad = [];
       if (!Array.isArray(r.roots) || r.roots.length !== 2) bad.push('磁盘根数量不对');
+      return bad;
+    }
+  },
+
+  // 32 「为什么这样分」必须查真规则，不能凭扩展名常识猜
+  {
+    id: 'G41', group: '规则', q: '为什么 a.pdf 被分到 03_文档？', ctx: { page: 'organize', dir: 'D:\\Downloads' },
+    script: [
+      toolStep('explain_rules', { name: 'a.pdf' }),
+      answer({ answer: '按扩展名 .pdf 归到 03_文档，这条来自当前 rules.json。', evidence: [{ tool: 'explain_rules' }] })
+    ],
+    tools: ['explain_rules'],
+    after: (res) => {
+      const r = (res.trace[0] && res.trace[0].result) || {};
+      const bad = [];
+      if (!r.matched || r.matched.cat !== '03_文档') bad.push('没拿到命中的分类');
+      if (!Array.isArray(r.categories) || !r.categories.length) bad.push('没返回分类清单');
       return bad;
     }
   }

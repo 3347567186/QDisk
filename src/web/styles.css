@@ -850,6 +850,17 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   min-height: 36px;
 }
 .group-head:hover { background: var(--hover); }
+/* 分组头的「为什么」：平时不占视觉，悬停或键盘聚焦时才出现。
+   触屏没有悬停，一律常显，否则这个入口等于不存在。 */
+.group-head .group-why {
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease);
+}
+.group-head:hover .group-why,
+.group-head:focus-within .group-why { opacity: 1; }
+@media (hover: none) {
+  .group-head .group-why { opacity: 1; }
+}
 .group-head .caret { transition: transform var(--dur-2) var(--ease); color: var(--text-3); display: inline-flex; }
 .group.open .group-head .caret { transform: rotate(90deg); }
 .group-body { display: none; }

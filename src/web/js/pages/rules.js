@@ -50,6 +50,21 @@
     return i >= 0 ? s.slice(i + 1) : s;
   }
 
+  /* 助手起草的桥：规则页没打开时先把草稿存着，
+     打开后自动填进编辑器——不然点了「填入规则编辑器」像没反应 */
+  let liveFill = null;
+  let pendingDraft = '';
+
+  window.AIRulesDraft = {
+    fill: function (text) {
+      const s = String(text || '').trim();
+      if (!s) return false;
+      if (liveFill) return liveFill(s);
+      pendingDraft = s;
+      return true;
+    }
+  };
+
   async function mount(root) {
     const S = {
       diskPath: '',
@@ -79,16 +94,17 @@
     const btnLoad = mkBtn('载入', 'Load', 'ghost', 'folder', loadFile);
     const btnSave = mkBtn('保存', 'Save', 'primary', 'export', () => saveFile(false));
     const btnTemplate = mkBtn('插入示例', 'Insert sample', 'ghost', 'file', insertTemplate);
+    const btnDraft = mkBtn('让助手起草', 'Draft with AI', 'ghost', 'spark', draftRules);
 
     const fileCard = card(
       h('div', { class: 'card-title' },
         h('h2', null, T('规则文件', 'Rule file')),
         dirtyBadge
       ),
-      h('div', { class: 'toolbar' }, pathInput, btnLoad, btnSave, btnTemplate),
+      h('div', { class: 'toolbar' }, pathInput, btnLoad, btnSave, btnTemplate, btnDraft),
       h('div', { class: 'muted small' },
-        T('规则使用 organize 的 YAML 格式：rules 下每条含 locations / filters / actions。校验、预览和执行读取的是磁盘上的文件，编辑后请先保存；保存会弹出另存为对话框。',
-          'Rules use organize YAML: each item under rules has locations / filters / actions. Validate, preview and run read the file from disk, so save before running. Saving opens a Save As dialog.'))
+        T('规则使用 organize 的 YAML 格式：rules 下每条含 locations / filters / actions。校验与预览直接读编辑器内容，不必先保存；只有「执行规则」需要把规则保存成文件。保存会弹出另存为对话框。',
+          'Rules use organize YAML: each item under rules has locations / filters / actions. Validate and preview read the editor directly — no need to save first. Only Run rules needs the file on disk. Saving opens a Save As dialog.'))
     );
 
     /* ---------------- 规则内容 ---------------- */
@@ -409,12 +425,62 @@
       }
     }
 
+    /* ---------------- 助手起草 ---------------- */
+    /* 助手产出的 YAML 只落到编辑器里，绝不自动写盘：
+       规则文件一旦落盘就会被「执行规则」按下去，草稿必须先过人的眼 */
+    function applyDraft(text) {
+      const s = String(text || '').trim();
+      if (!s) return false;
+      editor.value = s + (s.endsWith('\n') ? '' : '\n');
+      updateDirty(true);
+      S.validated = null;
+      renderValidation(null);
+      editor.focus();
+      editor.scrollTop = 0;
+      toast(T('已填入编辑器，先点「校验」确认再保存', 'Loaded into the editor — validate before saving'), 'ok');
+      return true;
+    }
+
+    liveFill = applyDraft;
+
+    if (pendingDraft) {
+      const d = pendingDraft;
+      pendingDraft = '';
+      applyDraft(d);
+    }
+
+    function draftRules() {
+      if (!window.AIDrawer) {
+        toast(T('助手还没就绪', 'Assistant is not ready yet'), 'warn');
+        return;
+      }
+      const folder = folderInput.value.trim();
+      const n = (editor.value.match(/^\s*-\s+name:/gm) || []).length;
+      window.AIDrawer.open({
+        title: T('问助手 · 起草规则', 'Ask AI · Draft rules'),
+        question: T('帮我起草一份 organize YAML 规则：把「' + (folder || '目标目录') +
+          '」里的文件按类型分到各自的子目录。只输出一个 ```yaml 代码块，不要解释。',
+          'Draft an organize YAML rule set that sorts files in "' + (folder || 'the target folder') +
+          '" into per-type subfolders. Output only one ```yaml code block, no prose.'),
+        ctx: () => ({
+          page: '高级规则',
+          dir: folder,
+          note: T('当前规则共 ' + fmtCount(n) + ' 条', 'Current rules: ' + fmtCount(n))
+        })
+      });
+    }
+
     /* ---------------- 校验 / 预览 / 执行 ---------------- */
+    /* 校验和预览直接读编辑器里的文本，不必先存盘：
+       草稿阶段就存盘会让磁盘上多出一堆半成品规则文件 */
     async function validate(silent) {
-      if (!(await ensureOnDisk())) return;
+      if (!editor.value.trim()) {
+        toast(T('编辑器还是空的，先写规则或插入示例', 'Editor is empty — write rules or insert the sample first'), 'warn');
+        return false;
+      }
       setBtnBusy(btnValidate, true, T('校验中…', 'Checking…'));
       try {
-        const r = await API.engine('rules.validate', { path: pathInput.value.trim() });
+        const r = await API.engine('rules.validate', { text: editor.value });
         S.validated = r;
         renderValidation(r);
         if (r.ok) {
@@ -443,10 +509,13 @@
         folderInput.focus();
         return;
       }
-      if (!(await ensureOnDisk())) return;
+      if (!editor.value.trim()) {
+        toast(T('编辑器还是空的，先写规则或插入示例', 'Editor is empty — write rules or insert the sample first'), 'warn');
+        return;
+      }
       setBtnBusy(btnPreview, true, T('预览中…', 'Previewing…'));
       try {
-        const r = await API.engine('rules.preview', { path: pathInput.value.trim(), folder: folder });
+        const r = await API.engine('rules.preview', { text: editor.value, folder: folder });
         S.preview = r;
         renderPreview(r);
         toast(T('预演完成：' + fmtCount(r.total) + ' 项将被移动', 'Preview: ' + fmtCount(r.total) + ' item(s) to move'), 'ok');
@@ -498,6 +567,11 @@
       S.preview = null;
       renderPreview(null);
     }
+
+    /* 切页后编辑器和函数都成了孤儿：清掉桥，草稿改为挂起等下次挂载 */
+    return function () {
+      liveFill = null;
+    };
   }
 
   window.Pages = window.Pages || {};

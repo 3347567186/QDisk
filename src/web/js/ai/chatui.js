@@ -89,9 +89,9 @@
   const PROPOSE_TOOLS = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
 
   const PERM_TOOLS = {
-    readonly: ['list_dir', 'read_file', 'disk_roots', 'last_organize'],
-    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
-    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
+    readonly: ['list_dir', 'read_file', 'disk_roots', 'last_organize', 'explain_rules'],
+    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
+    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
   };
 
   /* 动手档位：off 完全不提，confirm 每次点，auto 可撤销的小动作倒计时自动执行，
@@ -990,6 +990,30 @@
       }
     }
 
+    /* 从回答里抠出 YAML 草稿：优先 ```yaml 围栏，其次唯一一个 ``` 围栏。
+       只认「整段就是规则」的形状——多个围栏里挑含 rules: 的那个，
+       挑不出来就返回空，宁可不给按钮也不塞半截规则进编辑器。 */
+    function draftYaml(text) {
+      const s = String(text || '');
+      const blocks = [];
+      const re = /```([A-Za-z0-9_+-]*)[^\n]*\n([\s\S]*?)```/g;
+      let m;
+      while ((m = re.exec(s))) {
+        blocks.push({ lang: (m[1] || '').toLowerCase(), body: m[2] });
+      }
+      if (!blocks.length) {
+        /* 模型偶尔不写围栏，直接给一段以 rules: 开头的正文 */
+        const bare = s.match(/^\s*rules:\s*\n[\s\S]*$/m);
+        return bare ? bare[0].trim() : '';
+      }
+      const yamlish = blocks.filter((b) => b.lang === 'yaml' || b.lang === 'yml');
+      const pool = yamlish.length ? yamlish : blocks;
+      const withRules = pool.filter((b) => /^\s*rules\s*:/m.test(b.body));
+      const pick = withRules.length ? withRules[0] : (pool.length === 1 ? pool[0] : null);
+      return pick ? pick.body.trim() : '';
+    }
+
+
     /* 右键「让助手看看这里」：把路径填进输入框而不是直接发出去，
        用户可以补一句想干什么（清掉 / 分类 / 看看有多大）再发。 */
     function askAboutPath(p) {
@@ -1136,6 +1160,29 @@
       }
       const cards = suggestCards(res.suggest);
       if (cards) c.extra.appendChild(cards);
+
+      /* 回答里带了规则草稿就给一个「填入规则编辑器」：
+         草稿只进编辑器，不落盘、不执行——写盘这件事留给人按保存。
+         规则页没开过时 AIRulesDraft 不存在，那就不给按钮，免得点了没反应。 */
+      const yaml = draftYaml(res.answer || '');
+      if (yaml && root.AIRulesDraft && root.AIRulesDraft.fill) {
+        const draftBar = h('div', { class: 'ai-msg-bar' });
+        draftBar.appendChild(h('button', {
+          class: 'btn sm ghost',
+          onclick: () => {
+            if (!root.AIRulesDraft.fill(yaml)) return;
+            /* 抽屉里点的：填完就把抽屉收掉，让用户直接看到编辑器；
+               整页里点的：直接切到规则页。两条路都落不到「点了像没反应」。 */
+            if (root.AIDrawer && root.AIDrawer.isOpen && root.AIDrawer.isOpen()) {
+              root.AIDrawer.close();
+            }
+            navigateTo('rules');
+          }
+        }, UIx.icon('spark', 12), T('填入规则编辑器', 'Send to rule editor')));
+        draftBar.appendChild(h('span', { class: 'small muted' },
+          T('只填入，不保存、不执行', 'Loads only — no save, no run')));
+        c.extra.appendChild(draftBar);
+      }
 
       /* 这一轮真正碰过的位置：整条答完就能直接点到那个目录，
          而不是读完一句「打开 D:\Downloads 看看」然后自己去翻。 */

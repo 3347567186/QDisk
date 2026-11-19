@@ -63,6 +63,11 @@
       params: { paths: 'string[]≤50', recursive: 'boolean' },
       args: ['paths']
     },
+    explain_rules: {
+      desc: '查整理的真实分类规则：某个分类收哪些扩展名、某个文件为什么分到这一类、每条跳过原因是什么意思、哪些文件永远不会被移动。解释「为什么这样分」必须用它，不要凭常识猜',
+      params: { cat: 'string 分类名', name: 'string 文件名' },
+      args: []
+    },
     last_organize: {
       desc: '读最近一次整理的记录：时间、目录、移动了多少个文件',
       params: {},
@@ -181,10 +186,10 @@
 
   const PAGE_TOOLS = {
     ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_files', 'empty_dirs',
-      'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'last_organize',
+      'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize',
       'archive_entries', 'clean_candidates', 'settings_read', 'search_roots']),
     tools: PROPOSE.concat(['top_files', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
-    organize: PROPOSE.concat(['list_dir', 'read_file', 'organize_preview', 'last_organize', 'installed_apps']),
+    organize: PROPOSE.concat(['list_dir', 'read_file', 'organize_preview', 'explain_rules', 'last_organize', 'installed_apps']),
     search: PROPOSE.concat(['search_files', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
     apps: PROPOSE.concat(['installed_apps', 'list_dir', 'read_file']),
     archive: PROPOSE.concat(['list_dir', 'read_file', 'top_files', 'archive_entries'])
@@ -208,13 +213,21 @@
     }).filter(Boolean).join('\n');
   }
 
+  /* 只在真的给了 explain_rules 的页面上讲这条：没有这个工具的页面
+     要求它「必须用 explain_rules」，只会让它去调一个不存在的工具。 */
+  const RULES_EXPLAIN = [
+    '解释「为什么这样分」「为什么被跳过」必须先用 explain_rules 查真实规则，不要凭扩展名常识猜；查不到就说查不到。'
+  ];
+
   const has = (names, n) => names.indexOf(n) >= 0;
 
   /* 稳定前缀：同一组工具拼出的字符串必须完全一致 */
   function systemPrompt(toolNames) {
     const names = Array.isArray(toolNames) ? toolNames : [];
     const canWrite = has(names, 'propose_action');
-    const rules = RULES_BASE.concat(canWrite ? RULES_WRITE : RULES_READONLY).join('\n');
+    const rules = RULES_BASE
+      .concat(has(names, 'explain_rules') ? RULES_EXPLAIN : [])
+      .concat(canWrite ? RULES_WRITE : RULES_READONLY).join('\n');
     const parts = [
       '你是整理助手的内置 AI 助手。',
       '',

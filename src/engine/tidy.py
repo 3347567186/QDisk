@@ -12751,9 +12751,21 @@ def _engine_rules_execute(text, folder, simulate):
     return _engine_rules_events(out)[0]
 
 
+def _engine_rules_text(params):
+    """取要校验/预演的 YAML 文本：优先用请求里直接给的 text，其次读 path。
+
+    编辑器里的草稿还没存盘时，以前必须先存一个文件才能校验——用户点了
+    「校验」却弹出「先保存」，这是把内部实现漏到了界面上。现在两条路都行。
+    """
+    raw = params.get("text")
+    if isinstance(raw, str) and raw.strip():
+        return "(未保存的草稿)", raw
+    return _engine_file_text(params)
+
+
 def _engine_rules_validate(params):
     """rules.validate：只校验 YAML，不执行任何动作。"""
-    _p, text = _engine_file_text(params)
+    _p, text = _engine_rules_text(params)
     msg, ok = check_rules(text)
     rule_count = 0
     if ok:
@@ -12779,7 +12791,7 @@ def _engine_rules_validate(params):
 
 def _engine_rules_preview(params):
     """rules.preview：只算出会移动什么，不落盘。"""
-    _p, text = _engine_file_text(params)
+    _p, text = _engine_rules_text(params)
     folder = _engine_folder_dir(params)
     events = _engine_rules_execute(text, folder, simulate=True)
     moves, skipped = [], 0
@@ -12967,6 +12979,88 @@ def _engine_migrate_apply(params):
             "job_dir": rep.job_dir, "jobs": jobs, "blocked": []}
 
 
+_SKIP_LEGEND = [
+    ("排除的后缀", "你在扫描选项里填了「排除后缀」，这类文件不参与整理"),
+    ("系统文件", "Windows 的系统文件（desktop.ini、thumbs.db 之类），动了会影响系统"),
+    ("快捷方式/锁文件", "快捷方式与 Office/软件锁文件，移动后会失效"),
+    ("临时占位文件", "下载中的 .part/.crdownload/.tmp 之类，还在写"),
+    ("以 _ 开头的说明文件", "以 _ 开头的说明/占位文件，按约定保留在原处"),
+    ("读不到属性", "没有读取权限，或文件正被独占"),
+    ("系统属性", "带系统属性的文件，安全规则不动"),
+    ("符号链接/联接点", "是链接而不是实体文件，移动链接会打断指向"),
+    ("最近改动过，可能在用", "修改时间在「跳过最近」的分钟数以内，怕你还在用"),
+    ("排除的目录", "你在「排除目录」里写了这个目录名"),
+]
+
+
+def _engine_rules_explain(params):
+    """rules.explain：解释「为什么这样分」「为什么被跳过」。
+
+    模型不许凭常识猜分类，界面上也不该出现「大概是因为扩展名吧」这种话。
+    分类规则、被跳过的原因、永不移动的名单都从当前 rules.json 里读出来，
+    答案和引擎真正执行时的判断是同一份数据。
+    """
+    rules = _engine_rules()
+
+    # 分类 → 扩展名（反查 ext_to_cat）
+    cat_exts = {}
+    for ext, cat in rules.ext_to_cat.items():
+        cat_exts.setdefault(cat, []).append(ext)
+    for cat in cat_exts:
+        cat_exts[cat].sort()
+
+    want_cat = _engine_get(params, "cat", "", str).strip()
+    want_name = _engine_get(params, "name", "", str).strip()
+
+    out = {
+        "fallback": rules.fallback,
+        "cat_order": list(rules.cat_order),
+        "never": {
+            "exts": sorted(rules.never_exts)[:80],
+            "names": sorted(rules.never_names)[:80],
+            "prefixes": list(rules.never_prefixes)[:40],
+        },
+        "skip_reasons": [{"reason": r, "why": w} for r, w in _SKIP_LEGEND],
+        "content": {
+            "enabled": bool(rules.content_enabled),
+            "min_score": int(rules.content_min_score),
+            "exts": sorted(rules.content_exts)[:60],
+            "rules": [{"cat": c, "keywords": len(k), "strong": len(s)}
+                      for c, k, s in rules.content_rules][:40],
+        },
+    }
+
+    if want_cat:
+        exts = cat_exts.get(want_cat, [])
+        out["category"] = {
+            "cat": want_cat,
+            "exts": exts[:120],
+            "ext_count": len(exts),
+            "is_fallback": want_cat == rules.fallback,
+        }
+        if not exts and want_cat != rules.fallback:
+            out["category"]["note"] = "这个分类没有登记扩展名，只有内容识别会分到它"
+    else:
+        cats = []
+        for cat in rules.cat_order:
+            exts = cat_exts.get(cat, [])
+            cats.append({"cat": cat, "ext_count": len(exts), "exts": exts[:24]})
+        out["categories"] = cats
+
+    if want_name:
+        cat = rules.category(want_name)
+        ext = os.path.splitext(want_name)[1].lower()
+        out["matched"] = {
+            "name": want_name,
+            "ext": ext,
+            "cat": cat,
+            "why": ("扩展名 " + ext + " 登记在「" + cat + "」下") if ext in rules.ext_to_cat
+                   else ("扩展名 " + (ext or "（无）") + " 没有登记，落到兜底分类「" + cat + "」"),
+        }
+
+    return out
+
+
 _ENGINE_METHODS = {
     "ping": lambda _params: _engine_ping(),
     "settings.get": lambda _params: _engine_settings(),
@@ -12999,6 +13093,7 @@ _ENGINE_METHODS = {
     "rules.validate": _engine_rules_validate,
     "rules.preview": _engine_rules_preview,
     "rules.run": _engine_rules_run,
+    "rules.explain": _engine_rules_explain,
     "migrate.plan": _engine_migrate_plan,
     "migrate.apply": _engine_migrate_apply,
 }

@@ -827,7 +827,25 @@
         results.appendChild(box);
       }
 
+      if (state.skips && state.skips.n) results.appendChild(skipNotice());
       if (state.blocked.length) results.appendChild(blockedNotice());
+    }
+
+    /* 有文件被跳过：一句话说清跳了多少、为什么，再给一个问助手的口子。
+       用户看到「少了几个文件」时最想知道的就是这条 */
+    function skipNotice() {
+      const sk = state.skips || { n: 0, reasons: [] };
+      const why = sk.reasons.slice(0, 3).join('、') + (sk.reasons.length > 3 ? ' 等' : '');
+      return h('div', { class: 'row wrap' },
+        h('span', { class: 'badge' }, T('跳过 ' + fmtCount(sk.n) + ' 个文件', fmtCount(sk.n) + ' file(s) skipped')),
+        h('span', { class: 'small muted ellipsis', style: { maxWidth: '560px' }, title: why }, why),
+        h('span', { class: 'spacer' }),
+        h('button', {
+          class: 'btn ghost sm',
+          onclick: () => askWhy(T('这些文件为什么被跳过？', 'Why were these files skipped?'),
+            T('跳过 ' + fmtCount(sk.n) + ' 个文件 · ' + why, fmtCount(sk.n) + ' skipped · ' + why))
+        }, T('为什么跳过', 'Why skipped'))
+      );
     }
 
     /* 未扫描：引导态 */
@@ -889,6 +907,12 @@
         h('span', { class: 'spacer' }),
         h('button', {
           class: 'btn ghost sm',
+          onclick: () => askWhy(T('这些目录为什么被跳过？',
+            'Why were these folders skipped?'),
+            T('已跳过 ' + fmtCount(n) + ' 个目录', fmtCount(n) + ' folder(s) skipped'))
+        }, T('为什么跳过', 'Why skipped')),
+        h('button', {
+          class: 'btn ghost sm',
           onclick: () => showDetails(T('被拦截的目录', 'Blocked folders'),
             state.blocked.map((p) => [
               p.folder || '',
@@ -897,6 +921,23 @@
             ]))
         }, T('查看详情', 'Details'))
       );
+    }
+
+    /* 「为什么这样分」统一走助手抽屉：预填问题，上下文带上当前分组，
+       回答里的分类规则来自引擎的 rules.explain，不是模型猜的 */
+    function askWhy(question, note) {
+      if (!window.AIDrawer) return;
+      if (window.SteveAvatar) window.SteveAvatar.spin(askMark);
+      window.AIDrawer.open({
+        title: T('问助手 · 为什么', 'Ask AI · Why'),
+        question: question,
+        ctx: () => ({
+          page: '整理文件',
+          dir: state.sources[0] ? state.sources[0].path : '',
+          count: state.sources.length,
+          note: note || ''
+        })
+      });
     }
 
     /* 单个分组：默认收起，展开时才建表，避免大目录一次渲染 */
@@ -937,6 +978,18 @@
         h('span', { class: 'badge' },
           T(fmtCount(g.files.length) + ' 个文件', fmtCount(g.files.length) + ' files')),
         h('span', { class: 'spacer' }),
+        h('button', {
+          class: 'btn ghost sm group-why',
+          title: T('这一类是按什么规则分的', 'What rule puts files in this group'),
+          onclick: (e) => {
+            e.stopPropagation();
+            askWhy(
+              T('为什么「' + g.cat + '」这个分类会收这些文件？',
+                'Why does the "' + g.cat + '" group collect these files?'),
+              T('分类：' + g.cat + ' · ' + fmtCount(g.files.length) + ' 个文件 · ' +
+                fmtBytes(g.size), 'Group: ' + g.cat + ' · ' + g.files.length + ' files'));
+          }
+        }, T('为什么', 'Why')),
         h('span', { class: 'muted small' }, fmtBytes(g.size))
       );
 
