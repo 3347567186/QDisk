@@ -4176,7 +4176,7 @@ dependencies = [
 
 [[package]]
 name = "tidy-assistant"
-version = "1.36.11"
+version = "1.36.12"
 dependencies = [
  "anyhow",
  "bzip2",
