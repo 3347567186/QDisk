@@ -96,5 +96,60 @@
       return p.models.some(function (m) { return m[0].toLowerCase().indexOf(q) >= 0 || String(m[1]).toLowerCase().indexOf(q) >= 0; });
     });
   }
+  /* 每家厂商的 Key 申请 / 控制台地址。没收录的退回官网（p.site），
+     宁可跳官网也不要跳错页面；新增厂商时把这里补上即可。 */
+  var KEY_PAGES = {
+    alibaba_cloud: 'https://modelstudio.console.alibabacloud.com/?tab=playground#/api-key',
+    'aliyun-cn': 'https://bailian.console.aliyun.com/?tab=model#/api-key',
+    qwencloud_coding: 'https://qwencloud.com/',
+    qwencloud: 'https://qwencloud.com/',
+    'glm-cn': 'https://open.bigmodel.cn/usercenter/apikeys',
+    zai: 'https://z.ai/manage-apikey/apikey-list',
+    zai_api: 'https://z.ai/manage-apikey/apikey-list',
+    deepseek: 'https://platform.deepseek.com/api_keys',
+    kimi: 'https://platform.moonshot.cn/console/api-keys',
+    kimi_code: 'https://platform.moonshot.cn/console/api-keys',
+    siliconflow: 'https://cloud.siliconflow.cn/account/ak',
+    'volcengine-ark': 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+    byteplus: 'https://console.byteplus.com/ark/region:ark+ap-southeast-1/apiKey',
+    baidu: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
+    tencent: 'https://console.cloud.tencent.com/hunyuan/api-key',
+    minimax: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+    opencode: 'https://opencode.ai/auth',
+    opencode_go: 'https://opencode.ai/auth',
+    opencode_zen: 'https://opencode.ai/auth',
+    open_router: 'https://openrouter.ai/settings/keys',
+    gemini: 'https://aistudio.google.com/app/apikey',
+    vertex: 'https://console.cloud.google.com/apis/credentials',
+    'vertex-partner': 'https://console.cloud.google.com/apis/credentials',
+    ollama_cloud: 'https://ollama.com/settings/keys',
+    nvidia_nim: 'https://build.nvidia.com/settings/api-keys',
+    groq: 'https://console.groq.com/keys',
+    mistral: 'https://console.mistral.ai/api-keys',
+    mistral_codestral: 'https://console.mistral.ai/api-keys',
+    bedrock: 'https://console.aws.amazon.com/bedrock',
+    cerebras: 'https://cloud.cerebras.ai/?tab=apiKeys',
+    cloudflare: 'https://dash.cloudflare.com/profile/api-tokens',
+    cohere: 'https://dashboard.cohere.com/api-keys',
+    deepinfra: 'https://deepinfra.com/dash/api_keys',
+    fireworks: 'https://fireworks.ai/account/api-keys',
+    github_copilot: 'https://github.com/settings/tokens',
+    huggingface: 'https://huggingface.co/settings/tokens',
+    hyperbolic: 'https://app.hyperbolic.xyz/settings',
+    lightning: 'https://lightning.ai/settings/api-keys',
+    nebius: 'https://studio.nebius.ai/settings/api-keys',
+    novita: 'https://novita.ai/settings/key-management',
+    perplexity: 'https://www.perplexity.ai/settings/api',
+    sambanova: 'https://cloud.sambanova.ai/apis',
+    scaleway: 'https://console.scaleway.com/iam/api-keys',
+    together: 'https://api.together.xyz/settings/api-keys',
+    venice: 'https://venice.ai/settings/api',
+    vercel: 'https://vercel.com/dashboard/ai-gateway',
+    wandb: 'https://wandb.ai/authorize',
+    xai: 'https://console.x.ai/'
+  };
+  providers.forEach(function (p) {
+    p.keyUrl = KEY_PAGES[p.id] || p.site || '';
+  });
   window.AIPool = { source: 'dsh-xdpool 2.7.5', providers: providers, count: count, find: find, hostOf: hostOf };
 })();

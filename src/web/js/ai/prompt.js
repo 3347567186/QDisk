@@ -139,6 +139,22 @@
     '提案里不要塞没查证过的路径；宁可少提一项，也不要让一张卡片里出现你没看过的路径。'
   ];
 
+  /* 强度与温度的分工写死在 system：这是稳定前缀，只随版本变化，
+     具体这一轮用哪档由 contextLine 的【上下文】告知。
+     规则描述「努力」而不是「字数」——high 不等于啰嗦，off 不等于敷衍。 */
+  const EFFORT = [
+    '【推理强度怎么用】',
+    '强度是「愿意花多少努力查清楚」，不是「答案写多长」。四档的行为约定：',
+    '· 关：不展开推理，直接给结论；只做必要的一次查询。',
+    '· 低：一次到位，不绕路；能一步查清就不要拆成三步。',
+    '· 中：默认。先想清楚再动手，按「看结构 → 查细节 → 给结论」走。',
+    '· 高：多路径验算、交叉核对；数字与结论要能互相印证，必要时回头重查。',
+    '强度高时不要为了显得努力而空转：结论已经稳定、再查也不会改变结论，就停下来作答。',
+    '温度由任务决定，不由强度决定：查文件、算数字、写命令要稳；写文案、起名、润色才需要发散。',
+    '上下文里会给出这一轮的温度。若任务明显与温度不匹配（例如要精确数字却是高温度），按任务的正确性要求作答，不要因为温度高就允许自己猜。',
+    '不要在回答里复述「当前强度/温度」，界面已经显示给用户了。'
+  ].join('\n');
+
   const FORMAT = [
     '【输出格式·最高优先级】',
     '只输出一个 JSON 对象。第一个字符必须是 {，最后一个字符必须是 }。',
@@ -215,6 +231,8 @@
     parts.push('【可用工具】只允许调用下面这些，工具名必须逐字一致：');
     parts.push(toolText(names));
     parts.push('');
+    parts.push(EFFORT);
+    parts.push('');
     parts.push(FORMAT);
     return parts.join('\n');
   }
@@ -233,12 +251,18 @@
     }
     if (ctx.note) bits.push(ctx.note);
     if (ctx.permission) bits.push('权限=' + ctx.permission);
+    /* 强度写档位名，温度写实际值并标出来源：模型自己也会看这一行，
+       「温度 0.2（任务）」比裸一个数字更不容易被它当成随机数 */
     if (ctx.thinking) bits.push('强度=' + ctx.thinking);
+    if (ctx.temperature !== undefined && ctx.temperature !== null) {
+      bits.push('温度=' + ctx.temperature + (ctx.tempSrc ? '（' + ctx.tempSrc + '）' : ''));
+    }
+    if (ctx.task) bits.push('任务=' + ctx.task);
     if (ctx.canWrite === false) bits.push('动手=关');
     return bits.length ? '【上下文】' + bits.join(' · ') : '';
   }
 
-  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText, setCatalog, OUTPUT_REMINDER, FORMAT };
+  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText, setCatalog, OUTPUT_REMINDER, FORMAT, EFFORT };
   root.AIPrompt = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -776,12 +776,18 @@
             }
             shown.forEach((p) => {
               const open = p.id === expandedId;
-              list.appendChild(h('button', {
-                class: 'pool-row' + (open ? ' open' : ''), type: 'button',
-                onclick: () => {
-                  if (p.models.length === 1) { m0.close(); applyPool(p, p.models[0]); return; }
-                  expandedId = open ? '' : p.id;
-                  render(search.value);
+              /* 行本身是按钮语义，但里面还要放「申请 Key」的外链图标；
+                 按钮里套按钮是非法结构，所以改成 role=button 的 div。 */
+              const pick = () => {
+                if (p.models.length === 1) { m0.close(); applyPool(p, p.models[0]); return; }
+                expandedId = open ? '' : p.id;
+                render(search.value);
+              };
+              list.appendChild(h('div', {
+                class: 'pool-row' + (open ? ' open' : ''), role: 'button', tabindex: '0',
+                onclick: pick,
+                onkeydown: (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
                 }
               },
                 p.zh ? h('span', { class: 'pool-zh', text: p.zh }) : null,
@@ -789,6 +795,15 @@
                 p.free ? h('span', { class: 'pool-tag free', text: T('免费额度', 'Free') }) : null,
                 p.local ? h('span', { class: 'pool-tag', text: T('本地', 'Local') }) : null,
                 h('span', { class: 'pool-host mono', text: AIPool.hostOf(p.endpoint) }),
+                p.keyUrl ? h('button', {
+                  class: 'pool-key', type: 'button',
+                  title: T('去申请 / 查看这家厂商的 Key', 'Get or view this provider’s API key'),
+                  'aria-label': T('去申请 ' + p.name + ' 的 Key', 'Get ' + p.name + ' API key'),
+                  onclick: (e) => {
+                    e.stopPropagation();
+                    API.openPath(p.keyUrl).catch((err) => toast(err && err.message ? err.message : String(err), 'error'));
+                  }
+                }, icon('external', 13)) : null,
                 h('span', { class: 'pool-count', text: String(p.models.length) })
               ));
               if (!open) return;

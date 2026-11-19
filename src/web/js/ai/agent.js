@@ -14,6 +14,23 @@
 
   const DEFAULT_MAX_STEPS = 6;
   const DEFAULT_TURN_BUDGET = 8000;      // token（按字符数/2 估算），只在调用方显式给预算时用
+
+  /** 从一家厂商的 usage 里挖出「思考用了多少 token」。
+   *  挖不到就返回 null —— 调用方据此说「未上报」，而不是拿 0 冒充精确值。 */
+  function thinkTokensOf(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const cands = [
+      usage.reasoning_tokens,
+      usage.reasoning,
+      usage.completion_tokens_details && usage.completion_tokens_details.reasoning_tokens,
+      usage.output_tokens_details && usage.output_tokens_details.reasoning_tokens
+    ];
+    for (let i = 0; i < cands.length; i += 1) {
+      const n = Number(cands[i]);
+      if (Number.isFinite(n) && n > 0) return Math.round(n);
+    }
+    return null;
+  }
   /* 上下文窗口不知道的时候按 1M 算：DeepSeek V4 / GPT-5 这一代都在 1M 量级，
      保守取 32K 会让「明明装得下」的对话先被掐掉，那才是真正的失忆。 */
   const DEFAULT_WINDOW = 1000000;
@@ -363,6 +380,24 @@
       return Math.max(512, Math.min(ceiling, Math.max(base, learned)));
     }
 
+    /* 强度原生字段：由 strength 层算好放在 settings.extraBody，
+       这里只负责「被拒过就摘掉」。摘掉的是字段本身，不是整轮请求——
+       认不出 reasoning_effort 的接口照样能用提示词里的强度规则工作。 */
+    function extraFields() {
+      const src = settings.extraBody;
+      if (!src || typeof src !== 'object') return null;
+      const out = {};
+      let any = false;
+      Object.keys(src).forEach((k) => {
+        if (k === 'reasoning_effort' && caps.noReasoningEffort === true) return;
+        if (k === 'reasoning' && caps.noReasoning === true) return;
+        if ((k === 'thinking' || k === 'enable_thinking' || k === 'thinking_budget') && caps.noThinking === true) return;
+        out[k] = src[k];
+        any = true;
+      });
+      return any ? out : null;
+    }
+
     function buildBody(messages, stream, maxTokens) {
       const body = {
         model: settings.model || '',
@@ -373,12 +408,16 @@
          有的模型连 temperature 都不接受。被拒过就按学到的参数名发 */
       const tokenParam = caps.tokenParam === 'max_completion_tokens' ? 'max_completion_tokens' : 'max_tokens';
       body[tokenParam] = maxTokens || replyTokens();
-      if (caps.noTemperature !== true) {
-        body.temperature = typeof settings.temperature === 'number' ? settings.temperature : 0.2;
+      /* temperature 为 null = 这家把温度锁死了（推理模型），别硬塞：
+         塞了也要吃一次 400 才学会，不如一开始就不发 */
+      if (caps.noTemperature !== true && typeof settings.temperature === 'number') {
+        body.temperature = settings.temperature;
       }
       /* 能力是「学到的否定」：只有明确被拒过才不发这个字段 */
       if (stream && caps.streamOptions !== false) body.stream_options = { include_usage: true };
       if (settings.jsonMode !== false && caps.jsonMode !== false) body.response_format = { type: 'json_object' };
+      const extra = extraFields();
+      if (extra) Object.assign(body, extra);
       return body;
     }
 
@@ -400,6 +439,21 @@
       if (/temperature/i.test(t) && caps.noTemperature !== true) {
         remember({ noTemperature: true });
         return 'temperature';
+      }
+      /* 强度原生字段被拒：逐类摘掉再试。顺序讲究——先摘最具体的
+         （reasoning_effort / thinking），再摘概括的（reasoning），
+         否则一次就把能用的字段全关了 */
+      if (/reasoning_effort|reasoning\.effort/i.test(t) && caps.noReasoningEffort !== true) {
+        remember({ noReasoningEffort: true });
+        return 'reasoningEffort';
+      }
+      if (/thinking_budget|enable_thinking|budget_tokens|\bthinking\b/i.test(t) && caps.noThinking !== true) {
+        remember({ noThinking: true });
+        return 'thinking';
+      }
+      if (/\breasoning\b/i.test(t) && caps.noReasoning !== true) {
+        remember({ noReasoning: true });
+        return 'reasoning';
       }
       if (/response_format|json_object|json_schema/i.test(t)) {
         if (caps.jsonMode === false) return false;
@@ -430,6 +484,9 @@
     const DOWN_MSG = {
       tokenParam: '这个模型要 max_completion_tokens 而不是 max_tokens，已自动换参数重试',
       temperature: '这个模型不接受 temperature，已自动去掉重试',
+      reasoningEffort: '这个接口不认 reasoning_effort，已改回用提示词控制强度',
+      thinking: '这个接口不认 thinking 字段，已改回用提示词控制强度',
+      reasoning: '这个接口不认 reasoning 字段，已改回用提示词控制强度',
       jsonMode: '这个接口不支持强制 JSON 模式，已自动关掉重试',
       streamOptions: '这个接口不认 stream_options，已自动去掉重试',
       stream: '这个接口不支持流式返回，已自动改成分段拿结果'
@@ -783,6 +840,13 @@
           /* 命中率：DeepSeek 用 prompt_cache_hit_tokens，OpenAI 兼容口放在 prompt_tokens_details.cached_tokens */
           usageTotal.prompt_cache_hit_tokens += Number(step.usage.prompt_cache_hit_tokens ||
             (step.usage.prompt_tokens_details && step.usage.prompt_tokens_details.cached_tokens) || 0) || 0;
+          /* 思考 token：有的家给 reasoning_tokens，有的藏在 details 里，
+             有的压根不给。累计「有就加、没有就记 0 并标未上报」，绝不假装 0 是真数 */
+          const r = thinkTokensOf(step.usage);
+          if (r !== null) {
+            usageTotal.reasoning_tokens = (usageTotal.reasoning_tokens || 0) + r;
+            usageTotal.reasoning_reported = true;
+          }
         }
         if (stop.isStopped()) return stoppedResult();
 

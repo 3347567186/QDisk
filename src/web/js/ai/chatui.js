@@ -44,15 +44,38 @@
     none: 'tools'
   };
 
-  /* 推理强度只管「查几轮、答案多长」，不再切分上下文：
-     以前写成 deep 就吃掉窗口的 75%，等于「想得深就必须记得少」——
-     窗口是模型能力，不是思考旋钮。现在历史预算统一按窗口的 70%（见 agent.js），
-     三档只差 MAX_STEPS 与回复长度。 */
-  const THINKING = {
-    simple: { steps: 3, replyMax: 320 },
-    medium: { steps: 6, replyMax: 600 },
-    deep: { steps: 9, replyMax: 900 }
-  };
+  /* 推理强度管「愿意花多少努力」：思考预算、查证轮数、回复长度。
+     它不切分上下文——以前写成 deep 就吃掉窗口 75%，等于「想得深就必须记得少」，
+     而窗口是模型能力，不是思考旋钮。现在历史预算统一按窗口的 70%（见 agent.js），
+     档位只差思考预算、MAX_STEPS 与回复长度，定义在 strength.js。 */
+  const Strength = root.AIStrength;
+
+  /** 用量那一行的悬停说明：把每个数字是什么讲清，
+   *  并明确「思考 token 是真值还是估算」——估算不许冒充精确。 */
+  function usageTitle(st) {
+    const bits = [
+      T('缓存命中率 = 命中缓存的提示 token / 提示 token', 'Cache hit = cached prompt tokens / prompt tokens'),
+      T('思考预算 = 这一档最多允许模型思考多少 token', 'Thinking budget = tokens allowed for this level')
+    ];
+    if (st && st.estimated) bits.push(T('这次的思考量是估算：模型没有上报', 'Estimated: the model did not report reasoning tokens'));
+    return bits.join('\n');
+  }
+
+
+  /** 这一轮的策略：档位来自滑块（努力），温度来自设置（空 = 按任务自动），
+   *  步数硬上限来自设置里的防跑飞闸。 */
+  function policyFor(text, settings) {
+    const s = settings || {};
+    return Strength.resolve({
+      level: state.thinking,
+      text: text,
+      temperature: s.temperature === null || s.temperature === undefined ? null : s.temperature,
+      endpoint: s.endpoint,
+      model: s.model,
+      jsonMode: s.jsonMode,
+      stepCap: s.stepCap
+    });
+  }
 
   /* 权限档位决定「这一轮允许模型看见哪些工具」。
      1.28 起多了一组提案工具（propose_action / list_proposals / cancel_proposal / navigate）：
@@ -472,15 +495,20 @@
       /* 上下文占用环的分母是模型真窗口，不是写死的 8000 */
       state.ctxWindow = ctxWindowOf(settings);
       composer.setUsage({ used: state.usedTokens || 0, budget: state.ctxWindow });
-      /* 三档滑块标的是查证轮数，窗口单独在右边显示，不再混在一起 */
+      /* 滑块刻度标的是「思考预算」，不是查证轮数：
+         轮数是防守用的硬上限，写出来只会让人以为「少查几轮 = 更省钱」 */
       composer.setThinkBudgets(thinkBudgets(), state.ctxWindow);
       return list;
     }
 
-    /* 三档滑块标的是「查证轮数」，不是 token */
+    /* 四档滑块的刻度文字：思考预算（token），0 就直说「不思考」 */
     function thinkBudgets() {
-      return Object.keys(THINKING).map(function (id) {
-        return { id: id, steps: THINKING[id].steps };
+      return Strength.stops().map(function (s) {
+        return {
+          id: s.id,
+          steps: s.steps,
+          label: s.think ? (s.think >= 1000 ? (s.think / 1000).toFixed(1) + 'K' : String(s.think)) : T('不思考', 'off')
+        };
       });
     }
 
@@ -1131,7 +1159,7 @@
         }, T('重试', 'Retry')));
       }
       if (res.usage) {
-        /* 右下角只留三样：思考时长、这轮 token 用量、缓存命中率。
+        /* 右下角只留几样：思考时长、这轮 token、缓存命中率、思考预算用量。
            命中率只给百分比，写「命中率」三个字反而要多读一遍。 */
         const u = res.usage;
         const parts = [];
@@ -1143,7 +1171,13 @@
           const hit = Number(u.prompt_cache_hit_tokens) || 0;
           parts.push(Math.round((hit / Number(u.prompt_tokens)) * 100) + '%');
         }
-        if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: T('缓存命中率 = 命中缓存的提示 token / 本步提示 token', 'Cache hit rate = cached prompt tokens / prompt tokens') }, parts.join(' · ')));
+        /* 思考预算：真值标「思考」，服务端没上报就标「约」，绝不用 0 冒充精确 */
+        const st = Strength.thinkEstimate(state.policy, u);
+        if (st && st.tokens) {
+          const text = (st.estimated ? T('约', '~') : '') + st.tokens + T(' 思考', ' thinking');
+          parts.push(st.budget ? text + '/' + st.budget : text);
+        }
+        if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: usageTitle(st) }, parts.join(' · ')));
       }
       /* 刻度条的悬停预览要读这一轮的答案和用量：答案本来只进 DOM，
          这里回存到回合对象上，预览就不必去扒正文节点。 */
@@ -1180,15 +1214,15 @@
 
     let lastAsk = null;
 
-    function budgetFor(thinking, settings) {
-      const key = THINKING[thinking] ? thinking : 'medium';
-      const t = THINKING[key];
-      /* 三档只管「查几轮、答案多长」。上下文窗口是模型能力，原样交给 agent，
-         压缩阈值由它在窗口的 50/70/85% 处自动踩——想得深不该记得少。 */
+    function budgetFor(policy, settings) {
+      /* 档位只管「多努力」：思考预算、查几轮、答案多长。上下文窗口是模型能力，
+         原样交给 agent，压缩阈值由它在窗口的 50/70/85% 处自动踩——
+         想得深不该记得少。步数再和设置里的硬上限取小，防一路跑飞。 */
+      const cap = Number(settings.maxSteps) || 0;
       return {
-        steps: Math.min(t.steps, Number(settings.maxSteps) || t.steps),
+        steps: cap > 0 ? Math.min(policy.steps, cap) : policy.steps,
         window: ctxWindowOf(settings),
-        replyMax: t.replyMax
+        replyMax: policy.replyMax
       };
     }
 
@@ -1239,7 +1273,10 @@
         composer.setModel(settings.model);
       }
 
-      const bud = budgetFor(state.thinking, settings);
+      /* 这一轮的策略先算出来：档位决定努力，任务决定温度。
+         温度用 null 表示「这家锁死了」，agent 见到 null 就不发 temperature */
+      const policy2 = policyFor(q, settings);
+      const bud = budgetFor(policy2, settings);
       const policy = proposals ? proposals.getPolicy() : { mode: 'off' };
       const canWrite = policy.mode !== 'off';
       const allowed = PERM_TOOLS[state.permission] || PERM_TOOLS.standard;
@@ -1262,10 +1299,15 @@
            不再由「深度档位」乘一个比例——那是两件事 */
         ctxWindow: bud.window,
         turnBudget: 0,
+        /* 温度与强度原生字段都由 strength 算：
+           温度 = 手填 > 任务默认 > 档位兜底；锁温模型的 null 表示「不发」 */
+        temperature: policy2.temperature,
+        extraBody: policy2.extra,
         /* 回复上限跟着思考强度走：agent 用它算 max_tokens，
            原来固定 700 会把长回答截成半截 JSON */
         replyMax: bud.replyMax
       });
+      state.policy = policy2;
 
       const agent = AIAgent.createAgent({
         /* 有流式通道就走流式：推理过程边生成边推到思路行；
@@ -1298,7 +1340,12 @@
       }
       ctx.tools = Object.keys(tools);
       ctx.permission = permLabel(state.permission);
-      ctx.thinking = state.thinking;
+      /* 上下文行里说清「这一轮多努力、温度多少、任务是什么」：
+         模型据此调自己的行为，用户不用在正文里读到这些元信息 */
+      ctx.thinking = Strength.LEVELS[policy2.level].label[0];
+      ctx.temperature = policy2.temperature;
+      ctx.tempSrc = { manual: T('手填', 'manual'), task: T('任务', 'task'), level: T('档位', 'level'), locked: T('模型固定', 'fixed') }[policy2.tempSrc] || '';
+      ctx.task = policy2.taskLabel ? policy2.taskLabel[0] : '';
       ctx.canWrite = !!(tools.propose_action);
 
       startAnswer();
