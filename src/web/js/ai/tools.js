@@ -438,13 +438,22 @@
           }
 
           /* 目录排行给更大的 cap：1100 会把 15 条压到 2 条，
-             模型只看到两个目录，答案自然只有两句。 */
-          const out = pageFit(base, items, 0, want, 2600);
+             模型只看到两个目录，答案自然只有两句。
+             2600 还是不够（15 条 × 约 190 字符 ≈ 2900），实测砍到 11 条，
+             而模型看到 items 只有 11 条就只讲 3 个。给 6000，让 want 自己控数量。 */
+          const out = pageFit(base, items, 0, want, 6000);
           /* suggest_items 必须挂在 fit 之后：fit 会从尾部砍数组，
              挂在里面会被砍成 1 条（实测只剩 delete 那条，careful 组直接消失）。 */
           if (out && typeof out === 'object') {
             out.draft = lines.join('\n');
             if (sug.length) out.suggest_items = sug;
+            /* count 按「模型真正看得到的条数」重算，别让它说「一共 15 个」却只讲 11 个。
+               注意：这里只改数字，不要加解释性的 note —— 实测加一句
+               「只列出最大的 11 个（一共 15 个）」之后，模型反而只肯讲 3 个目录。 */
+            if (Array.isArray(out.items) && out.count !== out.items.length) {
+              out.found = out.count;
+              out.count = out.items.length;
+            }
           }
           return out;
         },
