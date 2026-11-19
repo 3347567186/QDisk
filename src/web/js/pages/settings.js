@@ -909,9 +909,18 @@
           )
           : null;
 
+        /* 温度有「自动」这一档：自动 = 按任务决定（查文件 0.1、算数字 0、
+           写文案 0.85）。手填才用输入框里的数字。以前这里只有一个数字，
+           等于让用户替所有任务选一个风险值——查文件偏发散、写文案偏死板。 */
+        const tempAutoCb = h('input', {
+          type: 'checkbox', checked: d.tempAuto !== false,
+          onchange: (e) => { d.tempAuto = e.target.checked; paint(); }
+        });
+
         const tempIn = h('input', {
           class: 'input', type: 'number', min: '0', max: '2', step: '0.1',
           value: String(d.temperature),
+          disabled: d.tempAuto !== false,
           oninput: (e) => { d.temperature = Math.min(2, Math.max(0, Number(e.target.value) || 0)); }
         });
 
@@ -1046,11 +1055,27 @@
               reported
                 ? T('读自端点 /models 的 max context length；历史超过窗口 50% 起按需裁剪，85% 压成摘要，不会失忆', 'Read from the endpoint; history is trimmed past 50% of the window and summarized at 85%')
                 : T('端点没有报告这个值：按模型名推断，推断不出按 1M。历史超过窗口 50% 起自动裁剪，85% 压成摘要', 'Not reported; inferred from the model name, else 1M. History is trimmed past 50% and summarized at 85%')),
-            setRow(T('温度', 'Temperature'), tempIn, T('越低越稳，助手类任务建议 0–0.3', 'Lower is steadier; 0–0.3 suits assistant tasks')),
-            setRow(T('查证轮数', 'Max tool steps'),
-              h('div', { class: 'row' },
-                h('span', { class: 'badge', text: String(d.maxSteps) + T(' 步', ' steps') }),
-                h('span', { class: 'small muted', text: T('超预算时会先给结论，不会无限查', 'Stops with a conclusion instead of looping') }))),
+            setRow(T('温度', 'Temperature'),
+              h('div', { class: 'row wrap' },
+                h('label', { class: 'check' }, tempAutoCb, h('span', { text: T('按任务自动', 'Auto by task') })),
+                tempIn),
+              d.tempAuto !== false
+                ? T('自动：查文件 0.1 · 算数字 0 · 写文案 0.85。温度管「答案有多发散」，与思考强度无关', 'Auto: 0.1 for files, 0 for math, 0.85 for writing. Temperature controls variety, not effort')
+                : T('手填值对所有任务生效；推理模型会锁死温度，那时这个数字不发送', 'Applies to every task; reasoning models lock temperature and this value is not sent')),
+            setRow(T('查证轮数上限', 'Max tool steps'),
+              h('div', { class: 'row wrap' },
+                h('input', {
+                  class: 'input', type: 'number', min: '1', max: '30', step: '1',
+                  value: String(d.maxSteps),
+                  onchange: (e) => {
+                    const n = Math.max(1, Math.min(30, Math.round(Number(e.target.value) || 12)));
+                    d.maxSteps = n;
+                    AIStore.save({ maxSteps: n });
+                    paint();
+                  }
+                }),
+                h('span', { class: 'small muted', text: T('与强度档位取小：关 6 / 低 8 / 中 10 / 高 14', 'Capped by level: off 6 / low 8 / medium 10 / high 14') })),
+              T('这是防一路跑飞的安全闸，不是强度；超了会先给结论，不会无限查', 'A safety cap, not effort; it stops with a conclusion instead of looping')),
 
             setCap(T('行为', 'Behaviour')),
             setRow(T('开关', 'Switches'),

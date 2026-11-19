@@ -3015,6 +3015,9 @@ html[data-theme="dark"] .ai-page {
 .dac-effort-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 12px; }
 /* 标题右侧：模型窗口。档位数字是它的 25/50/75%，一眼对上 */
 .dac-effort-meta {
+  /* 标题在左，窗口与重置一起靠右：margin-left:auto 把它们推过去，
+     不靠 space-between 把中间也撑开（那样窗口会飘到正中间） */
+  margin-left: auto;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-3);
@@ -3145,9 +3148,35 @@ html[data-theme="dark"] .ai-page {
   outline-offset: 2px;
 }
 
+.dac-effort-reset {
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--dur) var(--ease);
+}
+
+.dac-effort-reset:hover { background: var(--accent-weak); }
+.dac-effort-reset[hidden] { display: none; }
+
+/* 回答下方那一行的「中 · 温度 0.1（任务）」：
+   强度与温度是这一轮的元信息，挂在正文外面，不混进答案里 */
+.ai-policy {
+  font-size: var(--fs-tiny);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .reasoning-effort-stops {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* 档位数由策略层决定（现在四档：关闭/低/中/高）：
+     写死列数会让加档时标签挤成一团，auto-fit 跟着档位数走 */
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   align-items: center;
   margin-top: 6px;
   font-size: 11px;

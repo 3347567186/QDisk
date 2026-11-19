@@ -29,9 +29,17 @@
        modelCtx 是「每个模型各自报了多少」，ctxWindow 是当前选中那个生效的值。 */
     ctxWindow: 0,
     modelCtx: {},
+    /* 温度：tempAuto=true 时由任务决定（查文件 0.1、算数字 0、写文案 0.85），
+       false 时用手填的 temperature。温度管随机性，不该由「思考强度」推导——
+       那会让「想更认真」变成「更容易胡说」。
+       temperature 仍留 0.2 作为手填的初值，auto 时不使用它。 */
+    tempAuto: true,
     temperature: 0.2,
     jsonMode: true,
-    maxSteps: 6,
+    /* 查证轮数硬上限：不是「强度」，是防一路跑飞的安全闸。
+       强度档位自己也有轮数（off 6 / low 8 / medium 10 / high 14），
+       strength 会把两者取小，所以这里调到 12 也不会让 low 档变啰嗦。 */
+    maxSteps: 12,
     /* 单轮历史预算（token）。0 = 不写死，按模型窗口算（窗口 × 70%）：
        思考强度只决定查证轮数，不再切分上下文长度。 */
     turnBudget: 0,
@@ -96,7 +104,8 @@
     agent: {}
   };
 
-  const THINK_IDS = ['simple', 'medium', 'deep'];
+  /* 四档：关闭 / 低 / 中 / 高（老版本的 simple、deep 由 AIStrength.migrateLevel 迁移） */
+  const THINK_IDS = ['off', 'low', 'medium', 'high'];
   const PERM_IDS = ['readonly', 'standard', 'deep'];
 
   let uiCache = null;
@@ -165,10 +174,16 @@
         })
         .slice(0, 200);
     }
+    /* 温度三态在存储里用 tempAuto 表达，不靠「null 还是数字」猜：
+       老配置没有 tempAuto 字段，那时的 0.2 是软件写死的默认值（不是用户选的），
+       正好等于「自动」，所以缺省按自动处理；用户真改过别的值就当他手填。 */
     if (typeof raw.temperature === 'number' && raw.temperature >= 0 && raw.temperature <= 2) out.temperature = raw.temperature;
+    if (typeof raw.tempAuto === 'boolean') out.tempAuto = raw.tempAuto;
+    else out.tempAuto = !(typeof raw.temperature === 'number' && Math.abs(raw.temperature - 0.2) > 1e-9);
     if (typeof raw.jsonMode === 'boolean') out.jsonMode = raw.jsonMode;
+    /* 步数上限：强度档位另有自己的轮数，这里只当总闸用 */
     const steps = Number(raw.maxSteps);
-    if (steps >= 1 && steps <= 10) out.maxSteps = Math.round(steps);
+    if (steps >= 1 && steps <= 30) out.maxSteps = Math.round(steps);
     const budget = Number(raw.turnBudget);
     if (budget >= 2000 && budget <= 4000000) out.turnBudget = Math.round(budget);
     const win = Number(raw.ctxWindow);
@@ -202,7 +217,8 @@
         if (typeof k !== 'string' || !k || k.length > 200) return;
         if (!v || typeof v !== 'object' || Array.isArray(v)) return;
         const one = {};
-        ['jsonMode', 'streamOptions', 'stream', 'reasoning', 'noJson', 'noTemperature'].forEach((f) => {
+        ['jsonMode', 'streamOptions', 'stream', 'reasoning', 'noJson', 'noTemperature',
+          'noReasoningEffort', 'noThinking', 'noReasoning'].forEach((f) => {
           if (typeof v[f] === 'boolean') one[f] = v[f];
         });
         if (v.tokenParam === 'max_tokens' || v.tokenParam === 'max_completion_tokens') one.tokenParam = v.tokenParam;
@@ -381,7 +397,21 @@
         elapsed_ms: Number(u.elapsed_ms) || 0,
         prompt_tokens: Number(u.prompt_tokens) || 0,
         completion_tokens: Number(u.completion_tokens) || 0,
-        prompt_cache_hit_tokens: Number(u.prompt_cache_hit_tokens) || 0
+        prompt_cache_hit_tokens: Number(u.prompt_cache_hit_tokens) || 0,
+        /* 服务端上报过思考 token 才有这个字段：有就存，回看时不用再估算 */
+        reasoning_tokens: Number(u.reasoning_tokens) || 0,
+        reasoning_reported: !!u.reasoning_reported
+      };
+    }
+    /* 强度与温度：这条答案当时按哪档跑、温度是多少、温度从哪来。
+       只存结论不存档位表——档位表会随版本变，回看时按 id 现查。 */
+    if (m.policy && typeof m.policy === 'object') {
+      base.policy = {
+        level: String(m.policy.level || ''),
+        temperature: typeof m.policy.temperature === 'number' ? m.policy.temperature : null,
+        tempSrc: String(m.policy.tempSrc || ''),
+        task: String(m.policy.task || ''),
+        think: Number(m.policy.think) || 0
       };
     }
     return base;

@@ -50,11 +50,17 @@
   const CLOSED_SHADOW = '0 0 0 rgba(0,0,0,0)';
   const MENU_RADIUS = 16;
 
-  const THINK_STOPS = [
-    { id: 'simple', label: ['简单', 'Simple'], icon: 'feather' },
-    { id: 'medium', label: ['中度', 'Medium'], icon: 'bulb' },
-    { id: 'deep', label: ['深度', 'Deep'], icon: 'brain' }
-  ];
+  /* 强度档位从 strength.js 取（off/low/medium/high）：
+     定义只有一份，滑块、胶囊、请求策略、上下文行都读同一处，
+     不会出现「界面写深度、代码里还叫 deep」这种对不上的情况。 */
+  const Strength = root.AIStrength;
+
+  const THINK_STOPS = (Strength && Strength.stops ? Strength.stops() : []).map((s) => ({
+    id: s.id,
+    label: s.label,
+    icon: s.icon,
+    hint: s.hint
+  }));
 
   /* 三档都只影响「查证深度」，不改变只读边界 */
   const PERM_OPTIONS = [
@@ -454,6 +460,22 @@
     const effortMeta = el('span', 'dac-effort-meta', '');
     effortHead.appendChild(effortMeta);
     const effortHost = el('div');
+    /* 重置：档位滑到别处以后，一个按钮回到默认「中」。
+       默认档 = medium，所以本来就在 medium 时这个按钮不显示（别放没用的按钮） */
+    const effortReset = el('button', 'dac-effort-reset', T('重置', 'Reset'));
+    effortReset.type = 'button';
+    effortReset.title = T('回到默认档（中）', 'Back to the default level (medium)');
+    effortReset.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      thinking = 'medium';
+      /* 滑块自己也得回去：只改 thinking 不同步滑块，会出现
+         「标签写着中、指针还停在高」的两套状态 */
+      if (effort && effort.setValue) effort.setValue('medium');
+      syncPill();
+      if (o.onThinkingChange) o.onThinkingChange('medium');
+    });
+    effortHead.appendChild(effortReset);
     effortBlock.appendChild(effortHead);
     effortBlock.appendChild(effortHost);
     modelInner.appendChild(effortBlock);
@@ -729,6 +751,9 @@
       pillModel.textContent = hit ? (hit.label || hit.id) : (model || T('未配置模型', 'No model'));
       pillThink.textContent = T(t.label[0], t.label[1]);
       effort.setValue(thinking);
+      /* 已经在默认档就不显示重置按钮：摆一个点了没变化的按钮
+         只会让人怀疑自己是不是点错了 */
+      if (effortReset) effortReset.hidden = (thinking === 'medium');
     }
 
     function syncUsage() {
@@ -1224,7 +1249,7 @@
         syncSend();
       },
       setReducedMotion: function (v) { effort.setReducedMotion(v); },
-      /* 档位只标「查几轮」；window 写进标题右侧，说明上下文由模型能力决定，
+      /* 刻度标的是「思考预算」（token）；window 写进标题右侧，说明上下文由模型能力决定，
          不由这个滑块切分——这两件事以前被绑在一起，是设计错误 */
       setThinkBudgets: function (list, window) {
         effort.setBudgets(list);

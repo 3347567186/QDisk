@@ -69,7 +69,7 @@
     return Strength.resolve({
       level: state.thinking,
       text: text,
-      temperature: s.temperature === null || s.temperature === undefined ? null : s.temperature,
+      temperature: (s.tempAuto === false && typeof s.temperature === 'number') ? s.temperature : null,
       endpoint: s.endpoint,
       model: s.model,
       jsonMode: s.jsonMode,
@@ -377,7 +377,9 @@
       session: null,
       history: [],
       lastResult: null,
-      thinking: ui.thinking || 'medium',
+      /* 老版本存的是 simple / medium / deep，迁到 off/low/medium/high，
+         别让一次升级把用户选好的档位清成默认 */
+      thinking: Strength.migrateLevel(ui.thinking),
       permission: ui.permission || 'standard',
       model: ui.model || ''
     };
@@ -507,6 +509,7 @@
         return {
           id: s.id,
           steps: s.steps,
+          budget: s.think,
           label: s.think ? (s.think >= 1000 ? (s.think / 1000).toFixed(1) + 'K' : String(s.think)) : T('不思考', 'off')
         };
       });
@@ -1159,6 +1162,14 @@
         }, T('重试', 'Retry')));
       }
       if (res.usage) {
+        /* 这一轮实际用的强度与温度：放在正文外面（界面里），
+           不写进回答正文——正文里塞元信息只会让答案变脏 */
+        if (res.policy) {
+          bar.appendChild(h('span', {
+            class: 'ai-policy',
+            title: T('强度管努力（思考预算 / 查证轮数），温度管随机性（由任务决定）', 'Level controls effort; temperature controls variety (chosen by task)')
+          }, Strength.line(res.policy)));
+        }
         /* 右下角只留几样：思考时长、这轮 token、缓存命中率、思考预算用量。
            命中率只给百分比，写「命中率」三个字反而要多读一遍。 */
         const u = res.usage;
@@ -1172,7 +1183,7 @@
           parts.push(Math.round((hit / Number(u.prompt_tokens)) * 100) + '%');
         }
         /* 思考预算：真值标「思考」，服务端没上报就标「约」，绝不用 0 冒充精确 */
-        const st = Strength.thinkEstimate(state.policy, u);
+        const st = Strength.thinkEstimate(res.policy, u);
         if (st && st.tokens) {
           const text = (st.estimated ? T('约', '~') : '') + st.tokens + T(' 思考', ' thinking');
           parts.push(st.budget ? text + '/' + st.budget : text);
@@ -1401,6 +1412,9 @@
         };
       }
 
+      /* 这段回答按哪档强度、什么温度跑的：随结果一起带进 finishAnswer，
+         用量行才能说清「思考预算用了多少 / 一共给了多少」 */
+      if (res && !res.policy) res.policy = policy2;
       finishAnswer(res);
       state.running = false;
       composer.setBusy(false, false);
@@ -1433,7 +1447,16 @@
           compressed: res.compressed || 'none',
           counts: res.counts || null,
           status: res.status || '',
-          usage: res.usage || null
+          usage: res.usage || null,
+          /* 强度/温度也落盘：回看时能看到「这条答案当时是多努力、多稳」，
+             否则历史里只剩一段文字，看不出它是在什么设定下给的 */
+          policy: res.policy ? {
+            level: res.policy.level,
+            temperature: res.policy.temperature,
+            tempSrc: res.policy.tempSrc,
+            task: res.policy.task,
+            think: res.policy.think
+          } : null
         });
         if (!state.session.title || state.session.title === '新会话') state.session.title = q.slice(0, 30);
         try { await AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
@@ -1693,6 +1716,7 @@
             entries: entries,
             compressed: m.compressed || 'none',
             usage: m.usage || null,
+            policy: m.policy || null,
             interrupted: false
           });
           state.history.push({ role: 'assistant', content: m.content });

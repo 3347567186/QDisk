@@ -330,10 +330,13 @@
   }
 
   /* ---------- 组件 ---------- */
+  /* 兜底刻度：上层总会传自己的 stops（来自 strength.js），
+     这里只在没人传时保证滑块不是空的 */
   const DEFAULT_STOPS = [
-    { value: 'simple', label: '简单' },
-    { value: 'medium', label: '中度' },
-    { value: 'deep', label: '深度' }
+    { value: 'off', label: '关闭' },
+    { value: 'low', label: '低' },
+    { value: 'medium', label: '中' },
+    { value: 'high', label: '高' }
   ];
 
   const Effort = {};
@@ -353,8 +356,14 @@
     let dragging = false;
     let gesture = null;
     let reduced = M.prefersReduced();
-    /* 档位值（token）由上层按模型窗口算好传进来；没传就不显示数字，不编造 */
+    /* 档位值（token）由上层按档位算好传进来；没传就不显示数字，不编造。
+      budgetLabels 是上层给的显示文案（例如「1.6K」「不思考」），
+       有它就用它——数字怎么念由策略层决定，滑块不自己发明单位。 */
     let budgets = {};
+    let budgetLabels = {};
+    /* 档位刻度上写的是「思考预算多少 token」，而 budgets 里放的是「查几轮」。
+       两个数字不能混用：写 10 token 是错的，写 10 轮才是对的。 */
+    let budgetTokens = {};
 
     const el = document.createElement('div');
     el.className = 'reasoning-effort';
@@ -437,18 +446,21 @@
       return String(v);
     }
 
-    /* 档位旁边标的是「查几轮」。以前这里标 token（32K/64K），
-       等于把「想得深」和「记得少」绑在一起——现在两个旋钮彻底分开：
-       档位只管轮数，上下文窗口另有一处显示。 */
+    /* 档位旁边标的是「思考预算多少 token」（0 就直说「不思考」）。
+       上下文窗口是另一处的数字：想得深不该等于记得少。 */
     function paintBudgets() {
       stops.forEach(function (stop, i) {
+        const t = Number(budgetTokens[stop.value] || 0);
         const n = Number(budgets[stop.value] || 0);
+        const label = budgetLabels[stop.value];
         const v = stopVals[i];
         if (!v) return;
-        if (n > 0) {
-          v.textContent = n + T(' 步', ' steps');
+        if (label || t > 0) {
+          v.textContent = label || (t >= 1024 ? fmtTokens(t) : String(t));
           v.hidden = false;
-          v.title = n + T(' 轮查证', ' rounds');
+          v.title = t > 0
+            ? T('思考预算约 ', 'thinking budget ~') + t + T(' token · 最多查 ', ' tokens · up to ') + n + T(' 轮', ' rounds')
+            : T('不分配思考预算', 'no thinking budget');
         } else {
           v.textContent = '';
           v.hidden = true;
@@ -461,17 +473,21 @@
     function syncAria() {
       const s = selected();
       const cur = stops[s];
-      const n = cur ? Number(budgets[cur.value] || 0) : 0;
+      const t = cur ? Number(budgetTokens[cur.value] || 0) : 0;
+      const txt = cur ? (budgetLabels[cur.value] || (t > 0 ? String(t) : '')) : '';
       input.setAttribute('aria-valuenow', String(s));
       input.setAttribute('aria-valuetext', cur
-        ? cur.label + (n > 0 ? ' · ' + n + T(' 轮查证', ' rounds') : '')
+        ? cur.label + (txt ? ' · ' + txt + T(' 思考预算', ' thinking budget') : '')
         : '');
       hit.style.left = 'calc((100% - ' + THUMB_HIT_W + 'px) * ' + ratio() + ' + ' +
         ((THUMB_HIT_W - KNOB) / 2) + 'px)';
       stopBtns.forEach(function (b, i) {
         b.setAttribute('aria-pressed', String(i === s));
-        if (stops[i] && Number(budgets[stops[i].value] || 0) > 0) {
-          b.setAttribute('title', stops[i].label + ' · ' + budgets[stops[i].value] + T(' 轮查证', ' rounds'));
+        const one = stops[i];
+        const lab = one ? (budgetLabels[one.value] || '') : '';
+        const tt = one ? Number(budgetTokens[one.value] || 0) : 0;
+        if (one && (lab || tt > 0)) {
+          b.setAttribute('title', one.label + ' · ' + (lab || tt) + T(' 思考预算', ' thinking budget'));
         } else {
           b.removeAttribute('title');
         }
@@ -609,11 +625,15 @@
          只当「有值」处理，不会把 16384 印到界面上。 */
       setBudgets: function (list) {
         budgets = {};
+        budgetLabels = {};
+        budgetTokens = {};
         (list || []).forEach(function (s) {
           if (!s || !s.id) return;
+          if (typeof s.label === 'string' && s.label) budgetLabels[s.id] = s.label;
+          const t = Number(s.budget || s.think || 0);
+          if (t > 0) budgetTokens[s.id] = t;
           const n = Number(s.steps || 0);
           if (n > 0) budgets[s.id] = n;
-          else if (Number(s.budget || 0) > 0) budgets[s.id] = 0; /* 旧形状：不标数字 */
         });
         paintBudgets();
       },

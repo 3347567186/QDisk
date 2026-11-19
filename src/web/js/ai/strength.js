@@ -234,12 +234,15 @@
     return Math.min(hi, Math.max(lo, v));
   }
 
+  /* 温度留两位：0.85 这类任务默认值不该被四舍五入成 0.9，
+     否则「写文案」和「更发散」之间的差别会被抹平 */
   function round1(n) {
-    return Math.round(Number(n) * 10) / 10;
+    return Math.round(Number(n) * 100) / 100;
   }
 
   /* 温度来源优先级：用户手填 > 任务默认 > 档位区间中点。
-     jsonMode 下再压一道 0.7 的闸：格式正确比文采值钱。 */
+     只在真的开了 JSON 模式时才压 0.7 的闸——没开就别动手，
+     否则「写文案」永远拿不到它该有的高温。 */
   function temperatureFor(levelDef, task, manual, jsonMode) {
     let t;
     let src;
@@ -254,7 +257,7 @@
       t = round1((band[0] + band[1]) / 2);
       src = 'level';
     }
-    if (jsonMode !== false && t > 0.7) t = 0.7;
+    if (jsonMode === true && t > 0.7) t = 0.7;
     return { t: round1(t), src: src };
   }
 
@@ -317,17 +320,21 @@
     return { tokens: Math.round(out * 0.9), estimated: true, budget: policy.think };
   }
 
-  /* 一行摘要：「高 · 温度 0.2（任务）」，给上下文行和界面共用 */
+  /* 一行摘要：「高 · 温度 0.2（任务）」，给上下文行和界面共用。
+     policy 可能来自历史回放（只剩 level/温度这几个字段），
+     所以档位名按 id 现查，不假设 levelDef 一定在。 */
   function line(policy) {
     if (!policy) return '';
-    const name = T(policy.levelDef.label[0], policy.levelDef.label[1]);
-    if (policy.temperature === null) {
+    const def = LEVELS[policy.level] || LEVELS[DEFAULT_LEVEL];
+    const name = T(def.label[0], def.label[1]);
+    if (policy.temperature === null || policy.temperature === undefined) {
       return name + ' · ' + T('温度由模型固定', 'temperature fixed by model');
     }
     const src = {
       manual: T('手填', 'manual'),
       task: T('任务', 'task'),
-      level: T('档位', 'level')
+      level: T('档位', 'level'),
+      locked: T('模型固定', 'fixed')
     }[policy.tempSrc] || '';
     return name + ' · ' + T('温度 ', 'temp ') + policy.temperature + (src ? '（' + src + '）' : '');
   }
