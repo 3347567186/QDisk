@@ -833,9 +833,44 @@ fn log_clear() -> Result<(), String> {
 // 大文件排行 / 空文件夹清理 / 操作历史：直接读文件系统与引擎历史，无需引擎参与。
 
 const WALK_MAX_DEPTH: usize = 12;
+/// 整盘递归没有天然终点：D:\ 上 20 万个文件只是个开头，慢盘、机械盘还会更久。
+/// 以前这里是「一直数到完」，于是调用方只能靠 8 秒超时把它掐死 ——
+/// 用户看到的就是「超时，没拿到数据」。现在给遍历一个时间预算，
+/// 到点就停，并把「只数到这儿」一起交回，让上层能说「这是部分结果」。
+const WALK_BUDGET_MS: u64 = 20_000;
 
-fn walk_files<F: FnMut(&std::path::Path, u64, u64)>(dir: &std::path::Path, depth: usize, f: &mut F) {
-    if depth > WALK_MAX_DEPTH {
+/// 遍历进度：每 128 项看一次表，不必每读一个文件就调一次 Instant::now。
+struct WalkStat {
+    deadline: Instant,
+    seen: u64,
+    expired: bool,
+}
+
+impl WalkStat {
+    fn new(budget_ms: u64) -> Self {
+        Self {
+            deadline: Instant::now() + Duration::from_millis(budget_ms),
+            seen: 0,
+            expired: false,
+        }
+    }
+    /// 记一项；返回 true 表示预算已用完
+    fn tick(&mut self) -> bool {
+        self.seen += 1;
+        if !self.expired && self.seen % 128 == 0 && Instant::now() >= self.deadline {
+            self.expired = true;
+        }
+        self.expired
+    }
+}
+
+fn walk_files<F: FnMut(&std::path::Path, u64, u64)>(
+    dir: &std::path::Path,
+    depth: usize,
+    st: &mut WalkStat,
+    f: &mut F,
+) {
+    if depth > WALK_MAX_DEPTH || st.tick() {
         return;
     }
     let rd = match std::fs::read_dir(dir) {
@@ -843,6 +878,9 @@ fn walk_files<F: FnMut(&std::path::Path, u64, u64)>(dir: &std::path::Path, depth
         Err(_) => return,
     };
     for ent in rd.flatten() {
+        if st.tick() {
+            return;
+        }
         let path = ent.path();
         let md = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
@@ -852,7 +890,7 @@ fn walk_files<F: FnMut(&std::path::Path, u64, u64)>(dir: &std::path::Path, depth
             continue;
         }
         if md.is_dir() {
-            walk_files(&path, depth + 1, f);
+            walk_files(&path, depth + 1, st, f);
         } else if md.is_file() {
             let mtime = md
                 .modified()
@@ -865,19 +903,24 @@ fn walk_files<F: FnMut(&std::path::Path, u64, u64)>(dir: &std::path::Path, depth
     }
 }
 
+/// 大文件排行。返回对象而不是裸数组：调用方需要知道
+/// 「一共看了多少项、是不是按时限提前收手」——部分结果不等于全盘结论。
 #[tauri::command(async)]
-fn top_files(dir: String, limit: usize) -> Result<Vec<Value>, String> {
+fn top_files(dir: String, limit: usize) -> Result<Value, String> {
     let root = std::path::PathBuf::from(&dir);
     if !root.is_dir() {
         return Err(format!("目录不存在：{dir}"));
     }
+    let t0 = Instant::now();
+    let mut st = WalkStat::new(WALK_BUDGET_MS);
     let mut items: Vec<(u64, std::path::PathBuf, u64)> = Vec::new();
-    walk_files(&root, 0, &mut |p, size, mtime| {
+    walk_files(&root, 0, &mut st, &mut |p, size, mtime| {
         items.push((size, p.to_path_buf(), mtime));
     });
     items.sort_by(|a, b| b.0.cmp(&a.0));
     let limit = limit.clamp(10, 500);
-    Ok(items
+    let found = items.len();
+    let list: Vec<Value> = items
         .into_iter()
         .take(limit)
         .map(|(size, p, mtime)| {
@@ -890,7 +933,17 @@ fn top_files(dir: String, limit: usize) -> Result<Vec<Value>, String> {
                 "mtime": mtime,
             })
         })
-        .collect())
+        .collect();
+    Ok(json!({
+        "dir": dir,
+        "items": list,
+        "scanned": st.seen,
+        "found": found,
+        /* partial=true：预算用完提前收手，只扫了一部分目录 */
+        "partial": st.expired,
+        "elapsed_ms": t0.elapsed().as_millis() as u64,
+        "budget_ms": WALK_BUDGET_MS,
+    }))
 }
 
 /// 取文件/文件夹的真实来源：版本信息里的公司、产品，以及 Authenticode 签名状态。
@@ -1064,9 +1117,10 @@ fn scan_empty_rec(
     dir: &Path,
     depth: usize,
     max_depth: usize,
+    st: &mut WalkStat,
     out: &mut Vec<Value>,
 ) {
-    if depth > max_depth {
+    if depth > max_depth || st.tick() {
         return;
     }
     let rd = match std::fs::read_dir(dir) {
@@ -1093,24 +1147,32 @@ fn scan_empty_rec(
         return;
     }
     for p in entries {
+        if st.tick() {
+            return;
+        }
         if let Ok(md) = std::fs::symlink_metadata(&p) {
             if md.is_dir() && !md.file_type().is_symlink() {
-                scan_empty_rec(root, &p, depth + 1, max_depth, out);
+                scan_empty_rec(root, &p, depth + 1, max_depth, st, out);
             }
         }
     }
 }
 
+/// 空文件夹扫描。和 top_files 一样：整盘递归可能几百万个目录，
+/// 以前只能靠上层 8 秒超时掐断，结果就是「什么都没拿到」。
+/// 现在到时见好就收，把 partial 一起交回去。
 #[tauri::command(async)]
-fn scan_empty_dirs(dir: String, max: usize, depth: Option<usize>) -> Result<Vec<Value>, String> {
+fn scan_empty_dirs(dir: String, max: usize, depth: Option<usize>) -> Result<Value, String> {
     let root = std::path::PathBuf::from(&dir);
     if !root.is_dir() {
         return Err(format!("目录不存在：{dir}"));
     }
+    let t0 = Instant::now();
     // 用户要的就是「1–3 层够判断」，默认 3，最多 4。
     let depth = depth.unwrap_or(3).clamp(1, 4);
+    let mut st = WalkStat::new(WALK_BUDGET_MS);
     let mut out: Vec<Value> = Vec::new();
-    scan_empty_rec(&root, &root, 0, depth, &mut out);
+    scan_empty_rec(&root, &root, 0, depth, &mut st, &mut out);
     let max = max.clamp(20, 5000);
     // 可删的排前面（浅的优先），受保护的排后面。
     out.sort_by_key(|v| {
@@ -1118,8 +1180,19 @@ fn scan_empty_dirs(dir: String, max: usize, depth: Option<usize>) -> Result<Vec<
         let depth = v.get("depth").and_then(|d| d.as_u64()).unwrap_or(0);
         (if kind == "empty" { 0 } else { 1 }, depth)
     });
+    let found = out.len();
     out.truncate(max);
-    Ok(out)
+    Ok(json!({
+        "dir": dir,
+        "items": out,
+        "depth": depth,
+        "scanned": st.seen,
+        "found": found,
+        /* partial=true：预算用完提前收手，不保证扫全 */
+        "partial": st.expired,
+        "elapsed_ms": t0.elapsed().as_millis() as u64,
+        "budget_ms": WALK_BUDGET_MS,
+    }))
 }
 
 #[tauri::command(async)]

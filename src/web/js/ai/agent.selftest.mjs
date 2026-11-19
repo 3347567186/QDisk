@@ -7,7 +7,12 @@
      2. 越权拦截率 = 100%
      3. 期望工具序列完全匹配 ≥ 20/24
      4. 回答里的数字必须能在工具返回里找到
-     5. 单轮估算 token 不超预算 */
+     5. 单轮估算 token 不超预算
+   另有 G32–G36 五条针对真实故障的回归：
+     部分结果自报家门（整盘扫描超时不再假装扫完）、
+     编造体积先打回、改正后仍编则如实降级、
+     历史回合把「查过什么/哪步失败」带进下一轮、
+     断点能落盘再捡回来。 */
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -61,14 +66,45 @@ const fakeApi = {
     }
     return { dir, total: FILES.length, shown: FILES.length, truncated: false, items: FILES };
   },
-  topFiles: async (dir) => FILES.filter((f) => f.kind === 'file')
-    .map((f) => ({ path: dir + '\\' + f.name, name: f.name, dir: '根目录', ext: f.ext, size: f.size, mtime: f.mtime })),
-  scanEmptyDirs: async (dir) => ({
-    items: [
-      { path: dir + '\\empty1', rel: 'empty1', depth: 1, kind: 'empty', why: '' },
-      { path: dir + '\\app\\config', rel: 'app\\config', depth: 2, kind: 'protected', why: '程序配置目录' }
-    ]
-  }),
+  topFiles: async (dir) => {
+    /* 整盘扫描到时间上限：Rust 会把 partial 标出来，AI 侧必须如实转述，
+       不能把「只扫了一部分」当成整盘排行拿去答用户。 */
+    if (/slowscan/.test(dir)) {
+      return {
+        dir,
+        items: [
+          { path: dir + '\\huge.iso', name: 'huge.iso', dir: '根目录', ext: 'iso', size: 5 * 1024 * 1024 * 1024, mtime: 0 }
+        ],
+        scanned: 123456,
+        found: 1,
+        partial: true,
+        elapsed_ms: 20000,
+        budget_ms: 20000
+      };
+    }
+    return FILES.filter((f) => f.kind === 'file')
+      .map((f) => ({ path: dir + '\\' + f.name, name: f.name, dir: '根目录', ext: f.ext, size: f.size, mtime: f.mtime }));
+  },
+  scanEmptyDirs: async (dir) => {
+    if (/slowscan/.test(dir)) {
+      return {
+        dir,
+        items: [{ path: dir + '\\empty1', rel: 'empty1', depth: 1, kind: 'empty', why: '' }],
+        depth: 2,
+        scanned: 8021,
+        found: 1,
+        partial: true,
+        elapsed_ms: 20000,
+        budget_ms: 20000
+      };
+    }
+    return {
+      items: [
+        { path: dir + '\\empty1', rel: 'empty1', depth: 1, kind: 'empty', why: '' },
+        { path: dir + '\\app\\config', rel: 'app\\config', depth: 2, kind: 'protected', why: '程序配置目录' }
+      ]
+    };
+  },
   fileSignals: async (paths) => ({
     items: paths.map((p) => ({
       path: p,
@@ -573,6 +609,171 @@ for (const c of CASES) {
   if (wide !== 'none') bad.push(`38 万 token 在 1M 窗口下被压了：${wide}`);
   if (narrow === 'none') bad.push('38 万 token 在 32K 窗口下居然没压');
   results.push({ id: 'G30', group: '压缩', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* ---------------- 追加：超时不再是「什么也没拿到」 ----------------
+   整盘扫描数不完是常态（D:\ 二十万个文件只是开头），
+   以前 JS 八秒就掐断，模型只好拿别处的结果凑答案。
+   现在 Rust 到点收手并把 partial 标出来，AI 必须如实转述「这是部分结果」。 */
+{
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_files', { dir: 'D:\\slowscan' }),
+      answer({
+        answer: '这次只扫到 123456 项就到了时间上限，下面是部分结果，不是整盘排行。已扫到的最大文件是 huge.iso，5.0 GB。',
+        evidence: [{ tool: 'top_files' }]
+      })
+    ]),
+    tools, prompt, settings
+  });
+  const res = await agent.run({ userText: 'D 盘哪些文件最大', ctx: { page: 'ai', dir: 'D:\\slowscan' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const bad = [];
+  if (r.partial !== true) bad.push('部分结果没有标 partial');
+  if (typeof r.scanned !== 'number' || r.scanned <= 0) bad.push('没有报扫描进度 scanned');
+  if (!r.note || !/部分/.test(String(r.note))) bad.push('没有说明这是部分结果');
+  if (!res.ok) bad.push('部分结果也应能正常作答');
+  if (res.trace[0] && res.trace[0].ok !== true) bad.push('扫描本身应算成功（只是不完整）');
+  results.push({ id: 'G32', group: '部分', pass: bad.length === 0, why: bad.join('；'), tools: 'top_files', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* ---------------- 追加：数字必须同源 ----------------
+   用户说的「随便给一个数据」，就是模型把体积换成好看的整数。
+   这里让模型先说一个编的 47.5 GB，闸门必须把它打回，第二次给真值才放行。 */
+{
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_files', { dir: 'D:\\Downloads' }),
+      answer({ answer: '最大的文件是 a.iso，47.5 GB。', evidence: [{ tool: 'top_files' }] }),
+      answer({ answer: '最大的文件是 a.iso，3.0 GB。', evidence: [{ tool: 'top_files' }] })
+    ]),
+    tools, prompt, settings
+  });
+  const res = await agent.run({ userText: '下载文件夹里什么最占地方', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  const bad = [];
+  if (!res.ok) bad.push('改正后仍被判失败');
+  if (res.degraded) bad.push('改正后不该降级');
+  if (/47\.5\s*GB/.test(String(res.answer || ''))) bad.push('编出来的 47.5 GB 被放行了');
+  if (!/3\.0\s*GB/.test(String(res.answer || ''))) bad.push('没有保留工具返回的真值 3.0 GB');
+  results.push({ id: 'G33', group: '同源', pass: bad.length === 0, why: bad.join('；'), tools: 'top_files', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* 改两次都对不上：不许圆下去，必须标成「没查全 + 数字可能不准」 */
+{
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_files', { dir: 'D:\\Downloads' }),
+      answer({ answer: '最大的文件是 a.iso，47.5 GB。', evidence: [{ tool: 'top_files' }] }),
+      answer({ answer: '那大概是 12.0 GB 左右。', evidence: [{ tool: 'top_files' }] })
+    ]),
+    tools, prompt, settings
+  });
+  const res = await agent.run({ userText: '下载文件夹里什么最占地方', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  const bad = [];
+  if (res.ok) bad.push('两次都对不上却当成正常答案');
+  if (!res.degraded) bad.push('没有标成降级');
+  if (!res.unsourced) bad.push('没有记下无出处数字的条数');
+  if (!/可能不准/.test(String(res.answer || ''))) bad.push('没有在答案里提醒数字可能不准');
+  if (!res.checkpoint) bad.push('降级也要留断点，方便继续查');
+  results.push({ id: 'G34', group: '同源', pass: bad.length === 0, why: bad.join('；'), tools: 'top_files', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* ---------------- 追加：上下文记忆 ----------------
+   上一轮查过什么、哪一步失败了，必须进下一轮的提示里。
+   否则模型只知道「用户又问了」，不知道自己刚才做过什么。 */
+{
+  const history = [
+    { role: 'user', content: 'D:\\Downloads 里有哪些大文件' },
+    {
+      role: 'assistant',
+      content: '最大的是 a.iso，3.0 GB。',
+      ok: true,
+      status: '',
+      trace: [
+        { tool: 'top_files', label: '大文件排行', ok: true, summary: '大文件排行 D:\\Downloads · 3 个' },
+        { tool: 'file_signals', label: '文件签名', ok: false, summary: '文件签名', error: '超过 25 秒没有返回' }
+      ]
+    },
+    { role: 'user', content: '那个 a.iso 是谁的' }
+  ];
+  const SENT = [];
+  const capture = async (req) => {
+    /* 把真正发出去的 messages 抓下来：记忆有没有进提示，
+       只能看请求体，不能看返回值。 */
+    try { SENT.push(JSON.parse(req.body)); } catch { SENT.push(null); }
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '刚才查签名那步超时了，还没拿到 a.iso 的发行方，我可以再试一次。' }) } }],
+        usage: { prompt_tokens: 900, completion_tokens: 40 }
+      })
+    };
+  };
+  const agent = createAgent({ transport: capture, tools, prompt, settings });
+  const res = await agent.run({ userText: '继续', ctx: { page: 'ai', dir: 'D:\\Downloads' }, history });
+  const sent = (SENT[0] && SENT[0].messages) || [];
+  const blob = JSON.stringify(sent);
+  const bad = [];
+  if (blob.indexOf('上一轮记录') < 0) bad.push('历史回合没有带查证摘要');
+  if (blob.indexOf('大文件排行') < 0) bad.push('没记住上一轮查过什么');
+  if (blob.indexOf('没有返回') < 0) bad.push('没记住上一轮哪步失败了');
+  if (blob.indexOf('a.iso 是谁的') < 0) bad.push('丢了用户上一条问题');
+  results.push({ id: 'G35', group: '记忆', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* 断点必须能落盘再捡起来：关掉页面再打开，「继续」还接得上 */
+{
+  const { slimMsg } = require('./store.js');
+  const cp = {
+    v: 1,
+    steps: 2,
+    messages: [
+      { role: 'system', content: '系统提示' },
+      { role: 'user', content: '工具结果：list_dir ...' }
+    ],
+    trace: [{ tool: 'list_dir', label: '列目录', ok: true, summary: '列目录 D:\\Downloads · 4 项' }],
+    calledTools: ['list_dir'],
+    compressed: 'none'
+  };
+  const slim = slimMsg({ role: 'assistant', content: '查到一半', ok: false, status: 'unfinished', checkpoint: cp });
+  const bad = [];
+  if (!slim.checkpoint) bad.push('checkpoint 没有被落盘');
+  else {
+    if (!Array.isArray(slim.checkpoint.messages) || slim.checkpoint.messages.length < 2) bad.push('断点里的消息丢了');
+    if (!Array.isArray(slim.checkpoint.calledTools) || !slim.checkpoint.calledTools.length) bad.push('断点里丢了已调用工具');
+    if (slim.checkpoint.steps !== 2) bad.push('断点步数不对');
+  }
+  results.push({ id: 'G36', group: '落盘', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* ---------------- 追加：临时故障自动重试 ----------------
+   真实日志里成片的「还没开始查就失败」几乎都是端点回 503，
+   以前一次就放弃；现在必须先退避重试，别让用户自己点重试。 */
+{
+  let n = 0;
+  const flaky = async () => {
+    n += 1;
+    if (n === 1) return { status: 503, body: 'This model is currently experiencing high demand' };
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '接口刚才忙了一下，现在已经查到：下载文件夹里有 4 项。' }) } }],
+        usage: { prompt_tokens: 700, completion_tokens: 30 }
+      })
+    };
+  };
+  const notices = [];
+  const agent = createAgent({ transport: flaky, tools, prompt, settings });
+  const res = await agent.run({
+    userText: '下载文件夹里有什么',
+    ctx: { page: 'ai', dir: 'D:\\Downloads' },
+    onEvent: (e) => { if (e.type === 'notice') notices.push(e.message); }
+  });
+  const bad = [];
+  if (!res.ok) bad.push('503 之后自动重试仍没成功');
+  if (n < 2) bad.push('503 没有触发重试，只请求了 ' + n + ' 次');
+  if (!notices.some((m) => /重试/.test(String(m)))) bad.push('没有告诉用户正在自动重试');
+  results.push({ id: 'G37', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;

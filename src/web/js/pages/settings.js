@@ -1183,8 +1183,8 @@
                   text: T('温度', 'Temp')
                 }),
                 h('div', { class: 'row wrap' },
-                  h('label', { class: 'check', title: T('按任务自动选温度', 'Pick temperature by task') }, tempAutoCb, h('span', { text: T('自动', 'Auto') })),
-                  tempIn)),
+                  tempIn,
+                  h('label', { class: 'check', title: T('按任务自动选温度', 'Pick temperature by task') }, tempAutoCb, h('span', { text: T('自动', 'Auto') })))),
               h('div', { class: 'field' },
                 h('label', {
                   title: T('这是防一路跑飞的安全闸，不是强度；超了会先给结论，不会无限查。与强度档位取小：关 6 / 低 8 / 中 10 / 高 14', 'A safety cap, not effort; it stops with a conclusion instead of looping. Capped by level: off 6 / low 8 / medium 10 / high 14'),

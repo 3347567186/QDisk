@@ -3628,6 +3628,11 @@ html[data-theme="dark"] .ai-tnav-pop {
 .set-tri > .field { margin: 0; gap: 3px; }
 .set-tri > .field > label { font-size: var(--fs-tiny); color: var(--text-3); }
 .set-tri .input { width: 100%; box-sizing: border-box; }
+/* 温度这一格是「输入框 + 自动勾选」并排：输入框要让出位置，
+   否则 width:100% 会把勾选挤到第二行，三格高度就对不齐了。 */
+.set-tri .field > .row { flex-wrap: nowrap; gap: 6px; }
+.set-tri .field > .row > .input { flex: 1 1 auto; width: auto; min-width: 0; }
+.set-tri .field > .row .check { flex: 0 0 auto; white-space: nowrap; }
 @media (max-width: 620px) { .set-tri { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) {
   .set-row { grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 8px 12px; }

@@ -380,17 +380,26 @@
       bigList.replaceChildren(skeleton(6, 'scan'));
       bigHint.textContent = T('正在扫描…', 'Scanning…');
       try {
-        const list = await API.topFiles(dir, 50);
+        const res = await API.topFiles(dir, 50);
+        // Rust 现在返回 {dir,items,scanned,partial,…}；旧版是裸数组。
+        const list = (res && res.items) || (Array.isArray(res) ? res : []);
         bigItems = (Array.isArray(list) ? list : []).map((it) => Object.assign({}, it));
         bigFilterKey = 'all';
         renderFilter();
         // 来源软件：拿安装清单做前缀匹配，失败不影响主流程
         try {
-          const res = await API.engine('apps.list', {});
-          const apps = Array.isArray(res) ? res : (res && (res.apps || res.items)) || [];
+          const res2 = await API.engine('apps.list', {});
+          const apps = Array.isArray(res2) ? res2 : (res2 && (res2.apps || res2.items)) || [];
           owners = buildOwners(apps);
         } catch (_) { owners = () => ''; }
         renderBig();
+        // 部分结果不能装作是全盘结论
+        if (res && res.partial === true) {
+          bigHint.textContent = T(
+            '已扫 ' + (res.scanned || 0) + ' 项，达到时间上限，下面只是部分结果',
+            'Scanned ' + (res.scanned || 0) + ' items before the time limit — partial results only'
+          );
+        }
       } catch (e) {
         bigItems = [];
         bigHint.textContent = '';
@@ -536,18 +545,23 @@
       emptyList.replaceChildren(skeleton(6, 'scan'));
       emptyHint.textContent = T('正在扫描…', 'Scanning…');
       try {
-        const list = await API.scanEmptyDirs(dir, 2000, emptyDepth);
+        const res = await API.scanEmptyDirs(dir, 2000, emptyDepth);
+        // Rust 现在返回 {dir,items,depth,scanned,partial,…}；旧版是裸数组。
+        const list = (res && res.items) || (Array.isArray(res) ? res : []);
         emptyItems = (Array.isArray(list) ? list : []).map((x) => (typeof x === 'string'
           ? { path: x, depth: 0, kind: 'empty', why: '', rel: x }
           : x));
         emptyChecked.clear();
         const deletable = emptyItems.filter((x) => x.kind !== 'protected').length;
         const locked = emptyItems.length - deletable;
+        const partialNote = res && res.partial === true
+          ? T('，已达时间上限只扫了一部分', ', time limit hit — partial scan')
+          : '';
         emptyHint.textContent = emptyItems.length
           ? T('找到 ' + fmtCount(deletable) + ' 个可删空文件夹' + (locked ? '，' + locked + ' 个重要目录不删' : '') +
-              '（扫描深度 ' + emptyDepth + ' 层）',
+              '（扫描深度 ' + emptyDepth + ' 层' + partialNote + '）',
               fmtCount(deletable) + ' empty folders' + (locked ? ', ' + locked + ' protected' : '') +
-              ' (depth ' + emptyDepth + ')')
+              ' (depth ' + emptyDepth + partialNote + ')')
           : T('没有空文件夹', 'No empty folders');
         renderEmpty();
       } catch (e) {

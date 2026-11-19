@@ -309,6 +309,95 @@
     return { msgs, level };
   }
 
+  /* ---------------- 历史回合 ----------------
+     用户原话：「没有上下文记忆，根本不知道我上面发了什么、它自己做了什么」。
+     根因不在窗口大小，而在这里：以前只把 `{role,content}` 的答案正文塞回模型，
+     这一轮查过什么、拿到什么结果，全部丢掉。于是用户说「继续」「那个文件夹呢」，
+     模型既不知道刚才查过哪儿，也不知道哪几个数字是真查到的 —— 只能重新瞎猜。
+     现在每个历史回合都带一行「上一轮记录」，把工具摘要和失败原因一起给它。 */
+
+  /** 一个历史回合的自述：查了什么、拿到了什么、成没成 */
+  function turnDigest(m) {
+    const parts = [];
+    const trace = Array.isArray(m.trace) ? m.trace : [];
+    const ok = trace.filter((t) => t && t.ok);
+    const bad = trace.filter((t) => t && !t.ok);
+    if (ok.length) {
+      parts.push('查过：' + ok.slice(0, 6).map((t) => t.summary || t.label || t.tool).join('；'));
+    }
+    if (bad.length) {
+      parts.push('没查成：' + bad.slice(0, 4).map((t) => {
+        const why = String(t.error || t.summary || '').slice(0, 40);
+        return (t.label || t.tool) + (why ? '（' + why + '）' : '');
+      }).join('；'));
+    }
+    if (m.status === 'unfinished' || m.ok === false) parts.push('这一轮没查完');
+    if (m.status === 'stopped') parts.push('这一轮被中止');
+    return parts.join(' · ');
+  }
+
+  /** 取最近 maxTurns 个完整回合（用户问 + 助手答 + 那一轮的查证记录） */
+  function buildHistory(history, maxTurns) {
+    const turns = [];
+    let q = '';
+    (Array.isArray(history) ? history : []).forEach((m) => {
+      if (!m || !m.role) return;
+      const text = String(m.content == null ? '' : m.content).trim();
+      if (m.role === 'user') { q = text; return; }
+      if (m.role !== 'assistant') return;
+      turns.push({ q, a: text, d: turnDigest(m) });
+      q = '';
+    });
+    /* 最后一条 user 没有配对 answer（上一轮挂了）也要留着：
+       那就是用户「继续」要接上的那句话。 */
+    if (q) turns.push({ q, a: '', d: '' });
+    return turns.slice(-Math.max(1, maxTurns));
+  }
+
+  /* ---------------- 数字同源 ----------------
+     用户原话里的「随便给一个数据」。提示词里写了「数字必须来自工具返回」，
+     但那只是请求，不是闸门：模型换个单位、记串上一轮的结果，都能混过去。
+     这里做一次机械比对：带体积单位的数字必须能在成功工具结果里找到同源值。 */
+
+  const SIZE_UNITS = { B: 1, KB: 1024, MB: 1048576, GB: 1073741824, TB: 1099511627776 };
+
+  /** 抽出文本里所有「数字 + 体积单位」，换算成字节 */
+  function sizeTokens(text) {
+    const out = [];
+    const re = /(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)(?![A-Za-z])/gi;
+    let m = re.exec(String(text || ''));
+    while (m) {
+      const n = Number(m[1]);
+      const mul = SIZE_UNITS[String(m[2]).toUpperCase()] || 0;
+      if (Number.isFinite(n) && mul) out.push(n * mul);
+      m = re.exec(String(text || ''));
+    }
+    return out;
+  }
+
+  /** 答案里没有出处的体积值（字节）。没有可用参照时返回空，绝不凭空判错。 */
+  function unsourcedSizes(answer, hay) {
+    const have = sizeTokens(hay);
+    if (!have.length) return [];
+    const bad = [];
+    sizeTokens(answer).forEach((v) => {
+      /* 容差 2%：显示层会四舍五入成一位小数（3.3 GB），
+         不能因为这一点点误差就把真数据判成编的。 */
+      const hit = have.some((h) => Math.abs(h - v) <= Math.max(1024, h * 0.02));
+      if (!hit && !bad.some((b) => Math.abs(b - v) <= Math.max(1024, v * 0.02))) bad.push(v);
+    });
+    return bad;
+  }
+
+  const fmtSize = (v) => {
+    const n = Number(v) || 0;
+    if (n >= SIZE_UNITS.TB) return (n / SIZE_UNITS.TB).toFixed(1) + ' TB';
+    if (n >= SIZE_UNITS.GB) return (n / SIZE_UNITS.GB).toFixed(1) + ' GB';
+    if (n >= SIZE_UNITS.MB) return (n / SIZE_UNITS.MB).toFixed(1) + ' MB';
+    if (n >= SIZE_UNITS.KB) return (n / SIZE_UNITS.KB).toFixed(1) + ' KB';
+    return n + ' B';
+  };
+
   /* ---------------- 端点能力记忆 ----------------
      不同家的接口接受的字段不一样：有的不认 response_format，有的不认
      stream_options，有的根本不支持流式；同一家的不同模型耗时也差两个数量级。
@@ -502,6 +591,7 @@
       let tokenCap = replyTokens();
       let downLeft = 4;       // 能力降级最多四次（参数名 / 温度 / json / 流式）
       let slowLeft = 2;       // 超时放宽最多两次
+      let busyLeft = 2;       // 临时性 5xx/429 退避重试最多两次
       let grewTokens = 0;     // 空回复时加预算最多两次
       for (;;) {
         if (stop && stop.isStopped()) throw abortError();
@@ -595,6 +685,24 @@
               if (onEvent) onEvent({ type: 'notice', level: 'warn', message: DOWN_MSG[what] || '接口不认这个参数，已自动换一种发法' });
               continue;
             }
+          }
+          /* 临时性故障（免费端点常见的 429/500/502/503/504）不该一次就放弃：
+             真实日志里一整轮「还没开始查就失败」几乎都是这里被 503 直接怼死。
+             退避重试两次，每次把等待时间往上抬——比让用户手动点「重试」强。 */
+          const transient = [429, 500, 502, 503, 504].indexOf(res.status) >= 0;
+          if (transient && busyLeft > 0) {
+            busyLeft -= 1;
+            const wait = Math.min(8000, 1200 * Math.pow(2, 2 - busyLeft));
+            if (onEvent) {
+              onEvent({
+                type: 'notice',
+                level: 'warn',
+                message: '接口暂时不可用（HTTP ' + res.status + '），' + Math.round(wait / 1000) + ' 秒后自动重试'
+              });
+            }
+            await new Promise((r) => setTimeout(r, wait));
+            if (stop && stop.isStopped()) throw abortError();
+            continue;
           }
           const err = new Error(`接口返回 HTTP ${res.status}${detail ? '：' + detail : ''}`);
           err.code = res.status === 401 || res.status === 403 ? 'auth'
@@ -754,6 +862,8 @@
       let usageTotal = { prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0 };
       let compressed = 'none';
       const followUps = [];
+      /* 数字对不上时给模型一次改正机会：一次就够，再多就是把钱花在辩解上 */
+      let repairLeft = 1;
 
       /* 断点：把这一轮已经花掉的上下文原样留下。
          继续时从断点接着跑，已经查过的工具不必重查——重查一次就是重发一次整段 prompt。 */
@@ -793,10 +903,26 @@
         if (onEvent) onEvent({ type: 'resume', steps });
       } else {
         messages = [{ role: 'system', content: system }];
-        // 历史：只带最近的对话原文，更早的靠压缩兜底
+        /* 历史：按「回合」注入，每轮带上它自己查过什么。
+           以前只塞答案正文，模型看不到自己做过什么，用户一追问就得重新猜。
+           轮数跟着窗口走：窗口越大会话越长，别拿固定 3 轮把大窗口浪费掉。 */
         const history = Array.isArray(opts && opts.history) ? opts.history : [];
-        history.slice(-KEEP_TURNS * 2).forEach((m) => {
-          if (m && m.role && m.content) messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content) });
+        const maxTurns = Math.max(
+          KEEP_TURNS,
+          Math.min(12, Math.floor((budget > 0 ? budget : DEFAULT_WINDOW) / 6000))
+        );
+        buildHistory(history, maxTurns).forEach((t) => {
+          if (!t.q && !t.a) return;
+          const qText = t.q || '（上一轮没有提问）';
+          messages.push({ role: 'user', content: qText });
+          if (t.a) {
+            /* 助手消息里带一行「上一轮记录」：模型据此知道自己查过什么、
+               哪儿失败了，也才会在「继续」时接着往下查而不是从零重来。 */
+            messages.push({
+              role: 'assistant',
+              content: t.d ? (t.a + '\n（上一轮记录：' + t.d + '）') : t.a
+            });
+          }
         });
         const ctxLine = prompt.contextLine(ctx);
         /* 末尾再提醒一次格式：弱模型对 system 里的长规则不敏感，
@@ -826,11 +952,15 @@
             ok: false,
             degraded: true,
             answer: fallbackAnswer(msg, trace),
-            evidence: trace.map((t) => ({ tool: t.tool })),
+            evidence: trace.filter((t) => t.ok).map((t) => ({ tool: t.tool })),
             suggest: [],
             followUps,
             trace,
             compressed,
+            /* 调用失败也要留断点：503 / 网络抖动是最常见的失败，
+               以前这里不给 checkpoint，「继续」按钮根本不出现，
+               用户只能把问题重打一遍 —— 那就是他说的「没有上下文记忆」。 */
+            checkpoint: checkpoint(),
             usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
           };
         }
@@ -851,12 +981,34 @@
         if (stop.isStopped()) return stoppedResult();
 
         if (step.kind === 'answer') {
-          // evidence 只保留真正调用过的（校验已保证，这里再兜一层）
+          /* 两件事，缺一不可：
+             1) evidence 只认「真的成功查过」的工具 —— 以前失败也算调用过，
+                于是「查崩了」也能当依据，答案凭空就有了出处。
+             2) 体积数字必须能在成功结果里找到同源值，对不上就再给模型一次机会；
+                两次都对不上，就如实说「没查全」，而不是让它把数字圆下去。 */
           const evidence = (step.evidence || []).filter((e) => calledTools.includes(e.tool));
+          const okTools = trace.filter((t) => t.ok);
+          const hay = okTools.map((t) => JSON.stringify(t.result || '')).join('\n');
+          const bad = unsourcedSizes(step.answer, hay);
+          if (bad.length && repairLeft > 0) {
+            repairLeft -= 1;
+            messages.push({ role: 'assistant', content: JSON.stringify({ answer: step.answer }) });
+            messages.push({
+              role: 'user',
+              content: '这些数字在你的工具结果里找不到：' + bad.map(fmtSize).join('、') +
+                '。只能用工具真实返回的数字，或者直接说「没查到」。请重新只输出一个 JSON 对象。' +
+                (prompt.OUTPUT_REMINDER || '')
+            });
+            steps += 1;
+            continue;
+          }
+          const answerText = bad.length
+            ? step.answer + '\n\n· 注意：上面有体积数字没能在工具结果里核对上，可能不准。'
+            : step.answer;
           const follow = suggestFollowUps(ctx, trace);
           const res = {
-            ok: true,
-            answer: step.answer,
+            ok: !bad.length,
+            answer: answerText,
             evidence,
             suggest: step.suggest || [],
             followUps: follow,
@@ -865,6 +1017,11 @@
             interrupted: false,
             usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
           };
+          if (bad.length) {
+            res.degraded = true;
+            res.unsourced = bad.length;
+            res.checkpoint = checkpoint();
+          }
           if (onEvent) onEvent(Object.assign({ type: 'answer' }, res));
           return res;
         }
@@ -986,6 +1143,11 @@
     readCaps,
     salvageProse,
     estTokens,
+    turnDigest,
+    buildHistory,
+    sizeTokens,
+    unsourcedSizes,
+    fmtSize,
     DEFAULT_MAX_STEPS,
     DEFAULT_TURN_BUDGET,
     DEFAULT_WINDOW,

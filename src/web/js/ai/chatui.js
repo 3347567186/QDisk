@@ -1116,8 +1116,7 @@
         /* 回放时 trace 里只有工具，没有「想了几次、记了几条」。
            这两个数落盘放着，历史里的那一行才和当时一模一样 */
         res.counts = { thoughts: c.pg.counts.thoughts, tools: c.pg.counts.tools, records: (res.evidence || []).length };
-      /* 状态词也要跟着落盘：回放时「· 已停止 / · 查证未完成」得能从文件里读回来 */
-      res.status = res.stopped ? 'stopped' : (!res.ok ? 'unfinished' : '');
+        /* 状态词也要跟着落盘：回放时「· 已停止 / · 查证未完成」得能从文件里读回来 */
         res.status = res.stopped ? 'stopped' : (!res.ok ? 'unfinished' : '');
       }
       paintAnswer(c.body, res.answer || '');
@@ -1151,8 +1150,10 @@
         class: 'btn sm ghost',
         onclick: () => { UIx.copy(res.answer || ''); }
       }, T('复制', 'Copy')));
-      /* 停了不是废掉：断点已经在手，接着查比重新问一遍省一整轮 */
-      if (res.interrupted && res.checkpoint) {
+      /* 停了不是废掉：断点已经在手，接着查比重新问一遍省一整轮。
+         503 / 网络抖动的失败同样有断点（agent 现在一定给 checkpoint），
+         不给「继续」的话用户只能把问题重打一遍，那就是「没有上下文记忆」。 */
+      if (res.checkpoint && !res.replay) {
         bar.appendChild(h('button', {
           class: 'btn sm ghost',
           onclick: () => { continueTurn(); }
@@ -1459,8 +1460,20 @@
         });
       }
 
+      /* 历史里必须保留「这一轮查了什么」：只存答案正文的话，
+         用户下一句说「继续」「那个 D 盘的呢」，模型完全不知道自己刚才做过什么，
+         只能从头瞎猜 —— 这正是用户抱怨的「没有上下文记忆」。
+         trace 摘要（不含完整 result）足够它想起自己查过哪儿、哪儿失败了。 */
       state.history.push({ role: 'user', content: q });
-      state.history.push({ role: 'assistant', content: res.answer || '' });
+      state.history.push({
+        role: 'assistant',
+        content: res.answer || '',
+        trace: (res.trace || []).map((t) => ({
+          tool: t.tool, label: t.label, ok: t.ok, summary: t.summary, error: t.error
+        })),
+        ok: res.ok,
+        status: res.status || ''
+      });
       if (state.history.length > 40) state.history = state.history.slice(-40);
       if (state.session) {
         state.session.messages.push({ role: 'user', content: q, at: Date.now() });
@@ -1480,6 +1493,9 @@
           counts: res.counts || null,
           status: res.status || '',
           usage: res.usage || null,
+          /* 断点跟着消息一起落盘：关掉再打开，那一轮还能「继续」，
+             而不是把用户的问题当成新的重来一遍 */
+          checkpoint: res.checkpoint || null,
           /* 强度/温度也落盘：回看时能看到「这条答案当时是多努力、多稳」，
              否则历史里只剩一段文字，看不出它是在什么设定下给的 */
           policy: res.policy ? {
@@ -1749,9 +1765,20 @@
             compressed: m.compressed || 'none',
             usage: m.usage || null,
             policy: m.policy || null,
+            status: m.status || '',
+            counts: m.counts || null,
+            /* 断点也要从文件里恢复：重启软件后点「继续」还能接着上次那一步查，
+               否则中断就真的等于丢掉了 —— 用户看到的就是「它忘了自己做过什么」。 */
+            checkpoint: m.checkpoint || null,
             interrupted: false
           });
-          state.history.push({ role: 'assistant', content: m.content });
+          state.history.push({
+            role: 'assistant',
+            content: m.content,
+            trace: m.trace || [],
+            ok: m.ok,
+            status: m.status || ''
+          });
         });
         refreshActs();
         setEmpty(false);

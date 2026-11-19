@@ -414,6 +414,24 @@
         think: Number(m.policy.think) || 0
       };
     }
+    /* 断点也落盘：不存的话，关掉软件再打开，那一轮「继续」就没了，
+       用户只能把问题重说一遍 —— 看上去就是「它不记得自己做过什么」。
+       断点里的 messages 已经是这一轮的真实上下文，是恢复时唯一可靠的凭据。 */
+    if (m.checkpoint && typeof m.checkpoint === 'object' && Array.isArray(m.checkpoint.messages)) {
+      base.checkpoint = {
+        v: Number(m.checkpoint.v) || 1,
+        steps: Number(m.checkpoint.steps) || 0,
+        calledTools: (m.checkpoint.calledTools || []).slice(-LIMITS.trace).map(String),
+        compressed: String(m.checkpoint.compressed || 'none'),
+        /* messages 可能很长，但这是续跑的本体：截太狠会让「继续」变成
+           「带着半截上下文重新猜」。这里只挡一个上限，正常一轮远达不到。 */
+        messages: m.checkpoint.messages.slice(-60).map((x) => ({
+          role: x && x.role === 'assistant' ? 'assistant' : 'user',
+          content: cut(x && x.content, 4000)
+        })),
+        trace: (m.checkpoint.trace || []).slice(-LIMITS.trace).map(slimStep).filter(Boolean)
+      };
+    }
     return base;
   }
 
@@ -436,7 +454,7 @@
       title: String(session.title || '新会话').slice(0, 60),
       created: session.created || Date.now(),
       updated: Date.now(),
-      version: 2,
+      version: 3,
       messages: (session.messages || []).slice(-LIMITS.messages).map(slimMsg)
     };
     const acts = (session.acts || []).slice(-LIMITS.acts).map(slimAct).filter(Boolean);
@@ -494,4 +512,9 @@
     logUsage
   };
   root.AIStore = API_;
+  /* 自检要直接验「落盘后还能捡回来」：把精简器一起导出，
+     否则只能整套跑浏览器环境才测得到。 */
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = Object.assign({}, API_, { slimMsg, slimStep, LIMITS });
+  }
 })(typeof window !== 'undefined' ? window : globalThis);

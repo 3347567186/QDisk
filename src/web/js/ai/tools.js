@@ -11,7 +11,12 @@
   'use strict';
 
   const CAP = 1100;          // 单条工具结果字符上限
-  const TIMEOUT = 8000;      // 单工具超时
+  const TIMEOUT = 8000;      // 单工具超时（查一个已知位置的，够用）
+  /* 整盘/整目录遍历单独一档。D:\ 上 20 万个文件只是开头，
+     8 秒根本走不完，以前就是被这一档掐死的。
+     Rust 侧自带 20 秒预算并会提前收手返回部分结果，
+     这里留一点余量，别让 JS 抢先判死刑。 */
+  const SCAN_TIMEOUT = 25000;
 
   /* 不自动运行的程序类型：打开 .exe/.lnk 等于让模型替你双击任意文件。
      要让 agent 看这些文件的内容，用 read_file；要看签名，用 file_signals。 */
@@ -189,17 +194,30 @@
           const dir = needDir(args);
           const want = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
           const off = Math.max(0, Math.floor(Number(args.offset) || 0));
-          const r = await withTimeout(API.topFiles(dir, Math.min(off + want, 50)), TIMEOUT, '大文件排行');
-          const items = (r || []).map((it) => ({
+          // 整盘遍历由 Rust 侧限时（默认 20 秒），这里必须比它宽，
+          // 否则又变成「Rust 还在老实数、JS 先把它掐了」，什么也拿不到。
+          const r = await withTimeout(API.topFiles(dir, Math.min(off + want, 50)), SCAN_TIMEOUT, '大文件排行');
+          const raw = (r && r.items) || (Array.isArray(r) ? r : []) || [];
+          const items = raw.map((it) => ({
             name: it.name,
             size: fmtBytes(it.size),
             bytes: Number(it.size) || 0,
             dir: it.dir || '',
             age: fmtAge(it.mtime)
           }));
-          return pageFit({ dir, count: items.length }, items, off, want);
+          const base = { dir, count: items.length };
+          // 部分结果必须自报家门：否则模型会拿「扫了 12 万项的一部分」
+          // 当成整盘结论，正是用户说的「随便给一个数据」。
+          if (r && r.partial === true) {
+            base.partial = true;
+            base.scanned = r.scanned;
+            base.note = `只扫了 ${r.scanned} 项就到了 ${Math.round((r.budget_ms || 20000) / 1000)} 秒上限，这是部分结果，不是整盘统计`;
+          } else if (r && typeof r.scanned === 'number') {
+            base.scanned = r.scanned;
+          }
+          return pageFit(base, items, off, want);
         },
-        summary: (args, r) => `大文件排行 ${args.dir} · ${r.count} 个`
+        summary: (args, r) => `大文件排行 ${args.dir} · ${r.count} 个${r.partial ? '（部分）' : ''}`
       },
 
       empty_dirs: {
@@ -207,20 +225,26 @@
         run: async (args) => {
           const dir = needDir(args);
           const depth = Math.min(Math.max(Number(args.depth) || 2, 1), 3);
-          const r = await withTimeout(API.scanEmptyDirs(dir, 500, depth), TIMEOUT, '空文件夹扫描');
-          const list = (r && r.items) || r || [];
+          const r = await withTimeout(API.scanEmptyDirs(dir, 500, depth), SCAN_TIMEOUT, '空文件夹扫描');
+          const list = (r && r.items) || (Array.isArray(r) ? r : []) || [];
           const items = list.map((it) => ({
-            path: it.path || it,
-            depth: it.depth,
-            kind: it.kind === 'protected' ? 'protected' : 'empty',
-            why: it.why || ''
+            path: (it && it.path) || it,
+            depth: it && it.depth,
+            kind: it && it.kind === 'protected' ? 'protected' : 'empty',
+            why: (it && it.why) || ''
           }));
           const empty = items.filter((i) => i.kind === 'empty').length;
           const want = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
           const off = Math.max(0, Math.floor(Number(args.offset) || 0));
-          return pageFit({ dir, depth, empty, protected: items.length - empty }, items, off, want);
+          const base = { dir, depth, empty, protected: items.length - empty };
+          if (r && r.partial === true) {
+            base.partial = true;
+            base.scanned = r.scanned;
+            base.note = `只扫了 ${r.scanned} 个目录就到了时间上限，可能有空文件夹没被扫到`;
+          }
+          return pageFit(base, items, off, want);
         },
-        summary: (args, r) => `空文件夹 ${args.dir} · 可删 ${r.empty} / 受保护 ${r.protected}`
+        summary: (args, r) => `空文件夹 ${args.dir} · 可删 ${r.empty} / 受保护 ${r.protected}${r.partial ? '（部分）' : ''}`
       },
 
       file_signals: {
