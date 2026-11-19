@@ -719,6 +719,13 @@
 
         /* 模型池：从 dsh-xdpool 的厂商清单里挑一家，直接把地址与模型名填好。
            只做选择器，不接管请求——请求仍走下面这套端点与 Key。 */
+        /* 百炼、硅基流动这些控制台给的是 base URL（…/v1 或 …/compatible-mode/v1），
+           原样发请求会 404；保存/测试前统一补成 …/chat/completions。 */
+        function normEndpoint(u) {
+          if (window.AIStore && AIStore.normEndpoint) return AIStore.normEndpoint(u);
+          return String(u || '').trim();
+        }
+
         function applyPool(p, m) {
           d.endpoint = p.endpoint;
           d.model = m[0];
@@ -730,7 +737,12 @@
             if (w >= 2000 && w <= 4000000) d.ctxWindow = w;
           }
           paint();
-          toast(T('已填入 ' + p.name + ' · ' + m[0], 'Filled ' + p.name + ' · ' + m[0]), 'ok');
+          /* 已经有 Key：直接落盘，选完就能用；没 Key 则只填表单，提示补 Key 后保存 */
+          if (d.key) {
+            saveAi();
+          } else {
+            toast(T('已填入 ' + p.name + ' · ' + m[0] + '；填好 Key 再点保存', 'Filled ' + p.name + ' · ' + m[0] + '; add a key, then save'), 'ok');
+          }
         }
 
         function openPool() {
@@ -744,7 +756,7 @@
           const meta = h('span', { class: 'small muted' });
           const search = h('input', {
             class: 'input pool-search', spellcheck: 'false',
-            placeholder: T('搜厂商、域名或模型名', 'Search provider, host or model'),
+            placeholder: T('搜厂商、域名或模型名（可搜中文：百炼/智谱/火山）', 'Search provider, host or model (Chinese names work too)'),
             oninput: () => render(search.value),
             onkeydown: (e) => {
               if (e.key === 'Enter') {
@@ -778,6 +790,7 @@
                   render(search.value);
                 }
               },
+                p.zh ? h('span', { class: 'pool-zh', text: p.zh }) : null,
                 h('span', { class: 'pool-name', text: p.name }),
                 p.free ? h('span', { class: 'pool-tag free', text: T('免费额度', 'Free') }) : null,
                 p.local ? h('span', { class: 'pool-tag', text: T('本地', 'Local') }) : null,
@@ -821,7 +834,16 @@
         const endpointIn = h('input', {
           class: 'input mono', spellcheck: 'false', value: d.endpoint || '',
           placeholder: 'https://api.deepseek.com/v1/chat/completions',
-          oninput: (e) => { d.endpoint = e.target.value.trim(); state.aiTest = null; }
+          oninput: (e) => { d.endpoint = e.target.value.trim(); state.aiTest = null; },
+          /* 从控制台复制的是 base URL（…/v1）：失焦时补全，免得保存后 404 */
+          onblur: (e) => {
+            const v = normEndpoint(e.target.value);
+            if (v && v !== e.target.value) {
+              e.target.value = v;
+              d.endpoint = v;
+              toast(T('地址已补全 /chat/completions', 'Endpoint completed with /chat/completions'), 'ok');
+            }
+          }
         });
 
         const keyIn = h('input', {
@@ -1105,6 +1127,9 @@
         const d = state.aiDraft;
         if (state.aiBusy || !d) return;
         if (!d.endpoint) return toast(T('请先填接口地址', 'Fill the endpoint first'), 'error');
+        const rawEndpoint = d.endpoint;
+        d.endpoint = normEndpoint(d.endpoint);
+        const endpointFixed = d.endpoint !== rawEndpoint;
         if (!/^https?:\/\//i.test(d.endpoint)) return toast(T('接口地址要以 http:// 或 https:// 开头', 'Endpoint must start with http:// or https://'), 'error');
         if (!d.model) return toast(T('请先填模型名', 'Fill the model name first'), 'error');
         state.aiBusy = true; paint();
@@ -1130,7 +1155,9 @@
           }
           state.ai = next;
           state.aiDraft = Object.assign({}, next);
-          toast(T('AI 设置已保存', 'AI settings saved'), 'ok');
+          toast(endpointFixed
+            ? T('AI 设置已保存（地址已补全 /chat/completions）', 'AI settings saved (endpoint completed)')
+            : T('AI 设置已保存', 'AI settings saved'), 'ok');
         } catch (e) {
           toast(errText(e), 'error');
         } finally {
@@ -1145,6 +1172,7 @@
         const d = state.aiDraft;
         if (state.aiTesting || !d) return;
         if (!d.endpoint || !d.model) return toast(T('先填接口地址与模型名', 'Fill endpoint and model first'), 'error');
+        d.endpoint = normEndpoint(d.endpoint);
         state.aiTesting = true; state.aiTest = null; paint();
         const t0 = Date.now();
         const send = (body) => API.aiHttp({

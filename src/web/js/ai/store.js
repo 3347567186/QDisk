@@ -135,11 +135,23 @@
 
   let cache = null;
 
+  /* 控制台给的是 base URL（…/v1、…/compatible-mode/v1），直接发请求会 404。
+     统一补成 …/chat/completions；已经是完整地址的原样保留。 */
+  function normEndpoint(u) {
+    const s = String(u || '').trim();
+    if (!s) return s;
+    if (/\/chat\/completions\/?$/i.test(s)) return s.replace(/\/+$/, '');
+    if (/\/(v\d+[a-z]*|compatible-mode\/v1|openai\/v1|api\/v1|api\/coding\/\w+\/v\d+)\/?$/i.test(s)) {
+      return s.replace(/\/+$/, '') + '/chat/completions';
+    }
+    return s;
+  }
+
   function normalize(raw) {
     const out = Object.assign({}, DEFAULTS);
     if (!raw || typeof raw !== 'object') return out;
     if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
-    if (typeof raw.endpoint === 'string') out.endpoint = raw.endpoint.trim();
+    if (typeof raw.endpoint === 'string') out.endpoint = normEndpoint(raw.endpoint);
     if (typeof raw.key === 'string') out.key = raw.key.trim();
     if (typeof raw.model === 'string') out.model = raw.model.trim();
     if (Array.isArray(raw.models)) {
@@ -216,6 +228,11 @@
        发现这次真的改过（迁完 ctxFixed 由 false 变 true）就立刻写回。 */
     if (rawAi && rawAi.ctxFixed !== true && cache.ctxFixed === true) {
       try { await API.configSet({ ai: cache }); } catch { /* 写不进去就下次再说 */ }
+    }
+    /* 老配置里只存了 base URL（例如百炼 …/compatible-mode/v1），运行时会 404；
+       读一次就补全并写回，用户不用自己改。 */
+    if (rawAi && typeof rawAi.endpoint === 'string' && rawAi.endpoint !== cache.endpoint) {
+      try { await API.configSet({ ai: cache }); } catch { /* 同上 */ }
     }
     return cache;
   }
@@ -438,6 +455,7 @@
     saveUi,
     isConfigured,
     maskKey,
+    normEndpoint,
     listSessions,
     loadSession,
     saveSession,
