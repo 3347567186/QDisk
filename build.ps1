@@ -13,6 +13,11 @@
   默认全量是有原因的：只出 exe 时 release\ 里的安装包会停在老版本，
   用户装了安装包就等于装到旧功能（1.36.8 记过这个坑）。
 
+  引擎也会自动跟上：默认全量/打包时会比对 src\engine\ 与 引擎\整理助手引擎.exe
+  的时间，源码更新就先重建引擎再打包，并在产物自检里再查一次。
+  （1.39.0、1.40.0 都出过「包装好了、新方法 404」的包，原因就是以前只有 -Engine 才重建。）
+  只想快速验外壳能编译时用 -AppOnly，它明确不动引擎。
+
   版本规范见 docs\01-当前版\版本管理与发布规范.md：
   每次改动都要有版本号；release\ 只留最新与上一版（本脚本自动清理更旧的同类产物）。
 
@@ -110,6 +115,34 @@ function Build-IndexWalk {
   Copy-Item $built (Join-Path $engineSrc 'indexwalk.exe') -Force
   Write-Host ('  遍历器：{0:N0} KB' -f ((Get-Item $built).Length / 1KB)) -ForegroundColor DarkGray
   return $built
+}
+
+# ---------------------------------------------------------------- 引擎是否过期
+# 1.39.0 与 1.40.0 都踩过同一个坑：改了 src\engine\ 下的 Python，跑「默认全量」构建，
+# 打出来的安装包里装的仍是旧引擎 —— 因为 Build-Engine 只在显式 -Engine 时才跑。
+# 结果新功能在真机上 404，而构建日志一片绿，看上去什么都对。
+#
+# 修法不是「默认全量就重建引擎」（PyInstaller 要几分钟，改个前端也要等它），
+# 而是先看事实：源码比引擎二进制新，就说明包会装错东西，这时必须重建。
+# 判据只看「会进引擎的源文件」，数据目录、缓存、__pycache__ 不算。
+function Test-EngineStale {
+  $exe = Join-Path $root '引擎\整理助手引擎.exe'
+  if (-not (Test-Path $exe)) { return $true }
+  $built = (Get-Item $exe).LastWriteTimeUtc
+  $skip = @('数据', 'cache', '__pycache__', '.pytest_cache')
+  $newer = Get-ChildItem $engineSrc -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+      $_.Extension -in @('.py', '.spec', '.json', '.yaml', '.yml', '.txt', '.md') -and
+      -not ($_.FullName -split '\\' | Where-Object { $skip -contains $_ })
+    } |
+    Where-Object { $_.LastWriteTimeUtc -gt $built }
+  if ($newer) {
+    $newest = $newer | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    Write-Host ("  引擎已过期：{0} 比引擎二进制新（{1:N0} 个源文件）" -f `
+      (Resolve-Path -Relative $newest.FullName), $newer.Count) -ForegroundColor Yellow
+    return $true
+  }
+  return $false
 }
 
 function Build-Engine {
@@ -301,7 +334,20 @@ try {
   $record.git = $snapshot
   if ($snapshot) { Write-Host ("  源码快照：{0}（tag build-{1}）" -f $snapshot, $current) -ForegroundColor DarkGray }
 
-  if ($Engine)  { Build-Engine }
+  # 引擎什么时候要重建：
+  #   -Engine            → 明确要求
+  #   默认全量/打包       → 只要 src\engine\ 比引擎二进制新就必须重建，
+  #                        否则打出来的包装着旧引擎，新功能在真机上 404。
+  #                        （1.39.0、1.40.0 都踩过；以前靠人记得加 -Engine，记不住。）
+  #   -AppOnly           → 明确只要外壳，不动引擎
+  $engineStale = $false
+  if ($Engine) {
+    $engineStale = $true
+  } elseif (-not $AppOnly -and ($Bundle -or $Portable)) {
+    $engineStale = Test-EngineStale
+    if ($engineStale) { Write-Host '  本次会先重建引擎，再打包（否则包里的引擎是旧的）' -ForegroundColor Yellow }
+  }
+  if ($Engine -or $engineStale) { Build-Engine }
   if ($appBuilt) { Build-App }
   if ($Portable) { Build-Portable }
 
@@ -328,6 +374,11 @@ try {
   $record.releases = $releases
 
   $issues = Test-TidyBuildHealth -Root $root -SkipExe:(-not $appBuilt)
+  # 包里的引擎必须是最新源码打出来的：这条以前没有，于是 1.39.0 / 1.40.0
+  # 都出过「安装包装好了、新方法却 404」的包。只在真打包时查。
+  if (-not $AppOnly -and ($Bundle -or $Portable)) {
+    if (Test-EngineStale) { $issues.Add('引擎比源码旧：这次打出来的包装的仍是旧引擎，新功能在真机上会 404') }
+  }
   if ($issues.Count -gt 0) { throw ("产物自检不通过：" + ($issues -join '；')) }
 
   $record.result = 'ok'
