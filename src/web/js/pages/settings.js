@@ -719,13 +719,6 @@
 
         /* 模型池：从 dsh-xdpool 的厂商清单里挑一家，直接把地址与模型名填好。
            只做选择器，不接管请求——请求仍走下面这套端点与 Key。 */
-        /* 百炼、硅基流动这些控制台给的是 base URL（…/v1 或 …/compatible-mode/v1），
-           原样发请求会 404；保存/测试前统一补成 …/chat/completions。 */
-        function normEndpoint(u) {
-          if (window.AIStore && AIStore.normEndpoint) return AIStore.normEndpoint(u);
-          return String(u || '').trim();
-        }
-
         function applyPool(p, m) {
           d.endpoint = p.endpoint;
           d.model = m[0];
@@ -1122,6 +1115,14 @@
           state.ai = null;
           state.aiDraft = null;
         }
+      }
+
+      /* 百炼、硅基流动这些控制台给的是 base URL（…/v1 或 …/compatible-mode/v1），
+         原样发请求会 404；保存/测试前统一补成 …/chat/completions。
+         注意：saveAi/testAi 在模块作用域，这个函数必须同层，放进 secAssistant 里会 ReferenceError。 */
+      function normEndpoint(u) {
+        if (window.AIStore && AIStore.normEndpoint) return AIStore.normEndpoint(u);
+        return String(u || '').trim();
       }
 
       async function saveAi() {
