@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, section, toast, empty, skeleton, confirm } = UI;
+  const { h, T, icon, section, toast, empty, skeleton, confirm, modal } = UI;
 
   const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
@@ -104,6 +104,13 @@
         aiTest: null,
         aiModelsBusy: false,
         aiModelsErr: null,
+        /* 拉完模型后要自动弹出的清单窗口：paint 里读一次就清掉，
+           避免每次重绘都再弹一遍 */
+        autoOpenModels: false,
+        openModelReport: null,
+        /* 清单弹窗的句柄。放在 state 上而不是闭包里：paint() 会把
+           secAssistant 整块重建，闭包变量留不住，弹窗就再也关不掉了。 */
+        modelModal: null,
         aiKeyShown: false,
         openId: 'appearance'
       };
@@ -152,6 +159,14 @@
       /* ---------- 顶层 ---------- */
       function paint() {
         root.textContent = '';
+        /* 每次重绘都换一批闭包：旧的开窗函数指向上一份草稿，先清掉，
+           免得自动弹窗调到已经不存在的 DOM 上 */
+        state.openModelReport = null;
+        /* 弹窗挂在 #modal-root，不随 root 重绘消失：不清掉就会留下一层
+           指着旧 DOM 的窗口。close 是幂等的，重复调用安全。 */
+        const staleModal = state.modelModal;
+        state.modelModal = null;
+        if (staleModal) { try { staleModal.close(); } catch (e) { /* 已经关了 */ } }
         const holder = h('div', { class: 'stack' });
         holder.appendChild(secAppearance(holder));
         holder.appendChild(secBehavior(holder));
@@ -161,6 +176,12 @@
         holder.appendChild(secAssistant(holder));
         holder.appendChild(secMaintenance(holder));
         root.appendChild(holder);
+        /* 刚拉完模型清单：这一帧画完再把弹窗弹出来，否则清单还没进 DOM */
+        if (state.autoOpenModels) {
+          state.autoOpenModels = false;
+          const open = state.openModelReport;
+          if (open) setTimeout(open, 0);
+        }
       }
 
       const openOpt = (id) => ({ open: state.openId === id, id, accordion: null });
@@ -877,37 +898,137 @@
         }, icon('refresh', 14),
         h('span', { text: state.aiModelsBusy ? T('获取中…', 'Fetching…') : T('获取模型', 'Fetch models') }));
 
-        const modelPicker = modelList.length
-          ? h('div', { class: 'ai-models' },
-            h('div', { class: 'ai-models-head' },
-              h('span', { text: T('端点报告 ' + modelList.length + ' 个可用模型', modelList.length + ' models from the endpoint') }),
-              h('div', { class: 'spacer' }),
-              h('button', {
-                class: 'btn ghost sm', type: 'button',
-                onclick: () => { d.models = []; state.aiModelsErr = null; paint(); }
-              }, h('span', { text: T('清空', 'Clear') }))
+        /* 端点一次报几十个模型时，把整列塞在设置页里会把后面的选项全推到屏外，
+           而且那一大块平时根本用不到。改成「一行摘要 + 独立弹窗」：
+           摘要只说几个模型、当前选的是哪个；点开才是完整清单。 */
+        const modelReport = modelList.length
+          ? h('div', { class: 'ai-report' },
+            h('button', {
+              class: 'ai-report-open', type: 'button',
+              title: T('打开端点报告的模型清单', 'Open the model list from the endpoint'),
+              onclick: () => openModelReport()
+            },
+              icon('layers', 14),
+              h('span', { class: 'ai-report-text', text: T('端点报告 ' + modelList.length + ' 个可用模型', modelList.length + ' models from the endpoint') }),
+              h('span', { class: 'ai-report-cur', text: d.model || '' }),
+              h('span', { class: 'ai-report-chev' }, icon('chevron', 12))
             ),
-            h('div', { class: 'ai-models-list' }, ...modelList.map((id) => h('button', {
-              class: 'ai-model-item',
-              type: 'button',
+            h('button', {
+              class: 'btn ghost sm', type: 'button',
+              title: T('清空这份清单', 'Clear this list'),
+              onclick: () => { d.models = []; d.modelCtx = {}; state.aiModelsErr = null; paint(); }
+            }, h('span', { text: T('清空', 'Clear') }))
+          )
+          : null;
+
+        /* 清单弹窗：按厂商分组、每组可折叠、顶部可按关键词筛。
+           分组是为了把「65 个」切成几段扫读；折叠是为了不看的那几段不占视线。
+           选中的模型直接写回草稿，关掉弹窗后设置页已经跟着更新。 */
+        function closeModelReport() {
+          const m = state.modelModal;
+          state.modelModal = null;
+          if (m) { try { m.close(); } catch (e) { /* 已经关掉了 */ } }
+        }
+        function openModelReport() {
+          const list = Array.isArray(d.models) ? d.models : [];
+          if (!list.length) return;
+          const ctxMap = (d.modelCtx && typeof d.modelCtx === 'object') ? d.modelCtx : {};
+          let query = '';
+
+          const listBox = h('div', { class: 'ai-report-list' });
+          const filterIn = h('input', {
+            class: 'input ai-report-filter', type: 'text', spellcheck: 'false',
+            placeholder: T('筛选模型…', 'Filter models…'),
+            'aria-label': T('筛选模型', 'Filter models'),
+            oninput: (e) => { query = e.target.value; renderList(); }
+          });
+
+          const FAMILIES = [
+            { id: 'gemini', label: 'Gemini / Gemma', re: /gemini|gemma/i },
+            { id: 'openai', label: 'OpenAI', re: /(^|\/)gpt-|^o[1-4](?:-|$)|chatgpt/i },
+            { id: 'claude', label: 'Claude', re: /claude/i },
+            { id: 'deepseek', label: 'DeepSeek', re: /deepseek/i },
+            { id: 'qwen', label: 'Qwen / 通义', re: /qwen|tongyi|qwq/i },
+            { id: 'glm', label: 'GLM', re: /glm|chatglm/i },
+            { id: 'kimi', label: 'Kimi', re: /kimi|moonshot/i },
+            { id: 'llama', label: 'Llama / Mistral', re: /llama|mistral|mixtral|phi-|yi-/i }
+          ];
+          const OTHER = { id: 'other', label: T('其他', 'Other'), re: null };
+          function familyOf(id) {
+            for (let i = 0; i < FAMILIES.length; i += 1) {
+              if (FAMILIES[i].re.test(String(id))) return FAMILIES[i];
+            }
+            return OTHER;
+          }
+
+          function modelRow(id) {
+            const w = Number(ctxMap[id] || 0) || AIStore.inferCtx(id) || 0;
+            return h('button', {
+              class: 'ai-model-item', type: 'button',
               'data-active': id === d.model ? '1' : null,
               title: id,
               onclick: () => {
                 d.model = id;
                 /* 换模型就跟着换窗口：端点报过就用报的值；没报过就按模型名推断，
                    推断不出才落到 1M 默认。绝不沿用上一个模型的窗口。 */
-                const w = Number((d.modelCtx || {})[id] || 0);
-                d.ctxWindow = w || AIStore.inferCtx(id) || AIStore.FALLBACK_CTX;
+                d.ctxWindow = w || AIStore.FALLBACK_CTX;
                 state.aiTest = null;
+                closeModelReport();
                 paint();
               }
             }, h('span', { class: 'ai-model-name', text: id }),
-              Number((d.modelCtx || {})[id] || 0) || AIStore.inferCtx(id)
-                ? h('span', { class: 'ai-model-ctx', text: ctxLabel(Number((d.modelCtx || {})[id] || 0) || AIStore.inferCtx(id)) })
-                : null,
-              id === d.model ? icon('check', 12) : null)))
-          )
-          : null;
+              w ? h('span', { class: 'ai-model-ctx', text: ctxLabel(w) }) : null,
+              id === d.model ? icon('check', 12) : null);
+          }
+
+          function renderList() {
+            listBox.textContent = '';
+            const q = query.trim().toLowerCase();
+            const hit = list.filter((id) => !q || String(id).toLowerCase().indexOf(q) >= 0);
+            if (!hit.length) {
+              listBox.appendChild(h('div', { class: 'ai-report-miss', text: T('没有匹配的模型', 'No matching model') }));
+              return;
+            }
+            const buckets = new Map();
+            hit.forEach((id) => {
+              const f = familyOf(id);
+              if (!buckets.has(f.id)) buckets.set(f.id, { label: f.label, ids: [] });
+              buckets.get(f.id).ids.push(id);
+            });
+            /* 顺序固定：按 FAMILIES 的次序排，认不出的归到最后 */
+            FAMILIES.map((f) => f.id).concat(['other']).forEach((key) => {
+              const b = buckets.get(key);
+              if (!b) return;
+              listBox.appendChild(section(b.label,
+                h('div', { class: 'ai-report-group' }, ...b.ids.map(modelRow)), {
+                  /* 搜索时全展开（结果本来就不多），没搜时只展开当前模型所在的那组 */
+                  open: !!q || b.ids.indexOf(d.model) >= 0,
+                  hint: String(b.ids.length)
+                }));
+            });
+          }
+
+          renderList();
+          state.modelModal = modal({
+            title: T('端点报告 ' + list.length + ' 个可用模型', list.length + ' models from the endpoint'),
+            wide: true,
+            body: h('div', { class: 'ai-report-body' }, filterIn, listBox),
+            buttons: [
+              { id: 'clear', label: T('清空清单', 'Clear list'), kind: 'ghost' },
+              { id: 'close', label: T('关闭', 'Close'), kind: 'primary' }
+            ],
+            onAction: (id) => {
+              if (id !== 'clear') return;
+              d.models = [];
+              d.modelCtx = {};
+              state.aiModelsErr = null;
+              paint();
+            },
+            onClose: () => { state.modelModal = null; }
+          });
+        }
+        /* fetchModels 在 mount 作用域，拿到最新的打开函数只能走 state 上的钩子 */
+        state.openModelReport = openModelReport;
 
         /* 温度有「自动」这一档：自动 = 按任务决定（查文件 0.1、算数字 0、
            写文案 0.85）。手填才用输入框里的数字。以前这里只有一个数字，
@@ -1049,7 +1170,7 @@
               T('填接口文档里的模型名，也可以点「获取模型」让端点自己报', 'Type a model name, or let the endpoint list them'),
               h('div', null,
                 state.aiModelsErr ? h('div', { class: 'small', style: 'color:var(--danger)', text: state.aiModelsErr }) : null,
-                modelPicker)),
+                modelReport)),
             setRow(T('上下文窗口', 'Context window'),
               h('div', { class: 'row' }, ctxIn, h('span', { class: 'badge' + (reported ? ' ok' : ''), text: winSrc })),
               reported
@@ -1444,6 +1565,9 @@
           const known = Object.keys(got.ctx).length;
           toast(T('已获取 ' + got.list.length + ' 个模型' + (known ? '，' + known + ' 个带窗口信息' : ''),
             got.list.length + ' models fetched'), 'ok');
+          /* 拉完直接把清单弹出来：不然用户只看到一个 toast，
+             还得自己去点那一行才知道拿到了什么 */
+          state.autoOpenModels = true;
         } catch (e) {
           state.aiModelsErr = errText(e);
         } finally {

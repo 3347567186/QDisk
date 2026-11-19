@@ -441,7 +441,34 @@
 
     const modelBlock = el('div', 'dac-menu-block');
     const modelSec = el('div', 'dac-sec');
-    modelSec.appendChild(el('span', 'dac-sec-title', T('模型', 'Model')));
+    const modelSecTitle = el('span', 'dac-sec-title', T('模型', 'Model'));
+    const modelCount = el('span', 'dac-sec-count', '');
+    modelSec.appendChild(modelSecTitle);
+    modelSec.appendChild(modelCount);
+
+    /* 筛选框：端点报回几十个模型时，靠滚动找一个名字是折磨。
+       输入即过滤，Enter 选第一个命中项，Esc 清空（再按一次才关菜单）。
+       行数不多于 FILTER_MIN 时整条藏起来——三五个模型还要打字就太啰嗦。 */
+    const modelFilter = el('div', 'dac-filter');
+    modelFilter.hidden = true;
+    const filterIc = el('span', 'dac-filter-ic');
+    filterIc.appendChild(icon('search', 12));
+    const filterInput = document.createElement('input');
+    filterInput.className = 'dac-filter-input';
+    filterInput.type = 'text';
+    filterInput.setAttribute('autocomplete', 'off');
+    filterInput.setAttribute('spellcheck', 'false');
+    filterInput.placeholder = T('筛选模型…', 'Filter models…');
+    filterInput.setAttribute('aria-label', T('筛选模型', 'Filter models'));
+    const filterClear = el('button', 'dac-filter-clear');
+    filterClear.type = 'button';
+    filterClear.setAttribute('aria-label', T('清空筛选', 'Clear filter'));
+    filterClear.appendChild(icon('close', 11));
+    filterClear.hidden = true;
+    modelFilter.appendChild(filterIc);
+    modelFilter.appendChild(filterInput);
+    modelFilter.appendChild(filterClear);
+
     const modelScroll = el('div', 'dac-menu-scroll');
     const rowsBox = el('div', 'dac-rows');
     const rowsPill = el('div', 'dac-rows-pill');
@@ -449,6 +476,7 @@
     rowsBox.appendChild(rowsPill);
     modelScroll.appendChild(rowsBox);
     modelBlock.appendChild(modelSec);
+    modelBlock.appendChild(modelFilter);
     modelBlock.appendChild(modelScroll);
     modelInner.appendChild(modelBlock);
     modelInner.appendChild(el('div', 'dac-divider'));
@@ -499,9 +527,35 @@
     });
 
     const modelRows = [];
+    /* 少于这个数不摆筛选框：三条两行一眼看完，再给个输入框只是多一步 */
+    const FILTER_MIN = 8;
+    let modelQuery = '';
+
+    /* 命中判定：空格分词，每个词都要出现（AND），全部不区分大小写。
+       「gem flash」能同时命中 gemini-2.5-flash 和 gemini-flash-latest。 */
+    function modelHits(m, query) {
+      const q = String(query || '').trim().toLowerCase();
+      if (!q) return true;
+      const hay = (String(m.id || '') + ' ' + String(m.label || '')).toLowerCase();
+      return q.split(/\s+/).every(function (w) { return hay.indexOf(w) >= 0; });
+    }
+
+    function visibleModels() {
+      return models.filter(function (m) { return modelHits(m, modelQuery); });
+    }
+
     function rebuildModels() {
       rowsBox.querySelectorAll('.dac-row').forEach(function (n) { n.remove(); });
       modelRows.length = 0;
+
+      /* 筛选框只在模型够多时出现；清空条件同时管着「过滤到 0 条」的提示 */
+      modelFilter.hidden = models.length <= FILTER_MIN;
+      filterClear.hidden = !modelQuery;
+      modelCount.textContent = models.length
+        ? (modelQuery ? visibleModels().length + '/' + models.length : String(models.length))
+        : '';
+      modelCount.hidden = !models.length;
+
       if (!models.length) {
         const empty = el('div', 'dac-row', T('还没有配置模型', 'No models configured'));
         empty.style.cursor = 'default';
@@ -521,7 +575,25 @@
         rowsBox.appendChild(go);
         return;
       }
-      models.forEach(function (m) {
+
+      const shown = visibleModels();
+      if (!shown.length) {
+        /* 筛掉了全部：说清是「筛没了」而不是「没有模型」，
+           顺手给一个一键退回全量的按钮 */
+        const miss = el('div', 'dac-row dac-row-miss');
+        miss.style.cursor = 'default';
+        miss.appendChild(el('span', 'dac-row-name', T('没有匹配的模型', 'No matching model')));
+        rowsBox.appendChild(miss);
+        const reset = el('button', 'dac-row dac-row-go');
+        reset.type = 'button';
+        reset.setAttribute('role', 'menuitem');
+        reset.appendChild(el('span', 'dac-row-name', T('清空筛选看全部', 'Clear filter')));
+        reset.addEventListener('click', function () { setModelQuery(''); });
+        rowsBox.appendChild(reset);
+        return;
+      }
+
+      shown.forEach(function (m) {
         const row = el('button', 'dac-row');
         row.type = 'button';
         row.setAttribute('role', 'menuitem');
@@ -538,15 +610,50 @@
       syncRows();
     }
 
+    function setModelQuery(v) {
+      const next = String(v || '');
+      if (next === modelQuery) return;
+      modelQuery = next;
+      if (filterInput.value !== next) filterInput.value = next;
+      rebuildModels();
+      /* 过滤后行高变了，锚定气泡得重新量一次，否则会留一截空白 */
+      if (modelMorph.open) modelMorph.layout();
+    }
+
+    filterInput.addEventListener('input', function () { setModelQuery(filterInput.value); });
+    filterClear.addEventListener('click', function () {
+      setModelQuery('');
+      filterInput.focus();
+    });
+    filterInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        /* 回车选第一条命中项：打字 + 回车两步就能换模型，不用再去点 */
+        e.preventDefault();
+        const first = visibleModels()[0];
+        if (first) pickModel(first.id);
+      } else if (e.key === 'Escape') {
+        /* 有筛选词时 Esc 先清筛选，别一步把整个菜单关掉 */
+        if (modelQuery) { e.preventDefault(); e.stopPropagation(); setModelQuery(''); }
+      }
+      /* 上下键留给菜单本身，输入框里不拦 */
+    });
+
+    /* 选中态按 id 对齐，不按全局下标：筛选后 modelRows 只剩可见行，
+       再用 models 里的下标去找就会错位到别的行上。 */
     function syncRows() {
-      const index = models.findIndex(function (m) { return m.id === model; });
+      let hit = -1;
       modelRows.forEach(function (row, i) {
-        if (i === index) row.setAttribute('data-selected', '');
-        else row.removeAttribute('data-selected');
+        const on = row.dataset.model === model;
+        if (on) {
+          hit = i;
+          row.setAttribute('data-selected', '');
+        } else {
+          row.removeAttribute('data-selected');
+        }
         const ck = row.querySelector('.dac-check');
-        if (ck) ck.hidden = i !== index;
+        if (ck) ck.hidden = !on;
       });
-      placePill(rowsPill, modelRows, index);
+      placePill(rowsPill, modelRows, hit);
     }
 
     function pickModel(id) {
@@ -561,8 +668,22 @@
     const modelMorph = createPopover(pill, modelMenu, modelPanel, {
       align: 'right',
       width: MENU_W,
-      onOpen: function () { permMorph.hide(); modeMorph.hide(); pill.setAttribute('aria-expanded', 'true'); effort.resize(); },
-      onClose: function () { pill.setAttribute('aria-expanded', 'false'); }
+      onOpen: function () {
+        permMorph.hide();
+        modeMorph.hide();
+        pill.setAttribute('aria-expanded', 'true');
+        effort.resize();
+        /* 每次打开都从全量开始：上次的筛选词留着会让人以为模型变少了 */
+        if (modelQuery) setModelQuery('');
+        if (!modelFilter.hidden) {
+          /* 够多才自动聚焦：少的时候点开就能选，抢焦点反而多一步 */
+          setTimeout(function () { if (modelMorph.open) filterInput.focus(); }, 30);
+        }
+      },
+      onClose: function () {
+        pill.setAttribute('aria-expanded', 'false');
+        if (modelQuery) setModelQuery('');
+      }
     });
 
     pill.addEventListener('click', function () {
@@ -1115,6 +1236,9 @@
     }
     function onDocKey(e) {
       if (e.key !== 'Escape') return;
+      /* 菜单开着且有筛选词时，Esc 先退回全量，再按一次才关菜单。
+         这条必须在捕获阶段判：document 上的监听早于输入框自己的 keydown。 */
+      if (modelMorph.open && modelQuery) { setModelQuery(''); e.preventDefault(); return; }
       if (modelMorph.open) { modelMorph.hide(); return; }
       if (permMorph.open) { permMorph.hide(); return; }
       if (mentionState) closeMentions();

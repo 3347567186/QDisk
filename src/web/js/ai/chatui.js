@@ -63,11 +63,15 @@
 
 
   /** 这一轮的策略：档位来自滑块（努力），温度来自设置（空 = 按任务自动），
-   *  步数硬上限来自设置里的防跑飞闸。 */
-  function policyFor(text, settings) {
+   *  步数硬上限来自设置里的防跑飞闸。
+   *
+   *  level 必须由调用方显式传进来。这里在模块作用域，读不到 create() 里的
+   *  state —— 1.36.19 曾在这里直接写 state.thinking，结果每次提问都抛
+   *  ReferenceError，ask() 卡在 running=true 上，表现为「发不出也停不了」。 */
+  function policyFor(text, settings, level) {
     const s = settings || {};
     return Strength.resolve({
-      level: state.thinking,
+      level: level,
       text: text,
       temperature: (s.tempAuto === false && typeof s.temperature === 'number') ? s.temperature : null,
       endpoint: s.endpoint,
@@ -1237,7 +1241,35 @@
       };
     }
 
+    /* 兜底：askInner 里任何一处抛错，都不能把界面留在「正在回答」上。
+       卡死的机制很简单——running 一旦为 true 就再也没人置回 false，
+       输入框保持只读、发送键停在停止态，于是「发不出」也「停不了」。
+       正常跑完的轮次在收尾时已经置回 false，这里只收拾半途死掉的。 */
     async function ask(input) {
+      try {
+        return await askInner(input);
+      } catch (e) {
+        const midFlight = state.running;
+        state.running = false;
+        try { composer.setBusy(false, false); } catch (e2) { /* 输入框没造好也不能再抛 */ }
+        if (midFlight) {
+          try {
+            finishAnswer({
+              ok: false,
+              degraded: true,
+              answer: (e && e.message) || T('这一轮没能跑起来', 'This turn failed to start'),
+              evidence: [],
+              suggest: [],
+              followUps: [],
+              trace: []
+            });
+          } catch (e3) { /* 收尾失败不再往上抛，免得盖住原始错误 */ }
+        }
+        return null;
+      }
+    }
+
+    async function askInner(input) {
       const payload = (input && typeof input === 'object') ? input : { text: String(input || '') };
       const q = String(payload.text || '').trim();
       const resume = payload.resume || null;
@@ -1286,7 +1318,7 @@
 
       /* 这一轮的策略先算出来：档位决定努力，任务决定温度。
          温度用 null 表示「这家锁死了」，agent 见到 null 就不发 temperature */
-      const policy2 = policyFor(q, settings);
+      const policy2 = policyFor(q, settings, state.thinking);
       const bud = budgetFor(policy2, settings);
       const policy = proposals ? proposals.getPolicy() : { mode: 'off' };
       const canWrite = policy.mode !== 'off';
