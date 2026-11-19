@@ -142,7 +142,8 @@
       hovering = -1;
       preview.classList.remove('on');
       preview.setAttribute('aria-hidden', 'true');
-      if (preview.parentNode === nav) preview.style.removeProperty('--rail-c');
+      /* 不要在这里清 --rail-c：淡出还有 120ms，清掉会让正在退场的卡瞬间
+         跳回 top:0（页顶闪一下）。位置留到下一次 showPreview 再覆盖。 */
       centerActive();
     }
 

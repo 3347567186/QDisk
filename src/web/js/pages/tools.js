@@ -125,6 +125,7 @@
     askBtn.onclick = () => {
       if (window.SteveAvatar) {
         window.SteveAvatar.spin(askMark);
+        window.SteveAvatar.burst(askMark);
       }
       const list = bigItems || [];
       const total = list.reduce((s, x) => s + (x.size || 0), 0);
