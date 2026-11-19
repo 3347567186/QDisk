@@ -1163,6 +1163,100 @@ class TestSearch(EngineCase):
             self.assertIn("hint", res)
             self.assertIn("索引", res["hint"])
 
+    def test_folders_aggregates_by_directory(self):
+        """search.folders：按目录汇总体积。
+
+        这是「什么最占空间」的正解：单个文件（某个 .pak 5.4 GB）对人没有意义，
+        人要知道的是「哪个文件夹/软件占地方」。
+        """
+        folder = self.new_folder()
+        sub = os.path.join(folder, "GameA", "Content")
+        os.makedirs(sub, exist_ok=True)
+        # GameA 两个文件共 6000 字节，GameB 一个 1000 字节
+        for name, n in (("a1.bin", 4000), ("a2.bin", 2000)):
+            with open(os.path.join(sub, name), "wb") as f:
+                f.write(b"x" * n)
+        other = os.path.join(folder, "GameB")
+        os.makedirs(other, exist_ok=True)
+        with open(os.path.join(other, "b1.bin"), "wb") as f:
+            f.write(b"x" * 1000)
+        self.build(folder, reuse=False)
+        # depth=1：把每个顶层子目录下的所有文件汇总成一项，这正是「哪个文件夹最占空间」
+        res = self.rpc_ok("search.folders", {"depth": 1, "limit": 20, "auto": False})
+        self.assertEqual(res["source"], "index")
+        self.assertIsInstance(res["elapsed_ms"], int)
+        self.assertIsInstance(res["bytes"], int)
+        self.assertGreaterEqual(res["bytes"], 7000)
+        items = res["items"]
+        self.assertTrue(items, res)
+        # 必须按体积降序，且每项带占比
+        sizes = [i["size"] for i in items]
+        self.assertEqual(sizes, sorted(sizes, reverse=True), res)
+        for item in items:
+            self.assertIsInstance(item["size"], int)
+            self.assertIsInstance(item["files"], int)
+            self.assertIsInstance(item["pct"], float)
+            self.assertIsInstance(item["path"], str)
+            self.assertIsInstance(item["name"], str)
+        # GameA 是 6000 字节，应该排在 GameB（1000）前面
+        names = [i["name"] for i in items]
+        self.assertIn("GameA", names)
+        self.assertIn("GameB", names)
+        self.assertLess(names.index("GameA"), names.index("GameB"), res)
+
+    def test_folders_depth_changes_granularity(self):
+        """depth 越大分得越细：depth=1 合并到顶层，depth=3 能看到 Content。"""
+        folder = self.new_folder()
+        deep = os.path.join(folder, "L1", "L2", "L3")
+        os.makedirs(deep, exist_ok=True)
+        with open(os.path.join(deep, "big.bin"), "wb") as f:
+            f.write(b"x" * 5000)
+        self.build(folder, reuse=False)
+        shallow = self.rpc_ok("search.folders",
+                              {"depth": 1, "limit": 20, "auto": False})
+        deeper = self.rpc_ok("search.folders",
+                             {"depth": 3, "limit": 20, "auto": False})
+        self.assertEqual(shallow["depth"], 1)
+        self.assertEqual(deeper["depth"], 3)
+        # 两种粒度的总量必须一致：分层只是换个切法，不该凭空多出或少掉体积
+        self.assertEqual(shallow["bytes"], deeper["bytes"], (shallow, deeper))
+        self.assertTrue(any(i["name"] == "L1" for i in shallow["items"]), shallow)
+        self.assertTrue(any(i["name"] == "L3" for i in deeper["items"]), deeper)
+
+    def test_folders_parent_drills_down(self):
+        """parent 用来下钻：只看这个目录下面的子目录。"""
+        folder = self.new_folder()
+        for sub_name, n in (("Alpha", 3000), ("Beta", 1000)):
+            d = os.path.join(folder, "Root", sub_name)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "f.bin"), "wb") as f:
+                f.write(b"x" * n)
+        self.build(folder, reuse=False)
+        res = self.rpc_ok("search.folders", {
+            "depth": 3, "limit": 20, "auto": False,
+            "parent": os.path.join(folder, "Root")
+        })
+        names = [i["name"] for i in res["items"]]
+        self.assertIn("Alpha", names, res)
+        self.assertIn("Beta", names, res)
+        # 下钻之后不能把父目录自己也算进来
+        self.assertNotIn("Root", names, res)
+        self.assertLess(names.index("Alpha"), names.index("Beta"), res)
+
+    def test_folders_bad_params_are_errors(self):
+        for params in ({"depth": 0}, {"depth": "deep"}, {"limit": 0}):
+            r = self.rpc("search.folders", params)
+            self.assertFalse(r["ok"], (params, r))
+            self.assertTrue(r["error"], params)
+
+    def test_folders_without_index_has_hint(self):
+        """没索引且 auto=false 时不能静默返回空：要给 hint，别让人以为本机没大文件。"""
+        res = self.rpc_ok("search.folders",
+                          {"limit": 5, "auto": False})
+        if not res["roots"]:
+            self.assertIn("hint", res)
+            self.assertIn("索引", res["hint"])
+
 
 class TestSettingsSet(EngineCase):
     """settings.set：只写白名单键，类型/范围/取值都要挡住。"""

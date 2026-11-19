@@ -5458,6 +5458,173 @@ def search_index_top(limit=50, ids=None, min_size=0):
     return merged[:limit]
 
 
+def _folder_key(path, root, depth):
+    """把一个目录路径归到「第 depth 层前缀」，用来做体积汇总。
+
+    例：root=E:\\、depth=3 时
+      E:\\SteamLibrary\\steamapps\\common\\PUBG\\TslGame  →  E:\\SteamLibrary\\steamapps\\common
+    所有落在这个前缀下的目录都会汇总成同一项，于是得到的就是「common 这个目录多大」。
+
+    刻意不用 os.path.relpath：它对 11 万个目录要解析、normpath、split 一堆，
+    实测占掉大半个查询时间。这里做纯字符串切片就够，两边都是同一份索引里的
+    规范路径。
+    """
+    if not root:
+        return path
+    r = root.rstrip("\\/")
+    if len(path) <= len(r) or not path[:len(r)].lower() == r.lower():
+        return path
+    rest = path[len(r):].lstrip("\\/")
+    if not rest:
+        return r
+    parts = rest.split("\\") if "\\" in rest else rest.split("/")
+    parts = [p for p in parts if p and p != "."]
+    if not parts:
+        return r
+    return r + "\\" + "\\".join(parts[:depth])
+
+
+def _ix_folders_one(db_path, root, depth):
+    """单个库里按目录前缀汇总体积，返回 {前缀: [字节, 文件数]}。
+
+    为什么按目录而不按文件：人问「什么最占空间」想知道的是「哪个文件夹 / 哪个
+    软件」，不是「哪个 .pak」。单个 pak 5.4 GB 对人没有意义，PUBG 占 60 GB 才有。
+
+    先在 SQL 里按 dir 聚合（11 万行），再在 Python 里归并前缀 —— 直接 SELECT 每个
+    文件会是 142 万行，实测要 26 秒，人不可能等。
+    """
+    db = _index_open(db_path)
+    if db is None:
+        return {}
+    try:
+        if _index_schema_version(db) != INDEX_SCHEMA:
+            return {}
+        rows = db.execute(
+            "SELECT d.path, SUM(f.size), COUNT(*) FROM files f "
+            "JOIN dirs d ON d.id = f.dir_id GROUP BY d.id"
+        ).fetchall()
+    except Exception:
+        return {}
+    finally:
+        db.close()
+    out = {}
+    for dir_path, size, files in rows:
+        key = _folder_key(dir_path, root, depth)
+        slot = out.get(key)
+        if slot is None:
+            slot = out[key] = [0, 0]
+        slot[0] += int(size or 0)
+        slot[1] += int(files or 0)
+    return out
+
+
+def search_index_folders(depth=3, limit=20, min_size=0, ids=None, parent=None):
+    """按目录汇总体积，多库合并后降序返回 (目录路径, 字节, 文件数) 与总计。
+
+    parent 给了就只汇总它下面的子目录（用来下钻：先看 common 多大，再看
+    common 里哪个游戏最大）。
+    """
+    depth = max(1, min(int(depth), 6))
+    limit = max(1, int(limit))
+    min_size = max(0, int(min_size))
+    want = set(ids) if ids else None
+    items = [i for i in _ix_load()
+             if (not want or i["id"] in want) and os.path.isfile(_ix_db_abspath(i))]
+    merged = {}
+    for it in items:
+        one = _ix_folders_one(_ix_db_abspath(it), it["root"], depth)
+        for key, (size, files) in one.items():
+            slot = merged.get(os.path.normcase(key))
+            if slot is None:
+                slot = merged[os.path.normcase(key)] = [key, 0, 0]
+            slot[1] += size
+            slot[2] += files
+    total = sum(v[1] for v in merged.values())
+    rows = []
+    pkey = os.path.normcase(parent.rstrip("\\/")) if parent else ""
+    for key, size, files in merged.values():
+        if size < min_size:
+            continue
+        if pkey:
+            nk = os.path.normcase(key)
+            if nk != pkey and not nk.startswith(pkey + os.sep):
+                continue
+        rows.append((key, size, files))
+    rows.sort(key=lambda r: (-r[1], os.path.normcase(r[0])))
+    return rows[:limit], total
+
+
+def _engine_search_folders(params):
+    """search.folders：按目录汇总体积，回答「什么最占空间」。
+
+    和 search.top 的区别是聚合维度：search.top 给单个文件，人对「某个 .pak 5.4 GB」
+    没有概念；这里按目录前缀汇总，得到的是「PUBG 这个目录 60 GB」，才是人能据此
+    行动的信息。
+
+    auto=True（默认）时，如果本地还没有索引，就当场建一次再回答 —— 用户不该为了
+    问一句「什么最占空间」先自己理解「索引」这个概念。建索引要几秒，所以返回里带
+    built 标记，前端据此提示。
+    """
+    depth = _engine_get(params, "depth", 3, int)
+    if depth <= 0:
+        raise EngineError("参数 depth 必须是正整数")
+    limit = _engine_get(params, "limit", 20, int)
+    if limit <= 0:
+        raise EngineError("参数 limit 必须是正整数")
+    limit = min(limit, 500)
+    min_size = _engine_get(params, "min_size", 0, int)
+    parent = params.get("parent")
+    parent = str(parent).strip() if isinstance(parent, str) and parent.strip() else None
+    auto = _engine_get(params, "auto", True, bool)
+    ids = params.get("ids")
+    ids = [str(i) for i in ids] if isinstance(ids, list) and ids else None
+
+    t0 = time.perf_counter()
+    built = False
+    build_error = ""
+
+    # 没索引就自己建一次：整盘（D:/E:）+ 常用用户目录，建完才算「整机统计」
+    if auto and not ids and index_count() == 0:
+        roots = full_disk_roots() + default_index_roots()
+        seen, uniq = set(), []
+        for r in roots:
+            k = os.path.normcase(os.path.abspath(r))
+            if k not in seen:
+                seen.add(k)
+                uniq.append(r)
+        try:
+            if uniq:
+                index_add(uniq)
+                build_index(roots=uniq, progress=_engine_progress)
+                built = True
+        except Exception as exc:
+            build_error = "自动建索引失败：%s" % (exc,)
+
+    rows, total = search_index_folders(depth=depth, limit=limit, min_size=min_size,
+                                       ids=ids, parent=parent)
+    st = index_stats()
+    roots = [e.get("root") for e in st.get("entries") or [] if e.get("exists_root")]
+    items = []
+    for path, size, files in rows:
+        items.append({
+            "path": path,
+            "name": os.path.basename(path.rstrip("\\/")) or path,
+            "size": int(size),
+            "files": int(files),
+            # 占比让「60 GB 有多大」变得可比较，光给绝对数字人没尺度感
+            "pct": round((size * 100.0 / total), 1) if total else 0.0,
+        })
+    result = {"items": items, "total": len(items), "source": "index",
+              "roots": roots, "indexed": int(st.get("files") or 0),
+              "depth": depth, "bytes": int(total), "built": built,
+              "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
+    if build_error:
+        result["error"] = build_error
+    if not roots:
+        result["hint"] = "本地还没有索引：先在「搜索」页添加目录并建立一次，之后这里就能直接按体积排"
+    return result
+
+
 def index_count():
     return sum(int(i.get("files") or 0) for i in _ix_load())
 
@@ -13173,6 +13340,7 @@ _ENGINE_METHODS = {
     "search.index": _engine_search_index,
     "search.query": _engine_search_query,
     "search.top": _engine_search_top,
+    "search.folders": _engine_search_folders,
     "search.add": _engine_search_add,
     "search.remove": _engine_search_remove,
     "settings.set": _engine_settings_set,

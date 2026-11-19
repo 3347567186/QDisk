@@ -138,6 +138,7 @@
   /* 参数类型/范围校验（方案 §7 第 3 条） */
   const NUM_CAP = {
     list_dir: { limit: 200 },
+    top_folders: { limit: 50, depth: 6 },
     top_files: { limit: 50 },
     top_indexed: { limit: 50 },
     empty_dirs: { depth: 3 },
@@ -1485,6 +1486,7 @@
   function suggestFollowUps(ctx, trace) {
     const used = new Set((trace || []).map((t) => t.tool));
     const out = [];
+    if (used.has('top_folders')) out.push('这些文件夹里哪些内容能清掉？');
     if (used.has('top_files')) out.push('这些文件里哪个最占地方？');
     if (used.has('top_indexed')) out.push('这些大文件里哪些是能删的？');
     if (used.has('empty_dirs')) out.push('这些空文件夹删了会影响什么？');

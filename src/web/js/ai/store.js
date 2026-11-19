@@ -105,7 +105,14 @@
     /* 动手策略（档位 / 类别开关 / 预算上限）。字段语义由 proposals.js 的
        normalizePolicy 解释，这里只原样存取——策略改了界面要立刻生效，
        所以不在这里做二次归一，免得两处规则打架。默认空对象 → 归一成 off。 */
-    agent: {}
+    agent: {},
+    /* 迁移版本号。用整数而不是布尔，将来还要迁移别的字段时直接加 2、3。
+       为什么需要它：1.41.0 之前「关」的语义是「只做必要的一次查询」，
+       结果用户把强度设成关之后，问「什么最占空间」只拿到一个裸路径。
+       提示词已经改成「关也要给完整结论」，但已经存成 off 的老配置不会
+       自动享受新语义——它们当初选 off 是因为「省点 token」，不是想要
+       一句话答案。所以这里迁移一次，把老的 off 提升为 medium。 */
+    v: 0
   };
 
   /* 四档：关闭 / 低 / 中 / 高（老版本的 simple、deep 由 AIStrength.migrateLevel 迁移） */
@@ -123,6 +130,14 @@
     if (typeof raw.lastSession === 'string') out.lastSession = raw.lastSession.trim().slice(0, 80);
     if (typeof raw.railClosed === 'boolean') out.railClosed = raw.railClosed;
     if (raw.agent && typeof raw.agent === 'object') out.agent = raw.agent;
+    out.v = Number(raw.v) || 0;
+    /* 一次性迁移：v<1 的配置里 thinking==='off' 是老语义（只做一次查询）。
+       新语义下 off 只省查证步骤、不省答案内容，但老用户当初选它是为了省钱，
+       继续按 off 跑会重复「一句话结论」的体验，所以提到 medium。 */
+    if (out.v < 1) {
+      if (out.thinking === 'off') out.thinking = 'medium';
+      out.v = 1;
+    }
     return out;
   }
 
@@ -130,7 +145,12 @@
     if (uiCache && !force) return uiCache;
     let cfg = {};
     try { cfg = await API.configGet(); } catch { cfg = {}; }
-    uiCache = normalizeUi(cfg && cfg.ai_ui);
+    const rawUi = (cfg && cfg.ai_ui) || null;
+    uiCache = normalizeUi(rawUi);
+    /* 迁移只改内存等于没改：下次启动又读回旧值。发现真的动过就写回。 */
+    if (rawUi && (Number(rawUi.v) || 0) !== uiCache.v) {
+      try { await API.configSet({ ai_ui: uiCache }); } catch { /* 写不进去就下次再说 */ }
+    }
     return uiCache;
   }
 

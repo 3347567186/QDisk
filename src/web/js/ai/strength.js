@@ -33,9 +33,11 @@
       icon: 'feather',
       think: 0,
       steps: 6,
-      replyMax: 480,
+      /* 480 太窄：用户问「什么最占空间」，答案要交代「这是什么东西、占多少、
+         能不能清」，480 字符装不下，只能砍成一句话。省的是推理步数，不是答案内容。 */
+      replyMax: 640,
       band: [0, 0.3],
-      hint: ['不思考，直接给结论', 'Answer directly, no thinking']
+      hint: ['不思考，但结论要给全', 'No thinking, still a complete answer']
     },
     low: {
       id: 'low',

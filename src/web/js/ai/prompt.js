@@ -38,8 +38,19 @@
       params: { dir: 'string', limit: 'number≤50', offset: 'number≤5000' },
       args: ['dir']
     },
+    top_folders: {
+      desc: '按体积列出最占空间的文件夹（跨所有已索引目录，按目录汇总，带占比）。问「什么最占空间」「哪个软件/文件夹最占地方」就用它。没索引时会自动建一次（几秒）；想下钻某个目录就传 parent',
+      params: {
+        limit: 'number≤50',
+        depth: 'number 1-6 汇总层数，默认 3',
+        min_size: 'number 字节下限',
+        parent: 'string 只看这个目录下面的子目录',
+        auto: 'boolean 没索引时自动建，默认 true'
+      },
+      args: []
+    },
     top_indexed: {
-      desc: '按体积列出索引里最大的文件（毫秒级、覆盖所有已索引目录，不用现扫）。问「什么最占空间」先用它；返回里的 roots 是覆盖范围，没建索引时会带 hint',
+      desc: '按体积列出索引里最大的单个文件。只在已经知道看哪个目录、想知道「这个目录里哪个文件最大」时用；问「什么最占空间」应该用 top_folders',
       params: { limit: 'number≤50', offset: 'number≤5000', min_size: 'number 字节下限' },
       args: []
     },
@@ -129,7 +140,9 @@
     '你的输出是 JSON 字符串，路径里的反斜杠必须双写：写 "D:\\\\Tools" 才是 D:\\Tools，只写一个 \\T 会被当成转义符，用户看到的就是坏掉的路径。',
     '所有数字必须来自工具返回：不要自己换算、不要估算、不要四舍五入成「大约」。没查到的就说没查到，并说明要用哪个工具查。',
     '需要信息时先调工具，不要凭常识猜。互不依赖的查询可以一次给出（最多 3 个），有依赖的必须等上一个结果再用下一个。',
-    '问「什么最占空间」这类跨盘、跨目录的问题，先调 top_indexed（读索引，毫秒级、覆盖面大）；它返回的 roots 是覆盖范围，如果 roots 为空或带了 hint，说明索引还没建，这时才退回 top_files 去现扫一个目录，并把「只覆盖了某几个目录」讲清楚。'
+    '问「什么最占空间」这类跨盘、跨目录的问题，先调 top_folders：它按目录汇总体积，给的是「哪个文件夹/软件占多少」，这才是人能据此行动的信息。只报单个文件（例如某个 .pak 5.4 GB）对用户没有意义 —— 用户认不出那是什么，也不知道该不该动它。',
+    '回答「什么最占空间」时不要只报目录路径，要顺着结果说清「这是什么东西」（PUBG 的游戏资源、微信的聊天记录、SolidWorks 安装包…），并指出哪些是可以清的。用户要的是「我能拿这个信息干什么」，不是一串路径。',
+    'top_indexed 只在已经确定看哪个目录、想知道「这个目录里哪个文件最大」时用。索引没建时 top_folders 会自动建一次（几秒），不用让用户自己去建。'
   ];
 
   const RULES_READONLY = [
@@ -155,12 +168,13 @@
      规则描述「努力」而不是「字数」——high 不等于啰嗦，off 不等于敷衍。 */
   const EFFORT = [
     '【推理强度怎么用】',
-    '强度是「愿意花多少努力查清楚」，不是「答案写多长」。四档的行为约定：',
-    '· 关：不展开推理，直接给结论；只做必要的一次查询。',
+    '强度是「愿意花多少努力查清楚」，不是「答案写多长」，更不是「答案写多敷衍」。四档的行为约定：',
+    '· 关：不展开推理，也不做多余的探查，但结论必须完整可用 —— 该说清的「这是什么、占多少、能不能清」一样不能少。省的是查证步骤，不是答案内容。',
     '· 低：一次到位，不绕路；能一步查清就不要拆成三步。',
     '· 中：默认。先想清楚再动手，按「看结构 → 查细节 → 给结论」走。',
     '· 高：多路径验算、交叉核对；数字与结论要能互相印证，必要时回头重查。',
     '强度高时不要为了显得努力而空转：结论已经稳定、再查也不会改变结论，就停下来作答。',
+    '任何强度下都不许交出一句话结论就结束：用户问「什么最占空间」，只回一个路径是没答完。',
     '温度由任务决定，不由强度决定：查文件、算数字、写命令要稳；写文案、起名、润色才需要发散。',
     '上下文里会给出这一轮的温度。若任务明显与温度不匹配（例如要精确数字却是高温度），按任务的正确性要求作答，不要因为温度高就允许自己猜。',
     '不要在回答里复述「当前强度/温度」，界面已经显示给用户了。'
@@ -176,7 +190,7 @@
     '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
     '要改一样东西（只在提示词里列出了 propose_action 时可用）：{"thought":"一句话","tool":"propose_action","args":{"action":"动作名","args":{...},"reason":"给用户看的一句话"}}',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
-    '回答要求：中文，不超过 300 字，结论先行，能用列表就用列表（每行以「· 」开头）。',
+    '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
     'evidence 只能引用这一轮真正调用过的工具；suggest 只放你确实建议用户去处理的具体路径，没有就给空数组。',
     '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
@@ -234,7 +248,7 @@
     '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
     '不要代码块围栏，不要解释，JSON 前后不要有任何文字。',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
-    '回答要求：中文，不超过 300 字，结论先行，能用列表就用列表（每行以「· 」开头）。',
+    '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
     'evidence 只能引用这一轮真正调用过的工具；suggest 只放你确实建议用户去处理的具体路径，没有就给空数组。',
     '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
@@ -245,14 +259,14 @@
   const PROPOSE = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
 
   const PAGE_TOOLS = {
-    ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_files', 'top_indexed', 'empty_dirs',
+    ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs',
       'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize',
       'archive_entries', 'clean_candidates', 'settings_read', 'search_roots']),
-    tools: PROPOSE.concat(['top_files', 'top_indexed', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
+    tools: PROPOSE.concat(['top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
     organize: PROPOSE.concat(['list_dir', 'read_file', 'organize_preview', 'explain_rules', 'last_organize', 'installed_apps']),
-    search: PROPOSE.concat(['search_files', 'top_indexed', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
+    search: PROPOSE.concat(['search_files', 'top_folders', 'top_indexed', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
     apps: PROPOSE.concat(['installed_apps', 'list_dir', 'read_file']),
-    archive: PROPOSE.concat(['list_dir', 'read_file', 'top_files', 'top_indexed', 'archive_entries'])
+    archive: PROPOSE.concat(['list_dir', 'read_file', 'top_folders', 'top_files', 'top_indexed', 'archive_entries'])
   };
 
   /* 动作目录由 registry 在启动时灌进来（内容只随版本变化，仍是稳定前缀） */

@@ -89,9 +89,9 @@
   const PROPOSE_TOOLS = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
 
   const PERM_TOOLS = {
-    readonly: ['list_dir', 'read_file', 'disk_roots', 'top_indexed', 'last_organize', 'explain_rules'],
-    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'top_indexed', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
-    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'top_indexed', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
+    readonly: ['list_dir', 'read_file', 'disk_roots', 'top_folders', 'top_indexed', 'last_organize', 'explain_rules'],
+    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
+    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
   };
 
   /* 动手档位：off 完全不提，confirm 每次点，auto 可撤销的小动作倒计时自动执行，
@@ -1372,7 +1372,14 @@
       const policy = proposals ? proposals.getPolicy() : { mode: 'off' };
       const canWrite = policy.mode !== 'off';
       const allowed = PERM_TOOLS[state.permission] || PERM_TOOLS.standard;
-      const allTools = AITools.makeTools({ API: window.API, proposals: proposals, navigate: navigateTo });
+      const allTools = AITools.makeTools({
+        API: window.API,
+        proposals: proposals,
+        navigate: navigateTo,
+        /* 工具跑到一半要说话时用这个（例如「正在后台建索引，约几秒」）。
+           没有它，建索引那几秒界面上什么都不动，看起来就像卡死了。 */
+        say: (text) => addNotice(text, 'info')
+      });
       const tools = {};
       allowed.forEach((n) => {
         /* 关掉动手之后提案工具也一起收起来：模型看不见，就不会提一张注定被拒的卡片 */

@@ -29,7 +29,11 @@
     let i = -1;
     let x = v;
     do { x /= 1024; i += 1; } while (x >= 1024 && i < units.length - 1);
-    return (x >= 10 ? x.toFixed(0) : x.toFixed(1)) + ' ' + units[i];
+    /* 一律保留一位小数，不按大小改精度。
+       曾经写成「大于 10 就不留小数」，结果 17807225851 显示成「17 GB」，
+       模型答「16.6 GB」——数字其实没错，但同源校验按 2% 容差算不过，
+       真数据被当成编的，答案尾部挂了「体积数字没核对上」的警告。 */
+    return x.toFixed(1) + ' ' + units[i];
   };
 
   const fmtAge = (mtime) => {
@@ -118,6 +122,9 @@
   function makeTools(deps) {
     const API = deps.API;
     const proposals = deps.proposals;
+    /* 工具执行期间往界面上报一句话。建索引要几秒，不报进度用户会以为卡死；
+       deps.say 没给（自检脚本里）就静默丢弃，不能让提示变成必需依赖。 */
+    const say = typeof deps.say === 'function' ? deps.say : () => {};
 
     const table = {
       list_dir: {
@@ -220,10 +227,56 @@
         summary: (args, r) => `大文件排行 ${args.dir} · ${r.count} 个${r.partial ? '（部分）' : ''}`
       },
 
+      /* 「什么最占空间」的正解：按目录汇总体积。
+         单个文件（某个 .pak 5.4 GB）对人没有意义，人要知道的是「哪个文件夹/软件」。
+         索引没建时引擎会自己建一次（auto），这里只把 built 标出来让界面提示。 */
+      top_folders: {
+        label: '目录体积排行',
+        run: async (args) => {
+          const want = Math.min(Math.max(Number(args.limit) || 15, 1), 50);
+          const depth = Math.min(Math.max(Number(args.depth) || 3, 1), 6);
+          const minSize = Math.max(0, Math.floor(Number(args.min_size) || 0));
+          const parent = String(args.parent || '').trim();
+          const body = { limit: want, depth, min_size: minSize, auto: args.auto !== false };
+          if (parent) body.parent = parent;
+          /* 先看有没有索引，没有就先报一句「正在建」，别让用户对着转圈猜 */
+          if (body.auto) {
+            try {
+              const st = await API.engine('search.status', {});
+              if (!(Number(st && st.files) > 0)) say('本地还没有索引，正在后台建一次（约几秒，之后就不用再建了）');
+            } catch (e) { /* 状态查不到就照常跑，引擎自己会处理 */ }
+          }
+          const r = await withTimeout(API.engine('search.folders', body), 60000, '目录体积排行');
+          const items = ((r && r.items) || []).map((it) => ({
+            path: it.path,
+            name: it.name,
+            size: fmtBytes(it.size),
+            bytes: Number(it.size) || 0,
+            files: Number(it.files) || 0,
+            pct: Number(it.pct) || 0
+          }));
+          const base = {
+            count: items.length,
+            bytes: fmtBytes(r && r.bytes),
+            depth,
+            parent: parent || '',
+            roots: (r && r.roots) || [],
+            indexed: (r && r.indexed) || 0,
+            built: !!(r && r.built),
+            hint: (r && r.hint) || '',
+            error: (r && r.error) || ''
+          };
+          if (base.built) base.note = '本地还没有索引，刚刚自动建了一次（几秒），现在是整机统计';
+          if (!base.roots.length) base.note = '本地索引还没建起来，这个结果不能当整机统计';
+          return pageFit(base, items, 0, want);
+        },
+        summary: (args, r) => `目录体积排行 · ${r.count} 个${r.built ? '（刚建索引）' : ''}`
+      },
+
       /* 和 top_files 的分工：
          top_files 现扫一个目录，扫不完只能给部分结果；
          这里读本地索引里已经存下的 size 列，毫秒级、覆盖所有已索引根目录。
-         「最近什么最占空间」这类问题应该先走这里，别再让模型去撞 20 秒上限。 */
+         只用于「某个目录里哪个文件最大」，回答「什么最占空间」要用 top_folders。 */
       top_indexed: {
         label: '索引排行',
         run: async (args) => {

@@ -1172,6 +1172,112 @@ for (const c of CASES) {
   results.push({ id: 'G47', group: '索引', pass: bad.length === 0, why: bad.join('；'), tools: 'top_indexed', steps: res.usage ? res.usage.steps : 0 });
 }
 
+/* G48 「什么最占空间」必须按目录汇总，不能只报单个文件
+   这是用户实测后推翻上一版方案的地方：上一版答「某个 .pak 5.4 GB」，
+   用户说「什么都感觉用不上」—— 因为人认不出那是什么，也不知道该不该动。
+   正确出口是「PUBG 这个目录 60 GB」，人能据此行动。 */
+{
+  const folderApi = Object.assign({}, fakeApi, {
+    engine: async (method, params) => {
+      if (method === 'search.status') return { files: 1400000, dirs: 110000, roots: ['D:\\', 'E:\\'] };
+      if (method === 'search.folders') {
+        const all = [
+          { path: 'E:\\SteamLibrary\\steamapps\\common', name: 'common', size: 57789706255, files: 6700, pct: 14.6 },
+          { path: 'D:\\App\\微信\\Wechatdate', name: 'Wechatdate', size: 17807225851, files: 221342, pct: 4.5 }
+        ];
+        return { items: all, total: all.length, source: 'index', roots: ['D:\\', 'E:\\'], indexed: 1400000, depth: 3, bytes: 396272845688, built: false, elapsed_ms: 1200 };
+      }
+      return fakeApi.engine(method, params);
+    }
+  });
+  const said = [];
+  const folderTools = makeTools({ API: folderApi, say: (t) => said.push(t) });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_folders', { limit: 5 }),
+      answer({ answer: '最占空间的是 Steam 游戏库 common 目录（53.8 GB，占 14.6%），里面主要是 PUBG 这类游戏；其次是微信聊天记录 Wechatdate（16.6 GB）。' })
+    ]),
+    tools: folderTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '最近什么最占空间？', ctx: { page: 'ai' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const bad = [];
+  if (!res.trace.length || res.trace[0].tool !== 'top_folders') bad.push('没有用 top_folders（按目录汇总），用成了别的东西');
+  if (!Array.isArray(r.items) || !r.items.length) bad.push('没拿到目录排行');
+  if (r.items && r.items[0] && !/common/.test(r.items[0].name)) bad.push('第一条不是体积最大的目录');
+  if (r.items && r.items[0] && !r.items[0].pct) bad.push('没带占比（人没尺度感）');
+  if (r.bytes && !/GB/.test(String(r.bytes))) bad.push('总量没转成可读单位');
+  if (!res.ok) bad.push('这一轮应该能正常作答');
+  results.push({ id: 'G48', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G49 没索引时必须先报「正在建」，不能对着转圈不吭声
+   用户明确要求「AI 需要时自己后台建，带进度提示」。 */
+{
+  let built = false;
+  const coldApi = Object.assign({}, fakeApi, {
+    engine: async (method, params) => {
+      if (method === 'search.status') return { files: 0, dirs: 0, roots: [] };
+      if (method === 'search.folders') {
+        built = true;
+        return {
+          items: [{ path: 'D:\\Downloads', name: 'Downloads', size: 3221225472, files: 12, pct: 100 }],
+          total: 1, source: 'index', roots: ['D:\\Downloads'], indexed: 12,
+          depth: 3, bytes: 3221225472, built: true, elapsed_ms: 8000
+        };
+      }
+      return fakeApi.engine(method, params);
+    }
+  });
+  const said = [];
+  const coldTools = makeTools({ API: coldApi, say: (t) => said.push(t) });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_folders', { limit: 5 }),
+      answer({ answer: '最占空间的是 Downloads 目录（3.0 GB）。' })
+    ]),
+    tools: coldTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '什么最占空间', ctx: { page: 'ai' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const bad = [];
+  if (!built) bad.push('没索引时没有触发自动建');
+  if (!said.length) bad.push('建索引期间没有提示用户（会以为卡死）');
+  if (said.length && !/索引/.test(said.join(''))) bad.push('提示里没说清在建什么');
+  if (!r.built) bad.push('没把 built 标记传给模型，答案无法说明「刚建过」');
+  if (!res.ok) bad.push('建完索引应该能正常作答');
+  results.push({ id: 'G49', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G50 「关」强度也必须给完整结论，不许一句话打发
+   用户实测踩到的坑：thinking=off 的提示词原文是「只做必要的一次查询」，
+   模型照做，答案就只剩一个裸路径。关只该省查证步骤，不该省答案内容。 */
+{
+  const names = ['top_folders', 'list_dir'];
+  const offSys = prompt.systemPrompt(names, true);
+  const bad = [];
+  if (/只做必要的一次查询/.test(offSys)) bad.push('提示词里还留着「关=只做必要的一次查询」的老定义');
+  if (!/关[：:].*结论.*完整|结论必须完整|一样不能少/.test(offSys)) bad.push('没有写明「关也要给完整结论」');
+  if (/不超过 300 字/.test(offSys)) bad.push('答案还有 300 字硬上限，装不下「是什么、占多少、能不能清」');
+  if (!/这是什么东西|说清.*是什么|PUBG/.test(offSys)) bad.push('没有要求解释「这是什么东西」');
+  results.push({ id: 'G50', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* G51 老配置里 thinking='off' 要迁移成 medium，否则用户继续踩同一个坑
+   老用户当初选 off 是为了省 token，不是想要一句话答案。 */
+{
+  const { normalizeUi } = require('./store.js');
+  const bad = [];
+  const migrated = normalizeUi({ thinking: 'off' });
+  if (migrated.thinking !== 'medium') bad.push('老配置的 off 没有迁移成 medium，用户会继续拿到一句话答案');
+  if (migrated.v !== 1) bad.push('没有记下迁移版本号，每次启动都会重复迁移');
+  const kept = normalizeUi({ thinking: 'off', v: 1 });
+  if (kept.thinking !== 'off') bad.push('迁移之后用户主动选的 off 被改掉了（只该迁移一次）');
+  const fresh = normalizeUi({ thinking: 'high' });
+  if (fresh.thinking !== 'high') bad.push('非 off 的档位不该被迁移影响');
+  results.push({ id: 'G51', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 
