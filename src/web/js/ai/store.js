@@ -49,7 +49,11 @@
     /* 端点能力记忆：键是「主机|模型」，值是学到的习惯（是否认 response_format、
        是否认 stream_options、能不能流式、要不要预留给思考、实测耗时）。
        不同模型差异很大，所以按模型各记一份，换模型就重新学。 */
-    caps: {}
+    caps: {},
+    /* 备用端点：主端点限流/欠费/模型下线时按顺序往后切。
+       每项 {endpoint, model, key?}；key 省略就沿用主密钥。
+       真实日志里 60% 的失败是 429/402/503，没有备份就只能整轮作废。 */
+    fallbacks: []
   };
 
   /* 端点没报窗口时的兜底：1M。
@@ -222,6 +226,9 @@
           if (typeof v[f] === 'boolean') one[f] = v[f];
         });
         if (v.tokenParam === 'max_tokens' || v.tokenParam === 'max_completion_tokens') one.tokenParam = v.tokenParam;
+        /* nativeTools 是「这个端点认不认 function calling」的结论：
+           true 记得住（下次直接按原生发），false 也记得住（永久回落 JSON）。 */
+        if (typeof v.nativeTools === 'boolean') one.nativeTools = v.nativeTools;
         ['maxTokens', 'latencyMs', 'timeoutMs'].forEach((f) => {
           const n = Number(v[f]);
           if (Number.isFinite(n) && n > 0 && n <= 400000) one[f] = Math.round(n);
@@ -230,6 +237,25 @@
         caps[k] = one;
       });
       out.caps = caps;
+    }
+    /* 备用端点：最多 5 条，只留 endpoint/model/key 三个字段。
+       空项直接丢掉——界面上删到一半的空白行不该变成一条「配置」。 */
+    if (Array.isArray(raw.fallbacks)) {
+      const list = [];
+      const seen = new Set();
+      raw.fallbacks.forEach((f) => {
+        if (!f || typeof f !== 'object') return;
+        const endpoint = normEndpoint(typeof f.endpoint === 'string' ? f.endpoint : '');
+        const model = typeof f.model === 'string' ? f.model.trim().slice(0, 120) : '';
+        if (!endpoint || !model) return;
+        const id = endpoint + '|' + model;
+        if (seen.has(id)) return;
+        seen.add(id);
+        const one = { endpoint: endpoint, model: model };
+        if (typeof f.key === 'string' && f.key.trim()) one.key = f.key.trim();
+        list.push(one);
+      });
+      out.fallbacks = list.slice(0, 5);
     }
     return out;
   }
@@ -311,12 +337,24 @@
     evidence: 8,
     entries: 16,
     acts: 40,
-    paths: 8
+    paths: 8,
+    /* system 提示是「规则本身」，不是对话内容：它一被截断，模型就开始
+       不守规矩（不调工具、乱编体积），而且截断点在句子中间，看不出被截过。
+       给到 32KB 远大于实测 4KB，正常永远碰不到这个上限。 */
+    system: 32000
   };
 
   function cut(v, n) {
     const s = v == null ? '' : String(v);
     return s.length > n ? s.slice(0, n) + '…' : s;
+  }
+
+  /* 落盘与恢复都只认这三种角色：别的一律当 user。
+     以前这里是 `x.role === 'assistant' ? 'assistant' : 'user'`，
+     把 system 折成 user —— 见 slimMsg 里 checkpoint 那段注释。 */
+  const ROLES = { system: 'system', user: 'user', assistant: 'assistant' };
+  function roleOf(r) {
+    return ROLES[String(r || '')] || 'user';
   }
 
   function slimStep(t) {
@@ -424,10 +462,13 @@
         calledTools: (m.checkpoint.calledTools || []).slice(-LIMITS.trace).map(String),
         compressed: String(m.checkpoint.compressed || 'none'),
         /* messages 可能很长，但这是续跑的本体：截太狠会让「继续」变成
-           「带着半截上下文重新猜」。这里只挡一个上限，正常一轮远达不到。 */
+           「带着半截上下文重新猜」。这里只挡一个上限，正常一轮远达不到。
+           角色必须原样保留：以前把非 assistant 一律写成 user，system 提示
+           落盘后变成一条 user 消息，重启点「继续」时模型面前就没有规则了
+           （实测被腰斩在 4001 字，正好是 cut 的上限）。 */
         messages: m.checkpoint.messages.slice(-60).map((x) => ({
-          role: x && x.role === 'assistant' ? 'assistant' : 'user',
-          content: cut(x && x.content, 4000)
+          role: roleOf(x && x.role),
+          content: cut(x && x.content, roleOf(x && x.role) === 'system' ? LIMITS.system : 4000)
         })),
         trace: (m.checkpoint.trace || []).slice(-LIMITS.trace).map(slimStep).filter(Boolean)
       };
@@ -515,6 +556,6 @@
   /* 自检要直接验「落盘后还能捡回来」：把精简器一起导出，
      否则只能整套跑浏览器环境才测得到。 */
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = Object.assign({}, API_, { slimMsg, slimStep, LIMITS });
+    module.exports = Object.assign({}, API_, { slimMsg, slimStep, LIMITS, roleOf });
   }
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -89,9 +89,9 @@
   const PROPOSE_TOOLS = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
 
   const PERM_TOOLS = {
-    readonly: ['list_dir', 'read_file', 'disk_roots', 'last_organize', 'explain_rules'],
-    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
-    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
+    readonly: ['list_dir', 'read_file', 'disk_roots', 'top_indexed', 'last_organize', 'explain_rules'],
+    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'top_indexed', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
+    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_files', 'top_indexed', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
   };
 
   /* 动手档位：off 完全不提，confirm 每次点，auto 可撤销的小动作倒计时自动执行，
@@ -1569,7 +1569,16 @@
         prompt_tokens: res.usage ? res.usage.prompt_tokens : 0,
         completion_tokens: res.usage ? res.usage.completion_tokens : 0,
         ok: !!res.ok,
-        degraded: !!res.degraded
+        degraded: !!res.degraded,
+        /* 光记 ok/steps 等于没记：60% 的失败在日志里全是同一个长相，
+           查不出是限流、欠费、密钥不认还是模型名写错。这四项是判据。 */
+        code: res.code || '',
+        model: res.model || '',
+        endpoint: res.endpoint || '',
+        protocol: res.protocol || '',
+        switched: res.switched ? (res.switched.host + '/' + res.switched.model) : '',
+        exhausted: !!res.exhausted,
+        stopped: !!res.stopped
       });
     }
 

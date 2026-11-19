@@ -1113,6 +1113,56 @@ class TestSearch(EngineCase):
         if res["source"] == "index":
             self.assertLessEqual(res["total"], 2)
 
+    def test_top_by_size(self):
+        """search.top：读索引里已有的 size 列，按体积降序，不遍历磁盘。"""
+        folder = self.new_folder()
+        sizes = {"big_a.bin": 4096, "big_b.bin": 2048, "small_c.bin": 8}
+        for name, n in sizes.items():
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"x" * n)
+        self.build(folder, reuse=False)
+        res = self.rpc_ok("search.top", {"limit": 10})
+        self.assertEqual(res["source"], "index")
+        self.assertIsInstance(res["elapsed_ms"], int)
+        self.assertIsInstance(res["roots"], list)
+        self.assertIn(os.path.normcase(folder),
+                      {os.path.normcase(r) for r in res["roots"]})
+        names = [i["name"] for i in res["items"]]
+        self.assertIn("big_a.bin", names)
+        self.assertIn("big_b.bin", names)
+        # 降序：第一个必须不小于第二个
+        got = [i["size"] for i in res["items"]]
+        self.assertEqual(got, sorted(got, reverse=True), res)
+        for item in res["items"]:
+            self.assertIsInstance(item["size"], int)
+            self.assertIsInstance(item["mtime"], int)
+
+    def test_top_limit_and_min_size(self):
+        folder = self.new_folder()
+        for name, n in (("t1.bin", 3000), ("t2.bin", 2000), ("t3.bin", 4)):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"x" * n)
+        self.build(folder, reuse=False)
+        res = self.rpc_ok("search.top", {"limit": 1})
+        self.assertLessEqual(res["total"], 1)
+        res2 = self.rpc_ok("search.top", {"limit": 10, "min_size": 1000})
+        for item in res2["items"]:
+            self.assertGreaterEqual(item["size"], 1000)
+
+    def test_top_bad_params_are_errors(self):
+        for params in ({"limit": 0}, {"limit": "many"},
+                       {"limit": 5, "min_size": "big"}):
+            r = self.rpc("search.top", params)
+            self.assertFalse(r["ok"], (params, r))
+            self.assertTrue(r["error"], params)
+
+    def test_top_without_index_has_hint(self):
+        """没有任何索引时不能静默返回空表：要告诉用户「还没建索引」。"""
+        res = self.rpc_ok("search.top", {"limit": 5})
+        if not res["roots"]:
+            self.assertIn("hint", res)
+            self.assertIn("索引", res["hint"])
+
 
 class TestSettingsSet(EngineCase):
     """settings.set：只写白名单键，类型/范围/取值都要挡住。"""

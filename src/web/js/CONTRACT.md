@@ -115,6 +115,7 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 | `search.status` | {} | `{index_path,indexed,roots,built_at,backend}` |
 | `search.index` | `{roots:[...],rebuild?}` | 索引结果 |
 | `search.query` | `{q,limit?,offset?}` | `{items:[...],total}` |
+| `search.top` | `{limit?,min_size?}` | `{items:[{name,path,size,mtime}],total,source:"index",roots,indexed,elapsed_ms,hint?}` |
 | `rules.validate` | `{path}` | 校验结果 |
 | `rules.preview` | `{path, dest?}` | 预览结果 |
 | `rules.run` | `{path, dest?, dry_run?}` | 执行结果 |

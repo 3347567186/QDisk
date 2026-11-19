@@ -1161,6 +1161,59 @@
                 state.aiModelsErr ? h('div', { class: 'small', style: 'color:var(--danger)', text: state.aiModelsErr }) : null,
                 modelReport))
         );
+        /* 备用端点：主端点限流/欠费/模型下线时按顺序往后切。
+           放在「模型」这张卡里而不是单开一张：它和主模型是同一件事的两级 ——
+           「用哪个模型答」的完整答案包含「主的不行时用哪个」。
+           上限 5 条，与 store.js normalize 的截断一致，改一处要同时改两处。 */
+        const fbList = () => (Array.isArray(d.fallbacks) ? d.fallbacks : []);
+        const fbRowOf = (item, idx) => h('div', { class: 'row' },
+          h('input', {
+            class: 'input mono', spellcheck: 'false', value: item.endpoint || '',
+            placeholder: T('备用接口地址', 'Fallback endpoint'),
+            'aria-label': T('备用接口地址', 'Fallback endpoint'),
+            oninput: (e) => { item.endpoint = e.target.value.trim(); state.aiTest = null; },
+            /* 和主地址一样：控制台复制来的是 base URL，失焦补全免得保存后 404 */
+            onblur: (e) => {
+              const v = normEndpoint(e.target.value);
+              if (v && v !== e.target.value) { e.target.value = v; item.endpoint = v; }
+            }
+          }),
+          h('input', {
+            class: 'input mono', spellcheck: 'false', value: item.model || '',
+            placeholder: T('模型名', 'Model'),
+            'aria-label': T('备用模型名', 'Fallback model'),
+            oninput: (e) => { item.model = e.target.value.trim(); state.aiTest = null; }
+          }),
+          h('button', {
+            class: 'btn ghost sm', type: 'button',
+            title: T('移除这一条', 'Remove this entry'),
+            onclick: () => {
+              const l = fbList().slice();
+              l.splice(idx, 1);
+              d.fallbacks = l;
+              paint();
+            }
+          }, icon('trash', 14))
+        );
+
+        const fbBox = h('div', { class: 'stack' },
+          ...fbList().map(fbRowOf),
+          fbList().length < 5
+            ? h('button', {
+              class: 'btn ghost sm', type: 'button',
+              onclick: () => {
+                /* 只加空行、不落盘：没填完的空白条目在保存时会被 normalize 丢掉 */
+                d.fallbacks = fbList().concat([{ endpoint: '', model: '' }]);
+                paint();
+              }
+            }, icon('plus', 14), h('span', { text: T('加一个备用模型', 'Add a fallback') }))
+            : h('div', { class: 'small muted', text: T('最多 5 个', 'Up to 5') })
+        );
+
+        cardModel.appendChild(setRow(T('备用模型', 'Fallbacks'), fbBox,
+          T('主端点限流、欠费或模型下线时，按顺序自动往后切，答案顶部会写明切到了哪个。留空表示不切换',
+            'When the primary is rate-limited, out of credit or gone, these are tried in order; the answer states which one answered')));
+
         /* 三个数字字段并一行：窗口 / 温度 / 轮数都是短值，
            各占一整行会白掉三行高度。说明文字各自压进 title。 */
         cardModel.appendChild(h('div', { class: 'set-row' },

@@ -133,6 +133,19 @@ const fakeApi = {
     if (method === 'search.query') {
       return { items: [{ name: 'a.iso', path: 'D:\\Downloads\\a.iso', size: 3221225472, mtime: 0 }], total: 1, source: 'index' };
     }
+    /* 体积排行读的是索引里已经存好的 size 列，不现扫：
+       毫秒级、覆盖所有已索引目录，这是它和 top_files 的分工。 */
+    if (method === 'search.top') {
+      const all = [
+        { name: 'a.iso', path: 'D:\\Downloads\\a.iso', size: 3221225472, mtime: 0 },
+        { name: 'setup.exe', path: 'D:\\Downloads\\setup.exe', size: 92274688, mtime: 0 },
+        { name: 'data.bak', path: 'D:\\Downloads\\data.bak', size: 12582912, mtime: 0 }
+      ];
+      const minSize = Number(params && params.min_size) || 0;
+      const limit = Math.min(Number(params && params.limit) || 50, all.length);
+      const items = all.filter((x) => x.size >= minSize).slice(0, limit);
+      return { items, total: items.length, source: 'index', roots: ['D:\\Downloads'], indexed: 1, elapsed_ms: 2 };
+    }
     if (method === 'scan') {
       if (FAIL_FIRST.armed) {
         FAIL_FIRST.armed = false;
@@ -753,15 +766,22 @@ for (const c of CASES) {
   results.push({ id: 'G35', group: '记忆', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
 }
 
-/* 断点必须能落盘再捡起来：关掉页面再打开，「继续」还接得上 */
+/* 断点必须能落盘再捡起来：关掉页面再打开，「继续」还接得上。
+   这里连着验三件事，都是真机踩过的：
+   ① role 保真 —— 以前只认 assistant，其余一律写成 user，system 直接被折成 user；
+   ② system 不许截断 —— 4KB 的规则被 cut(…,4000) 腰斩，恢复后模型就不守规矩了；
+   ③ 恢复侧不信任落盘的 system，必须用当前这套规则重建（否则改过的规则永远不生效）。 */
 {
   const { slimMsg } = require('./store.js');
+  /* 造一条超过 4000 字的 system：正是真机里被腰斩的长度 */
+  const longSystem = '你是整理助手的内置 AI 助手。' + '规则：所有数字必须来自工具返回。'.repeat(300);
   const cp = {
     v: 1,
     steps: 2,
     messages: [
-      { role: 'system', content: '系统提示' },
-      { role: 'user', content: '工具结果：list_dir ...' }
+      { role: 'system', content: longSystem },
+      { role: 'user', content: '工具结果：list_dir ...' },
+      { role: 'assistant', content: '{"tool":"top_files","args":{"dir":"D:\\\\Downloads"}}' }
     ],
     trace: [{ tool: 'list_dir', label: '列目录', ok: true, summary: '列目录 D:\\Downloads · 4 项' }],
     calledTools: ['list_dir'],
@@ -771,9 +791,60 @@ for (const c of CASES) {
   const bad = [];
   if (!slim.checkpoint) bad.push('checkpoint 没有被落盘');
   else {
-    if (!Array.isArray(slim.checkpoint.messages) || slim.checkpoint.messages.length < 2) bad.push('断点里的消息丢了');
+    const msgs = slim.checkpoint.messages;
+    if (!Array.isArray(msgs) || msgs.length < 3) bad.push('断点里的消息丢了');
+    else {
+      if (msgs[0].role !== 'system') bad.push('system 被改写成了 ' + msgs[0].role + '（重启后规则就没了）');
+      if (String(msgs[0].content || '').length < 4000) {
+        bad.push('system 被截断成 ' + String(msgs[0].content || '').length + ' 字（规则被腰斩）');
+      }
+      if (msgs[2].role !== 'assistant') bad.push('assistant 的 role 没保住');
+      if (msgs[1].role !== 'user') bad.push('user 的 role 没保住');
+    }
     if (!Array.isArray(slim.checkpoint.calledTools) || !slim.checkpoint.calledTools.length) bad.push('断点里丢了已调用工具');
     if (slim.checkpoint.steps !== 2) bad.push('断点步数不对');
+  }
+
+  /* 恢复侧：落盘里的 system 是旧的、且首条不是 system 时，
+     必须用当前规则重建，并补一句「接着上一轮继续」。 */
+  const SENT = [];
+  const capture = async (req) => {
+    try { SENT.push(JSON.parse(req.body)); } catch { SENT.push(null); }
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '接着上一轮：下载文件夹里有 4 项。' }) } }],
+        usage: { prompt_tokens: 900, completion_tokens: 40 }
+      })
+    };
+  };
+  const agent = createAgent({ transport: capture, tools, prompt, settings });
+  await agent.run({
+    userText: '继续',
+    ctx: { page: 'ai', dir: 'D:\\Downloads' },
+    /* 故意给一份坏断点：首条是 user、system 被腰斩 */
+    resume: {
+      v: 1, steps: 2, calledTools: ['list_dir'], compressed: 'none', trace: [],
+      messages: [
+        { role: 'user', content: longSystem.slice(0, 4001) },
+        { role: 'user', content: '工具结果：list_dir ...' }
+      ]
+    }
+  });
+  const sent = (SENT[0] && SENT[0].messages) || [];
+  if (!sent.length) bad.push('恢复后根本没发请求');
+  else {
+    if (sent[0].role !== 'system') bad.push('恢复时首条不是 system（当前规则没被重建）');
+    /* 重建出来的必须是当前 prompt，而不是断点里那份旧的。
+       两种协议形态都算「当前规则」：原生工具协议下 system 里不列工具表。 */
+    const names = Object.keys(tools);
+    const nowJson = prompt.systemPrompt(names, false);
+    const nowNative = prompt.systemPrompt(names, true);
+    const got = String(sent[0].content || '');
+    if (got !== nowJson && got !== nowNative) bad.push('恢复时没有用当前规则重建 system');
+    if (JSON.stringify(sent).indexOf('接着上一轮') < 0) bad.push('恢复时没有告诉模型「接着上一轮继续」');
+    /* 落盘里那份被腰斩的 system 绝不能再出现 */
+    if (JSON.stringify(sent).indexOf(longSystem.slice(0, 200)) >= 0) bad.push('把落盘里那份旧 system 又发了一遍');
   }
   results.push({ id: 'G36', group: '落盘', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
@@ -884,6 +955,221 @@ for (const c of CASES) {
   if (!res.ok) bad.push('短时限流之后自动重试仍没成功');
   if (n < 2) bad.push('短时限流没有触发重试，只请求了 ' + n + ' 次');
   results.push({ id: 'G40', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* ---------------- 追加：原生工具调用（function calling） ----------------
+   第二层根因：请求体从来没有 tools 字段，全靠 250 行 JSON 容错脚手架撑着。
+   这里验三件事：
+   ① 有工具能力时真的发 tools + tool_choice，且不再发 response_format（两套约束互斥）；
+   ② 能解析 message.tool_calls（含流式分片）并执行；
+   ③ 端点明确说「不认 tools」时回落 JSON，且 system 当场跟着改。 */
+{
+  const SENT = [];
+  const native = async (req) => {
+    let body = null;
+    try { body = JSON.parse(req.body); } catch { body = null; }
+    SENT.push(body);
+    const hasTool = body && Array.isArray(body.tools) && body.tools.length;
+    if (!hasTool) {
+      return { status: 400, body: '{"error":{"message":"tools is not supported by this model"}}' };
+    }
+    /* 第一次返回一个工具调用，第二次给结论 */
+    if (SENT.length === 1) {
+      return {
+        status: 200,
+        body: JSON.stringify({
+          choices: [{
+            message: {
+              content: null,
+              tool_calls: [{
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'list_dir', arguments: JSON.stringify({ dir: 'D:\\Downloads' }) }
+              }]
+            },
+            finish_reason: 'tool_calls'
+          }],
+          usage: { prompt_tokens: 600, completion_tokens: 20 }
+        })
+      };
+    }
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '下载文件夹里有 4 项，其中 a.iso 最大，3.0 GB。', evidence: [{ tool: 'list_dir' }] }) } }],
+        usage: { prompt_tokens: 700, completion_tokens: 40 }
+      })
+    };
+  };
+  const agent = createAgent({ transport: native, tools, prompt, settings });
+  const res = await agent.run({ userText: '下载文件夹里有什么', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  const first = SENT[0] || {};
+  const bad = [];
+  if (!Array.isArray(first.tools) || !first.tools.length) bad.push('请求体里没有 tools 字段');
+  else {
+    const fn = first.tools[0] && first.tools[0].function;
+    if (!fn || first.tools[0].type !== 'function') bad.push('tools 不是 OpenAI function schema 形状');
+    else if (!fn.name || !fn.parameters || fn.parameters.type !== 'object') bad.push('function schema 缺 name/parameters');
+  }
+  if (first.tool_choice !== 'auto') bad.push('没有发 tool_choice:auto');
+  if (first.response_format) bad.push('原生协议下不该再发 response_format（两套约束互斥）');
+  if (!res.ok) bad.push('原生工具调用之后没拿到结论：' + String(res.answer || '').slice(0, 60));
+  if (res.protocol !== 'tools') bad.push('结果里没有标出走的是 tools 协议');
+  if (!(res.trace || []).some((t) => t.tool === 'list_dir' && t.ok)) bad.push('原生 tool_calls 没有被执行');
+  results.push({ id: 'G42', group: '协议', pass: bad.length === 0, why: bad.join('；'), tools: 'list_dir', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* 端点不认 tools：必须自动回落 JSON，而不是整轮作废。
+   真实免费池里这种端点占多数（这就是第二层根因的由来）。 */
+{
+  let n = 0;
+  const SENT = [];
+  const noTools = async (req) => {
+    n += 1;
+    let body = null;
+    try { body = JSON.parse(req.body); } catch { body = null; }
+    SENT.push(body);
+    if (body && Array.isArray(body.tools) && body.tools.length) {
+      return { status: 400, body: '{"error":{"message":"Invalid request: tools is not supported"}}' };
+    }
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '这个接口只支持 JSON 约定，已经照常查到了：下载文件夹里有 4 项。' }) } }],
+        usage: { prompt_tokens: 700, completion_tokens: 40 }
+      })
+    };
+  };
+  const agent = createAgent({ transport: noTools, tools, prompt, settings });
+  const res = await agent.run({ userText: '下载文件夹里有什么', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  const bad = [];
+  if (!res.ok) bad.push('不认 tools 时没有回落成功');
+  if (n < 2) bad.push('没有重试，只请求了 ' + n + ' 次');
+  if (res.protocol !== 'json') bad.push('回落之后协议没标成 json');
+  const last = SENT[SENT.length - 1] || {};
+  if (Array.isArray(last.tools) && last.tools.length) bad.push('回落之后还在发 tools');
+  if (!last.response_format) bad.push('回落之后没改回 response_format');
+  const sys = ((last.messages || [])[0] || {}).content || '';
+  if (sys && sys.indexOf('【可用工具】') < 0) bad.push('回落之后 system 没改回 JSON 那套（还写着用 function calling）');
+  results.push({ id: 'G43', group: '协议', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* ---------------- 追加：主端点不可用时自动换备用端点 ----------------
+   用户明确要求：可以自动换，但答案顶部必须写明切到了哪个。
+   真实日志里 402/429 长等待/401/404 合计 25 次，以前每一次都是整轮作废。 */
+{
+  let n = 0;
+  const primary = 'http://127.0.0.1:9/v1/chat/completions';
+  const backup = 'http://127.0.0.1:8/v1/chat/completions';
+  const twoHost = async (req) => {
+    n += 1;
+    if (req.url === primary) return { status: 402, body: '{"error":{"message":"Insufficient credits"}}' };
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: answer({ answer: '备用端点答的：下载文件夹里有 4 项。' }) } }],
+        usage: { prompt_tokens: 700, completion_tokens: 40 }
+      })
+    };
+  };
+  const agent = createAgent({
+    transport: twoHost,
+    tools,
+    prompt,
+    settings: Object.assign({}, settings, {
+      fallbacks: [{ endpoint: backup, model: 'backup-model' }]
+    })
+  });
+  const res = await agent.run({ userText: '下载文件夹里有什么', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  const bad = [];
+  if (!res.ok) bad.push('换到备用端点之后仍失败');
+  if (n < 2) bad.push('没有换端点，只请求了 ' + n + ' 次');
+  if (!res.switched) bad.push('没有记下切到了哪个端点');
+  else if (res.switched.model !== 'backup-model') bad.push('记错了切过去的模型：' + res.switched.model);
+  if (!/已自动切换到/.test(String(res.answer || ''))) bad.push('答案顶部没有写明切换（用户明确要求）');
+  if (String(res.answer || '').indexOf('已自动切换到') > 20) bad.push('切换说明不在答案顶部');
+  results.push({ id: 'G44', group: '故障', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* 备用端点也挂了：必须给出人话，不许无限换下去，也不许把原始 JSON 摆出来。
+   注意期望的是「降级结果」而不是抛异常：降级会带上断点，
+   用户点「继续」就能接着查，比一个红叉有用得多。 */
+{
+  let n = 0;
+  const dead = async () => { n += 1; return { status: 503, body: 'upstream overloaded' }; };
+  const agent = createAgent({
+    transport: dead,
+    tools,
+    prompt,
+    settings: Object.assign({}, settings, {
+      fallbacks: [{ endpoint: 'http://127.0.0.1:8/v1/chat/completions', model: 'b1' }]
+    })
+  });
+  let res = null;
+  let err = null;
+  try {
+    res = await agent.run({ userText: '下载文件夹里有什么', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  } catch (e) { err = e; }
+  const msg = String((err && err.message) || (res && res.answer) || '');
+  const bad = [];
+  if (err && !(res && !res.ok)) bad.push('全部端点都挂了却当成成功');
+  if (res && res.ok) bad.push('全部端点都挂了却当成成功');
+  if (!res && !err) bad.push('既没有结果也没有错误');
+  if (!/HTTP|接口|不可用|忙/.test(msg)) bad.push('文案没说清是接口的问题：' + msg.slice(0, 80));
+  if (/\{"/.test(msg)) bad.push('文案里摆着原始 JSON：' + msg.slice(0, 80));
+  /* 换过一次就该停：1 个主 + 1 个备用，各自重试有上限，不能变成死循环 */
+  if (n > 12) bad.push('切换之后还在无限重试，共请求 ' + n + ' 次');
+  if (res && !res.checkpoint) bad.push('全部挂掉时也该留断点');
+  results.push({ id: 'G45', group: '故障', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* ---------------- 追加：索引排行（读 size 列，不现扫） ----------------
+   第三层根因：「最近什么最占空间」= 3 盘 × 20 秒现扫，塞进 6 步对话循环。
+   索引里本来就存着 size 列，读它只要毫秒级，且覆盖所有已索引目录。 */
+{
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_indexed', { limit: 3 }),
+      answer({ answer: '索引里最大的是 a.iso，3.0 GB；其次是 setup.exe，88.0 MB。', evidence: [{ tool: 'top_indexed' }] })
+    ]),
+    tools, prompt, settings
+  });
+  const res = await agent.run({ userText: '最近什么最占空间', ctx: { page: 'ai' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const bad = [];
+  if (!res.ok) bad.push('索引排行之后没拿到结论');
+  if (!Array.isArray(r.items) || !r.items.length) bad.push('没有返回排行条目');
+  else if (r.items[0].name !== 'a.iso') bad.push('第一条不是最大的 a.iso');
+  if (!Array.isArray(r.roots) || !r.roots.length) bad.push('没有报出覆盖范围 roots（模型据此才敢说是整机统计）');
+  if (!/3\.0 GB/.test(String(res.answer || ''))) bad.push('没有用上工具返回的真实体积');
+  results.push({ id: 'G46', group: '索引', pass: bad.length === 0, why: bad.join('；'), tools: 'top_indexed', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* 索引还没建：必须自报家门说「这不是整机统计」，不许拿空结果当结论 */
+{
+  const noIndexApi = Object.assign({}, fakeApi, {
+    engine: async (method, params) => {
+      if (method === 'search.top') {
+        return { items: [], total: 0, source: 'index', roots: [], indexed: 0, hint: '本地还没有索引：先在「搜索」页添加目录并建立一次' };
+      }
+      return fakeApi.engine(method, params);
+    }
+  });
+  const noIndexTools = makeTools({ API: noIndexApi });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_indexed', { limit: 3 }),
+      answer({ answer: '本地索引还没建，所以现在给不出整机统计；可以去「搜索」页建一次索引。' })
+    ]),
+    tools: noIndexTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '最近什么最占空间', ctx: { page: 'ai' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const bad = [];
+  if (!r.hint) bad.push('没有把引擎给的 hint 传上来');
+  if (!r.note || !/索引/.test(String(r.note))) bad.push('没有说明「索引还没建，这不是整机统计」');
+  if (!res.ok) bad.push('空索引也应能正常作答（说清原因即可）');
+  results.push({ id: 'G47', group: '索引', pass: bad.length === 0, why: bad.join('；'), tools: 'top_indexed', steps: res.usage ? res.usage.steps : 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;

@@ -139,6 +139,7 @@
   const NUM_CAP = {
     list_dir: { limit: 200 },
     top_files: { limit: 50 },
+    top_indexed: { limit: 50 },
     empty_dirs: { depth: 3 },
     search_files: { limit: 20 }
   };
@@ -416,6 +417,31 @@
     return box && typeof box === 'object' && !Array.isArray(box) ? Object.assign({}, box) : {};
   }
 
+  /* ---------------- 备用端点（故障转移） ----------------
+     真实日志里 60% 的失败是 429 / 402 / 503：免费池的模型被限流或额度用光。
+     主端点没有备份时，整轮对话就作废，用户只能自己换模型重说一遍。
+     这里允许在设置里配一串备用「端点 + 模型」，只在端点明确拒绝服务
+     （限流、欠费、密钥不认、模型不存在、5xx 退避用尽）时往后切，
+     切了必须在答案顶部写明 —— 用户要知道这句话是谁说的。 */
+  function buildCandidates(settings) {
+    const out = [];
+    const push = (endpoint, model, key) => {
+      const e = String(endpoint || '').trim();
+      const m = String(model || '').trim();
+      if (!e || !m) return;
+      const id = e + '|' + m;
+      if (out.some((c) => c.id === id)) return;
+      let host = e;
+      try { host = new URL(e).host; } catch (err) { host = e.replace(/^https?:\/\//i, '').split('/')[0]; }
+      out.push({ id, endpoint: e, model: m, key: String(key || '').trim(), host: host || e });
+    };
+    push(settings.endpoint, settings.model, settings.apiKey);
+    (Array.isArray(settings.fallbacks) ? settings.fallbacks : []).forEach((f) => {
+      if (f && typeof f === 'object') push(f.endpoint, f.model, f.key || settings.apiKey);
+    });
+    return out;
+  }
+
   /* ---------------- 环路 ---------------- */
 
   function createAgent(deps) {
@@ -431,8 +457,27 @@
     const ctxWin = Number(settings.ctxWindow) || 0;
     const budget = Number(settings.turnBudget) || ctxWin || DEFAULT_WINDOW;
     const callTimeout = Number(settings.callTimeout) || DEFAULT_CALL_TIMEOUT;
-    const capKey = capKeyOf(settings.endpoint, settings.model);
-    const caps = readCaps(settings.caps, capKey);
+
+    /* ---------------- 当前在用的端点 ----------------
+       这一轮里可能中途换端点（限流/欠费/模型不存在），所以端点、模型、
+       密钥、能力记忆都是可变状态，不是常量。换了必须让用户看得见：
+       switched 记下「从哪来、为什么换」，答案顶部会写一行。 */
+    const candidates = buildCandidates(settings);
+    let candIdx = 0;
+    let curEndpoint = candidates.length ? candidates[0].endpoint : (settings.endpoint || '');
+    let curModel = candidates.length ? candidates[0].model : (settings.model || '');
+    let curKey = candidates.length ? candidates[0].key : (settings.apiKey || '');
+    let capKey = capKeyOf(curEndpoint, curModel);
+    let caps = readCaps(settings.caps, capKey);
+    /* 切换记录：{host, model, why, from} —— 只在真的换过之后才有值 */
+    let switched = null;
+
+    /** 答案顶部那一行：用户要求「换了模型必须写明」，所以放在最前面 */
+    function switchedNote() {
+      if (!switched) return '';
+      return '· 已自动切换到 ' + switched.host + ' / ' + switched.model
+        + '（原来那个：' + switched.why + '）\n\n';
+    }
 
     /** 记住这个端点+模型的一个能力，落盘后下次直接照做 */
     function remember(patch) {
@@ -441,6 +486,40 @@
       if (typeof deps.learn === 'function') {
         try { deps.learn(capKey, Object.assign({}, caps)); } catch (e) { /* 记忆失败不影响这一轮 */ }
       }
+    }
+
+    /* ---------------- 换下一个备用端点 ----------------
+       只在「这个端点明确不给服务」时调用：限流很久、欠费、密钥不认、
+       模型不存在、5xx 退避用完。换过去之后能力记忆也要换成那一家的，
+       否则会把上一个端点学到的「不认 response_format」错记到新的身上。 */
+    function switchCandidate(why) {
+      if (candIdx + 1 >= candidates.length) return false;
+      const from = { host: candidates[candIdx].host, model: curModel };
+      candIdx += 1;
+      const c = candidates[candIdx];
+      curEndpoint = c.endpoint;
+      curModel = c.model;
+      curKey = c.key || settings.apiKey || '';
+      capKey = capKeyOf(curEndpoint, curModel);
+      caps = readCaps(settings.caps, capKey);
+      switched = { host: c.host, model: c.model, why: why, from: from };
+      return true;
+    }
+
+    /** 这一轮走原生工具协议还是 JSON 约定？
+     *  三种状态：true 已知能（上次成功了）、false 已知不能（被拒过）、
+     *  未记录 = 试一次原生 —— 原生可靠得多，值得先试；
+     *  真被拒了 downgrade 会记成 false，之后永久走 JSON。 */
+    function nativeOn() {
+      return caps.nativeTools !== false;
+    }
+
+    /** 协议变了就当场改 system：里面写着「用 function calling 调工具」
+     *  而请求里已经没有 tools（或反过来），模型会照着不存在的协议干活。
+     *  降级和换端点都会改变协议，两处都必须调它。 */
+    function applySystem(messages, toolNames) {
+      if (!messages || !messages[0] || messages[0].role !== 'system') return;
+      messages[0] = { role: 'system', content: prompt.systemPrompt(toolNames, nativeOn()) };
     }
 
     /** 等待上限：用户设的、学到的耗时、默认值取最大；上限 300s（Rust 侧封顶） */
@@ -487,9 +566,10 @@
       return any ? out : null;
     }
 
-    function buildBody(messages, stream, maxTokens) {
+    function buildBody(messages, stream, maxTokens, toolNames) {
+      const native = nativeOn();
       const body = {
-        model: settings.model || '',
+        model: curModel || '',
         messages,
         stream: !!stream
       };
@@ -504,7 +584,18 @@
       }
       /* 能力是「学到的否定」：只有明确被拒过才不发这个字段 */
       if (stream && caps.streamOptions !== false) body.stream_options = { include_usage: true };
-      if (settings.jsonMode !== false && caps.jsonMode !== false) body.response_format = { type: 'json_object' };
+      /* 双协议只能二选一：
+         给了 tools 就不要再要 response_format —— 模型会一边调工具一边硬凑 JSON，
+         两套约束互相打架，反而更容易出格式错。没有 tools 能力时才靠 JSON 约定。 */
+      if (native) {
+        const schema = prompt.toolSchema ? prompt.toolSchema(toolNames || []) : [];
+        if (schema.length) {
+          body.tools = schema;
+          body.tool_choice = 'auto';
+        }
+      } else if (settings.jsonMode !== false && caps.jsonMode !== false) {
+        body.response_format = { type: 'json_object' };
+      }
       const extra = extraFields();
       if (extra) Object.assign(body, extra);
       return body;
@@ -517,6 +608,10 @@
       const t = String(detail || '');
       /* 参数名不同的模型（o1/o3/gpt-5 要 max_completion_tokens）：
          报错里点名了就换成它，没点名但提到 max_tokens 不认也换 */
+      if (/tool|function[_ ]?call/i.test(t) && caps.nativeTools !== false) {
+        remember({ nativeTools: false });
+        return 'nativeTools';
+      }
       if (/max_completion_tokens/i.test(t) && caps.tokenParam !== 'max_completion_tokens') {
         remember({ tokenParam: 'max_completion_tokens' });
         return 'tokenParam';
@@ -636,6 +731,7 @@
       thinking: '这个接口不认 thinking 字段，已改回用提示词控制强度',
       reasoning: '这个接口不认 reasoning 字段，已改回用提示词控制强度',
       jsonMode: '这个接口不支持强制 JSON 模式，已自动关掉重试',
+      nativeTools: '这个接口不认 tools 字段，已改回用 JSON 描述工具调用',
       streamOptions: '这个接口不认 stream_options，已自动去掉重试',
       stream: '这个接口不支持流式返回，已自动改成分段拿结果'
     };
@@ -661,6 +757,8 @@
         let streamUsage = null;
         let reasoningSeen = false;
         let reasonAcc = '';
+        /* 原生工具调用的流式片段：参数是分片到达的，必须按 index 拼回来 */
+        const sseCalls = [];
         if (sink) sink.thought = '';
         const pump = (piece) => {
           if (typeof piece !== 'string' || !piece) return;
@@ -692,6 +790,19 @@
               if (sink) sink.thought = reasonAcc;
             }
             if (d.content) sseText += d.content;
+            /* 原生工具调用在流里是增量：{index, function:{name, arguments 片段}}。
+               按 index 累积，别按到达顺序拼 —— 多工具并行时顺序不保证。 */
+            if (Array.isArray(d.tool_calls)) {
+              d.tool_calls.forEach((tc) => {
+                const i = Number(tc && tc.index) || 0;
+                if (!sseCalls[i]) sseCalls[i] = { id: '', name: '', args: '' };
+                const slot = sseCalls[i];
+                if (tc.id) slot.id = tc.id;
+                const fn = tc.function || {};
+                if (fn.name) slot.name += fn.name;
+                if (fn.arguments) slot.args += fn.arguments;
+              });
+            }
           }
         };
         const wantStream = !!deps.streaming && caps.stream !== false;
@@ -699,9 +810,9 @@
         let res;
         try {
           const sent = transport({
-            url: settings.endpoint || '',
-            headers: settings.apiKey ? { Authorization: 'Bearer ' + settings.apiKey } : {},
-            body: JSON.stringify(buildBody(messages, wantStream, tokenCap)),
+            url: curEndpoint || '',
+            headers: curKey ? { Authorization: 'Bearer ' + curKey } : {},
+            body: JSON.stringify(buildBody(messages, wantStream, tokenCap, ctxTools)),
             timeoutMs: waitMs(),
             onDelta: wantStream ? pump : null
           });
@@ -741,6 +852,10 @@
             const what = downgrade(res.status, detail, wantStream);
             if (what) {
               downLeft -= 1;
+              /* 协议被降级时，system 必须当场跟着改：
+                 上面还写着「用 function calling 调工具」，实际请求里已经没有 tools 了，
+                 模型会照着不存在的协议干活，输出必然对不上。 */
+              if (what === 'nativeTools') applySystem(messages, ctxTools);
               if (onEvent) onEvent({ type: 'notice', level: 'warn', message: DOWN_MSG[what] || '接口不认这个参数，已自动换一种发法' });
               continue;
             }
@@ -775,6 +890,31 @@
             }
             await new Promise((r) => setTimeout(r, wait));
             if (stop && stop.isStopped()) throw abortError();
+            continue;
+          }
+          /* 换端点的判定：这几种「不是参数问题、而是这家不给服务」的，
+             退避重试也救不回来，直接往后切一个备用端点。
+             参数不认（400/422）不走这里 —— 那是可以降级修好的。 */
+          const giveUp = res.status === 402
+            || res.status === 401 || res.status === 403
+            || res.status === 404
+            || (rateLimited && !worthWaiting)
+            || (transient && busyLeft <= 0);
+          if (giveUp && switchCandidate('HTTP ' + res.status)) {
+            /* 换了一家就要重新学：上一家的参数习惯不能带过来。
+               协议也可能不一样（一家认 tools、一家不认），system 必须跟着改。 */
+            downLeft = 4;
+            busyLeft = 2;
+            slowLeft = 2;
+            applySystem(messages, ctxTools);
+            if (onEvent) {
+              onEvent({
+                type: 'notice',
+                level: 'warn',
+                message: '主端点不可用（HTTP ' + res.status + '），已自动切换到 '
+                  + switched.host + ' / ' + switched.model
+              });
+            }
             continue;
           }
           /* 错误必须翻成人话再往上抛：正文里摆一段原始 JSON，
@@ -822,6 +962,86 @@
              原先是无条件顶替，结果把一段思考文字塞给解析器，必然格式错 */
           if (!content && reasoning && !extractJson(reasoning).error) content = reasoning;
           usage = (payload && payload.usage) || {};
+          /* 原生工具调用（非流式） */
+          const tcs = choice && choice.message && choice.message.tool_calls;
+          if (Array.isArray(tcs)) {
+            tcs.forEach((tc) => {
+              const fn = (tc && tc.function) || {};
+              sseCalls.push({
+                id: String((tc && tc.id) || ''),
+                name: String(fn.name || ''),
+                args: typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments || {})
+              });
+            });
+          }
+        }
+
+        /* ---------------- 原生工具调用 ----------------
+           协议把参数结构管住了，这里只需要把 name/arguments 还原成
+           内部那套 {kind:'tools', tools:[{tool,args}]}，后面的执行与回灌完全复用。
+           参数是 JSON 字符串，坏掉就丢这一条 —— 不猜、不补全，
+           让模型下一轮自己重发（协议层面它看得见自己发了什么）。 */
+        const nativeCalls = sseCalls.filter((c) => c && c.name);
+        if (nativeCalls.length) {
+          /* 这个端点真的会走 function calling：记下来，下次一开始就按原生发，
+             不必再吃一次「先试 JSON」的格式修复。 */
+          if (caps.nativeTools !== true) remember({ nativeTools: true });
+          const calls = [];
+          for (const c of nativeCalls) {
+            let args = {};
+            try {
+              const raw = String(c.args || '').trim();
+              args = raw ? JSON.parse(raw) : {};
+            } catch (e) {
+              if (onEvent) {
+                onEvent({ type: 'notice', level: 'warn', message: '模型给出的工具参数不是合法 JSON，已让它重发' });
+              }
+              args = null;
+            }
+            if (args === null) continue;
+            if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+            calls.push({ tool: c.name, args });
+          }
+          if (!calls.length) {
+            if (repairLeft > 0) {
+              repairLeft -= 1;
+              messages.push({ role: 'user', content: '刚才那次工具调用的参数不是合法 JSON，请重新调用一次，参数必须是合法 JSON 对象。' });
+              continue;
+            }
+            throw Object.assign(new Error('模型给出的工具参数无法解析'), { code: 'bad_output' });
+          }
+          /* 原生模式下模型可能一次给多个工具：白名单、去重、限量都照旧走校验，
+             越权的工具在这里就被挡掉，绝不因为「协议允许」就放行。 */
+          const kept = [];
+          for (const call of calls) {
+            if (!ctxTools.includes(call.tool)) {
+              if (onEvent) {
+                onEvent({ type: 'notice', level: 'warn', message: '模型调用了没有开放的工具 ' + call.tool + '，已忽略' });
+              }
+              continue;
+            }
+            const a = checkArgs(call.tool, call.args);
+            if (!a.ok) {
+              if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '工具参数不合格（' + a.error + '），已忽略这次调用' });
+              continue;
+            }
+            kept.push({ tool: call.tool, args: a.args });
+            if (kept.length >= MAX_BATCH_TOOLS) break;
+          }
+          if (!kept.length) {
+            if (repairLeft > 0) {
+              repairLeft -= 1;
+              messages.push({ role: 'user', content: '你调用的工具不可用或参数不对。只能使用这些工具：' + ctxTools.join('、') + '。请重新来一次。' });
+              continue;
+            }
+            throw Object.assign(new Error('模型调用的工具都不可用'), { code: 'bad_output' });
+          }
+          /* 只调了一个工具时用单工具形状：回灌历史更短，也和后面对齐 */
+          const stepOut = kept.length === 1
+            ? { kind: 'tool', tool: kept[0].tool, args: kept[0].args, usage }
+            : { kind: 'tools', tools: kept, usage };
+          stepOut.thought = String(reasonAcc || '').slice(0, 200);
+          return stepOut;
         }
         /* 见了 reasoning_content 就说明是推理模型：思考也吃 token 预算，
            给宽一点，别让正文被挤成空串（学到后记下来，下次一开始就给够） */
@@ -914,7 +1134,20 @@
       const token = (opts && opts.token) || { stopped: false };
       const ctx = (opts && opts.ctx) || {};
       const ctxTools = (ctx.tools && ctx.tools.length ? ctx.tools : Object.keys(tools)).filter((n) => tools[n]);
-      const system = prompt.systemPrompt(ctxTools);
+      /* 协议决定了 system 里怎么写工具：原生模式工具由 schema 声明，
+         再列一遍只会和 schema 打架；JSON 模式必须逐字列出工具名。 */
+      let nativeNow = nativeOn();
+      let system = prompt.systemPrompt(ctxTools, nativeNow);
+      /* 中途被拒（400 说不认 tools）会把 nativeTools 记成 false：
+         这时 system 得换回 JSON 那套，否则规则和实际发法对不上。 */
+      const syncProtocol = () => {
+        if (nativeOn() === nativeNow) return;
+        nativeNow = nativeOn();
+        system = prompt.systemPrompt(ctxTools, nativeNow);
+        if (messages && messages[0] && messages[0].role === 'system') {
+          messages[0] = { role: 'system', content: system };
+        }
+      };
 
       /* 停止：`token.stopped` 只是旗标，真正让在飞请求立刻结束的是这里的 race。
          Rust 侧还有 ai_cancel 去断掉连接，两边都不能省：
@@ -973,7 +1206,32 @@
 
       const resume = (opts && opts.resume) || null;
       if (resume && Array.isArray(resume.messages) && resume.messages.length) {
-        messages = resume.messages.map((m) => ({ role: m.role, content: String(m.content) }));
+        /* 恢复断点时 system 一律用「现在这份」重铺，而不是信任落盘的那份：
+           落盘的 system 是上一版 prompt、可能被截断（旧版甚至被折成 user）。
+           规则应该永远来自当前代码，历史只负责提供「查过什么」。
+           1.39.x 及更早的断点把 system 写成了 user（role 只认 assistant，其余一律 user），
+           那一份会以 user 身份混进历史、被模型当成用户指令，所以还得单独挑掉：
+           断点里第 0 条按构造永远是 system，role 不是 system 就说明是旧版写坏的，
+           直接丢；再用当前 system 的开头当指纹兜一层。 */
+        const sysHead = String(system || '').slice(0, 24);
+        const raw0 = resume.messages[0];
+        const headBroken = !!(raw0 && raw0.role !== 'system');
+        const kept = resume.messages
+          .filter((m, i) => !(i === 0 && headBroken))
+          .filter((m) => m && m.role !== 'system')
+          .filter((m) => {
+            const c = String((m && m.content) == null ? '' : m.content);
+            return !(sysHead && c.indexOf(sysHead) === 0);
+          })
+          .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content == null ? '' : m.content) }));
+        messages = [{ role: 'system', content: system }].concat(kept);
+        /* 断点停在「工具刚返回」那一刻，模型下一句该接着往下走。
+           不补这一句，它常把上一条工具结果当成新问题重新开始查。 */
+        messages.push({
+          role: 'user',
+          content: '（接着上一轮继续：上面这些是已经查过的结果，不要重复查，直接往下判断；'
+            + '还缺信息就继续调工具，够了就给结论）' + (prompt.OUTPUT_REMINDER || '')
+        });
         steps = Number(resume.steps) || 0;
         calledTools = Array.isArray(resume.calledTools) ? resume.calledTools.slice() : [];
         trace = Array.isArray(resume.trace) ? resume.trace.slice() : [];
@@ -1004,8 +1262,11 @@
         });
         const ctxLine = prompt.contextLine(ctx);
         /* 末尾再提醒一次格式：弱模型对 system 里的长规则不敏感，
-           贴在生成位置前的这句它才看得见 */
-        const tail = prompt.OUTPUT_REMINDER || '';
+           贴在生成位置前的这句它才看得见。
+           原生模式下要查就直接调工具，不能让它以为必须先吐 JSON。 */
+        const tail = nativeNow
+          ? '\n\n（要查就调用工具；能答就只输出一个 JSON 对象，不要代码块、不要解释）'
+          : (prompt.OUTPUT_REMINDER || '');
         messages.push({ role: 'user', content: (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '') + tail });
       }
 
@@ -1031,7 +1292,13 @@
           return {
             ok: false,
             degraded: true,
-            answer: fallbackAnswer(msg, trace),
+            /* 错误码必须随结果带出去：usage.jsonl 里以前只有 ok:false，
+               60% 的失败全同一个长相，根本没法判断是限流、欠费还是模型名写错。 */
+            code,
+            model: curModel,
+            endpoint: curEndpoint,
+            protocol: nativeNow ? 'tools' : 'json',
+            answer: switchedNote() + fallbackAnswer(msg, trace),
             evidence: trace.filter((t) => t.ok).map((t) => ({ tool: t.tool })),
             suggest: [],
             followUps,
@@ -1044,6 +1311,9 @@
             usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
           };
         }
+        /* 协议可能在这次调用里被降级（400 说不认 tools）：
+           把 system 同步过来，下一轮就按新的发法走 */
+        syncProtocol();
         if (step.usage) {
           usageTotal.prompt_tokens += Number(step.usage.prompt_tokens) || 0;
           usageTotal.completion_tokens += Number(step.usage.completion_tokens) || 0;
@@ -1082,9 +1352,9 @@
             steps += 1;
             continue;
           }
-          const answerText = bad.length
+          const answerText = switchedNote() + (bad.length
             ? step.answer + '\n\n· 注意：上面有体积数字没能在工具结果里核对上，可能不准。'
-            : step.answer;
+            : step.answer);
           const follow = suggestFollowUps(ctx, trace);
           const res = {
             ok: !bad.length,
@@ -1095,6 +1365,12 @@
             trace,
             compressed,
             interrupted: false,
+            /* 这一轮是谁答的：换过端点就写换到哪儿，没换就是主端点。
+               日志里以前只有 ok/steps，出问题根本看不出是哪家模型干的。 */
+            model: curModel,
+            endpoint: curEndpoint,
+            protocol: nativeNow ? 'tools' : 'json',
+            switched: switched ? { host: switched.host, model: switched.model, why: switched.why } : null,
             usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
           };
           if (bad.length) {
@@ -1161,6 +1437,12 @@
             content: '工具结果：\n' + ran.map((r, i) => `[${i + 1}] id=${r.tool}\n${JSON.stringify(r.result)}`).join('\n')
           });
         }
+        /* 工具结果为什么不用原生 role:'tool' 回灌：
+           原生协议要求 assistant 那条带 tool_calls 且 tool_call_id 对得上，
+           而断点落盘只存 {role, content}，恢复时 id 就丢了 —— 一旦用户
+           「继续」到一半，带 tool_calls 的历史配上没有 id 的结果必然 400。
+           用纯文本回灌在任何端点、任何恢复路径下都成立，
+           代价只是少一层协议校验，而参数结构已经由 schema 管住了。 */
         steps += 1;
       }
 
@@ -1171,12 +1453,16 @@
         ok: false,
         degraded: true,
         exhausted: true,
-        answer: fallbackAnswer('步数用尽', trace) + '\n· 信息可能不全，可以继续追问，我会接着查。',
+        answer: switchedNote() + fallbackAnswer('步数用尽', trace) + '\n· 信息可能不全，可以继续追问，我会接着查。',
         evidence: trace.map((t) => ({ tool: t.tool })),
         suggest: [],
         followUps,
         trace,
         compressed,
+        model: curModel,
+        endpoint: curEndpoint,
+        protocol: nativeNow ? 'tools' : 'json',
+        switched: switched ? { host: switched.host, model: switched.model, why: switched.why } : null,
         checkpoint: checkpoint(),
         usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
       };
@@ -1200,6 +1486,7 @@
     const used = new Set((trace || []).map((t) => t.tool));
     const out = [];
     if (used.has('top_files')) out.push('这些文件里哪个最占地方？');
+    if (used.has('top_indexed')) out.push('这些大文件里哪些是能删的？');
     if (used.has('empty_dirs')) out.push('这些空文件夹删了会影响什么？');
     if (used.has('file_signals')) out.push('有没有没签名的可疑文件？');
     if (used.has('installed_apps')) out.push('这些程序里哪个占用最大？');

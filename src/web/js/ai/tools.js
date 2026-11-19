@@ -220,6 +220,43 @@
         summary: (args, r) => `大文件排行 ${args.dir} · ${r.count} 个${r.partial ? '（部分）' : ''}`
       },
 
+      /* 和 top_files 的分工：
+         top_files 现扫一个目录，扫不完只能给部分结果；
+         这里读本地索引里已经存下的 size 列，毫秒级、覆盖所有已索引根目录。
+         「最近什么最占空间」这类问题应该先走这里，别再让模型去撞 20 秒上限。 */
+      top_indexed: {
+        label: '索引排行',
+        run: async (args) => {
+          const want = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
+          const off = Math.max(0, Math.floor(Number(args.offset) || 0));
+          const minSize = Math.max(0, Math.floor(Number(args.min_size) || 0));
+          const r = await withTimeout(
+            API.engine('search.top', { limit: Math.min(off + want, 50), min_size: minSize }),
+            TIMEOUT, '索引排行');
+          const items = ((r && r.items) || []).map((it) => ({
+            name: it.name,
+            path: it.path,
+            size: fmtBytes(it.size),
+            bytes: Number(it.size) || 0,
+            age: fmtAge(it.mtime)
+          }));
+          const base = {
+            count: items.length,
+            total: r.total,
+            /* 覆盖范围必须回给模型：索引只覆盖登记过的目录，
+               不写出来它就会把「索引里的前几名」说成「整机最占空间」。 */
+            roots: r.roots || [],
+            indexed: r.indexed || 0,
+            hint: r.hint || ''
+          };
+          if (!(r.roots || []).length) {
+            base.note = '本地索引还没建，这个结果不能当整机统计；需要的话先去「搜索」页建立一次索引';
+          }
+          return pageFit(base, items, off, want);
+        },
+        summary: (args, r) => `索引排行 · ${r.count} 个${(r.roots || []).length ? '' : '（无索引）'}`
+      },
+
       empty_dirs: {
         label: '空文件夹',
         run: async (args) => {

@@ -34,9 +34,14 @@
       args: []
     },
     top_files: {
-      desc: '列出目录下最大的文件（含扩展名与所在子目录）',
+      desc: '列出目录下最大的文件（含扩展名与所在子目录）。现扫目录，大目录可能只扫到一部分',
       params: { dir: 'string', limit: 'number≤50', offset: 'number≤5000' },
       args: ['dir']
+    },
+    top_indexed: {
+      desc: '按体积列出索引里最大的文件（毫秒级、覆盖所有已索引目录，不用现扫）。问「什么最占空间」先用它；返回里的 roots 是覆盖范围，没建索引时会带 hint',
+      params: { limit: 'number≤50', offset: 'number≤5000', min_size: 'number 字节下限' },
+      args: []
     },
     empty_dirs: {
       desc: '找出可以删除的空文件夹，标出哪些是受保护的重要目录',
@@ -123,7 +128,8 @@
     '路径可以写任意绝对路径（C:\\、D:\\ 或盘符根目录），不确定从哪看先用 disk_roots 再逐层 list_dir。',
     '你的输出是 JSON 字符串，路径里的反斜杠必须双写：写 "D:\\\\Tools" 才是 D:\\Tools，只写一个 \\T 会被当成转义符，用户看到的就是坏掉的路径。',
     '所有数字必须来自工具返回：不要自己换算、不要估算、不要四舍五入成「大约」。没查到的就说没查到，并说明要用哪个工具查。',
-    '需要信息时先调工具，不要凭常识猜。互不依赖的查询可以一次给出（最多 3 个），有依赖的必须等上一个结果再用下一个。'
+    '需要信息时先调工具，不要凭常识猜。互不依赖的查询可以一次给出（最多 3 个），有依赖的必须等上一个结果再用下一个。',
+    '问「什么最占空间」这类跨盘、跨目录的问题，先调 top_indexed（读索引，毫秒级、覆盖面大）；它返回的 roots 是覆盖范围，如果 roots 为空或带了 hint，说明索引还没建，这时才退回 top_files 去现扫一个目录，并把「只覆盖了某几个目录」讲清楚。'
   ];
 
   const RULES_READONLY = [
@@ -179,20 +185,74 @@
      弱模型（glm-4-flash）光靠 system 里的要求会当没看见。 */
   const OUTPUT_REMINDER = '\n\n（只输出一个 JSON 对象，不要代码块、不要解释）';
 
+  /* ---------------- 原生工具协议 ----------------
+     上面那套「用 JSON 描述工具调用」是给不支持 function calling 的端点准备的：
+     它便宜、兼容性最好，代价是模型要把参数写成 JSON 字符串，容易漏引号、
+     写错括号，于是要一整套修复重试兜底。
+     支持 tools 的端点就直说 —— 让协议本身管住参数结构，比事后修复可靠得多。
+     两种协议不能同时用：给了 tools 又要求 JSON，模型会两边都想满足。 */
+
+  /** 把 TOOLS 里的类型说明翻成 JSON Schema 的 type */
+  function jsonType(spec) {
+    const s = String(spec || '').toLowerCase();
+    if (s.indexOf('string[]') === 0) return { type: 'array', items: { type: 'string' } };
+    if (s.indexOf('number') === 0) return { type: 'number' };
+    if (s.indexOf('boolean') === 0) return { type: 'boolean' };
+    return { type: 'string' };
+  }
+
+  /** OpenAI 兼容的 function schema 数组；只给白名单里的工具 */
+  function toolSchema(names) {
+    return (Array.isArray(names) ? names : []).map((n) => {
+      const t = TOOLS[n];
+      if (!t) return null;
+      const props = {};
+      (t.args || []).forEach((k) => { props[k] = jsonType((t.params || {})[k]); });
+      return {
+        type: 'function',
+        function: {
+          name: n,
+          description: t.desc,
+          parameters: {
+            type: 'object',
+            properties: props,
+            /* 必填参数由 TOOLS.args 说了算；其余留给模型按需补 */
+            required: (t.args || []).slice(),
+            additionalProperties: true
+          }
+        }
+      };
+    }).filter(Boolean);
+  }
+
+  /* 原生工具模式下，工具调用走协议本身，JSON 只留给最后的回答对象。
+     不说清楚这一点，模型会一边调工具一边还想输出 {"tool":...}。 */
+  const FORMAT_NATIVE = [
+    '【输出格式·最高优先级】',
+    '需要查东西时，直接调用提供的工具（function calling），不要用 JSON 文字描述工具调用。',
+    '能回答时，只输出一个 JSON 对象，第一个字符必须是 {，最后一个字符必须是 }：',
+    '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
+    '不要代码块围栏，不要解释，JSON 前后不要有任何文字。',
+    '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
+    '回答要求：中文，不超过 300 字，结论先行，能用列表就用列表（每行以「· 」开头）。',
+    'evidence 只能引用这一轮真正调用过的工具；suggest 只放你确实建议用户去处理的具体路径，没有就给空数组。',
+    '不确定能不能答就先调工具，不要用普通文字回答。'
+  ].join('\n');
+
   /* 按页面裁剪工具（对应方案 §4：工具越多选得越差）。
      提案三件套在所有页面都有——用户在任何页面都可能开口让你动手；
      只读工具按页面给，省下的位置留给动作目录。 */
   const PROPOSE = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
 
   const PAGE_TOOLS = {
-    ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_files', 'empty_dirs',
+    ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_files', 'top_indexed', 'empty_dirs',
       'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize',
       'archive_entries', 'clean_candidates', 'settings_read', 'search_roots']),
-    tools: PROPOSE.concat(['top_files', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
+    tools: PROPOSE.concat(['top_files', 'top_indexed', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
     organize: PROPOSE.concat(['list_dir', 'read_file', 'organize_preview', 'explain_rules', 'last_organize', 'installed_apps']),
-    search: PROPOSE.concat(['search_files', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
+    search: PROPOSE.concat(['search_files', 'top_indexed', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
     apps: PROPOSE.concat(['installed_apps', 'list_dir', 'read_file']),
-    archive: PROPOSE.concat(['list_dir', 'read_file', 'top_files', 'archive_entries'])
+    archive: PROPOSE.concat(['list_dir', 'read_file', 'top_files', 'top_indexed', 'archive_entries'])
   };
 
   /* 动作目录由 registry 在启动时灌进来（内容只随版本变化，仍是稳定前缀） */
@@ -222,7 +282,7 @@
   const has = (names, n) => names.indexOf(n) >= 0;
 
   /* 稳定前缀：同一组工具拼出的字符串必须完全一致 */
-  function systemPrompt(toolNames) {
+  function systemPrompt(toolNames, native) {
     const names = Array.isArray(toolNames) ? toolNames : [];
     const canWrite = has(names, 'propose_action');
     const rules = RULES_BASE
@@ -241,12 +301,16 @@
       parts.push('参数里带 ? 的可省略。路径一律写完整绝对路径。');
       parts.push('');
     }
-    parts.push('【可用工具】只允许调用下面这些，工具名必须逐字一致：');
-    parts.push(toolText(names));
-    parts.push('');
+    /* 原生协议下工具名与参数由 function schema 声明，
+       再在 system 里列一遍只会让前缀变长、还可能和 schema 不一致 */
+    if (!native) {
+      parts.push('【可用工具】只允许调用下面这些，工具名必须逐字一致：');
+      parts.push(toolText(names));
+      parts.push('');
+    }
     parts.push(EFFORT);
     parts.push('');
-    parts.push(FORMAT);
+    parts.push(native ? FORMAT_NATIVE : FORMAT);
     return parts.join('\n');
   }
 
@@ -275,7 +339,7 @@
     return bits.length ? '【上下文】' + bits.join(' · ') : '';
   }
 
-  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText, setCatalog, OUTPUT_REMINDER, FORMAT, EFFORT };
+  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText, setCatalog, OUTPUT_REMINDER, FORMAT, FORMAT_NATIVE, EFFORT, toolSchema, jsonType };
   root.AIPrompt = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof window !== 'undefined' ? window : globalThis);

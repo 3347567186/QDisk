@@ -5400,6 +5400,64 @@ def search_index(keyword, limit=800, ids=None):
     return merged[:limit]
 
 
+def _ix_top_one(db_path, limit, min_size):
+    """查单个库最大的几个文件，返回 [(完整路径, 名字, 大小, 时间)]。
+
+    files 表本来就有 size 列（建库时一起写进去的），所以「谁最占空间」
+    根本不需要重新遍历磁盘 —— 一条 ORDER BY 就够了。
+    以前没有这条查询，模型问「什么最占空间」只能去 top_files 现扫，
+    整盘 20 秒预算扫不完，于是答「只扫了前 20 秒」。
+    """
+    db = _index_open(db_path)
+    if db is None:
+        return []
+    try:
+        if _index_schema_version(db) != INDEX_SCHEMA:
+            return []
+        rows = db.execute(
+            "SELECT d.path, f.name, f.size, f.mtime FROM files f "
+            "JOIN dirs d ON d.id = f.dir_id "
+            "WHERE f.size >= ? ORDER BY f.size DESC LIMIT ?",
+            (int(min_size), int(limit))).fetchall()
+        return [(os.path.join(folder, name), name, int(size or 0), mtime)
+                for folder, name, size, mtime in rows]
+    except Exception:
+        return []
+    finally:
+        db.close()
+
+
+def search_index_top(limit=50, ids=None, min_size=0):
+    """按体积取前 N 个文件：多库并发查，合并去重后按大小降序。
+
+    返回 (完整路径, 名字, 大小, 时间)。索引里没有的东西它当然查不到，
+    所以调用方要把「覆盖了哪些根目录」一并告诉用户，别让人以为这是整机统计。
+    """
+    limit = max(1, int(limit))
+    min_size = max(0, int(min_size))
+    items = [i for i in _ix_load()
+             if (not ids or i["id"] in set(ids)) and os.path.isfile(_ix_db_abspath(i))]
+    if not items:
+        return []
+    paths = [_ix_db_abspath(i) for i in items]
+    results = []
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+            for part in pool.map(lambda p: _ix_top_one(p, limit, min_size), paths):
+                results.extend(part)
+    except Exception:
+        for p in paths:
+            results.extend(_ix_top_one(p, limit, min_size))
+    seen = {}
+    for path, name, size, mtime in results:
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen[key] = (path, name, size, mtime)
+    merged = sorted(seen.values(), key=lambda r: (-(r[2] or 0), os.path.normcase(r[0])))
+    return merged[:limit]
+
+
 def index_count():
     return sum(int(i.get("files") or 0) for i in _ix_load())
 
@@ -12529,6 +12587,35 @@ def _engine_search_query(params):
         result["hint"] = "本地还没有索引，可以先添加目录并建立一次"
     return result
 
+
+def _engine_search_top(params):
+    """search.top：按体积取前 N 个文件，直接查索引，不遍历磁盘。
+
+    和 top_files 的区别：top_files 是「现扫一个目录」，扫不完就只能给部分结果；
+    这里读的是索引里已经记下的 size 列，毫秒级、覆盖所有已索引的根目录。
+    索引没建的时候给一条明确的 hint，别让模型以为「本机没有大文件」。
+    """
+    limit = _engine_get(params, "limit", 50, int)
+    if limit <= 0:
+        raise EngineError("参数 limit 必须是正整数")
+    limit = min(limit, 2000)
+    min_size = _engine_get(params, "min_size", 0, int)
+    ids = params.get("ids")
+    ids = [str(i) for i in ids] if isinstance(ids, list) and ids else None
+    t0 = time.perf_counter()
+    rows = search_index_top(limit, ids=ids, min_size=min_size)
+    items = [{"name": name or os.path.basename(path), "path": path,
+              "size": int(size or 0), "mtime": int(mtime or 0)}
+             for path, name, size, mtime in rows]
+    st = index_stats()
+    roots = [e.get("root") for e in st.get("entries") or [] if e.get("exists_root")]
+    result = {"items": items, "total": len(items), "source": "index",
+              "roots": roots, "indexed": int(st.get("files") or 0),
+              "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
+    if not roots:
+        result["hint"] = "本地还没有索引：先在「搜索」页添加目录并建立一次，之后这里就能直接按体积排"
+    return result
+
 # ── --engine：设置写入 / 规则 / 迁移 相关方法 ─────────────────────────
 #
 # 同样只做「参数校验 + 复用既有业务函数 + 转结构」，写盘/删除/搬移的规则
@@ -13085,8 +13172,7 @@ _ENGINE_METHODS = {
     "search.status": _engine_search_status,
     "search.index": _engine_search_index,
     "search.query": _engine_search_query,
-    "search.add": _engine_search_add,
-    "search.remove": _engine_search_remove,
+    "search.top": _engine_search_top,
     "search.add": _engine_search_add,
     "search.remove": _engine_search_remove,
     "settings.set": _engine_settings_set,
