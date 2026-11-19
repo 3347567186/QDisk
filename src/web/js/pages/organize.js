@@ -194,7 +194,6 @@
     btnAsk.onclick = () => {
       if (window.SteveAvatar) {
         window.SteveAvatar.spin(askMark);
-        window.SteveAvatar.burst(askMark);
       }
       window.AIDrawer.open({
         title: T('问助手 · 整理', 'Ask AI · Tidy'),
