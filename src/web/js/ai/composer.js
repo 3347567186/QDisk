@@ -918,6 +918,16 @@
       return !!input.value.trim() || attachments.length > 0;
     }
 
+    /* 思考中的提示：没有它，用户看到的就是一个空框，会以为还是不能打字。
+       改 placeholder 而不是插一块新 DOM，是因为空框时它正好就在光标那儿，
+       有草稿时它自然隐去（那时用户已经在写了，不需要再提示）。 */
+    const PLACEHOLDER_IDLE = T('尽管问…', 'Ask anything…');
+    const PLACEHOLDER_BUSY = T('回答中，可以先写下一条…', 'Answering — you can keep typing…');
+    function syncBusyHint() {
+      input.placeholder = busy ? PLACEHOLDER_BUSY : PLACEHOLDER_IDLE;
+      input.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+
     function syncSend() {
       if (busy) {
         sendBtn.disabled = !o.onStop || stopping;
@@ -1176,6 +1186,9 @@
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         if (composing || e.keyCode === 229) return;
+        /* 思考中回车=换行：既然允许打字，就不能让回车变成「按了没反应」
+           （submit 会被 busy 挡住，preventDefault 又吃掉了换行）。 */
+        if (busy) return;
         e.preventDefault();
         submit();
         return;
@@ -1270,6 +1283,7 @@
     syncMode();
     syncUsage();
     autosize();
+    syncBusyHint();
     syncSend();
 
     if (disabled) {
@@ -1340,10 +1354,14 @@
         return '';
       },
       focus: function () { input.focus(); },
+      /* 思考期间输入框保持可编辑：以前这里把 textarea 设成 readOnly，
+         于是「这一轮还在跑」被写成了「不许打字」——想补一句就得等整轮结束。
+         现在只停发送，不停打字：内容留在框里当草稿，这轮收尾后直接回车发。
+         误发是安全的：submit() 首行就有 busy 守卫，发送键此刻也已经是停止键。 */
       setBusy: function (next, isStopping) {
         busy = !!next;
         stopping = !!isStopping;
-        input.readOnly = busy;
+        syncBusyHint();
         syncSend();
       },
       setUsage: function (u) { usage = u || usage; syncUsage(); },

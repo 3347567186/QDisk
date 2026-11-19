@@ -379,43 +379,71 @@
             return label;
           };
           const lines = [];
+          /* 每条路径只出现一次。上一版把「最占空间的三个目录」和
+             「要小心处理的」各写一遍，Steam/手机备份/Minecraft 在答案里
+             重复出现两次 —— 用户原话是「格式总规总矩、废话多」。 */
+          const used = {};
           const top3 = items.slice(0, 3);
           if (top3.length) {
             lines.push('最占空间的三个目录：');
             top3.forEach((row) => {
-              lines.push('· ' + nameOf(row.path) + '，' + row.size + (row.pct ? '（占 ' + row.pct + '%）' : '') + ' — ' + row.path);
+              used[row.path] = 1;
+              const risk = row.risk === 'safe' ? '可以直接删'
+                : row.risk === 'careful' ? ('要小心：' + (row.clean || '不能直接删'))
+                  : row.risk === 'keep' ? '别动'
+                    : '没认出来，删之前先确认';
+              lines.push('· ' + nameOf(row.path) + '，' + row.size +
+                (row.pct ? '（占 ' + row.pct + '%）' : '') + ' — ' + row.path + '（' + risk + '）');
             });
           }
-          if (groups.safe.length) {
+          const restOf = (list) => list.filter((p) => !used[p]);
+          const safeRest = restOf(groups.safe);
+          const careRest = restOf(groups.careful);
+          const unkRest = restOf(groups.unknown);
+          if (safeRest.length) {
             lines.push('');
-            lines.push('能直接清的（共 ' + fmtBytes(sumOf(groups.safe)) + '）：');
-            groups.safe.slice(0, 6).forEach((p) => {
+            lines.push('能直接清的（共 ' + fmtBytes(sumOf(safeRest)) + '）：');
+            safeRest.slice(0, 6).forEach((p) => {
               const row = byPath[p] || {};
               lines.push('· ' + nameOf(p) + '，' + (row.size || '') + ' — ' + p + (row.clean ? '。' + row.clean : ''));
             });
+          } else if (groups.safe.length) {
+            /* safe 的条目正好都在 top3 里：上面已经标了「可以直接删」，
+               这里只指过去，不再重复列一遍路径。 */
+            lines.push('');
+            lines.push('能直接清的：就是上面标了「可以直接删」的那几个。');
           } else {
             lines.push('');
-            lines.push('能直接清的：这一屏里没有，需要往下看更多目录。');
+            lines.push('能直接清的：这一屏里没有。');
           }
-          if (groups.careful.length) {
+          if (careRest.length) {
             lines.push('');
-            lines.push('要小心处理的（共 ' + fmtBytes(sumOf(groups.careful)) + '）：');
-            groups.careful.slice(0, 4).forEach((p) => {
+            lines.push('要小心处理的（共 ' + fmtBytes(sumOf(careRest)) + '）：');
+            careRest.slice(0, 4).forEach((p) => {
               const row = byPath[p] || {};
               lines.push('· ' + nameOf(p) + '，' + (row.size || '') + ' — ' + (row.clean || '不能直接删'));
             });
-          }
-          if (groups.unknown.length) {
+          } else if (groups.careful.length) {
             lines.push('');
-            lines.push('没认出来的（' + groups.unknown.length + ' 个，看起来像程序或项目目录，删之前先确认）：');
-            groups.unknown.slice(0, 4).forEach((p) => {
+            lines.push('要小心处理的：就是上面那几个，不能直接删目录。');
+          }
+          if (unkRest.length) {
+            const show = unkRest.slice(0, 4);
+            lines.push('');
+            /* 数字必须是「下面真正列出来的条数」：上一版写 groups.unknown.length，
+               于是出现「没认出来的（7 个）」后面只跟 4 条，自己跟自己打架。 */
+            lines.push('没认出来的（' + show.length + ' 个，看起来像程序或项目目录，删之前先确认）：');
+            show.forEach((p) => {
               const row = byPath[p] || {};
               lines.push('· ' + p + (row.size ? '，' + row.size : ''));
             });
           }
 
           /* 建议项也在这里算好：safe 给 delete，careful 给 check。
-             unknown 和 keep 一律不进 suggest —— 用户点一下就删的东西不能靠猜。 */
+             unknown 和 keep 一律不进 suggest —— 用户点一下就删的东西不能靠猜。
+             注意这里用 groups 全量、不用 restOf：建议按钮是独立的一块 UI，
+             和答案正文不重复；而正文去重后如果 safe 恰好全在 top3 里，
+             restOf 会是空的，按钮就跟着没了 —— 用户反而更没得点。 */
           const sug = [];
           if (groups.safe.length) {
             sug.push({

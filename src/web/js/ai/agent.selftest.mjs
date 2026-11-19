@@ -21,6 +21,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { createAgent, estTokens } = require('./agent.js');
+const agentApi = require('./agent.js');
 const prompt = require('./prompt.js');
 const { makeTools } = require('./tools.js');
 
@@ -1362,6 +1363,149 @@ for (const c of CASES) {
   if (/都可以清理/.test(String(res.answer || ''))) bad.push('最终答案里还留着「都可以清理」');
   if (!/要小心处理/.test(String(res.answer || ''))) bad.push('重写后的答案没有把「要小心处理的」分开讲');
   results.push({ id: 'G53', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G54 用户说了「d盘」，范围必须由代码注入，不能靠模型自觉
+   真实会话 s-mwnomg37：用户问「那你看一下d盘呢」，模型调 top_folders 时 args=null，
+   拿到整机结果后把上一轮全是 E 盘的答案原样重发，只把开头改成「D盘最占空间的三个目录是」。
+   盘符是能用字符串算准的事实，不该让模型猜。 */
+{
+  const bad = [];
+  const s = agentApi.scopeOf('那你看一下d盘呢');
+  if (!s || !s.roots || s.roots[0] !== 'd:') bad.push('认不出「d盘」这个范围');
+  if (s && !/D\s*盘/.test(s.label)) bad.push('范围标签没写清是哪个盘');
+  if (agentApi.scopeOf('最近什么最占空间？')) bad.push('没提范围时不该硬塞一个范围');
+  const forced = agentApi.applyScope('top_folders', { limit: 5 }, s);
+  if (forced.args.parent !== 'D:\\') bad.push('top_folders 没被注入 parent（模型会拿到整机结果冒充 D 盘）');
+  if (forced.forced !== 'D:\\') bad.push('注入后没有记录，无法在界面上告诉用户按哪个范围查的');
+  const kept = agentApi.applyScope('top_folders', { parent: 'D:\\App' }, s);
+  if (kept.forced) bad.push('模型自己带对了范围还被改掉');
+  const other = agentApi.applyScope('top_folders', { parent: 'E:\\x' }, s);
+  if (other.args.parent !== 'D:\\') bad.push('模型带了个别的盘的范围却没被改回用户问的那个盘');
+
+  /* 端到端：模型不主动带范围时，工具收到的 args 里必须有 parent */
+  let seenArgs = null;
+  let asked = 0;
+  const scopeTools = makeTools({ API: fakeApi });
+  const scoped = createAgent({
+    transport: async (req) => {
+      asked += 1;
+      if (asked === 1) return { status: 200, body: JSON.stringify({ choices: [{ message: { content: toolStep('top_folders', { limit: 5 }) } }], usage: {} }) };
+      /* 从回灌的工具结果里看不出传了什么，所以这里断言 trace 里记的 args */
+      return { status: 200, body: JSON.stringify({ choices: [{ message: { content: answer({ answer: 'D 盘最大的是 D:\\App\\微信\\Wechatdate，16.6 GB。' }) } }], usage: {} }) };
+    },
+    tools: scopeTools, prompt, settings
+  });
+  const res = await scoped.run({ userText: '那你看一下d盘呢', ctx: { page: 'ai' } });
+  const t0 = (res.trace && res.trace[0]) || {};
+  seenArgs = t0.args || {};
+  if (!seenArgs.parent) bad.push('端到端：模型没带范围时，工具参数里也没有被补上（trace.args 为空）');
+  results.push({ id: 'G54', group: '范围', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G55 答案里的路径必须来自本轮工具结果，且落在用户问的范围里
+   用户原话「他会拿别的数据来忽悠我，他自己不会区分数据来源」。
+   数字同源只挡住「编体积」，挡不住「拿 E 盘的结果冒充 D 盘」。 */
+{
+  const hay = JSON.stringify({ items: [
+    { path: 'E:\\SteamLibrary\\steamapps\\common', size: 57789706255 },
+    { path: 'D:\\App\\微信\\Wechatdate', size: 17807225851 }
+  ] });
+  const roots = ['d:'];
+  const bad = [];
+  const o = agentApi.unsourcedPaths('D 盘最占空间的是 E:\\SteamLibrary\\steamapps\\common，53.8 GB', hay, roots);
+  if (!o.out.length) bad.push('拿 E 盘路径冒充 D 盘没有被判为越界');
+  const ok = agentApi.unsourcedPaths('D 盘最占空间的是 D:\\App\\微信\\Wechatdate，16.6 GB', hay, roots);
+  if (ok.out.length || ok.bad.length) bad.push('正常答案被误判');
+  const fake = agentApi.unsourcedPaths('最大的是 D:\\Fake\\Path，9 GB', hay, roots);
+  if (!fake.bad.length) bad.push('凭空出现的路径没有被判为无出处');
+  const free = agentApi.unsourcedPaths('E:\\SteamLibrary\\steamapps\\common 最大', hay, null);
+  if (free.out.length) bad.push('用户没限定范围时不该判越界');
+
+  /* 端到端：越界答案要被打回重写，改对之后要能正常返回 */
+  const dRows = [
+    { path: 'D:\\App\\微信\\Wechatdate', name: 'Wechatdate', size: 17807225851, files: 900, pct: 60 },
+    { path: 'E:\\SteamLibrary\\steamapps\\common', name: 'common', size: 57789706255, files: 6700, pct: 40 }
+  ];
+  const dApi = Object.assign({}, fakeApi, {
+    engine: async (method) => {
+      if (method === 'search.status') return { files: 100, dirs: 10, roots: ['D:\\', 'E:\\'] };
+      if (method === 'search.folders') {
+        return { items: dRows, total: 2, source: 'index', roots: ['D:\\', 'E:\\'], indexed: 100, depth: 3, bytes: 75596932106, built: false, elapsed_ms: 30 };
+      }
+      return fakeApi.engine(method);
+    }
+  });
+  let asked = 0;
+  const pTools = makeTools({ API: dApi });
+  const ag = createAgent({
+    transport: async (req) => {
+      asked += 1;
+      let body;
+      if (asked === 1) body = toolStep('top_folders', { limit: 5 });
+      else if (asked === 2) body = answer({ answer: 'D 盘最占空间的是 E:\\SteamLibrary\\steamapps\\common，53.8 GB。' });
+      else body = answer({ answer: 'D 盘最占空间的是 D:\\App\\微信\\Wechatdate，16.6 GB。' });
+      return { status: 200, body: JSON.stringify({ choices: [{ message: { content: body } }], usage: {} }) };
+    },
+    tools: pTools, prompt, settings
+  });
+  const res = await ag.run({ userText: '看一下d盘呢', ctx: { page: 'ai' } });
+  if (asked < 3) bad.push('越界答案没有被拦下重写（只问了 ' + asked + ' 次）');
+  if (/E:\\SteamLibrary/.test(String(res.answer || ''))) bad.push('最终答案里还留着 E 盘路径冒充 D 盘');
+  if (!/Wechatdate/.test(String(res.answer || ''))) bad.push('改对之后没能正常返回 D 盘的答案');
+  results.push({ id: 'G55', group: '范围', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G56 同一批目录不许在答案里出现两次，分组数字必须和列出来的条数一致
+   真机第一版：Steam/手机备份/Minecraft 先在「最占空间的三个目录」出现，
+   又在「要小心处理的」里各出现一遍；「没认出来的（7 个）」后面只跟 4 条。
+   用户原话是「格式总规总矩、废话多」。 */
+{
+  const rows = [
+    { path: 'E:\\SteamLibrary\\steamapps\\common', name: 'common', size: 57789706255, files: 6700, pct: 14.6 },
+    { path: 'E:\\手机备份\\iPhone_15_Pro', name: 'iPhone_15_Pro', size: 51272413821, files: 900, pct: 12.9 },
+    { path: 'E:\\pcl2\\.minecraft\\versions', name: 'versions', size: 39056434002, files: 300, pct: 9.9 },
+    { path: 'D:\\Builds\\tidyassistant-target\\release', name: 'release', size: 11494713634, files: 40, pct: 2.9 },
+    { path: 'D:\\Tool\\图吧工具箱\\tools', name: 'tools', size: 9866983168, files: 300, pct: 2.5 },
+    { path: 'D:\\AIProjeckt\\source\\src-tauri', name: 'src-tauri', size: 6700466670, files: 80, pct: 1.7 },
+    { path: 'E:\\APP\\SolidWorks\\SOLIDWORKS', name: 'SOLIDWORKS', size: 8269632073, files: 500, pct: 2.1 }
+  ];
+  const dupApi = Object.assign({}, fakeApi, {
+    engine: async (method) => {
+      if (method === 'search.status') return { files: 1400000, dirs: 110000, roots: ['D:\\', 'E:\\'] };
+      if (method === 'search.folders') {
+        return { items: rows, total: rows.length, source: 'index', roots: ['D:\\', 'E:\\'], indexed: 1400000, depth: 3, bytes: 396272845688, built: false, elapsed_ms: 1200 };
+      }
+      return fakeApi.engine(method);
+    }
+  });
+  const dupTools = makeTools({ API: dupApi });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_folders', { limit: 15 }),
+      answer({ answer: 'Steam 游戏库 53.8 GB 最多，图吧工具箱没认出来。' })
+    ]),
+    tools: dupTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '最近什么最占空间？', ctx: { page: 'ai' } });
+  const draft = String(((res.trace[0] || {}).result || {}).draft || '');
+  const bad = [];
+  if (!draft) bad.push('没有生成草稿');
+  /* 每条路径在整个草稿里只能出现一次 */
+  const seen = {};
+  rows.forEach((r) => { seen[r.path] = (draft.split(r.path).length - 1); });
+  const dupPaths = Object.keys(seen).filter((p) => seen[p] > 1);
+  if (dupPaths.length) bad.push('这些目录在答案里出现了不止一次：' + dupPaths.join('、'));
+  /* 「N 个」必须等于它下面真正列出来的条数 */
+  const m = draft.match(/没认出来的（(\d+) 个/);
+  if (m) {
+    const claimed = Number(m[1]);
+    const seg = draft.slice(draft.indexOf(m[0]));
+    const listed = (seg.match(/^· /gm) || []).length;
+    if (claimed !== listed) bad.push('写着「没认出来的（' + claimed + ' 个）」，实际只列了 ' + listed + ' 条');
+  }
+  if (!res.ok) bad.push('这一轮应该能正常作答');
+  results.push({ id: 'G56', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;

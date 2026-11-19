@@ -115,11 +115,102 @@
         openId: 'appearance'
       };
 
+      /* 右键「粘贴」的落点：设置页里最近聚焦过的那个输入框。
+         右键菜单弹出时不抢焦点，所以没有「当前输入框」可问，只能靠 focusin
+         记一个最近的；页面重绘后旧节点会失效，用时再判一次 isConnected。
+         适用场景就是本页最常见的动作：从服务商控制台复制 Key / 地址 / 模型名。 */
+      let lastField = null;
+      root.addEventListener('focusin', (e) => {
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') && !t.disabled && !t.readOnly) lastField = t;
+      });
+
+      function pasteIntoField() {
+        const field = lastField && lastField.isConnected ? lastField : null;
+        if (!field) {
+          toast(T('先点一下要粘贴的输入框', 'Click the field to paste into first'));
+          return;
+        }
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+          field.focus();
+          toast(T('请按 Ctrl+V 粘贴', 'Press Ctrl+V to paste'));
+          return;
+        }
+        navigator.clipboard.readText().then((txt) => {
+          if (!txt) { field.focus(); return; }
+          const start = typeof field.selectionStart === 'number' ? field.selectionStart : field.value.length;
+          const end = typeof field.selectionEnd === 'number' ? field.selectionEnd : field.value.length;
+          field.setRangeText(txt, start, end, 'end');
+          /* 本页输入框都靠 oninput 同步草稿，直接改 value 不触发，得自己派发一次 */
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+          field.focus();
+        }).catch(() => {
+          field.focus();
+          toast(T('读不到剪贴板，请按 Ctrl+V', 'Clipboard blocked, press Ctrl+V'));
+        });
+      }
+
+      /* 输入框里的剪切/复制/粘贴：不用 document.execCommand（WebView2 里时灵时不灵，
+         而且改值不派发 input）。统一走「读选区 → 改 setRangeText → 补发 input」，
+         和 pasteIntoField 同一套动作，本页所有输入框的 oninput 都能收到。 */
+      function fieldEdit(field, op) {
+        if (!field) return;
+        const start = typeof field.selectionStart === 'number' ? field.selectionStart : field.value.length;
+        const end = typeof field.selectionEnd === 'number' ? field.selectionEnd : field.value.length;
+        const picked = field.value.slice(start, end);
+        const write = (txt) => {
+          field.setRangeText(txt, start, end, 'end');
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+          field.focus();
+        };
+        if (op === 'selectAll') { field.focus(); field.select(); return; }
+        if (op === 'copy') {
+          if (!picked) return;
+          navigator.clipboard.writeText(picked).then(
+            () => toast(T('已复制', 'Copied'), 'ok'),
+            () => toast(T('复制失败', 'Copy failed'), 'error')
+          );
+          return;
+        }
+        if (op === 'cut') {
+          if (!picked) return;
+          navigator.clipboard.writeText(picked).then(
+            () => write(''),
+            () => toast(T('复制失败', 'Copy failed'), 'error')
+          );
+          return;
+        }
+        if (op === 'paste') pasteIntoField();
+      }
+
       // 设置页右键：数据目录 / 日志目录相关的最常用动作。
       // 页面本身没有列表，所以挂在整页容器上，空白处右键也能用。
-      UI.attachMenu(root, () => {
+      UI.attachMenu(root, (e) => {
+        const t = e.target;
+        const field = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') && !t.disabled && !t.readOnly
+          ? t : null;
+        /* 输入框内右键给文本编辑那一套：这里的原生菜单只有一个「粘贴」，
+           而剪贴板读写在 WebView 里本来就受控，索性自己给全。 */
+        if (field) {
+          lastField = field;
+          const hasSel = field.selectionStart !== field.selectionEnd;
+          return [
+            { label: T('剪切', 'Cut'), icon: 'scissors', disabled: !hasSel, action: () => fieldEdit(field, 'cut') },
+            { label: T('复制', 'Copy'), icon: 'copy', disabled: !hasSel, action: () => fieldEdit(field, 'copy') },
+            { label: T('粘贴', 'Paste'), icon: 'paste', action: () => fieldEdit(field, 'paste') },
+            { sep: true },
+            { label: T('全选', 'Select all'), action: () => fieldEdit(field, 'selectAll') }
+          ];
+        }
         const dir = state.settings && state.settings.data_dir;
         return [
+          {
+            label: T('粘贴到输入框', 'Paste into field'),
+            icon: 'paste',
+            disabled: !(lastField && lastField.isConnected),
+            action: pasteIntoField
+          },
+          { sep: true },
           {
             label: T('复制数据目录', 'Copy data folder'), icon: 'copy', disabled: !dir,
             action: () => {

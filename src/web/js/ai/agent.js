@@ -391,6 +391,108 @@
     return bad;
   }
 
+  /* ---------------- 范围（scope）与路径出处 ----------------
+     用户原话：「他会乱取找文件来给我」「他会拿别的数据来忽悠我，他自己不会区分数据来源」。
+     真实会话（s-mwnomg37）里是这样的：用户问「那你看一下d盘呢」，模型调 top_folders 时
+     没带任何范围，拿到整机结果后把上一轮全是 E 盘的答案原样重发，只在开头把「最近最占空间」
+     改成「D盘最占空间的三个目录是」。下一轮更离谱，答成「D 盘（E 盘）的 Steam 游戏库」。
+     盘符归属、路径有没有查过，都是能用字符串算准的事实，不该交给模型自觉。 */
+
+  const WINPATH_RE = /[A-Za-z]:\\[^\s，。；：、）)」"'<>|?*]*/g;
+  const DRIVE_RE = /(?:^|[^A-Za-z0-9])([A-Za-z])\s*盘/g;
+
+  /** 统一成比较用的形态：反斜杠、去尾斜杠、小写 */
+  function normPath(p) {
+    return String(p || '').replace(/\//g, '\\').replace(/[\\，。；：、）)」"'<>|?*]+$/, '').toLowerCase();
+  }
+
+  /**
+   * 从用户这句话里认出他要的范围。认不出返回 null —— 没范围就不插手。
+   * 「d盘」「D盘呢」「看一下 D:\Tools」都要能认出来。
+   */
+  function scopeOf(text) {
+    const s = String(text || '');
+    const roots = [];
+    /* 原样大小写另存一份：比较用小写，但注进工具参数、显示给用户的必须是原样，
+       否则「D:\」会变成「d:\」，模型回灌时又照着抄一遍。 */
+    const raws = [];
+    const push = (p) => {
+      const k = normPath(p).replace(/\\+$/, '');
+      if (!k) return;
+      if (!roots.some((r) => r === k)) { roots.push(k); raws.push(String(p).replace(/[\\，。；：、）)」"'<>|?*]+$/, '')); }
+    };
+    /* 给了具体路径就按路径，比整个盘精确 */
+    const paths = s.match(WINPATH_RE) || [];
+    if (paths.length) {
+      paths.forEach(push);
+      return { roots, raws, label: paths[0] };
+    }
+    let m = DRIVE_RE.exec(s);
+    while (m) {
+      push(String(m[1]).toUpperCase() + ':');
+      m = DRIVE_RE.exec(s);
+    }
+    DRIVE_RE.lastIndex = 0;
+    if (!roots.length) return null;
+    return { roots, raws, label: roots.map((r) => r.toUpperCase().replace(':', '') + ' 盘').join('、') };
+  }
+
+  /** path 是否落在 roots 里（roots 已 normPath，不带尾斜杠） */
+  function inScope(path, roots) {
+    if (!roots || !roots.length) return true;
+    const p = normPath(path);
+    return roots.some((r) => p === r || p.indexOf(r + '\\') === 0);
+  }
+
+  /** 把工具结果摊平成可搜索的文本：JSON 里的 \\ 要还原，否则路径永远搜不到 */
+  function flatten(hay) {
+    return String(hay || '').replace(/\\\\/g, '\\').replace(/\//g, '\\').toLowerCase();
+  }
+
+  /**
+   * 答案里的路径有没有出处、在不在范围内。
+   * out: 明确越界（用户问 D 盘，答案写 E 盘路径）；bad: 这一轮工具结果里根本没有。
+   */
+  function unsourcedPaths(answer, hay, roots) {
+    const text = String(answer || '');
+    const found = text.match(WINPATH_RE) || [];
+    if (!found.length) return { out: [], bad: [] };
+    const flat = flatten(hay);
+    const out = [];
+    const bad = [];
+    found.forEach((raw) => {
+      const p = normPath(raw);
+      if (!p || p.length < 3) return;
+      if (!inScope(p, roots)) {
+        if (!out.some((x) => x.toLowerCase() === p)) out.push(raw);
+        return;
+      }
+      if (!flat) return;
+      if (flat.indexOf(p) < 0 && !bad.some((x) => normPath(x) === p)) bad.push(raw);
+    });
+    return { out, bad };
+  }
+
+  /**
+   * 把用户说的范围落到工具参数上。
+   * 只在「用户明确说了范围、且模型自己没带（或带错了）」时补，模型带对了就尊重它。
+   * 返回 {args, forced}，forced 用于在回灌里告诉模型「这次是按 X 盘查的」。
+   */
+  function applyScope(tool, args, scope) {
+    const a = Object.assign({}, args || {});
+    if (!scope || !scope.roots || scope.roots.length !== 1) return { args: a, forced: '' };
+    const root = scope.roots[0];
+    /* 用原样大小写那份去注入，比较才用 normPath */
+    const raw = (scope.raws && scope.raws[0]) || root;
+    const withSlash = raw.replace(/\\+$/, '') + '\\';
+    const KEY = tool === 'top_folders' ? 'parent' : (tool === 'top_files' || tool === 'list_dir' || tool === 'empty_dirs' || tool === 'search_files' ? 'dir' : '');
+    if (!KEY) return { args: a, forced: '' };
+    const cur = a[KEY];
+    if (cur && inScope(cur, scope.roots)) return { args: a, forced: '' };
+    a[KEY] = withSlash;
+    return { args: a, forced: withSlash };
+  }
+
   const fmtSize = (v) => {
     const n = Number(v) || 0;
     if (n >= SIZE_UNITS.TB) return (n / SIZE_UNITS.TB).toFixed(1) + ' TB';
@@ -944,6 +1046,17 @@
           } catch (e) {
             throw Object.assign(new Error('接口返回的不是 JSON'), { code: 'bad_response' });
           }
+          /* 有的接口出错也回 200，把错误放在 body 里：
+             不认这层就会一路走到「模型返回了空内容」，把真原因（比如
+             Content-Type 不对、模型名下线、余额不足）整个吞掉。 */
+          if (payload && payload.error && !(payload.choices && payload.choices.length)) {
+            const em = payload.error.message || payload.error.msg || payload.error.code || '';
+            const err = Object.assign(
+              new Error('接口返回错误：' + (em || '没有说明')),
+              { code: 'api_error', detail: String(em || '') }
+            );
+            throw err;
+          }
           choice = payload && payload.choices && payload.choices[0];
           content = choice && choice.message ? choice.message.content : '';
           if (Array.isArray(content)) {
@@ -1139,6 +1252,10 @@
          再列一遍只会和 schema 打架；JSON 模式必须逐字列出工具名。 */
       let nativeNow = nativeOn();
       let system = prompt.systemPrompt(ctxTools, nativeNow);
+      /* 用户这句话点了哪个盘/哪个目录。认不出来就是 null，不插手工具参数。
+         认出来之后，凡是能表达范围的工具都按它补参数（见 applyScope）——
+         「看一下d盘」以前是模型自觉带 parent，实测它不带，于是拿整机结果冒充 D 盘。 */
+      const scope = scopeOf(opts && opts.userText);
       /* 中途被拒（400 说不认 tools）会把 nativeTools 记成 false：
          这时 system 得换回 JSON 那套，否则规则和实际发法对不上。 */
       const syncProtocol = () => {
@@ -1341,6 +1458,30 @@
           const okTools = trace.filter((t) => t.ok);
           const hay = okTools.map((t) => JSON.stringify(t.result || '')).join('\n');
           const bad = unsourcedSizes(step.answer, hay);
+          /* 路径也要有出处，而且要在用户问的范围里。
+             用户原话「他会拿别的数据来忽悠我，他自己不会区分数据来源」：
+             数字同源只挡住了「编体积」，挡不住「拿 E 盘的结果冒充 D 盘」——
+             那些数字确实来自工具，只是张冠李戴。这里补上路径这一维。 */
+          const pth = unsourcedPaths(step.answer, hay, scope && scope.roots);
+          if ((pth.out.length || pth.bad.length) && repairLeft > 0) {
+            repairLeft -= 1;
+            messages.push({ role: 'assistant', content: JSON.stringify({ answer: step.answer }) });
+            const lines = [];
+            if (pth.out.length) {
+              lines.push('这些路径不在' + (scope ? scope.label : '你查的范围') + '里：' + pth.out.join('、') +
+                '。用户问的是' + (scope ? scope.label : '这个范围') + '，不能用别的盘的结果顶替。');
+            }
+            if (pth.bad.length) {
+              lines.push('这些路径在你这一轮的工具结果里没有出现：' + pth.bad.join('、') + '。');
+            }
+            messages.push({
+              role: 'user',
+              content: lines.join('') + '只用工具真实返回、且属于用户所问范围的路径；查不到就直接说没查到。' +
+                '请重新只输出一个 JSON 对象。' + (prompt.OUTPUT_REMINDER || '')
+            });
+            steps += 1;
+            continue;
+          }
           if (bad.length && repairLeft > 0) {
             repairLeft -= 1;
             messages.push({ role: 'assistant', content: JSON.stringify({ answer: step.answer }) });
@@ -1445,7 +1586,14 @@
         const ran = [];
         for (const call of calls) {
           if (stop.isStopped()) return stoppedResult();
-          const args = call.args || {};
+          /* 范围优先于模型自觉：用户说了「d盘」，模型没带 parent 就替它带上，
+             带了但带错（比如给 top_folders 发明一个它不认的 dir 参数）也改回来。
+             这是硬约束，不是提示词请求 —— 提示词管不住它。 */
+          const scoped = applyScope(call.tool, call.args || {}, scope);
+          const args = scoped.args;
+          if (scoped.forced && onEvent) {
+            onEvent({ type: 'notice', level: 'info', message: '按' + scope.label + '查（' + scoped.forced + '）' });
+          }
           if (onEvent) onEvent({ type: 'step-start', tool: call.tool, args });
           const t0 = Date.now();
           let result;
@@ -1560,6 +1708,11 @@
     buildHistory,
     sizeTokens,
     unsourcedSizes,
+    unsourcedPaths,
+    scopeOf,
+    inScope,
+    applyScope,
+    normPath,
     fmtSize,
     DEFAULT_MAX_STEPS,
     DEFAULT_TURN_BUDGET,

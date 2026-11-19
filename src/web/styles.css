@@ -3028,6 +3028,14 @@ html[data-theme="dark"] .ai-page {
   font: inherit; font-size: 12px; color: var(--text-1); padding: 0;
 }
 .dac-filter-input::placeholder { color: var(--text-3); }
+/* 筛选框本身不画焦点环（用户截图圈的就是这一圈橙框）：全局 :focus-visible 的
+   box-shadow 会落在 <input> 上，跟外层 .dac-filter 的描边叠成两道。
+   焦点感全部交给 .dac-filter:focus-within 的描边与图标变深，键盘可达性不变。 */
+.dac-filter-input:focus,
+.dac-filter-input:focus-visible,
+.dac-filter-input:focus-within {
+  outline: none; box-shadow: none; border-color: transparent;
+}
 .dac-filter-clear {
   display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center;
   width: 16px; height: 16px; padding: 0; border: 0; border-radius: 4px;
@@ -3399,6 +3407,13 @@ html[data-theme="dark"] .ai-page {
 
 .ai-report-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .ai-report-filter { width: 100%; }
+/* 同一件事在弹窗里也成立：清单筛选框不拿强调色描边，只把边框压深一档。
+   `.input:focus` 那条（accent 边框 + 3px 光环）在这里被同名更靠后的规则盖掉。 */
+.ai-report-filter:focus,
+.ai-report-filter:focus-visible {
+  outline: none; box-shadow: none;
+  border-color: color-mix(in srgb, var(--text-1) 28%, transparent);
+}
 /* 弹窗里清单自己滚，标题和筛选框不动。
    overflow-x 必须显式藏住：只写 overflow-y: auto 时，浏览器会把 overflow-x
    一并算成 auto，于是组标题那条 margin: 0 -8px 的负边距撑出的 16px
