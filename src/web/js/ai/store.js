@@ -53,7 +53,15 @@
     /* 备用端点：主端点限流/欠费/模型下线时按顺序往后切。
        每项 {endpoint, model, key?}；key 省略就沿用主密钥。
        真实日志里 60% 的失败是 429/402/503，没有备份就只能整轮作废。 */
-    fallbacks: []
+    fallbacks: [],
+    /* 厂商记忆：键是端点主机（api.deepseek.com / open.bigmodel.cn …），
+       值是 { key, model, endpoint, at }。
+       为什么按主机而不是按完整地址：同一家的 base URL 会有 /v1、
+       /compatible-mode/v1、/api/paas/v4 三种写法，主机却只有一个；
+       按完整地址记会把「换了条路径」变成「又要重填一遍 Key」。
+       为什么存在这里而不是另开一个文件：它跟端点、模型是一件事，
+       存 app.json 的 ai 段就能跟着用户备份一起走。 */
+    providerKeys: {}
   };
 
   /* 端点没报窗口时的兜底：1M。
@@ -180,6 +188,21 @@
     return s;
   }
 
+  /* 端点主机：厂商记忆的键。
+     URL() 解析失败时退回手抠 —— 用户手打一半的地址也要能有个键，
+     否则「边填边记」会不断丢东西。 */
+  function hostOf(endpoint) {
+    const s = String(endpoint || '').trim();
+    if (!s) return '';
+    try {
+      const u = new URL(s);
+      return String(u.host || '').toLowerCase();
+    } catch (e) {
+      const m = s.match(/^[a-z]+:\/\/([^/?#]+)/i);
+      return m ? String(m[1] || '').toLowerCase() : '';
+    }
+  }
+
   function normalize(raw) {
     const out = Object.assign({}, DEFAULTS);
     if (!raw || typeof raw !== 'object') return out;
@@ -277,6 +300,31 @@
       });
       out.fallbacks = list.slice(0, 5);
     }
+    /* 厂商记忆：键必须是主机名，值只留 {key, model, endpoint, at}。
+       这里做的是「防脏」而不是「防用户」——它由软件自己写，
+       但用户可能手工编辑 app.json，坏一条不该把整份配置读废。
+       上限 60 家：正常用户一辈子也用不到这么多，超了按最近使用保留。 */
+    if (raw.providerKeys && typeof raw.providerKeys === 'object' && !Array.isArray(raw.providerKeys)) {
+      const keys = {};
+      const entries = [];
+      Object.keys(raw.providerKeys).forEach((k) => {
+        const host = String(k || '').trim().toLowerCase();
+        if (!host || host.length > 120) return;
+        const v = raw.providerKeys[k];
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+        const one = {};
+        if (typeof v.key === 'string' && v.key.trim()) one.key = v.key.trim();
+        if (typeof v.model === 'string' && v.model.trim()) one.model = v.model.trim().slice(0, 120);
+        if (typeof v.endpoint === 'string' && v.endpoint.trim()) one.endpoint = normEndpoint(v.endpoint);
+        one.at = Number(v.at) || 0;
+        /* 没 Key 也没模型记忆的条目没有价值，直接丢掉 */
+        if (!one.key && !one.model) return;
+        entries.push({ host: host, one: one });
+      });
+      entries.sort((a, b) => (b.one.at || 0) - (a.one.at || 0));
+      entries.slice(0, 60).forEach((it) => { keys[it.host] = it.one; });
+      out.providerKeys = keys;
+    }
     return out;
   }
 
@@ -316,6 +364,84 @@
     if (!k) return '';
     if (k.length <= 8) return '••••';
     return k.slice(0, 3) + '••••' + k.slice(-4);
+  }
+
+  /* ---------------- 厂商记忆 ----------------
+     一个很具体的历史痛点：用户手里有好几家的 Key（智谱、DeepSeek、百炼…），
+     每换一次厂商都要把 Key 重新粘一遍，粘错了要到对话里才炸成 401。
+     这里按主机记住「这家的 Key 和上次用的模型」，切回去时自动带出来。
+
+     只记主机：同一家的地址有 /v1、/compatible-mode/v1、/api/paas/v4 多种写法，
+     按完整地址记等于「换条路径就要重填」。 */
+
+  /* 记忆键：既接受完整地址，也接受裸主机名。
+     界面上的「已记住的厂商」列表手里只有 host（它就是 providerKeys 的键），
+     如果再拿它去走 hostOf() 会因为缺少协议头解析失败，导致读不到也删不掉。 */
+  function hostKeyOf(value) {
+    const s = String(value || '').trim().toLowerCase();
+    if (!s) return '';
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return hostOf(s) || '';
+    return s.replace(/^\/+/, '').split('/')[0];
+  }
+
+  /* 读某家的记忆；没有就返回 null（调用方据此决定是否覆盖当前表单） */
+  function recallProvider(endpoint) {
+    const host = hostKeyOf(endpoint);
+    if (!host) return null;
+    const all = (cache && cache.providerKeys) || {};
+    const hit = all[host];
+    if (!hit || typeof hit !== 'object') return null;
+    return Object.assign({}, hit, { host: host });
+  }
+
+  /* 记某家：key / model / endpoint 都尽量更新，空值不覆盖已有的。
+     at 用来做「最近用过」的排序，也方便界面上按新鲜度排。
+     只有真写进了新内容才更新 at —— 每次保存都拿空值调一遍的话，
+     时间戳会被无意义地刷新，界面上的顺序就跟着乱跳。 */
+  async function rememberProvider(patch) {
+    const p = patch || {};
+    const host = hostKeyOf(p.endpoint);
+    if (!host) return null;
+    const cur = await load();
+    const all = Object.assign({}, cur.providerKeys || {});
+    const prev = (all[host] && typeof all[host] === 'object') ? all[host] : {};
+    const one = Object.assign({}, prev);
+    let touched = false;
+    if (typeof p.key === 'string' && p.key.trim() && p.key.trim() !== prev.key) { one.key = p.key.trim(); touched = true; }
+    if (typeof p.model === 'string' && p.model.trim() && p.model.trim().slice(0, 120) !== prev.model) { one.model = p.model.trim().slice(0, 120); touched = true; }
+    if (typeof p.endpoint === 'string' && p.endpoint.trim() && normEndpoint(p.endpoint) !== prev.endpoint) { one.endpoint = normEndpoint(p.endpoint); touched = true; }
+    if (!one.key && !one.model) return null;
+    if (!touched && prev.at) return cur;
+    one.at = Date.now();
+    all[host] = one;
+    return save({ providerKeys: all });
+  }
+
+  /* 忘掉某家（界面上「删除这条记忆」用它）：删完不会影响当前正在用的配置 */
+  async function forgetProvider(endpoint) {
+    const host = hostKeyOf(endpoint);
+    if (!host) return null;
+    const cur = await load();
+    const all = Object.assign({}, cur.providerKeys || {});
+    if (!all[host]) return cur;
+    delete all[host];
+    return save({ providerKeys: all });
+  }
+
+  /* 记忆列表，按最近使用排序：界面「已记住的厂商」那一块照这个顺序铺 */
+  function listProviders() {
+    const all = (cache && cache.providerKeys) || {};
+    return Object.keys(all).map((host) => {
+      const v = all[host] || {};
+      return {
+        host: host,
+        key: String(v.key || ''),
+        masked: maskKey(v.key),
+        model: String(v.model || ''),
+        endpoint: String(v.endpoint || ''),
+        at: Number(v.at) || 0
+      };
+    }).sort((a, b) => (b.at || 0) - (a.at || 0));
   }
 
   /* ---------------- 会话 ---------------- */
@@ -565,6 +691,11 @@
     isConfigured,
     maskKey,
     normEndpoint,
+    hostOf,
+    recallProvider,
+    rememberProvider,
+    forgetProvider,
+    listProviders,
     listSessions,
     loadSession,
     saveSession,

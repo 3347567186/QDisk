@@ -2378,6 +2378,54 @@ html[data-theme="dark"] .ai-page {
   transition: flex-basis var(--dur-3) var(--ease), height var(--dur-3) var(--ease),
     padding var(--dur-3) var(--ease), opacity var(--dur-2) var(--ease);
 }
+
+/* 「正在运行」面板：切走的会话在后台继续跑，这里给一个能点回去的入口。
+   外观跟下面的归档清单对齐（同一个 margin / 圆角 / 描边），
+   免得左栏里出现两种不同宽度的方块。 */
+.ai-busy {
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: 1px;
+  margin: 0 8px 6px; padding: 6px 5px 5px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.ai-busy[hidden] { display: none; }
+.ai-busy-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 6px 4px; font-size: var(--fs-tiny); color: var(--text-3);
+  letter-spacing: .04em;
+}
+/* 呼吸点：不用旋转图标，静态也能看出「这条是活的」 */
+.ai-busy-dot {
+  flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-text);
+  animation: ai-busy-pulse 1.6s var(--ease) infinite;
+}
+@keyframes ai-busy-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.82); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-busy-dot { animation: none; }
+}
+.ai-busy-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%;
+  padding: 4px 6px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--text-2); cursor: pointer; text-align: left;
+  font-size: var(--fs-small); font-family: inherit;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.ai-busy-row:hover { background: var(--hover); color: var(--text-1); }
+.ai-busy-row[data-active] { color: var(--text-1); }
+.ai-busy-title {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.ai-busy-tag {
+  flex: 0 0 auto; font-size: var(--fs-tiny); color: var(--text-3);
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+/* 左栏收起时整块让位：宽度只剩 56px，标题全成省略号，不如不画 */
+.ai-page[data-rail="closed"] .ai-busy { display: none; }
 .ai-rail-group {
   font-size: var(--fs-tiny); color: var(--text-3); letter-spacing: .04em;
   padding: 10px 8px 4px; flex: 0 0 auto;
@@ -2446,6 +2494,12 @@ html[data-theme="dark"] .ai-page {
 }
 .ai-scroll::-webkit-scrollbar { width: 0; height: 0; }
 .ai-msgs { display: flex; flex-direction: column; gap: 26px; }
+
+/* 后台会话的消息容器停靠区（chatui.js 的 paneStore）。
+   只用来「让切走的会话继续待在文档里」，不参与布局：
+   hidden 属性已经让它不渲染，这里再兜一道 display:none，
+   免得某些浏览器把 hidden 容器里的 flex 子项也算进高度。 */
+.ai-panes { display: none; }
 
 /* 消息：照 Claude 的做法——用户那句是右侧一块浅底气泡，助手回答就是正文。
    两边都不再挂「你 / 助手」的标签：位置和底色已经说明了是谁在说。 */

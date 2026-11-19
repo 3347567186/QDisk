@@ -526,6 +526,30 @@
      这里允许在设置里配一串备用「端点 + 模型」，只在端点明确拒绝服务
      （限流、欠费、密钥不认、模型不存在、5xx 退避用尽）时往后切，
      切了必须在答案顶部写明 —— 用户要知道这句话是谁说的。 */
+  function hostOf(endpoint) {
+    const s = String(endpoint || '').trim();
+    if (!s) return '';
+    try { return new URL(s).host.toLowerCase(); } catch (e) { return (s.replace(/^https?:\/\//i, '').split('/')[0] || '').toLowerCase(); }
+  }
+
+  /* 找这一家的 Key：先看设置里有没有单独填（fallbacks[].key），
+     再看「已记住的厂商」里存过什么。
+     注意这里**故意**不再无条件回退到主端点的 apiKey：
+     跨厂商的时候那把 Key 属于另一家，发过去只会 401，
+     还等于把 A 家的密钥送给了 B 家的服务器。同域名才允许继承。 */
+  function keyFor(endpoint, explicit, primaryEndpoint, primaryKey) {
+    const own = String(explicit || '').trim();
+    if (own) return own;
+    try {
+      const mem = root.AIStore && root.AIStore.recallProvider ? root.AIStore.recallProvider(endpoint) : null;
+      if (mem && mem.key) return String(mem.key).trim();
+    } catch (e) { /* 记忆读不出来就当没有 */ }
+    const h = hostOf(endpoint);
+    const ph = hostOf(primaryEndpoint);
+    if (h && ph && h === ph) return String(primaryKey || '').trim();
+    return '';
+  }
+
   function buildCandidates(settings) {
     const out = [];
     const push = (endpoint, model, key) => {
@@ -534,13 +558,16 @@
       if (!e || !m) return;
       const id = e + '|' + m;
       if (out.some((c) => c.id === id)) return;
-      let host = e;
-      try { host = new URL(e).host; } catch (err) { host = e.replace(/^https?:\/\//i, '').split('/')[0]; }
-      out.push({ id, endpoint: e, model: m, key: String(key || '').trim(), host: host || e });
+      const host = hostOf(e) || e;
+      out.push({ id, endpoint: e, model: m, key: key, host: host || e });
     };
-    push(settings.endpoint, settings.model, settings.apiKey);
+    push(settings.endpoint, settings.model,
+      keyFor(settings.endpoint, settings.apiKey, settings.endpoint, settings.apiKey));
     (Array.isArray(settings.fallbacks) ? settings.fallbacks : []).forEach((f) => {
-      if (f && typeof f === 'object') push(f.endpoint, f.model, f.key || settings.apiKey);
+      if (f && typeof f === 'object') {
+        push(f.endpoint, f.model,
+          keyFor(f.endpoint, f.key, settings.endpoint, settings.apiKey));
+      }
     });
     return out;
   }
@@ -602,7 +629,10 @@
       const c = candidates[candIdx];
       curEndpoint = c.endpoint;
       curModel = c.model;
-      curKey = c.key || settings.apiKey || '';
+      /* Key 在 buildCandidates 里已经按「显式 → 已记住 → 同域名才继承主端点」定好，
+         这里不再回退 settings.apiKey：换了厂商还用上一家的 Key 只会 401，
+         而且那把密钥会真的发到另一家的服务器上 */
+      curKey = c.key || '';
       capKey = capKeyOf(curEndpoint, curModel);
       caps = readCaps(settings.caps, capKey);
       switched = { host: c.host, model: c.model, why: why, from: from };

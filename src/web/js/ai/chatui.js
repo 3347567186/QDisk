@@ -245,7 +245,10 @@
     const compact = !!options.compact;
 
     const scroller = h('div', { class: 'ai-scroll' });
-    const msgs = h('div', { class: 'ai-msgs' });
+    /* 消息容器以前是 const：切会话只能把里面的节点删掉，而正在跑的那一轮
+       还在往被删掉的节点里写 —— 用户看到的就是「任务没了」。
+       现在它是 let，永远指向当前可见会话的容器（activatePane 负责换）。 */
+    let msgs = h('div', { class: 'ai-msgs' });
     const emptyBox = h('div', { class: 'ai-empty' });
     scroller.appendChild(emptyBox);
     scroller.appendChild(msgs);
@@ -264,15 +267,174 @@
     const shell = h('div', { class: 'ai-shell' + (compact ? ' compact' : '') }, scroller, toBottom);
     rootEl.appendChild(shell);
 
+    /* ---------------- 会话分桶（pane） ----------------
+       一个会话一个 pane：自己的状态、自己的消息容器、自己的回合刻度。
+       切会话只换视图，正在跑的那一轮继续往它自己的 pane 里写。
+       以前 newSession / loadSession 只做 resetTurns + msgs.innerHTML=''，
+       在飞那一轮的节点被从文档里摘掉，用户看到的就是「任务没了」，
+       结果还会落进已经换掉的那个会话对象里 —— bug1 就是这条链。 */
+    const panes = new Map();
+    /* 不可见的 pane 留在这个隐藏容器里，而不是被摘出文档：
+       后台会话仍在写 DOM，节点一旦离开文档树，写出来的东西就再也看不见。 */
+    const paneStore = h('div', { class: 'ai-panes' });
+    paneStore.hidden = true;
+    shell.appendChild(paneStore);
+    /* 当前可见的 pane：所有「看得见的界面」只认它（滚动、跟随、输入框忙态） */
+    let activePane = null;
+    /* destroy() 之后为 true。后台会话可能还在飞，它收尾时不该再去碰
+       已经被拆掉的输入框 / 跟随器（那些对象已经 destroy，再调用就抛了）。 */
+    let destroyed = false;
+    /* 单飞闸门：同一时刻只允许一个请求在飞（不动 Rust 那边的全局 AI_CANCEL）。
+       别的会话这时提交不静默丢、也不并行打断，进 queue 排队等它跑完。 */
+    let inFlight = null;
+    const queue = [];
+    /* 切一次会话就多留一份 DOM，不回收就是一路涨内存。
+       被回收的会话内容早就在 AIStore 里存着，切回来时按文件重建即可。 */
+    const PANE_KEEP = 5;
+
+    function makePane(id) {
+      const pane = {
+        id: id,
+        state: newState(),
+        msgs: h('div', { class: 'ai-msgs' }),
+        turns: [],
+        current: null,
+        lastAsk: null,
+        built: false
+      };
+      /* 右键菜单与「点路径就打开」必须绑在这个 pane 自己的容器上：
+         只绑启动时那两个全局 msgs 的话，切过会话之后新容器里的路径就点不动了
+         （entries.bind 内部按 scope.__aiEntriesBound 去重，重复绑不会叠加）。 */
+      pane.msgs.addEventListener('contextmenu', onContextMenu);
+      try { AIEntries.bind(pane.msgs, { onAsk: askAboutPath }); } catch (e) { /* 绑不上只少一个点击 */ }
+      paneStore.appendChild(pane.msgs);
+      panes.set(id, pane);
+      return pane;
+    }
+
+    /* 这个 pane 是不是用户此刻正在看的那一个。activePane 还没设立
+       （boot 之前、或调用方没走 newSession）时，谁在用 msgs 谁就是可见的，
+       否则起手那几帧会把界面操作全当成「后台」跳过。
+       destroy 之后没有任何东西是「可见」的：后台会话可能还在飞，
+       它收尾时不该再去动已经拆掉的输入框与跟随器。 */
+    function isVisible(pane) {
+      if (destroyed) return false;
+      if (!pane) return false;
+      if (pane === activePane) return true;
+      return !activePane && pane.msgs === msgs;
+    }
+
+    /* 模型 / 强度 / 权限是全局偏好，不是某个会话的私产：改了要落到每个 pane
+       的 state 上。只写可见那一份的话，切回一个早就建好的会话时，它记着的
+       还是启动时那套值 —— 「换了模型再点重试又用回旧模型」（bug2）就是这条
+       在别人的会话里更隐蔽的版本。 */
+    function eachPaneState(fn) {
+      panes.forEach(function (p) { fn(p.state, p); });
+      /* 还没建立任何 pane 时（boot 之前），只有那个占位 state 可写 */
+      if (!activePane) fn(state, null);
+    }
+
+    /* 换视图：旧容器收回隐藏仓，新容器挂进滚动区；
+       状态 / 回合刻度 / 跟随器全部换成这个 pane 的。
+       界面永远只反映可见会话，后台会话的写入只碰它自己的 DOM。 */
+    function activatePane(pane) {
+      if (!pane) return;
+      if (activePane && activePane !== pane) {
+        if (activePane.msgs.parentNode) activePane.msgs.parentNode.removeChild(activePane.msgs);
+        paneStore.appendChild(activePane.msgs);
+      } else if (!activePane && msgs && msgs !== pane.msgs && msgs.parentNode) {
+        /* 启动时那个占位容器不属于任何会话：第一次激活时把它摘掉，
+           否则它会一直跟真正的内容并排留在滚动区里。 */
+        msgs.parentNode.removeChild(msgs);
+      }
+      if (pane.msgs.parentNode) pane.msgs.parentNode.removeChild(pane.msgs);
+      scroller.appendChild(pane.msgs);
+      activePane = pane;
+      state = pane.state;
+      msgs = pane.msgs;
+      turns = pane.turns;
+      if (rail) rail.setTurns(pane.turns);
+      rebuildFollow();
+      setEmpty(!pane.msgs.children.length);
+      toBottom.classList.remove('on');
+      /* 输入框的「忙」跟着可见会话走：后台会话在跑不该锁住这里，
+         可见会话在跑就得能停 —— 停止按钮停的永远是看得见的这一条。 */
+      composer.setBusy(!!state.running, false);
+      requestAnimationFrame(function () { paintActiveTurn(); });
+      /* 可见会话变了，「运行中」高亮与「这是你正在看的那个」都得跟着变 */
+      notifyBusy();
+    }
+
+    /* 跟随器盯的是「某个容器 + 某个滚动条」：换了会话就换了容器，
+       复用旧实例等于让它盯一个已经不在视口里的节点。 */
+    function rebuildFollow() {
+      if (follow) { try { follow.destroy(); } catch (e) { /* 旧的收不掉也要换成新的 */ } }
+      follow = root.AIFollow ? root.AIFollow.create({
+        scroller: scroller,
+        content: msgs,
+        onChange: function (s) { toBottom.classList.toggle('on', !s.following); }
+      }) : null;
+      if (follow) follow.resume();
+    }
+
+    /* 别的会话在飞时提交：排队 + 在该会话里留一条看得见的提示。
+       以前这里是静默 return，用户点了发送却什么都没发生（bug1 的另一半）。 */
+    function enqueueTurn(pane, payload) {
+      const node = h('div', { class: 'ai-notice info' },
+        T('上一个会话还在跑，这条已排队，跑完自动发',
+          'Another conversation is still running — queued, will send when it finishes'));
+      pane.msgs.appendChild(node);
+      scrollEnd(false, pane);
+      queue.push({ pane: pane, payload: payload, node: node });
+      notifyBusy();
+    }
+
+    /* 出队：一次只起一条，它收尾时再调回这里，天然串行 */
+    function pumpQueue() {
+      if (inFlight) return;
+      while (queue.length) {
+        const item = queue.shift();
+        if (item.node && item.node.parentNode) item.node.remove();
+        if (!item.pane || !panes.has(item.pane.id)) continue;   // 会话已经没了：这条不再有意义
+        ask(item.payload, item.pane);
+        notifyBusy();
+        return;
+      }
+      notifyBusy();
+    }
+
+    /* 让出单飞位：清标记 + 立刻看队列 */
+    function releaseFlight() {
+      inFlight = null;
+      pumpQueue();
+      /* pumpQueue 里已经发过一次通知，这里再发一次是为了覆盖
+         「队列空、单纯这一轮跑完」的常见情况（那时上面那条 return 走不到） */
+      notifyBusy();
+    }
+
+    function prunePanes() {
+      if (panes.size <= PANE_KEEP) return;
+      panes.forEach(function (p, id) {
+        if (panes.size <= PANE_KEEP) return;
+        if (!id || p === activePane || p.state.running) return;
+        if (inFlight && inFlight.pane === p) return;
+        if (queue.some(function (q) { return q.pane === p; })) return;
+        if (p.msgs.parentNode) p.msgs.parentNode.removeChild(p.msgs);
+        panes.delete(id);
+      });
+    }
+
     /* 回合导航：一条刻度 = 一轮（用户一句话 + 它的回答）。窄窗或只有一轮时自己隐藏。 */
-    const turns = [];
+    let turns = [];
     const rail = root.AITurnRail ? root.AITurnRail.create({
       host: shell,
       onNavigate: function (i) { jumpToTurn(i); }
     }) : null;
 
-    /* 视角跟随：贴底就跟，读者一往上翻就撒手，出现「回到底部」 */
-    const follow = root.AIFollow ? root.AIFollow.create({
+    /* 视角跟随：贴底就跟，读者一往上翻就撒手，出现「回到底部」。
+       必须 let：跟随器绑的是「某个容器 + 某个滚动条」，换会话就整个重建
+       （见 rebuildFollow），继续复用旧实例等于让它盯一个不在视口里的节点。 */
+    let follow = root.AIFollow ? root.AIFollow.create({
       scroller: scroller,
       content: msgs,
       onChange: function (s) { toBottom.classList.toggle('on', !s.following); }
@@ -375,18 +537,26 @@
       return guardReady;
     }
 
-    let state = {
-      running: false,
-      token: { stopped: false },
-      session: null,
-      history: [],
-      lastResult: null,
-      /* 老版本存的是 simple / medium / deep，迁到 off/low/medium/high，
-         别让一次升级把用户选好的档位清成默认 */
-      thinking: Strength.migrateLevel(ui.thinking),
-      permission: ui.permission || 'standard',
-      model: ui.model || ''
-    };
+    /* 一个会话的全部私有状态。以前只有一份，切会话就把它整份覆盖掉，
+       于是「跑完往哪儿写」取决于切没切走 —— 这是结果落错地方的一半原因。
+       现在每个 pane 各持一份，在飞那一轮拿着自己的 st 一直写到底。 */
+    function newState() {
+      return {
+        running: false,
+        token: { stopped: false },
+        session: null,
+        history: [],
+        lastResult: null,
+        /* 老版本存的是 simple / medium / deep，迁到 off/low/medium/high，
+           别让一次升级把用户选好的档位清成默认 */
+        thinking: Strength.migrateLevel(ui.thinking),
+        permission: ui.permission || 'standard',
+        model: ui.model || ''
+      };
+    }
+
+    /* 永远指向当前可见 pane 的 state：界面层（底栏、输入框、停止键）只读它 */
+    let state = newState();
 
     /* 输入框：模型菜单与推理强度都在它里面，这里只接回调 */
     const composer = root.AIComposer.create(shell, {
@@ -404,28 +574,39 @@
       usage: { used: 0, budget: 0 },
       onSubmit: (payload) => { ask(payload); },
       onStop: () => {
-        state.token.stopped = true;
+        /* 停止只停看得见的那个会话。后台会话在飞时这里不该被按到
+           （输入框的忙态跟着可见会话走），万一按到也只作用于可见的那个，
+           绝不能顺手把别人的任务停掉。 */
+        const pane = activePane;
+        if (!pane || !pane.state.running) return;
+        const st = pane.state;
+        st.token.stopped = true;
         /* 旗标只让环路在下一步前收手；在飞的这次请求要靠 onStop 立刻结束，
            Rust 侧 ai_cancel 再去断连接——两边都做，才不用等接口自己超时。 */
-        try { if (typeof state.token.onStop === 'function') state.token.onStop(); } catch (e) { /* 收尾失败也要停 */ }
+        try { if (typeof st.token.onStop === 'function') st.token.onStop(); } catch (e) { /* 收尾失败也要停 */ }
         try { if (window.API && window.API.aiCancel) window.API.aiCancel(); } catch (e) { /* 断连失败不影响界面 */ }
         composer.setBusy(true, true);
       },
       onThinkingChange: (v) => {
-        state.thinking = v;
+        /* 强度是全局偏好：每个 pane 的 state 都要跟上。
+           只写可见那份的话，切到一个旧会话时它还记着启动时的档位，
+           那一轮就会按旧档位跑（用户的感受是「我明明调高了，它没变」）。 */
+        eachPaneState(function (st) { st.thinking = v; });
         rememberUi({ thinking: v });
       },
       onPermissionChange: (p) => {
-        state.permission = p;
+        eachPaneState(function (st) { st.permission = p; });
         rememberUi({ permission: p });
       },
       onModelChange: (id) => {
         /* 换模型就换窗口：每个模型的上下文长度是各自的能力，不共用上一个的。
            端点没报过这个模型的值时，按模型名推断（1M / 200K / 128K…），不留空。 */
-        state.model = id;
+        const w = ctxWindowOf({ model: id });
+        eachPaneState(function (st) {
+          st.model = id;
+          st.ctxWindow = w;
+        });
         rememberUi({ model: id });
-        const w = ctxWindowOf(Object.assign({}, state.settings, { model: id }));
-        state.ctxWindow = w;
         composer.setUsage({ used: state.usedTokens || 0, budget: w });
         composer.setThinkBudgets(thinkBudgets(), w);
       },
@@ -474,7 +655,10 @@
       return { ok: true, page: p };
     }
 
-    function scrollEnd(force) {
+    /* 贴底只对「看得见的那个会话」有意义：后台会话的写入不该把视图拽下去。
+       传了 pane 就是替某个 pane 判断，没传就当操作的是可见会话。 */
+    function scrollEnd(force, pane) {
+      if (pane && !isVisible(pane)) return;
       /* 贴底跟随交给 AIFollow 判断；这里只做「已经在底部」时的即时贴底 */
       if (follow) {
         if (follow.isFollowing() || force) follow.toBottom(force ? 'instant' : 'instant');
@@ -485,25 +669,34 @@
       scroller.scrollTop = scroller.scrollHeight;
     }
 
-    /* 配置变了就同步胶囊与菜单：模型是单一真值，不在菜单里编造 */
-    function applyModels(settings) {
+    /* 配置变了就同步胶囊与菜单：模型是单一真值，不在菜单里编造。
+       模型是全局配置（不是每个会话各一份），但每一轮跑在哪个会话里就写哪个会话的
+       state：后台会话没法去改用户此刻看到的胶囊，只把自己的取值记住等切回来。 */
+    function applyModels(settings, pane) {
+      const tgt = pane || activePane;
+      const st = tgt ? tgt.state : state;
       const list = realModels(settings);
-      composer.setModels(list);
+      /* destroy 之后输入框已经拆掉了：后台会话这时才收尾时不该再去碰它，
+         否则 setModels 会去操作已经 destroy 掉的 morph 而抛错 */
+      if (!destroyed) composer.setModels(list);
       if (list.length) {
         /* 上次在菜单里选的那个模型优先：它在清单里就沿用它，
            不在（端点换了、模型下线了）才退回设置里配的第一个。 */
         const want = ui.model && list.some(function (m) { return m.id === ui.model; }) ? ui.model : list[0].id;
-        state.model = want;
-        composer.setModel(want);
+        st.model = want;
+        if (!destroyed && (!pane || isVisible(tgt))) composer.setModel(want);
       } else {
-        state.model = '';
+        st.model = '';
       }
       /* 上下文占用环的分母是模型真窗口，不是写死的 8000 */
-      state.ctxWindow = ctxWindowOf(settings);
-      composer.setUsage({ used: state.usedTokens || 0, budget: state.ctxWindow });
-      /* 滑块刻度标的是「思考预算」，不是查证轮数：
-         轮数是防守用的硬上限，写出来只会让人以为「少查几轮 = 更省钱」 */
-      composer.setThinkBudgets(thinkBudgets(), state.ctxWindow);
+      st.ctxWindow = ctxWindowOf(settings);
+      /* 底栏只反映看得见的那个会话：后台会话的 token 不该跳到用户眼前 */
+      if (!destroyed && (!pane || isVisible(tgt))) {
+        composer.setUsage({ used: st.usedTokens || 0, budget: st.ctxWindow });
+        /* 滑块刻度标的是「思考预算」，不是查证轮数：
+           轮数是防守用的硬上限，写出来只会让人以为「少查几轮 = 更省钱」 */
+        composer.setThinkBudgets(thinkBudgets(), st.ctxWindow);
+      }
       return list;
     }
 
@@ -599,14 +792,22 @@
       return i > 0 ? t.slice(0, i) : '';
     }
 
-    function pendingCards() {
-      syncCards();
+    function pendingCards(where) {
+      syncCards(where);
     }
 
     /* 整页和抽屉共用一份队列，因此这里不能只往自己这边追加新卡：
-       别的视图已经处理掉的，这边也要跟着换成「已执行 / 已取消」。 */
-    function syncCards() {
+       别的视图已经处理掉的，这边也要跟着换成「已执行 / 已取消」。
+       卡片长在「提出它的那个会话」里：后台会话在飞时提出来的卡片
+       不能插到用户正在看的另一个会话里（那是错位的上下文）。 */
+    function syncCards(where) {
       if (!proposals) return;
+      /* 卡片归谁：调用方点名最准；没点名时看「谁在飞」——单飞闸门保证同一时刻
+         只有一个会话在跑，那么新提出来的卡片必然属于它。以前的兜底是 activePane，
+         于是后台会话提出来的卡片会插进用户正在看的另一个会话里（上下文错位），
+         而 onEvent 随后再调 pendingCards(pane) 时卡片已经在错的地方登记过了。 */
+      const owner = inFlight && inFlight.pane && panes.has(inFlight.pane.id) ? inFlight.pane : null;
+      const pane = where || owner || activePane || { msgs: msgs, turns: turns };
       const live = proposals.list();
       const ids = new Set(live.map((x) => x.id));
       live.forEach((p) => {
@@ -617,12 +818,14 @@
         }
         /* 卡片是「现在就要你处理」的东西：追加前只要用户没翻到很远的历史里，
            就把视图钉到卡片底部。scrollEnd(false) 的 80px 判据在这里不够用——
-           一张卡动辄两百多像素高，追加完 gap 已经超了，尾巴（勾选区下半 +
-           执行/取消）会停在输入框下面点不到。 */
-        const near = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 400;
-        const node = proposalCard(p);
+            一张卡动辄两百多像素高，追加完 gap 已经超了，尾巴（勾选区下半 +
+            执行/取消）会停在输入框下面点不到。 */
+        const near = isVisible(pane)
+          && (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 400);
+        const node = proposalCard(p, pane);
+        node._pane = pane;
         cardNodes.set(p.id, node);
-        msgs.appendChild(node);
+        pane.msgs.appendChild(node);
         if (near) requestAnimationFrame(() => scrollEnd(true));
       });
       cardNodes.forEach((node, id) => {
@@ -631,8 +834,19 @@
       });
     }
 
-    function proposalCard(p) {
+    /* 换会话时只清这个会话上挂着的卡片映射：别的会话的卡片还在它自己的
+       DOM 里，把整张表 clear 掉会让那些卡再也接不上后续状态变化。 */
+    function clearCards(pane) {
+      cardNodes.forEach(function (node, id) {
+        if (!pane || node._pane === pane) cardNodes.delete(id);
+      });
+    }
+
+    function proposalCard(p, pane) {
       const host = h('div', { class: 'ai-msg bot ai-prop' });
+      /* 卡片记着自己长在哪个会话：点「执行 / 撤销」之后的提示、记录、重绘
+         都必须落回那个会话，不能落到用户此刻在看的另一个会话里。 */
+      host._pane = pane || activePane;
       host._repaint = paint;
       paint();
       return host;
@@ -792,8 +1006,8 @@
               ub.disabled = true;
               const r = await proposals.undo(p.id);
               ub.textContent = r.ok ? T('已撤销', 'Undone') : T('撤销失败', 'Undo failed');
-              if (!r.ok) addNotice(r.error || '撤销失败', 'warn');
-              else { markActUndone(p.action); syncCards(); }
+              if (!r.ok) addNotice(r.error || '撤销失败', 'warn', host._pane);
+              else { markActUndone(p.action, host._pane); syncCards(host._pane); }
             });
             bar.appendChild(ub);
           }
@@ -830,7 +1044,7 @@
           goBtn.textContent = T('执行中…', 'Running…');
           const pickedPaths = pickable ? selList() : undefined;
           if (pickable && !pickedPaths.length) {
-            addNotice(T('一项都没勾，什么也没做', 'nothing checked'), 'warn');
+            addNotice(T('一项都没勾，什么也没做', 'nothing checked'), 'warn', host._pane);
             paint();
             return;
           }
@@ -846,14 +1060,14 @@
               summary: String(r.message || ''),
               paths: (pickedPaths && pickedPaths.length ? pickedPaths : picks).slice(0, 8),
               undoable: !!p.undo
-            });
+            }, host._pane);
             paint();
             try {
               window.dispatchEvent(new CustomEvent('ai-action', { detail: { action: p.action, ok: true } }));
             } catch (e) { /* 页面没监听就算了 */ }
           } else {
             /* 失败原因要留在卡片上：过期、预算超了、路径被拦，都各有各的话 */
-            addNotice(r.error || T('执行失败', 'Run failed'), 'warn');
+            addNotice(r.error || T('执行失败', 'Run failed'), 'warn', host._pane);
             p.status = 'failed';
             paint();
             bar.appendChild(h('span', { class: 'ai-prop-done' }, r.error || ''));
@@ -910,37 +1124,55 @@
       ? proposals.subscribe(() => { try { pendingCardsRefresh(); } catch (e) { /* 画挂了不该影响执行 */ } })
       : null;
 
-    function addUser(text) {
-      setEmpty(false);
+    /* 写进某个会话的消息区。所有「这一轮产出」都走这里：
+       传 pane 就写那个 pane 自己的容器，不传就是可见会话。
+       以前一律写全局 msgs，切走之后写进的是已经脱离文档的节点。 */
+    function addUser(text, pane) {
+      const tgt = pane || activePane;
+      if (!tgt) return;
+      if (isVisible(tgt)) setEmpty(false);
       /* 不挂「你」的标签：右侧浅底气泡本身已经说明了是谁在说 */
       const node = h('div', { class: 'ai-msg user' },
         h('div', { class: 'ai-msg-body' }, text)
       );
-      msgs.appendChild(node);
+      tgt.msgs.appendChild(node);
       /* 每句话开一轮：导航条上一条刻度，跳转就落到这句话 */
-      turns.push({ prompt: text, answer: '', userNode: node, answerNode: null });
+      tgt.turns.push({ prompt: text, answer: '', userNode: node, answerNode: null });
       stamp(node, 'user', text);
-      if (rail) rail.setTurns(turns);
-      scrollEnd(true);
+      /* 刻度条只有一条：只在看得见那个会话变化时重画 */
+      if (rail && isVisible(tgt)) rail.setTurns(tgt.turns);
+      scrollEnd(true, tgt);
     }
 
+    /* 在飞那一轮的活动对象。现在它自带 pane 与「那一轮的回合对象」：
+       以前靠 turns[turns.length-1] 反查回合，一换会话就会指到别的会话的最后一轮。
+       单飞闸门保证全局同时只有一个正在回答的轮次。 */
     let current = null;
 
     /* 清空回合：换会话/新会话时必须连刻度一起清，
        否则右边会留着上一段对话的刻度，悬停还能看到上一轮的提问。 */
-    function resetTurns() {
-      turns.length = 0;
-      if (rail) rail.setTurns([]);
-      if (follow) follow.resume();
-      if (toBottom) toBottom.classList.remove('on');
+    function resetTurns(pane) {
+      const tgt = pane || activePane;
+      if (!tgt) return;
+      tgt.turns.length = 0;
+      if (rail && isVisible(tgt)) rail.setTurns([]);
+      if (isVisible(tgt)) {
+        if (follow) follow.resume();
+        if (toBottom) toBottom.classList.remove('on');
+      }
     }
 
     /* 查证过程组（procs.js）：折叠时只有一行「执行 N 次思考，调用 M 次工具，记录 K 条」，
        展开是平铺的过程行；跑到一半摊开，落定折回一行，点一下可再摊开。
        口径照 dsh-claude-style 的 Process rows，颜色与字号用本项目的 token。 */
-    function startAnswer(opts) {
+    function startAnswer(opts, pane) {
+      const tgt = pane || activePane;
+      if (!tgt) return null;
       const replay = !!(opts && opts.replay);
-      const pg = replay ? null : root.AIProcs.create({ onAppend: () => scrollEnd() });
+      /* 过程组的 onAppend 只在可见会话上滚动：后台会话不该把读的人拽到别处 */
+      const pg = replay ? null : root.AIProcs.create({
+        onAppend: function () { scrollEnd(false, tgt); }
+      });
       if (pg) pg.open();
       const body = h('div', { class: 'ai-msg-body ai-answer' });
       const extra = h('div', { class: 'ai-extra' });
@@ -949,21 +1181,26 @@
         body,
         extra
       );
-      msgs.appendChild(node);
-      scrollEnd(true);
-      current = { node, pg, body, extra, steps: [], replay, stopped: false };
+      tgt.msgs.appendChild(node);
+      scrollEnd(true, tgt);
+      /* 回合对象直接存进来：不再反查 turns[turns.length-1]，
+         否则切会话后这个回合就归别人了 */
+      const turn = tgt.turns[tgt.turns.length - 1] || null;
+      const c = { pane: tgt, turn: turn, node: node, pg: pg, body: body, extra: extra, steps: [], replay: replay, stopped: false };
+      tgt.current = c;
+      current = c;
       stamp(node, 'bot', '');
-      const turn = turns[turns.length - 1];
       if (turn) turn.answerNode = node;
-      return current;
+      return c;
     }
 
-    function pushStep(step) {
-      if (!current || !current.pg) return;
-      current.steps.push(step);
+    function pushStep(step, pane) {
+      const c = pane ? pane.current : current;
+      if (!c || !c.pg) return;
+      c.steps.push(step);
       /* 思考原文已经由流式片段边收边挂在「思考」行上，这里只补工具行，
          不再把 ev.thought 重放一遍——否则同一段推理会出现两次。 */
-      current.pg.addStep({
+      c.pg.addStep({
         tool: step.tool,
         label: step.label,
         args: step.args,
@@ -973,7 +1210,7 @@
         ok: step.ok,
         result: step.result
       });
-      scrollEnd();
+      scrollEnd(false, c.pane);
     }
 
     /* 回答正文：有 Markdown 结构就渲染，没有就原样显示。
@@ -1058,39 +1295,47 @@
     }
 
     /* 执行记录：这个会话里真正动过手的动作（已执行 / 已撤销）。
-       以前这些只在内存活 10 分钟，关掉就再也找不到「我当时清了什么」。 */
-    function recordAct(entry) {
-      if (!state.session || !entry) return;
-      const acts = state.session.acts || (state.session.acts = []);
+       以前这些只在内存活 10 分钟，关掉就再也找不到「我当时清了什么」。
+       记录属于会话，写的时候必须认 pane —— state 是「可见会话」这个游标，
+       后台会话收尾时它早就指到别处了。 */
+    function recordAct(entry, pane) {
+      const tgt = pane || activePane;
+      const st = tgt ? tgt.state : state;
+      if (!st.session || !entry) return;
+      const acts = st.session.acts || (st.session.acts = []);
       acts.push(entry);
-      if (acts.length > 40) state.session.acts = acts.slice(-40);
-      try { AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
-      refreshActs();
+      if (acts.length > 40) st.session.acts = acts.slice(-40);
+      try { AIStore.saveSession(st.session); } catch (e) { /* 落盘失败不打断对话 */ }
+      refreshActs(tgt);
     }
 
-    function markActUndone(action) {
-      if (!state.session) return;
-      const acts = state.session.acts || [];
+    function markActUndone(action, pane) {
+      const tgt = pane || activePane;
+      const st = tgt ? tgt.state : state;
+      if (!st.session) return;
+      const acts = st.session.acts || [];
       for (let i = acts.length - 1; i >= 0; i--) {
         if (!acts[i].undone && acts[i].action === action) {
           acts[i].undone = true;
-          try { AIStore.saveSession(state.session); } catch (e) { /* 同上 */ }
-          refreshActs();
+          try { AIStore.saveSession(st.session); } catch (e) { /* 同上 */ }
+          refreshActs(tgt);
           return;
         }
       }
     }
 
     /* 执行记录挂在会话末尾。执行/撤销后要就地刷新——否则「我刚清掉的东西」
-       要等下次打开会话才看得到，等于又回到「找不回入口」。 */
-    function refreshActs() {
-      if (!state.session) return;
-      const old = msgs.querySelector('.ai-acts');
+       要等下次打开会话才看得到，等于又回到「找不回入口」。
+       卡片可能来自后台会话：卡的每一处重绘都带着它自己的 pane。 */
+    function refreshActs(pane) {
+      const tgt = pane || activePane;
+      if (!tgt || !tgt.state.session) return;
+      const old = tgt.msgs.querySelector('.ai-acts');
       if (old) old.remove();
-      const node = actsBar(state.session.acts);
+      const node = actsBar(tgt.state.session.acts);
       if (node) {
-        msgs.appendChild(node);
-        scrollEnd();
+        tgt.msgs.appendChild(node);
+        scrollEnd(false, tgt);
       }
     }
 
@@ -1123,9 +1368,14 @@
       return wrap;
     }
 
-    function finishAnswer(res) {
-      if (!current) startAnswer();
-      const c = current;
+    /* 收尾一律认 pane：后台会话跑完之后 state 早就指向用户当前看的会话了，
+       这里要是按 state / 全局 current 落笔，结果就会写进别人的会话。 */
+    function finishAnswer(res, pane) {
+      const tgt = pane || (current && current.pane) || activePane;
+      if (!tgt) return;
+      let c = tgt.current || null;
+      if (!c) c = startAnswer(null, tgt);
+      if (!c) return;
       /* 过程组落定：计数定格、等待行收掉、折回一行。
          停止与失败也用同一行计数——「想到哪、查到哪」本身就是信息。 */
       if (c.pg) {
@@ -1203,7 +1453,7 @@
       if (res.checkpoint && !res.replay) {
         bar.appendChild(h('button', {
           class: 'btn sm ghost',
-          onclick: () => { continueTurn(); }
+          onclick: () => { continueTurn(tgt); }
         }, T('继续', 'Continue')));
       }
       /* 历史回放没有 lastAsk，「重试」会是个点不动的按钮——那种不如不给。
@@ -1211,7 +1461,7 @@
       if (!res.replay && !res.quota) {
         bar.appendChild(h('button', {
           class: 'btn sm ghost',
-          onclick: () => { retryLast(); }
+          onclick: () => { retryLast(tgt); }
         }, T('重试', 'Retry')));
       }
       if (res.usage) {
@@ -1244,8 +1494,10 @@
         if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: usageTitle(st) }, parts.join(' · ')));
       }
       /* 刻度条的悬停预览要读这一轮的答案和用量：答案本来只进 DOM，
-         这里回存到回合对象上，预览就不必去扒正文节点。 */
-      const closed = turns[turns.length - 1];
+         这里回存到回合对象上，预览就不必去扒正文节点。
+         回合对象在这一轮开始时就已经绑在 c 上，不再反查「最后一个回合」
+         ——后台会话收尾时，那边的最后一个回合可能已经是别的了。 */
+      const closed = c.turn;
       if (closed) {
         closed.answer = res.answer || '';
         if (res.usage) {
@@ -1255,28 +1507,37 @@
           if (used) bits.push(used >= 1000 ? (used / 1000).toFixed(1) + 'k' : String(used));
           closed.meta = bits.join(' · ');
         }
-        if (rail) rail.setTurns(turns);
+        if (rail && isVisible(tgt)) rail.setTurns(tgt.turns);
       }
       c.extra.appendChild(bar);
 
-      const chips = followChips(res.followUps, (q) => ask({ text: q }));
+      const chips = followChips(res.followUps, (q) => ask({ text: q }, tgt));
       if (chips) c.extra.appendChild(chips);
       /* 执行记录永远待在会话最末：新回答进来后把它挪下来，不然读起来像
          「先记了账、才发生的事」。 */
-      refreshActs();
-      scrollEnd();
-      current = null;
+      refreshActs(tgt);
+      scrollEnd(false, tgt);
+      tgt.current = null;
+      if (current === c) current = null;
     }
 
-    function addNotice(message, level) {
-      if (!current) startAnswer();
-      current.extra.appendChild(h('div', { class: 'ai-notice ' + (level || 'info') }, message));
-      scrollEnd();
+    /* 提示行也认 pane：后台会话的「已排队」提示必须落在它自己的消息区里，
+       否则用户在新会话里看到一句不属于这里的话。 */
+    function addNotice(message, level, pane) {
+      const tgt = pane || activePane;
+      if (!tgt) return;
+      let c = tgt.current || null;
+      if (!c) c = startAnswer(null, tgt);
+      if (!c) return;
+      c.extra.appendChild(h('div', { class: 'ai-notice ' + (level || 'info') }, message));
+      scrollEnd(false, tgt);
     }
 
     /* ---------------- 运行 ---------------- */
 
-    let lastAsk = null;
+    /* 以前这里有一个全局 lastAsk：谁最后提交就记谁，切会话后再点「重试」
+       会把上一个会话的问题发到当前会话里。现在它是每个 pane 自己的
+       pane.lastAsk（见 makePane），这里不再保存任何全局副本。 */
 
     function budgetFor(policy, settings) {
       /* 档位只管「多努力」：思考预算、查几轮、答案多长。上下文窗口是模型能力，
@@ -1293,14 +1554,20 @@
     /* 兜底：askInner 里任何一处抛错，都不能把界面留在「正在回答」上。
        卡死的机制很简单——running 一旦为 true 就再也没人置回 false，
        输入框保持只读、发送键停在停止态，于是「发不出」也「停不了」。
-       正常跑完的轮次在收尾时已经置回 false，这里只收拾半途死掉的。 */
-    async function ask(input) {
+       正常跑完的轮次在收尾时已经置回 false，这里只收拾半途死掉的。
+       注意这里收拾的是「这一轮所属的那个会话」，不是用户此刻在看的会话：
+       后台会话炸掉时不该把可见会话的输入框解锁，也不该把错误写进别人的消息区。 */
+    async function ask(input, pane) {
       try {
-        return await askInner(input);
+        return await askInner(input, pane);
       } catch (e) {
-        const midFlight = state.running;
-        state.running = false;
-        try { composer.setBusy(false, false); } catch (e2) { /* 输入框没造好也不能再抛 */ }
+        const tgt = pane || (current && current.pane) || activePane;
+        const st = tgt ? tgt.state : state;
+        const midFlight = st.running;
+        st.running = false;
+        if (!tgt || isVisible(tgt)) {
+          try { composer.setBusy(false, false); } catch (e2) { /* 输入框没造好也不能再抛 */ }
+        }
         if (midFlight) {
           try {
             finishAnswer({
@@ -1311,37 +1578,71 @@
               suggest: [],
               followUps: [],
               trace: []
-            });
+            }, tgt);
           } catch (e3) { /* 收尾失败不再往上抛，免得盖住原始错误 */ }
         }
+        /* 炸掉也要让出单飞位，否则队列里排着的那几条永远等不到。
+           只在「占着单飞位的就是这一轮」时才让：万一抛在还没占位之前，
+           这时候把别人的位置放掉会让两个请求同时跑。 */
+        if (inFlight && tgt && inFlight.pane === tgt) releaseFlight();
         return null;
       }
     }
 
-    async function askInner(input) {
+    /* 一轮对话。所有状态都认「这一轮属于哪个会话」：
+       入口把 st / pane 钉死，函数体里不再碰全局 state / msgs / turns。
+       这样切走之后这一轮继续往它自己的会话里写，结果落回它自己的存档。 */
+    async function askInner(input, fromPane) {
       const payload = (input && typeof input === 'object') ? input : { text: String(input || '') };
       const q = String(payload.text || '').trim();
       const resume = payload.resume || null;
-      if ((!q && !(payload.attachments || []).length) || state.running) return;
-      lastAsk = payload;
+      /* 还没有任何会话（boot 还没跑完、或者它失败过）时先补一个：
+         空状态里的示例问题此刻点下去，以前会落到一个不存在的 pane 上被静默丢掉。 */
+      let pane = fromPane || activePane;
+      if (!pane) {
+        startNewSession();
+        pane = activePane;
+      }
+      if (!pane) return;
+      const st = pane.state;
+      /* 同一会话重复提交没有意义（上一轮还在跑），保持老行为直接丢；
+         但如果已经有别的会话在飞，这一次不能静默丢掉——塞进队列并给出提示，
+         否则用户点了发送什么都没发生（bug1 的另一半）。 */
+      if (!q && !(payload.attachments || []).length) return;
+      if (inFlight) {
+        if (inFlight.pane === pane || st.running) return;
+        enqueueTurn(pane, payload);
+        return;
+      }
+      /* 单飞位是空的但它自己还标着 running：说明上一轮死在了半路（收尾没走到）。
+         这时候重复提交没有意义，直接丢——跟以前 `|| state.running` 的行为一致，
+         只是现在按会话判断，不会因为别的会话在跑就把这一条也丢掉。 */
+      if (st.running) return;
+      st.running = true;
+      /* 占住单飞位：谁在飞、飞在哪个会话，收尾时靠它判断要不要出队 */
+      inFlight = { pane: pane, st: st };
+      pane.lastAsk = payload;
+      /* 一开跑就告诉左栏「这条进入运行中」：用户此刻可能正要切去别的会话，
+         不给标记的话切过去之后就没有任何地方能看出它还在跑 */
+      notifyBusy();
 
-      state.thinking = payload.thinking || state.thinking;
-      state.permission = payload.permission || state.permission;
+      st.thinking = payload.thinking || st.thinking;
+      st.permission = payload.permission || st.permission;
 
       const shown = q || T('（已附加 ', '(attached ') + (payload.attachments || []).length + T(' 个路径）', ' paths)');
       /* 继续不是新问题：用户那条消息已经在断点里，再插一条会重复 */
-      if (!resume) addUser(q ? shown : shown);
+      if (!resume) addUser(q ? shown : shown, pane);
 
-      state.running = true;
-      state.token = { stopped: false };
-      composer.setBusy(true, false);
+      st.token = { stopped: false };
+      /* 忙态只锁得住看得见的那个会话：后台会话在跑不该让当前输入框发不出话 */
+      if (isVisible(pane)) composer.setBusy(true, false);
 
       const settings = await AIStore.load();
-      applyModels(settings);
+      applyModels(settings, pane);
       try { await ensureGuard(); } catch (e) { /* 闸门没配好也不挡住只读问答 */ }
       if (!AIStore.isConfigured(settings)) {
-        state.running = false;
-        composer.setBusy(false, false);
+        st.running = false;
+        if (isVisible(pane)) composer.setBusy(false, false);
         finishAnswer({
           ok: false,
           degraded: true,
@@ -1353,32 +1654,35 @@
           suggest: [],
           followUps: [],
           trace: []
-        });
+        }, pane);
+        releaseFlight();
         return;
       }
 
-      if (payload.model) {
-        state.model = payload.model;
-      } else if (settings.model) {
-        // 用户没在菜单里换模型时，胶囊跟着设置走
-        state.model = settings.model;
-        composer.setModel(settings.model);
+      /* 这一轮到底用哪个模型：入口 payload 只代表「点发送那一刻」的选择，
+         用户可能随后在胶囊里换了模型。取当前选择优先，别再让旧 payload
+         单方面把当前模型压回去（bug2：切模型后点重试又跑回老模型）。 */
+      const wantModel = payload.model || st.model || settings.model;
+      if (wantModel) {
+        st.model = wantModel;
+        /* 胶囊只在看得见的会话上刷新；后台会话记住自己的取值即可 */
+        if (isVisible(pane)) composer.setModel(wantModel);
       }
 
       /* 这一轮的策略先算出来：档位决定努力，任务决定温度。
          温度用 null 表示「这家锁死了」，agent 见到 null 就不发 temperature */
-      const policy2 = policyFor(q, settings, state.thinking);
+      const policy2 = policyFor(q, settings, st.thinking);
       const bud = budgetFor(policy2, settings);
       const policy = proposals ? proposals.getPolicy() : { mode: 'off' };
       const canWrite = policy.mode !== 'off';
-      const allowed = PERM_TOOLS[state.permission] || PERM_TOOLS.standard;
+      const allowed = PERM_TOOLS[st.permission] || PERM_TOOLS.standard;
       const allTools = AITools.makeTools({
         API: window.API,
         proposals: proposals,
         navigate: navigateTo,
         /* 工具跑到一半要说话时用这个（例如「正在后台建索引，约几秒」）。
            没有它，建索引那几秒界面上什么都不动，看起来就像卡死了。 */
-        say: (text) => addNotice(text, 'info')
+        say: (text) => addNotice(text, 'info', pane)
       });
       const tools = {};
       allowed.forEach((n) => {
@@ -1391,7 +1695,9 @@
       /* 注意：AIStore 存的字段叫 key，agent 读的是 apiKey —— 这里对上，
          否则真实接口会因为没有 Authorization 头直接 401。 */
       const agentSettings = Object.assign({}, settings, {
-        model: payload.model || settings.model,
+        /* 这一轮真正要跑的模型：和上面 wantModel 是同一个值，
+           否则界面胶囊显示新模型、请求却还发去老模型（bug2 的另一处） */
+        model: wantModel || settings.model,
         apiKey: settings.key,
         maxSteps: bud.steps,
         /* 窗口原样传下去：agent 按它的 50/70/85% 自动压缩，
@@ -1406,7 +1712,7 @@
            原来固定 700 会把长回答截成半截 JSON */
         replyMax: bud.replyMax
       });
-      state.policy = policy2;
+      st.policy = policy2;
 
       const agent = AIAgent.createAgent({
         /* 有流式通道就走流式：推理过程边生成边推到思路行；
@@ -1438,7 +1744,7 @@
         ctx.selected = payload.attachments.slice(0, 3);
       }
       ctx.tools = Object.keys(tools);
-      ctx.permission = permLabel(state.permission);
+      ctx.permission = permLabel(st.permission);
       /* 上下文行里说清「这一轮多努力、温度多少、任务是什么」：
          模型据此调自己的行为，用户不用在正文里读到这些元信息 */
       ctx.thinking = Strength.LEVELS[policy2.level].label[0];
@@ -1447,20 +1753,23 @@
       ctx.task = policy2.taskLabel ? policy2.taskLabel[0] : '';
       ctx.canWrite = !!(tools.propose_action);
 
-      startAnswer();
+      startAnswer(null, pane);
       let res;
       try {
         res = await agent.run({
           userText: q || T('看看这些文件：', 'Look at these files: ') + (payload.attachments || []).join(', '),
           ctx: ctx,
-          history: state.history,
-          token: state.token,
+          history: st.history,
+          token: st.token,
           resume: resume,
           onEvent: (ev) => {
+            /* 过程行一律写这一轮自己的 pane：切走之后 current 可能已经指向
+               用户新会话里的另一轮，靠它落笔就把 A 的过程写进 B 了 */
+            const c = pane.current;
             if (ev.type === 'step') {
               /* 等待行的措辞跟着阶段走：同一条「还在跑」，
                  说「正在查证」比说「正在思考」更接近用户此刻看到的事 */
-              if (current && current.pg) current.pg.setRunning(true, T('正在查证', 'Checking'));
+              if (c && c.pg) c.pg.setRunning(true, T('正在查证', 'Checking'));
               pushStep({
                 tool: ev.tool,
                 /* 行标签用工具自己的短名（磁盘 / 空文件夹 / 读文件），
@@ -1474,17 +1783,17 @@
                 thought: ev.thought,
                 result: ev.result,
                 error: ev.error
-              });
+              }, pane);
               /* 提案一落地就把卡片摆出来：用户不用等模型把话说完了才看到 */
-              if (ev.tool === 'propose_action' && ev.ok) pendingCards();
+              if (ev.tool === 'propose_action' && ev.ok) pendingCards(pane);
             } else if (ev.type === 'thought') {
-              if (current && current.pg) {
+              if (c && c.pg) {
                 /* 推理原文先挂在「思考」行上；下一步工具会把它折进过程组 */
-                current.pg.setRunning(true, T('正在推理', 'Reasoning'));
-                current.pg.addThought(ev.text);
+                c.pg.setRunning(true, T('正在推理', 'Reasoning'));
+                c.pg.addThought(ev.text);
               }
             } else if (ev.type === 'notice') {
-              addNotice(ev.message, ev.level);
+              addNotice(ev.message, ev.level, pane);
             }
           }
         });
@@ -1505,24 +1814,30 @@
       /* 这段回答按哪档强度、什么温度跑的：随结果一起带进 finishAnswer，
          用量行才能说清「思考预算用了多少 / 一共给了多少」 */
       if (res && !res.policy) res.policy = policy2;
-      finishAnswer(res);
-      state.running = false;
-      composer.setBusy(false, false);
-      state.lastResult = res;
+      finishAnswer(res, pane);
+      st.running = false;
+      if (isVisible(pane)) composer.setBusy(false, false);
+      st.lastResult = res;
+      /* 收尾立刻同步一次运行态：左栏的「运行中」标记要跟着消失，
+         不然它会一直挂着，用户以为还在跑 */
+      notifyBusy();
       if (res.usage) {
-        state.usedTokens = (res.usage.prompt_tokens || 0) + (res.usage.completion_tokens || 0);
-        composer.setUsage({
-          used: state.usedTokens,
-          budget: state.ctxWindow || ctxWindowOf(settings)
-        });
+        st.usedTokens = (res.usage.prompt_tokens || 0) + (res.usage.completion_tokens || 0);
+        /* 底栏的用量环只反映看得见的会话：后台会话跑完不该把用户眼前这个圈跳一下 */
+        if (isVisible(pane)) {
+          composer.setUsage({
+            used: st.usedTokens,
+            budget: st.ctxWindow || ctxWindowOf(settings)
+          });
+        }
       }
 
       /* 历史里必须保留「这一轮查了什么」：只存答案正文的话，
          用户下一句说「继续」「那个 D 盘的呢」，模型完全不知道自己刚才做过什么，
          只能从头瞎猜 —— 这正是用户抱怨的「没有上下文记忆」。
          trace 摘要（不含完整 result）足够它想起自己查过哪儿、哪儿失败了。 */
-      state.history.push({ role: 'user', content: q });
-      state.history.push({
+      st.history.push({ role: 'user', content: q });
+      st.history.push({
         role: 'assistant',
         content: res.answer || '',
         trace: (res.trace || []).map((t) => ({
@@ -1531,12 +1846,12 @@
         ok: res.ok,
         status: res.status || ''
       });
-      if (state.history.length > 40) state.history = state.history.slice(-40);
-      if (state.session) {
-        state.session.messages.push({ role: 'user', content: q, at: Date.now() });
+      if (st.history.length > 40) st.history = st.history.slice(-40);
+      if (st.session) {
+        st.session.messages.push({ role: 'user', content: q, at: Date.now() });
         /* 回答不是一段文字就完：查证过程、依据、建议、可点入口一起落盘，
            否则回到历史里只剩一句「打开 D:\… 看看」，入口全丢了。 */
-        state.session.messages.push({
+        st.session.messages.push({
           role: 'assistant',
           content: res.answer || '',
           at: Date.now(),
@@ -1563,11 +1878,12 @@
             think: res.policy.think
           } : null
         });
-        if (!state.session.title || state.session.title === '新会话') state.session.title = q.slice(0, 30);
-        try { await AIStore.saveSession(state.session); } catch (e) { /* 落盘失败不打断对话 */ }
+        if (!st.session.title || st.session.title === '新会话') st.session.title = q.slice(0, 30);
+        try { await AIStore.saveSession(st.session); } catch (e) { /* 落盘失败不打断对话 */ }
         /* 记住「正在聊的这个会话」：下次进 AI 页直接接着聊，
-           而不是每次都开一个空白新会话。 */
-        rememberUi({ lastSession: state.session.id });
+           而不是每次都开一个空白新会话。后台会话跑完不该改这条记忆——
+           用户此刻正在看的是另一个会话。 */
+        if (isVisible(pane)) rememberUi({ lastSession: st.session.id });
         notifySessions();
       }
       AIStore.logUsage({
@@ -1587,19 +1903,38 @@
         exhausted: !!res.exhausted,
         stopped: !!res.stopped
       });
+      /* 这一轮彻底收尾：让出单飞位，队列里排着的下一条这时才起跑。
+         放在最末而不是 finishAnswer 里，是因为调用方还要读 res 落盘：
+         提前出队会让下一轮立刻改写 st.lastResult / st.session。 */
+      releaseFlight();
     }
 
-    function retryLast() {
-      if (!lastAsk || state.running) return;
-      ask(lastAsk);
+    /* 重试：payload 里冻着「当初点发送那一刻」的模型名，
+       直接用会把用户在胶囊里换过的新模型覆盖回老模型（bug2）。
+       这里只拿 payload 当底稿，模型取当前选择。 */
+    function retryLast(pane) {
+      const tgt = pane || activePane;
+      if (!tgt || !tgt.lastAsk) return;
+      const st = tgt.state;
+      if (st.running || (inFlight && inFlight.pane === tgt)) return;
+      const p = Object.assign({}, tgt.lastAsk, { model: st.model || tgt.lastAsk.model });
+      ask(p, tgt);
     }
 
-    /* 从断点接着跑：不重发已经查过的工具，也不重复插用户消息 */
-    function continueTurn() {
-      const res = state.lastResult;
-      if (!res || !res.checkpoint || state.running) return;
-      const base = lastAsk || { text: '' };
-      ask(Object.assign({}, base, { resume: res.checkpoint }));
+    /* 从断点接着跑：不重发已经查过的工具，也不重复插用户消息。
+       模型同样取当前选择，不沿用断点里那句旧 payload 的模型。 */
+    function continueTurn(pane) {
+      const tgt = pane || activePane;
+      if (!tgt) return;
+      const st = tgt.state;
+      const res = st.lastResult;
+      if (!res || !res.checkpoint) return;
+      if (st.running || (inFlight && inFlight.pane === tgt)) return;
+      const base = tgt.lastAsk || { text: '' };
+      ask(Object.assign({}, base, {
+        resume: res.checkpoint,
+        model: st.model || base.model
+      }), tgt);
     }
 
     /* 会话列表变了（新建 / 落盘 / 载入）就让外面重画右侧的归档列表 */
@@ -1607,6 +1942,46 @@
       if (typeof options.onSessions === 'function') {
         try { options.onSessions(); } catch (e) { /* 外面的重画失败不该影响对话 */ }
       }
+    }
+
+    /* 「谁在跑」变了就告诉外面。
+       后台会话在跑的时候界面上原本一点痕迹都没有（切走就看不见了），
+       用户只能凭空猜「刚才那条到底跑完没有」。这里把运行集合推给页面，
+       由左栏画成一排「运行中」，点一下就切回去看。 */
+    function notifyBusy() {
+      if (typeof options.onBusy === 'function') {
+        try { options.onBusy(activity()); } catch (e) { /* 画不出来不该影响对话本身 */ }
+      }
+    }
+
+    /* 运行态快照：给页面用的最小信息集（不把 DOM / state 漏出去）。
+       queued 是这个会话自己排着几条，running 是它此刻有没有在飞。 */
+    function activity() {
+      const items = [];
+      panes.forEach(function (p) {
+        if (!p.id) return;
+        const queued = queue.filter(function (q) { return q.pane === p; }).length;
+        const running = !!(p.state && p.state.running);
+        if (!running && !queued) return;
+        const s = p.state && p.state.session;
+        items.push({
+          id: p.id,
+          title: (s && s.title) || T('新会话', 'New chat'),
+          running: running,
+          queued: queued,
+          visible: p === activePane
+        });
+      });
+      /* 在飞的排前面，其余按排队量：一眼看到的该是真正在干活的那条 */
+      items.sort(function (a, b) {
+        if (a.running !== b.running) return a.running ? -1 : 1;
+        return b.queued - a.queued;
+      });
+      return {
+        items: items,
+        active: activePane ? activePane.id : '',
+        busy: !!inFlight
+      };
     }
 
     /* ---------- 右键菜单 ----------
@@ -1742,11 +2117,14 @@
         return;
       }
 
-      /* 空白处：只给「粘贴」和「全选对话」 */
+      /* 空白处：只给「粘贴」和「全选对话」。
+         这里不能直接读全局 msgs：右键可能是从某个 pane 的容器冒泡上来的，
+         读全局会把「另一个会话的对话」复制出去。以事件实际落在哪个容器为准。 */
+      const scope = t.closest('.ai-msgs') || msgs;
       UI.menu(e, [
         { label: T('粘贴到输入框', 'Paste into composer'), action: pasteIntoComposer },
-        { label: T('复制整段对话', 'Copy transcript'), disabled: !msgs.children.length,
-          action: () => writeClipboard(Array.prototype.map.call(msgs.children,
+        { label: T('复制整段对话', 'Copy transcript'), disabled: !scope.children.length,
+          action: () => writeClipboard(Array.prototype.map.call(scope.children,
             (n) => ((n.dataset.role === 'user' ? '我：' : '助手：') + (n.dataset.text || textOf(n)))).join('\n\n')) }
       ]);
     }
@@ -1754,7 +2132,8 @@
     msgs.addEventListener('contextmenu', onContextMenu);
     /* 回答正文里的路径与链接统一由 AIEntries 接管：
        点路径 = 打开那个位置，点外链 = 交给系统浏览器（WebView2 里
-       target="_blank" 没有窗口处理器，点了什么都不会发生）。 */
+       target="_blank" 没有窗口处理器，点了什么都不会发生）。
+       这一份是给启动容器绑的；每个 pane 自己的容器在 makePane 里各绑一次。 */
     AIEntries.bind(msgs, { onAsk: askAboutPath });
     /* 输入框自己也要绑：它不在消息区里，而且 ui.js 对输入类不拦系统菜单，
        不绑的话这里是浏览器原生那份（带拼写检查），跟别处不一致 */
@@ -1768,11 +2147,11 @@
       if (!prefs) return;
       Object.assign(ui, prefs);
       if (prefs.thinking) {
-        state.thinking = prefs.thinking;
+        eachPaneState(function (st) { st.thinking = prefs.thinking; });
         composer.setThinking(prefs.thinking);
       }
       if (prefs.permission) {
-        state.permission = prefs.permission;
+        eachPaneState(function (st) { st.permission = prefs.permission; });
         composer.setPermission(prefs.permission);
       }
     }).catch(() => {});
@@ -1780,102 +2159,183 @@
       applyModels(s);
     }).catch(() => {});
 
+    /* 取某个会话的 pane：开过就复用。复用是这套机制的关键——
+       切回一个还在后台跑的会话，要看到它已经写出来的内容，
+       而不是把存档重放一遍（重放会把在飞的节点顶掉）。 */
+    function paneForSession(session) {
+      if (!session || !session.id) return null;
+      const id = String(session.id);
+      const had = panes.get(id);
+      if (had) {
+        /* 只在它还没有会话对象时补上：复用中的 pane 手里那份才是活的
+           （在飞那一轮正往它里面追加消息），拿磁盘读回来的旧副本顶掉，
+           下一次落盘就会把这轮刚问的那句话写没了。 */
+        if (!had.state.session) had.state.session = session;
+        return had;
+      }
+      const pane = makePane(id);
+      pane.state.session = session;
+      return pane;
+    }
+
+    /* 把一个会话的历史铺进它的 pane。只在「这个 pane 还没铺过」时调用：
+       铺过之后再进来，DOM 里就是真实跑出来的内容，比存档更全（可能还在跑）。 */
+    function replaySessionInto(pane, session) {
+      if (!pane || !session) return;
+      const st = pane.state;
+      resetTurns(pane);
+      pane.msgs.innerHTML = '';
+      /* 卡片映射按会话清：别的会话的卡片还在它自己的 DOM 里，
+         整表 clear 会让那些卡再也接不上后续状态变化。 */
+      clearCards(pane);
+      /* 会话里存过的提案不再重放成可点卡片：过期的东西点了只会失败。
+         执行过的动作另有一条「执行记录」，那才是事后要回看的东西。 */
+      if (proposals) proposals.newSession();
+      st.session = session;
+      st.history = [];
+      pane.lastAsk = null;
+      (session.messages || []).forEach(function (m) {
+        if (m.role === 'user') {
+          addUser(m.content, pane);
+          st.history.push({ role: 'user', content: m.content });
+          return;
+        }
+        const c = startAnswer({ replay: true }, pane);
+        if (!c) return;
+        /* 老会话只有一段文字，新会话带着查证过程与入口一起回来。
+           后者直接重放，前者从正文里认路径，两种都能点到位置。 */
+        const entries = (m.entries && m.entries.length)
+          ? m.entries
+          : AIEntries.fromText(m.content);
+        const steps = replayTrace(m.trace, m);
+        if (steps) c.node.insertBefore(steps, c.body);
+        finishAnswer({
+          ok: m.ok !== false,
+          replay: true,
+          answer: m.content,
+          evidence: m.evidence || [],
+          suggest: m.suggest || [],
+          followUps: [],
+          trace: m.trace || [],
+          entries: entries,
+          compressed: m.compressed || 'none',
+          usage: m.usage || null,
+          policy: m.policy || null,
+          status: m.status || '',
+          counts: m.counts || null,
+          /* 断点也要从文件里恢复：重启软件后点「继续」还能接着上次那一步查，
+             否则中断就真的等于丢掉了 —— 用户看到的就是「它忘了自己做过什么」。 */
+          checkpoint: m.checkpoint || null,
+          interrupted: false
+        }, pane);
+        st.history.push({
+          role: 'assistant',
+          content: m.content,
+          trace: m.trace || [],
+          ok: m.ok,
+          status: m.status || ''
+        });
+      });
+      /* 最后一条回答的 checkpoint / 用量等要能撑起「继续」与「重试」：
+         startAnswer/finishAnswer 已经把 st.lastResult 写过，这里只补「回放完了」 */
+      pane.built = true;
+      refreshActs(pane);
+      setEmpty(!pane.msgs.children.length && isVisible(pane));
+      prunePanes();
+    }
+
+    /* 造一个新的空会话并把它变成当前会话。切走不打断在飞的那一轮：
+       旧 pane 连同它的任务一起留在 paneStore 里继续跑，结果落回它自己的会话。 */
+    function startNewSession() {
+      const session = {
+        id: Date.now().toString(36),
+        title: '新会话',
+        created: Date.now(),
+        messages: []
+      };
+      const pane = makePane(session.id);
+      pane.state.session = session;
+      pane.state.history = [];
+      pane.state.lastResult = null;
+      pane.state.token = { stopped: false };
+      /* 新会话清空提案队列：上一个会话没确认的动作不能跨会话留着，
+         否则「我上次好像点过什么」就成了猜谜。配额也从零开始。 */
+      if (proposals) proposals.newSession();
+      activatePane(pane);
+      renderEmpty();
+      setEmpty(true);
+      prunePanes();
+      notifySessions();
+      return pane;
+    }
+
     return {
       ask,
       retry: retryLast,
       composer,
+      /* 运行态快照：页面用它画「哪些会话还在跑」，点一下切回去看。
+         返回的是拷贝，页面改它不会影响对话内部状态。 */
+      activity: activity,
+      /* 只清「看得见的那个会话」，别的会话连同它们还在跑的任务一起留着。
+         抽屉关掉时才由 destroy() 统一收走。 */
       clear() {
-        resetTurns();
-        msgs.innerHTML = '';
-        cardNodes.clear();
+        const tgt = activePane;
+        if (tgt) {
+          resetTurns(tgt);
+          tgt.msgs.innerHTML = '';
+          clearCards(tgt);
+          tgt.state.history = [];
+          tgt.state.session = null;
+          tgt.state.lastResult = null;
+          tgt.built = false;
+        }
         if (proposals) proposals.newSession();
-        state.history = [];
-        state.session = null;
-        state.lastResult = null;
         renderEmpty();
         setEmpty(true);
       },
+      /* 切会话 = 换视图，不打断在飞的任何东西。
+         已经铺过内容的 pane 直接复用：上面可能正有一轮在写，
+         重放存档会把在飞的节点顶掉（bug1 的另一半）。 */
       loadSession(session) {
-        resetTurns();
-        msgs.innerHTML = '';
-        cardNodes.clear();
-        /* 会话里存过的提案不再重放成可点卡片：过期的东西点了只会失败。
+        if (!session || !session.id) return;
+        const pane = paneForSession(session);
+        if (!pane) return;
+        /* 新会话清空提案队列：过期的东西点了只会失败，
            执行过的动作另有一条「执行记录」，那才是事后要回看的东西。 */
+        if (!pane.built) replaySessionInto(pane, session);
         if (proposals) proposals.newSession();
-        state.session = session;
-        state.history = [];
-        lastAsk = null;
-        (session.messages || []).forEach((m) => {
-          if (m.role === 'user') {
-            addUser(m.content);
-            state.history.push({ role: 'user', content: m.content });
-            return;
-          }
-          const c = startAnswer({ replay: true });
-          /* 老会话只有一段文字，新会话带着查证过程与入口一起回来。
-             后者直接重放，前者从正文里认路径，两种都能点到位置。 */
-          const entries = (m.entries && m.entries.length)
-            ? m.entries
-            : AIEntries.fromText(m.content);
-          const steps = replayTrace(m.trace, m);
-          if (steps) c.node.insertBefore(steps, c.body);
-          finishAnswer({
-            ok: m.ok !== false,
-            replay: true,
-            answer: m.content,
-            evidence: m.evidence || [],
-            suggest: m.suggest || [],
-            followUps: [],
-            trace: m.trace || [],
-            entries: entries,
-            compressed: m.compressed || 'none',
-            usage: m.usage || null,
-            policy: m.policy || null,
-            status: m.status || '',
-            counts: m.counts || null,
-            /* 断点也要从文件里恢复：重启软件后点「继续」还能接着上次那一步查，
-               否则中断就真的等于丢掉了 —— 用户看到的就是「它忘了自己做过什么」。 */
-            checkpoint: m.checkpoint || null,
-            interrupted: false
-          });
-          state.history.push({
-            role: 'assistant',
-            content: m.content,
-            trace: m.trace || [],
-            ok: m.ok,
-            status: m.status || ''
-          });
-        });
-        refreshActs();
-        setEmpty(false);
-        scrollEnd(true);
+        activatePane(pane);
+        if (pane.built) {
+          refreshActs(pane);
+          setEmpty(!pane.msgs.children.length);
+          scrollEnd(true, pane);
+        }
         notifySessions();
       },
       newSession() {
-        resetTurns();
-        msgs.innerHTML = '';
-        /* 新会话清空提案队列：上一个会话没确认的动作不能跨会话留着，
-           否则「我上次好像点过什么」就成了猜谜。配额也从零开始。 */
-        cardNodes.clear();
-        if (proposals) proposals.newSession();
-        state.session = {
-          id: Date.now().toString(36),
-          title: '新会话',
-          created: Date.now(),
-          messages: []
-        };
-        state.history = [];
-        state.lastResult = null;
-        state.token = { stopped: false };
-        renderEmpty();
-        setEmpty(true);
-        notifySessions();
+        startNewSession();
       },
-      /* 删除后如果是当前会话，回到一个干净的新会话 */
+      /* 删除后如果是当前会话，回到一个干净的新会话。
+         被删的那个会话要是还在跑，任务照跑到底、结果照样落盘
+         （存档文件删了也不会写回来），但界面上它已经没地方显示了。 */
       deleteSession(id) {
-        if (state.session && state.session.id === id) {
+        const pane = id ? panes.get(String(id)) : null;
+        if (pane && pane === activePane) {
           this.newSession();
         }
+        if (pane && !pane.state.running) {
+          if (pane.msgs.parentNode) pane.msgs.parentNode.removeChild(pane.msgs);
+          panes.delete(String(id));
+        }
+      },
+      /* 按 id 切到某个会话（不需要走磁盘）。
+         正在跑的那个会话往往还没落盘——它要到这一轮结束才写文件，
+         所以页面点「运行中」那条时只能按 id 找活着的 pane，读文件会读空。 */
+      focusSession(id) {
+        const pane = id ? panes.get(String(id)) : null;
+        if (!pane) return false;
+        activatePane(pane);
+        return true;
       },
       sessions() {
         return AIStore.listSessions();
@@ -1911,15 +2371,54 @@
       },
       get session() { return state.session; },
       focus() { composer.focus(); },
-      setBusy(b) { state.running = b; composer.setBusy(b, false); },
-      setModel(id) { state.model = id; composer.setModel(id); },
-      setThinking(v) { state.thinking = v; composer.setThinking(v); },
-      setPermission(p) { state.permission = p; composer.setPermission(p); },
+      /* 调用方（页面卸载前）用它把界面从「正在回答」摘出来。
+         只作用于可见会话：后台会话的任务还在跑，把它标成不忙等于骗界面。 */
+      setBusy(b) {
+        if (activePane) activePane.state.running = !!b;
+        else state.running = !!b;
+        composer.setBusy(b, false);
+      },
+      /* 模型 / 强度 / 权限是全局偏好：每个 pane 都写一份。
+         只写可见那份的话，切回一个旧会话时它还拿着启动时那套值，
+         下一轮就按旧值跑（bug2 在跨会话场景下的同一个根因）。 */
+      setModel(id) {
+        eachPaneState(function (st) { st.model = id; });
+        composer.setModel(id);
+      },
+      setThinking(v) {
+        eachPaneState(function (st) { st.thinking = v; });
+        composer.setThinking(v);
+      },
+      setPermission(p) {
+        eachPaneState(function (st) { st.permission = p; });
+        composer.setPermission(p);
+      },
       /* 页面/抽屉收起时必须调它：composer 里挂着推理强度画布的 ticker、
          菜单的 resize 监听和 motion 订阅，只清 DOM 会把它们留成常驻空转。
-         提案队列是全应用共用的，退订一定要做，否则关掉的抽屉还在重画。 */
+         提案队列是全应用共用的，退订一定要做，否则关掉的抽屉还在重画。
+         分桶的残留也要一并清：每个 pane 的 DOM、跟随器、单飞位与排队
+         不跟着收掉，就会留下一批再也用不到却在跑的东西。 */
       destroy() {
+        /* 先立牌子再拆东西：在飞那一轮收尾时会问 isVisible，
+           立完牌子它就知道「界面已经没了」，不再去调那些 destroy 过的对象 */
+        destroyed = true;
         try { if (unsubscribe) unsubscribe(); } catch (e) { /* 退订失败不影响收尾 */ }
+        try { if (follow) follow.destroy(); } catch (e) { /* 跟随器收不掉也别拦着关 */ }
+        follow = null;
+        if (rail) { try { rail.destroy(); } catch (e) { /* 同上 */ } }
+        /* 在飞的那一轮不再往界面写：这里只断它和 DOM 的联系，
+           不去碰 Rust 的全局 AI_CANCEL（那是另一个会话也可能在用的） */
+        inFlight = null;
+        queue.length = 0;
+        panes.forEach(function (p) {
+          p.state.running = false;
+          p.current = null;
+          if (p.msgs.parentNode) p.msgs.parentNode.removeChild(p.msgs);
+        });
+        panes.clear();
+        activePane = null;
+        current = null;
+        try { paneStore.innerHTML = ''; } catch (e) { /* 已经摘掉了 */ }
         try { composer.destroy(); } catch (e) { /* 忽略 */ }
       }
     };

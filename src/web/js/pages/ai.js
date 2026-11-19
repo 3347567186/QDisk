@@ -19,6 +19,10 @@
 
       /* ---------- 左栏 ---------- */
       const railList = h('div', { class: 'ai-rail-list' });
+      /* 运行中面板：后台会话在跑的时候，别的页面元素都不会有反应
+         （聊到一半点「新对话」，旧的那条继续跑，但界面上一点痕迹都没有）。
+         这里固定留一条，只在真有东西在跑/排队时才出现，点一下切回去看。 */
+      const busyBox = h('div', { class: 'ai-busy', hidden: true });
       const newBtn = h('button', {
         class: 'ai-new',
         type: 'button',
@@ -47,6 +51,7 @@
 
       const rail = h('aside', { class: 'ai-rail' },
         h('div', { class: 'ai-rail-top' }, newBtn, railToggle),
+        busyBox,
         railList
       );
 
@@ -115,6 +120,60 @@
         if (sameDay) return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
         if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '/' + d.getDate();
         return d.getFullYear() + '/' + (d.getMonth() + 1);
+      }
+
+      /* 把「谁还在跑」画到左栏顶部。
+         用户的原话是「我新增对话了那我怎么看还在运行那条呢，现在我看不见」——
+         切走的会话在后台继续跑，但界面上不能一点痕迹都没有。
+         这里只画在跑 / 排队的会话，点一下就切回去看它跑到哪了。 */
+      let busyStamp = '';
+      function renderBusy(snap) {
+        const items = (snap && snap.items) || [];
+        /* 通知来得很密（开跑 / 收尾 / 出队 / 切会话各一次），
+           内容没变就别重建 DOM：正在点的那个按钮会被换掉，光标也跟着丢。 */
+        const stamp = items.map((it) => it.id + ':' + (it.running ? 'r' : '') + it.queued + (it.visible ? 'v' : '')).join('|');
+        if (stamp === busyStamp) return;
+        busyStamp = stamp;
+        busyBox.innerHTML = '';
+        if (!items.length) {
+          busyBox.hidden = true;
+          return;
+        }
+        busyBox.hidden = false;
+        busyBox.appendChild(h('div', { class: 'ai-busy-head' },
+          h('span', { class: 'ai-busy-dot' }),
+          h('span', {}, T('正在运行', 'Running'))));
+        items.forEach((it) => {
+          const label = it.queued > 0
+            ? T('+' + it.queued + ' 排队', '+' + it.queued + ' queued')
+            : '';
+          busyBox.appendChild(h('button', {
+            class: 'ai-busy-row',
+            type: 'button',
+            'data-active': it.visible ? '' : null,
+            title: it.title + (label ? ' · ' + label : ''),
+            onclick: () => {
+              if (!chat) return;
+              /* 在跑的会话还没落盘，只能按 id 找活着的那个；
+                 找不到就退回读文件（跑完的会话一定有存档） */
+              if (chat.focusSession && chat.focusSession(it.id)) {
+                activeId = it.id;
+                paintActive();
+                chat.focus();
+                return;
+              }
+              AIStore.loadSession(it.id).then((s) => {
+                if (!s) return;
+                chat.loadSession(s);
+                activeId = s.id;
+                paintActive();
+              }).catch(() => {});
+            }
+          },
+            h('span', { class: 'ai-busy-title' }, it.title),
+            label ? h('span', { class: 'ai-busy-tag' }, label) : null
+          ));
+        });
       }
 
       /* 列表要标题，而 listSessions 只给文件名和 mtime —— 逐个读会话头。
@@ -221,13 +280,19 @@
       chat = AIChat.create(chatRoot, {
         ctx: () => ({ page: 'ai', tools: AIPrompt.PAGE_TOOLS.ai }),
         /* 新会话落盘 / 载入后刷新左栏，标题与排序跟着变 */
-        onSessions: () => { renderList(); }
+        onSessions: () => { renderList(); },
+        /* 谁在跑 / 排了几条变了就重画顶部那一条：
+           后台会话在跑时界面上得有地方能看见它，否则「新对话」一点就找不回来了 */
+        onBusy: (snap) => { renderBusy(snap); }
       });
       /* 上次的强度 / 权限 / 模型 / 会话都从 ai_ui 恢复；
          读完再点亮左栏高亮，避免先亮一个再跳一个 */
       chat.boot().then(() => {
         activeId = chat.session ? chat.session.id : null;
         paintActive();
+        /* 首屏补一次运行态：boot 之前的那些通知没有订阅者，
+           这里主动拉一遍，免得上一次会话还在跑却看不见 */
+        try { if (chat.activity) renderBusy(chat.activity()); } catch (e) { /* 拉不到就不画 */ }
       }).catch(() => {
         activeId = chat.session ? chat.session.id : null;
         paintActive();

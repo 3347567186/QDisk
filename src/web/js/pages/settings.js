@@ -817,8 +817,20 @@
             state.aiProv = e.target.value;
             const p = AIStore.PROVIDERS.find((x) => x.id === e.target.value);
             if (p && p.id !== 'custom') {
-              // 换厂商就换默认地址与模型，但不动已填的密钥
+              /* 换厂商就换默认地址与模型。
+                 密钥这里有个坑：以前是「一律不动已填的密钥」，
+                 结果从智谱切到 DeepSeek，表单里还留着智谱的 Key，
+                 点保存就把两个不相干的东西焊在一起了（请求 401 才暴露）。
+                 现在的规则是：这家有记过的 Key 就带出来，没有就清空 ——
+                 空着至少是「明显还没配」，比「看着像配好了其实不对」好排查。 */
               d.endpoint = p.endpoint; d.model = p.model; state.aiTest = null;
+              const mem = AIStore.recallProvider ? AIStore.recallProvider(p.endpoint) : null;
+              if (mem) {
+                if (mem.key) d.key = mem.key;
+                if (mem.model) d.model = mem.model;
+              } else {
+                d.key = '';
+              }
               paint();
             }
           }
@@ -827,7 +839,11 @@
         })));
 
         /* 模型池：从 dsh-xdpool 的厂商清单里挑一家，直接把地址与模型名填好。
-           只做选择器，不接管请求——请求仍走下面这套端点与 Key。 */
+           只做选择器，不接管请求——请求仍走下面这套端点与 Key。
+
+           这里同时把「这家的 Key」带出来：池子里的 64 家厂商，用户往往是
+           先看中模型再回头找 Key，来回切几次就得重粘几次。
+           有记忆就顺手填上，没有就只清空（不清空的话会拿上一家的 Key 去打新地址）。 */
         function applyPool(p, m) {
           d.endpoint = p.endpoint;
           d.model = m[0];
@@ -838,6 +854,10 @@
             const w = Math.round(Number(m[2]));
             if (w >= 2000 && w <= 4000000) d.ctxWindow = w;
           }
+          /* 同一家如果记过 Key 和上次用的模型，一并带出来 */
+          const mem = AIStore.recallProvider ? AIStore.recallProvider(p.endpoint) : null;
+          if (mem && mem.key) d.key = mem.key;
+          else if (!mem) d.key = '';
           paint();
           /* 已经有 Key：直接落盘，选完就能用；没 Key 则只填表单，提示补 Key 后保存 */
           if (d.key) {
@@ -1227,6 +1247,58 @@
            原来是一条 15 行的长单列，AI 区块自己就超过一屏，滚到下面
            就找不到上面改过的字段。分组依据是「改一处会不会牵连另一处」：
            连接与模型是同一件事的两面，行为与权限是另一件事。 */
+        /* 「已记住的厂商」：把 providerKeys 里存过的东西摊开来给用户看。
+           为什么要这块界面，而不是让记忆在后台默默生效：
+             1. 用户得知道「我上次填的 Key 还在」，否则每次都要怀疑一遍；
+             2. 记忆会过期（换机器、注销、Key 被吊销），得能一条条删；
+             3. 一键切回去比「记住上一个选的是谁」有用得多 —— 常年在
+                两三家之间来回切的用户，这一步能省掉「翻地址、粘贴、保存」。
+           故意不显示完整 Key：这块界面会被截图，掩码就够了。 */
+        function providerMemoryBox() {
+          const rows = (AIStore.listProviders ? AIStore.listProviders() : []);
+          if (!rows.length) {
+            return h('div', { class: 'small muted', text: T(
+              '保存过一次后，这里会记住各家的 Key 与上次用的模型，切回来时自动带出',
+              'After the first save, each provider keeps its key and last model here and is restored when you switch back') });
+          }
+          return h('div', { class: 'stack' }, ...rows.map((it) => {
+            const usable = !!it.endpoint;
+            return h('div', { class: 'row' },
+              h('div', { class: 'stack', style: 'flex:1' },
+                h('span', { class: 'mono', text: it.host }),
+                h('span', { class: 'small muted', text: (it.model ? it.model + ' · ' : '') + (it.masked || T('无 Key', 'no key')) })),
+              h('button', {
+                class: 'btn ghost sm', type: 'button',
+                disabled: !usable,
+                title: usable
+                  ? T('切回这一家的地址、模型与 Key', 'Switch back to this provider’s endpoint, model and key')
+                  : T('这条只记了模型，没有可用的地址', 'This entry has no endpoint recorded'),
+                onclick: () => {
+                  if (!usable) return;
+                  d.endpoint = it.endpoint;
+                  if (it.model) d.model = it.model;
+                  if (it.key) d.key = it.key;
+                  state.aiProv = 'custom';
+                  state.aiTest = null;
+                  paint();
+                  toast(T('已切回 ' + it.host, 'Switched to ' + it.host), 'ok');
+                }
+              }, icon('undo', 13), h('span', { text: T('切回', 'Use') })),
+              h('button', {
+                class: 'btn ghost sm', type: 'button',
+                title: T('忘掉这一家的记录', 'Forget this provider'),
+                onclick: async () => {
+                  try {
+                    await AIStore.forgetProvider(it.host);
+                    toast(T('已忘掉 ' + it.host, 'Forgot ' + it.host), 'ok');
+                    paint();
+                  } catch (e) { toast(errText(e), 'error'); }
+                }
+              }, icon('trash', 13))
+            );
+          }));
+        }
+
         const cardConn = h('div', { class: 'set-card' },
             setCap(T('连接', 'Connection'), h('span', { class: 'set-cap-tail', text: AIStore.isConfigured(d) ? T('已配置', 'Configured') : T('未配置', 'Not configured') })),
             setRow(T('服务商', 'Provider'), provBox),
@@ -1240,7 +1312,9 @@
                   onclick: () => { state.aiKeyShown = !state.aiKeyShown; paint(); }
                 }, h('span', { text: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show') }))
               ),
-              T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported'))
+              T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported')),
+            setRow(T('已记住的厂商', 'Saved providers'), providerMemoryBox(),
+              T('按接口域名记住，切回时自动填好地址、模型和 Key', 'Keyed by endpoint host; switching back restores endpoint, model and key'))
         );
 
         const cardModel = h('div', { class: 'set-card' },
@@ -1479,6 +1553,14 @@
           }
           state.ai = next;
           state.aiDraft = Object.assign({}, next);
+          /* 保存成功就把「这家的 Key + 这次选的模型」记下来。
+             不 await、失败也不打断：记忆是便利功能，丢了顶多下次重粘一遍，
+             不能因为它把「已保存」这条反馈拖慢或弄成报错。 */
+          if (AIStore.rememberProvider) {
+            AIStore.rememberProvider({ endpoint: next.endpoint, key: next.key, model: next.model })
+              .then(() => { try { paint(); } catch (e) { /* 重绘失败不影响已保存 */ } })
+              .catch(() => {});
+          }
           toast(endpointFixed
             ? T('AI 设置已保存（地址已补全 /chat/completions）', 'AI settings saved (endpoint completed)')
             : T('AI 设置已保存', 'AI settings saved'), 'ok');
