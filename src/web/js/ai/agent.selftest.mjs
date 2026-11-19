@@ -1278,6 +1278,92 @@ for (const c of CASES) {
   results.push({ id: 'G51', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
 
+/* G52 可点建议必须由代码算：safe 进 delete、careful 进 check、unknown 一律不进
+   用户原话「什么都感觉用不上」—— 空 suggest 就是他说的那种感觉。
+   反过来的错误更贵：把没认出来的程序目录放进 delete，用户点一下就删掉要重装的东西。
+   实测踩过两次：suggest_items 挂在 fit 之前会被砍成 1 条；两个同名「下载目录」分不清。 */
+{
+  const rows = [
+    { path: 'E:\\下载\\SW2026\\SolidWorks 2026 SP0(64bit)', name: 'SolidWorks 2026 SP0(64bit)', size: 17653004608, files: 900, pct: 4.5 },
+    { path: 'E:\\下载\\大学生职业生涯规划PPT\\先看精选版', name: '先看精选版', size: 6363212725, files: 40, pct: 1.6 },
+    { path: 'E:\\SteamLibrary\\steamapps\\common', name: 'common', size: 57789706255, files: 6700, pct: 14.6 },
+    { path: 'D:\\Tool\\图吧工具箱\\tools', name: 'tools', size: 9866983168, files: 300, pct: 2.5 }
+  ];
+  const sugApi = Object.assign({}, fakeApi, {
+    engine: async (method) => {
+      if (method === 'search.status') return { files: 1400000, dirs: 110000, roots: ['D:\\', 'E:\\'] };
+      if (method === 'search.folders') {
+        return { items: rows, total: rows.length, source: 'index', roots: ['D:\\', 'E:\\'], indexed: 1400000, depth: 3, bytes: 396272845688, built: false, elapsed_ms: 1200 };
+      }
+      return fakeApi.engine(method);
+    }
+  });
+  const sugTools = makeTools({ API: sugApi });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_folders', { limit: 15 }),
+      answer({ answer: '下载目录占 16.4 GB 可以直接清；Steam 游戏库要小心；图吧工具箱没认出来。' })
+    ]),
+    tools: sugTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '最近什么最占空间？', ctx: { page: 'ai' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const sug = res.suggest || [];
+  const del = sug.filter((x) => x.action === 'delete')[0];
+  const chk = sug.filter((x) => x.action === 'check')[0];
+  const allPaths = sug.reduce((a, x) => a.concat(x.paths || []), []);
+  const bad = [];
+  if (!del) bad.push('没有给出 delete 建议（用户看到的还是「什么都用不上」）');
+  if (del && (del.paths || []).length !== 2) bad.push('delete 建议只带了 ' + (del.paths || []).length + ' 条路径，两个下载目录应该都在（fit 又把数组砍了？）');
+  if (!chk) bad.push('没有给出 check 建议（要小心处理的那些没地方点）');
+  if (chk && !(chk.paths || []).some((p) => /steamapps/.test(p))) bad.push('check 建议里没有 Steam 游戏库');
+  if (allPaths.some((p) => /图吧工具箱/.test(p))) bad.push('没认出来的程序目录进了 suggest —— 用户点一下就删掉要重装的东西');
+  if (!r.draft || !/能直接清/.test(r.draft) || !/要小心处理/.test(r.draft)) bad.push('没有生成三段式草稿');
+  if (r.draft && !/下载目录（SolidWorks 2026 SP0\(64bit\)）/.test(r.draft)) bad.push('两个同名「下载目录」没被区分开，人不知道点的是哪个');
+  if (!res.ok) bad.push('这一轮应该能正常作答');
+  results.push({ id: 'G52', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G53 有不能删的条目却说「都可以清理」必须打回重写
+   实测 glm-4-flash 会写「这些文件都可以进行清理」，而列表里有 Steam 游戏库和微信聊天记录。
+   用户照做就删掉几十 GB 游戏本体和全部聊天记录，不可逆。
+   只拦这一种硬错误 —— 不替模型写答案，否则又变成用户说的「像是脚本跑出来的」。 */
+{
+  const rows = [
+    { path: 'D:\\Downloads\\old.iso', name: 'old.iso', size: 3221225472, files: 1, pct: 40 },
+    { path: 'E:\\SteamLibrary\\steamapps\\common', name: 'common', size: 57789706255, files: 6700, pct: 60 }
+  ];
+  const riskApi = Object.assign({}, fakeApi, {
+    engine: async (method) => {
+      if (method === 'search.status') return { files: 100, dirs: 10, roots: ['D:\\', 'E:\\'] };
+      if (method === 'search.folders') {
+        return { items: rows, total: 2, source: 'index', roots: ['D:\\', 'E:\\'], indexed: 100, depth: 3, bytes: 61010931687, built: false, elapsed_ms: 30 };
+      }
+      return fakeApi.engine(method);
+    }
+  });
+  let asked = 0;
+  const riskTools = makeTools({ API: riskApi });
+  const agent = createAgent({
+    transport: async (req) => {
+      asked += 1;
+      const body = asked === 1
+        ? toolStep('top_folders', { limit: 10 })
+        : (asked === 2
+          ? answer({ answer: '这些文件都可以清理，能腾出 57 GB。' })
+          : answer({ answer: '能直接清的：D:\\Downloads\\old.iso，3.0 GB。要小心处理的：Steam 游戏库，不能直接删，不玩就在 Steam 里卸载。' }));
+      return { status: 200, body: JSON.stringify({ choices: [{ message: { content: body } }], usage: { prompt_tokens: 900, completion_tokens: 60 } }) };
+    },
+    tools: riskTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '最近什么最占空间？', ctx: { page: 'ai' } });
+  const bad = [];
+  if (asked < 3) bad.push('「都可以清理」没有被拦下重写（只问了 ' + asked + ' 次）');
+  if (/都可以清理/.test(String(res.answer || ''))) bad.push('最终答案里还留着「都可以清理」');
+  if (!/要小心处理/.test(String(res.answer || ''))) bad.push('重写后的答案没有把「要小心处理的」分开讲');
+  results.push({ id: 'G53', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

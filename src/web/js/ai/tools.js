@@ -99,16 +99,78 @@
     return d;
   };
 
+  /* ---------------- 路径 → 「这是什么、能不能清」 ----------------
+     用户实测的原话是「他就发个链接给我，什么都感觉用不上」。
+     光给路径和体积没用：`E:\SteamLibrary\steamapps\common` 是什么、能不能删，
+     用户心里没有底。这个判断工具比模型可靠 —— 模型只能看路径字符串猜，
+     而路径模式是确定的，写成规则表命中率更高，也不会编。
+
+     规则只写「有把握的」：没命中就返回空，让模型自己判断，
+     宁可不说，也不能给一条错的处理建议（删错东西是不可逆的）。
+
+     risk 三档是硬结论，不是形容词：
+       safe    —— 删了程序会自己重建，直接说能删
+       careful —— 能清，但必须走正确入口（微信要进设置里清、游戏要用平台卸载）
+       keep    —— 别动，删了会丢数据或坏系统
+     有 risk 就不允许模型自己改口说「都可以清理」—— 实测它真的会这么写。 */
+  const PATH_RULES = [
+    { re: /[\\/]steamapps[\\/]common([\\/]|$)/i, risk: 'careful', what: 'Steam 游戏库（已装的游戏本体）',
+      clean: '不能直接删，删了要重新下几十 GB；不玩就在 Steam 里卸载' },
+    { re: /[\\/](SteamLibrary|Epic ?Games|GOG ?Games)([\\/]|$)/i, risk: 'careful', what: '游戏安装目录',
+      clean: '不能直接删，用对应平台的卸载功能' },
+    { re: /[\\/]\.minecraft([\\/]|$)/i, risk: 'careful', what: 'Minecraft 游戏与存档',
+      clean: 'versions 里不玩的旧版本、mods 里不用的模组可以删；saves 是存档，删了进度就没了' },
+    { re: /[\\/](Wechatdate|WeChat ?Files|xwechat_files)([\\/]|$)/i, risk: 'careful', what: '微信聊天记录与缓存',
+      clean: '要在微信「设置 → 存储空间 → 管理」里清，不能直接删目录（会丢聊天记录）' },
+    { re: /手机备份|[\\/](iPhone|iTunes|MobileSync)([\\/]|$)/i, risk: 'careful', what: '手机备份',
+      clean: '旧手机的备份基本没用，但要在 iTunes/访达里删，不能直接删目录' },
+    { re: /[\\/](Downloads|下载)([\\/]|$)/i, risk: 'safe', what: '下载目录',
+      clean: '装完的安装包、看过的压缩包可以删，过一眼再动手' },
+    { re: /[\\/]node_modules([\\/]|$)/i, risk: 'safe', what: 'Node 依赖（可重装）',
+      clean: '可以删，删了在项目里跑一次 npm install 就回来' },
+    { re: /[\\/](target|dist|build|obj|__pycache__|\.next)([\\/]|$)/i, risk: 'safe', what: '编译产物',
+      clean: '可以删，重新编译就有，不影响源码' },
+    { re: /[\\/](AppData[\\/]Local[\\/]Temp|Windows[\\/]Temp|临时|Temp)([\\/]|$)/i, risk: 'safe', what: '临时文件',
+      clean: '可以删，程序会自己重建' },
+    { re: /[\\/](Cache|caches|缓存|GPUCache|Code ?Cache)([\\/]|$)/i, risk: 'safe', what: '缓存',
+      clean: '可以删，下次运行会重建，第一次会慢一点' },
+    { re: /[\\/](pagefile\.sys|hiberfil\.sys|swapfile\.sys)/i, risk: 'keep', what: 'Windows 系统文件',
+      clean: '不能删，删了系统会出问题；只能在系统设置里调大小' },
+    { re: /[\\/]Windows([\\/]|$)/i, risk: 'keep', what: 'Windows 系统目录',
+      clean: '不能删，删了系统就起不来了' },
+    { re: /[\\/](Program ?Files|ProgramData)([\\/]|$)/i, risk: 'keep', what: '已安装程序',
+      clean: '不能直接删，要卸载就从「设置 → 应用」里卸载' },
+    { re: /[\\/](Videos|视频|Movies)([\\/]|$)/i, risk: 'keep', what: '视频',
+      clean: '多半是你要留的素材，自己看过再决定' },
+    { re: /[\\/](Pictures|图片|Photos)([\\/]|$)/i, risk: 'keep', what: '图片',
+      clean: '多半要留，自己看过再决定' },
+    { re: /[\\/](Documents|文档)([\\/]|$)/i, risk: 'keep', what: '文档目录',
+      clean: '不要整体删，里面有你的工作文件' }
+  ];
+
+  /** 认出来的话返回 {what, clean, risk}，认不出来返回 null（宁可不说也不瞎猜） */
+  const whatOf = (fullPath) => {
+    const p = String(fullPath || '').replace(/\//g, '\\');
+    for (let i = 0; i < PATH_RULES.length; i += 1) {
+      if (PATH_RULES[i].re.test(p)) {
+        return { what: PATH_RULES[i].what, clean: PATH_RULES[i].clean, risk: PATH_RULES[i].risk };
+      }
+    }
+    return null;
+  };
+
   /* 分页：结果被剪裁不再等于数据丢了。
      offset 跳过前几项，next_offset 指向下一页；模型按它续取即可。
-     fit() 可能再砍掉几条，所以裁剪之后要把 next_offset 收回实际条数，保证不漏项。 */
-  function pageFit(base, list, off, want) {
+     fit() 可能再砍掉几条，所以裁剪之后要把 next_offset 收回实际条数，保证不漏项。
+     cap 可以按工具给：CAP=1100 对「15 个目录 + 每项说明」太小，
+     实测会把目录列表压到只剩 2 条，模型只看得到两条，答案自然薄。 */
+  function pageFit(base, list, off, want, cap) {
     const from = Math.min(Math.max(0, Math.floor(off) || 0), list.length);
     const items = list.slice(from, from + want);
     const obj = Object.assign({}, base, { items });
     if (from > 0) obj.offset = from;
     if (from + items.length < list.length) obj.next_offset = from + items.length;
-    const out = fit(obj, CAP);
+    const out = fit(obj, cap || CAP);
     if (out && Array.isArray(out.items)) {
       /* fit 也会砍条目：按「真正返回了几条」定下一页，模型才不会跳过中间几条 */
       const next = from + out.items.length;
@@ -247,14 +309,21 @@
             } catch (e) { /* 状态查不到就照常跑，引擎自己会处理 */ }
           }
           const r = await withTimeout(API.engine('search.folders', body), 60000, '目录体积排行');
-          const items = ((r && r.items) || []).map((it) => ({
-            path: it.path,
-            name: it.name,
-            size: fmtBytes(it.size),
-            bytes: Number(it.size) || 0,
-            files: Number(it.files) || 0,
-            pct: Number(it.pct) || 0
-          }));
+          const items = ((r && r.items) || []).map((it) => {
+            const row = {
+              path: it.path,
+              name: it.name,
+              size: fmtBytes(it.size),
+              bytes: Number(it.size) || 0,
+              files: Number(it.files) || 0,
+              pct: Number(it.pct) || 0
+            };
+            /* 直接告诉模型「这是什么、能不能清」，别让它对着路径字符串猜。
+               没认出来就不加这几个字段，模型会按「不确定」处理。 */
+            const w = whatOf(it.path);
+            if (w) { row.what = w.what; row.clean = w.clean; row.risk = w.risk; }
+            return row;
+          });
           const base = {
             count: items.length,
             bytes: fmtBytes(r && r.bytes),
@@ -266,9 +335,118 @@
             hint: (r && r.hint) || '',
             error: (r && r.error) || ''
           };
+          /* 按风险分好组，把「能清多少」直接算出来给模型。
+             不这么做的话，实测模型会把「Steam 游戏库」和「缓存」并列成
+             「这些文件都可以进行清理」—— 用户照做就删掉几十 GB 的游戏本体。
+             分组是确定的算术，不该交给模型自由发挥。 */
+          const groups = { safe: [], careful: [], keep: [], unknown: [] };
+          items.forEach((row) => {
+            const g = groups[row.risk] || groups.unknown;
+            g.push(row.path);
+          });
+          const sumOf = (list) => list.reduce((n, p) => {
+            const hit = items.find((x) => x.path === p);
+            return n + (hit ? hit.bytes : 0);
+          }, 0);
+          base.groups = {
+            safe: { count: groups.safe.length, bytes: fmtBytes(sumOf(groups.safe)), paths: groups.safe.slice(0, 6) },
+            careful: { count: groups.careful.length, bytes: fmtBytes(sumOf(groups.careful)), paths: groups.careful.slice(0, 6) },
+            keep: { count: groups.keep.length, bytes: fmtBytes(sumOf(groups.keep)), paths: groups.keep.slice(0, 6) },
+            unknown: { count: groups.unknown.length, paths: groups.unknown.slice(0, 6) }
+          };
           if (base.built) base.note = '本地还没有索引，刚刚自动建了一次（几秒），现在是整机统计';
           if (!base.roots.length) base.note = '本地索引还没建起来，这个结果不能当整机统计';
-          return pageFit(base, items, 0, want);
+
+          /* 直接排好三段式草稿和可点建议。
+             为什么不让模型自己排：实测四轮，每修好一处就弄坏另一处 ——
+             把「工具箱」这种程序目录列成可删、把微信同时放进「能清」和「要小心」、
+             把比赛 ppt 说成「在微信设置中清理」。分组和数字是确定的算术，
+             交给一个便宜的 flash 模型自由发挥，答案就永远在几种错法之间摇摆。 */
+          const byPath = {};
+          items.forEach((row) => { byPath[row.path] = row; });
+          /* 同一个 what 出现两次时（两个都叫「下载目录」）人分不清是哪个，
+             补上路径最后一段，让它变成「下载目录（SW2026）」 */
+          const nameOf = (p) => {
+            const row = byPath[p] || {};
+            let label = row.what || row.name || p;
+            if (row.what) {
+              const same = items.filter((x) => x.what === row.what);
+              if (same.length > 1) {
+                const leaf = String(p).split(/[\\/]/).filter(Boolean).pop() || '';
+                if (leaf && leaf !== row.what) label = row.what + '（' + leaf + '）';
+              }
+            }
+            return label;
+          };
+          const lines = [];
+          const top3 = items.slice(0, 3);
+          if (top3.length) {
+            lines.push('最占空间的三个目录：');
+            top3.forEach((row) => {
+              lines.push('· ' + nameOf(row.path) + '，' + row.size + (row.pct ? '（占 ' + row.pct + '%）' : '') + ' — ' + row.path);
+            });
+          }
+          if (groups.safe.length) {
+            lines.push('');
+            lines.push('能直接清的（共 ' + fmtBytes(sumOf(groups.safe)) + '）：');
+            groups.safe.slice(0, 6).forEach((p) => {
+              const row = byPath[p] || {};
+              lines.push('· ' + nameOf(p) + '，' + (row.size || '') + ' — ' + p + (row.clean ? '。' + row.clean : ''));
+            });
+          } else {
+            lines.push('');
+            lines.push('能直接清的：这一屏里没有，需要往下看更多目录。');
+          }
+          if (groups.careful.length) {
+            lines.push('');
+            lines.push('要小心处理的（共 ' + fmtBytes(sumOf(groups.careful)) + '）：');
+            groups.careful.slice(0, 4).forEach((p) => {
+              const row = byPath[p] || {};
+              lines.push('· ' + nameOf(p) + '，' + (row.size || '') + ' — ' + (row.clean || '不能直接删'));
+            });
+          }
+          if (groups.unknown.length) {
+            lines.push('');
+            lines.push('没认出来的（' + groups.unknown.length + ' 个，看起来像程序或项目目录，删之前先确认）：');
+            groups.unknown.slice(0, 4).forEach((p) => {
+              const row = byPath[p] || {};
+              lines.push('· ' + p + (row.size ? '，' + row.size : ''));
+            });
+          }
+
+          /* 建议项也在这里算好：safe 给 delete，careful 给 check。
+             unknown 和 keep 一律不进 suggest —— 用户点一下就删的东西不能靠猜。 */
+          const sug = [];
+          if (groups.safe.length) {
+            sug.push({
+              action: 'delete',
+              paths: groups.safe.slice(0, 6),
+              why: '可以直接删，共 ' + fmtBytes(sumOf(groups.safe)) + '：' +
+                groups.safe.slice(0, 3).map(nameOf).join('、')
+            });
+          }
+          if (groups.careful.length) {
+            sug.push({
+              action: 'check',
+              paths: groups.careful.slice(0, 6),
+              why: '占得多但要小心清：' +
+                groups.careful.slice(0, 2).map((p) => {
+                  const row = byPath[p] || {};
+                  return nameOf(p) + '（' + (row.clean || '不能直接删') + '）';
+                }).join('；')
+            });
+          }
+
+          /* 目录排行给更大的 cap：1100 会把 15 条压到 2 条，
+             模型只看到两个目录，答案自然只有两句。 */
+          const out = pageFit(base, items, 0, want, 2600);
+          /* suggest_items 必须挂在 fit 之后：fit 会从尾部砍数组，
+             挂在里面会被砍成 1 条（实测只剩 delete 那条，careful 组直接消失）。 */
+          if (out && typeof out === 'object') {
+            out.draft = lines.join('\n');
+            if (sug.length) out.suggest_items = sug;
+          }
+          return out;
         },
         summary: (args, r) => `目录体积排行 · ${r.count} 个${r.built ? '（刚建索引）' : ''}`
       },

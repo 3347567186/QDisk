@@ -1353,15 +1353,59 @@
             steps += 1;
             continue;
           }
+          /* 只拦「合并成一类」的断言，不替模型写答案。
+             实测四轮：让 glm-4-flash 自己组织「什么最占空间」，每修一处就坏另一处 ——
+             把程序目录列成可删、把微信同时放进两组、把 ppt 说成在微信里清。
+             但反过来用工具的 draft 直接覆盖答案，答案会变成模板腔，
+             那正是用户说的「感觉像是脚本跑出来的」。
+             所以分工是：话由模型说（它擅长），可操作的建议由代码算（suggest_items，
+             已经按 safe/careful 分好组）；这里只拦一种硬错误 ——
+             明明有不能删的条目，却说「这些都可以清理」。 */
+          const blanket = /(都(可以|能)(直接)?(清|删)|全部(可以|都能)?(清|删)|一概(清|删)|都可以清理|都能删除|均(可|能)(清|删))/;
+          let riskBad = [];
+          if (blanket.test(String(step.answer || ''))) {
+            for (let ti = trace.length - 1; ti >= 0; ti -= 1) {
+              const g = trace[ti] && trace[ti].result && trace[ti].result.groups;
+              if (!g) continue;
+              ['careful', 'keep', 'unknown'].forEach((k) => {
+                if (g[k] && Number(g[k].count) > 0) riskBad.push(k);
+              });
+              break;
+            }
+          }
+          if (riskBad.length && repairLeft > 0) {
+            repairLeft -= 1;
+            messages.push({ role: 'assistant', content: JSON.stringify({ answer: step.answer }) });
+            messages.push({
+              role: 'user',
+              content: '你的回答把不同风险的东西合并成「都可以清理」了，但工具结果里还有 ' +
+                riskBad.join('、') + ' 组的条目（程序目录、系统文件、聊天记录、存档这类，删了会丢东西）。' +
+                '请重写答案，把「能直接清的」和「要小心处理的」分开说，不要用「都」这种合并句式。' +
+                (prompt.OUTPUT_REMINDER || '')
+            });
+            steps += 1;
+            continue;
+          }
           const answerText = switchedNote() + (bad.length
             ? step.answer + '\n\n· 注意：上面有体积数字没能在工具结果里核对上，可能不准。'
             : step.answer);
           const follow = suggestFollowUps(ctx, trace);
+          /* 可操作的建议优先用工具算好的那份（按 safe/careful 分好组、路径已核对），
+             模型自己给的 suggest 只当补充。用户原话「什么都感觉用不上」，
+             空 suggest 就是他说的那种感觉 —— 有可清的目录时不能让它是空的。 */
+          let codeSuggest = null;
+          for (let ti = trace.length - 1; ti >= 0; ti -= 1) {
+            const r0 = trace[ti] && trace[ti].result;
+            if (r0 && Array.isArray(r0.suggest_items) && r0.suggest_items.length) {
+              codeSuggest = r0.suggest_items;
+              break;
+            }
+          }
           const res = {
             ok: !bad.length,
             answer: answerText,
             evidence,
-            suggest: step.suggest || [],
+            suggest: codeSuggest || step.suggest || [],
             followUps: follow,
             trace,
             compressed,
