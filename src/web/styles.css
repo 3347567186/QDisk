@@ -3581,35 +3581,57 @@ html[data-theme="dark"] .ai-tnav-pop {
   .ai-tnav-mark::before, .ai-tnav-pop, .ai-tobottom { transition: none; }
 }
 
-/* ---------------- 设置：一张卡 + 行间细线（Claude 的分组方式） ---------------- */
+/* ---------------- 设置：一张卡 + 行间细线（Linear 的密度） ----------------
+   密度是这一套的核心：标签左、控件右、一行一件事。原来的做法是「标签占
+   152px 一列 + 说明占 2~3 行」，十几项叠起来单独一个 AI 区块就超过一屏。
+   现在标签列收到 92px、说明压成一行（全文在 title 里，悬停可看），
+   短字段并进 .set-tri 三列，整块再按语义拆成左右两张卡（.set-cols）。 */
 .set-stack { display: flex; flex-direction: column; gap: 12px; }
 .set-card {
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius-lg); overflow: hidden;
 }
+/* 左右两栏：一列一个话题。窗口窄了自动落回单栏，不挤成两半。 */
+.set-cols {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; align-items: start;
+}
+@media (max-width: 1080px) { .set-cols { grid-template-columns: minmax(0, 1fr); } }
 .set-cap {
   display: flex; align-items: center; gap: 8px;
-  padding: 12px 16px 6px; font-size: var(--fs-tiny); font-weight: 600;
+  padding: 9px 14px 3px; font-size: var(--fs-tiny); font-weight: 600;
   letter-spacing: .04em; color: var(--text-3); text-transform: none;
 }
 .set-cap + .set-row { border-top: 0; }
 .set-cap-tail { margin-left: auto; font-weight: 400; letter-spacing: 0; color: var(--text-3); }
 .set-row {
-  display: grid; grid-template-columns: 152px minmax(0, 1fr);
-  gap: 12px 16px; align-items: start; padding: 11px 16px;
+  display: grid; grid-template-columns: 92px minmax(0, 1fr);
+  gap: 4px 14px; align-items: start; padding: 7px 14px;
 }
 .set-row + .set-row, .set-cap ~ .set-row { border-top: .5px solid var(--line); }
 .set-row > .set-body { min-width: 0; }
 .set-label {
-  font-size: var(--fs-small); color: var(--text-2); line-height: 30px;
-  padding-top: 1px;
+  font-size: var(--fs-small); color: var(--text-2);
+  line-height: 1.4; padding-top: 7px;
 }
-.set-row .desc { margin-top: 5px; font-size: var(--fs-tiny); line-height: 1.55; color: var(--text-3); }
+/* 说明只留一行：全文挂在 title 上，悬停看得到。
+   多行说明是这块最大的高度来源——十行乘两行就是 300px。 */
+.set-row .desc {
+  margin-top: 3px; font-size: var(--fs-tiny); line-height: 1.45;
+  color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .set-row .input { max-width: 100%; }
 .set-row .row { align-items: center; }
+/* 三个短字段并一行：窗口 / 温度 / 轮数这类数字控件各自占一整行太奢侈 */
+.set-tri { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; }
+.set-tri > .field { margin: 0; gap: 3px; }
+.set-tri > .field > label { font-size: var(--fs-tiny); color: var(--text-3); }
+.set-tri .input { width: 100%; box-sizing: border-box; }
+@media (max-width: 620px) { .set-tri { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) {
-  .set-row { grid-template-columns: 1fr; gap: 6px; padding: 12px 14px; }
-  .set-label { line-height: 1.4; font-size: var(--fs-tiny); font-weight: 600; }
+  .set-row { grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 8px 12px; }
+  .set-label { padding-top: 0; font-size: var(--fs-tiny); font-weight: 600; }
 }
 
 /* ---------------- 抽屉头部：左手新对话 / 历史，右手整页 / 关闭 ---------------- */
@@ -3671,6 +3693,18 @@ html[data-theme="dark"] .ai-tnav-pop {
 
 .set-row .set-body > .input { width: 100%; box-sizing: border-box; }
 .set-row .set-body > .row > .input { width: auto; }
+
+/* 能力范围与上限压在同一个 body 里，中间一条细线分开，不再各占一整行 */
+.set-body .set-sub { margin-top: 8px; padding-top: 8px; border-top: .5px solid var(--line); }
+.set-body .set-sub > label {
+  display: block; margin-bottom: 5px;
+  font-size: var(--fs-tiny); color: var(--text-3);
+}
+
+/* 维护区的 dl.kv 现在也住进 .set-card：卡本身没有内边距，
+   行距按同一套密度给，否则贴着卡边。 */
+.set-card > .kv { padding: 10px 14px; gap: 7px var(--space-3); }
+.set-card > .kv + .kv { border-top: .5px solid var(--line); }
 
 /* ---------------- 输入框那排：窄容器里不许互相压住 ----------------
    抽屉只有 432px：左边三枚胶囊 + 右边容量环/模型胶囊/发送键会把 flex 撑破，

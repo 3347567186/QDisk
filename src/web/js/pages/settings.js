@@ -156,6 +156,20 @@
         );
       }
 
+      /* 一张卡、若干行、行间 0.5px 细线：分组标题只在卡内出现一次，
+         不再「每条一块」——那样十几项会散成十几张卡，扫读成本高。
+         放在模块作用域：七个区块都用它，塞进某个区块函数里别的区块就够不着。 */
+      const setRow = (label, node, desc, tail) => h('div', { class: 'set-row' },
+        h('div', { class: 'set-label', text: label }),
+        h('div', { class: 'set-body' },
+          node,
+          desc ? h('div', { class: 'desc', text: desc, title: desc }) : null,
+          tail || null)
+      );
+      const setCap = (text, tail) => h('div', { class: 'set-cap' },
+        h('span', { class: 'set-cap-text', text }),
+        tail || null);
+
       /* ---------- 顶层 ---------- */
       function paint() {
         root.textContent = '';
@@ -187,9 +201,10 @@
       const openOpt = (id) => ({ open: state.openId === id, id, accordion: null });
 
       function secAppearance(holder) {
-        const body = h('div', { class: 'grid-2' },
-          h('div', { class: 'field' },
-            h('label', { text: T('主题', 'Theme') }),
+        /* 两行就够：主题一组单选、语言一组单选。原来用 .grid-2 + .field，
+           每组各占半屏宽、说明各占一行，读起来像两篇文章。 */
+        const body = h('div', { class: 'set-card' },
+          setRow(T('主题', 'Theme'),
             h('div', { class: 'row wrap' }, THEMES.map((t) =>
               h('label', { class: 'check' },
                 h('input', {
@@ -201,10 +216,8 @@
                 h('span', { text: T(t.zh, t.en) })
               )
             )),
-            h('div', { class: 'desc', text: T('跟随系统会读取 Windows 的深浅色设置', 'System follows the Windows color mode') })
-          ),
-          h('div', { class: 'field' },
-            h('label', { text: T('界面语言', 'Language') }),
+            T('跟随系统会读取 Windows 的深浅色设置', 'System follows the Windows color mode')),
+          setRow(T('界面语言', 'Language'),
             h('div', { class: 'row wrap' }, LANGS.map((l) =>
               h('label', { class: 'check' },
                 h('input', {
@@ -216,8 +229,7 @@
                 h('span', { text: T(l.zh, l.en) })
               )
             )),
-            h('div', { class: 'desc', text: T('切换后界面文案立即更新', 'The interface switches immediately') })
-          )
+            T('切换后界面文案立即更新', 'The interface switches immediately'))
         );
         return section(T('外观与语言', 'Appearance & language'), body, {
           open: state.openId === 'appearance',
@@ -260,20 +272,19 @@
         const closeSelect = h('select', {
           class: 'select',
           id: 'set-close',
+          /* 行标签是普通 div，不是 <label for>：这里显式给无障碍名字，
+             否则读屏软件只念「组合框」 */
+          'aria-label': T('关闭窗口时', 'When closing the window'),
           onchange: (e) => onCloseAction(e.target.value)
         }, CLOSE_ACTIONS.map((c) =>
           h('option', { value: c.value, selected: state.closeAction === c.value, text: T(c.zh, c.en) })
         ));
 
         const body = h('div', { class: 'stack' },
-          h('div', { class: 'grid-2' },
-            h('div', { class: 'field' },
-              h('label', { for: 'set-close', text: T('关闭窗口时', 'When closing the window') }),
-              closeSelect,
-              h('div', { class: 'desc', text: T('最小化到托盘后可从托盘图标重新打开', 'Reopen it from the tray icon') })
-            ),
-            h('div', { class: 'field' },
-              h('label', { text: T('启动', 'Startup') }),
+          h('div', { class: 'set-card' },
+            setRow(T('关闭窗口时', 'On close'), closeSelect,
+              T('最小化到托盘后可从托盘图标重新打开', 'Reopen it from the tray icon')),
+            setRow(T('启动', 'Startup'),
               h('label', { class: 'check' },
                 h('input', {
                   type: 'checkbox',
@@ -283,23 +294,21 @@
                 }),
                 h('span', { text: T('开机自动启动', 'Start with Windows') })
               ),
-              h('div', { class: 'desc', text: T('随 Windows 登录自动运行整理助手', 'Launch the assistant after Windows sign-in') })
-            )
+              T('随 Windows 登录自动运行整理助手', 'Launch the assistant after Windows sign-in')),
+            setRow(T('权限', 'Privileges'),
+              h('div', { class: 'row wrap' },
+                state.admin
+                  ? h('span', { class: 'badge ok', text: T('管理员', 'Administrator') })
+                  : h('span', { class: 'badge warn', text: T('普通权限', 'Standard user') }),
+                h('button', {
+                  class: 'btn sm',
+                  disabled: state.admin,
+                  onclick: onRunAsAdmin
+                }, icon('shield', 14), h('span', { text: T('以管理员身份重启', 'Restart as administrator') }))),
+              T('整理受保护目录时需要管理员权限', 'Administrator rights are needed for protected folders'))
           ),
           h('div', { class: 'note', text: T('单实例运行：再次启动会激活已打开的窗口，不会产生第二个进程。',
-            'Single instance: launching again focuses the open window instead of starting a second process.') }),
-          h('div', { class: 'row' },
-            h('span', { class: 'small muted', text: T('权限', 'Privileges') }),
-            state.admin
-              ? h('span', { class: 'badge ok', text: T('管理员', 'Administrator') })
-              : h('span', { class: 'badge warn', text: T('普通权限', 'Standard user') }),
-            h('button', {
-              class: 'btn sm',
-              disabled: state.admin,
-              onclick: onRunAsAdmin
-            }, icon('shield', 14), h('span', { text: T('以管理员身份重启', 'Restart as administrator') })),
-            h('span', { class: 'small muted', text: T('整理受保护目录时需要管理员权限', 'Administrator rights are needed for protected folders') })
-          )
+            'Single instance: launching again focuses the open window instead of starting a second process.') })
         );
 
         return section(T('行为与启动', 'Behavior & startup'), body, {
@@ -382,61 +391,60 @@
           });
           const conflictSelect = h('select', {
             class: 'select',
+            'aria-label': T('同名冲突', 'Name clashes'),
             onchange: (e) => { s.conflict_policy = e.target.value; paintHint(); }
           }, CONFLICTS.map((c) =>
             h('option', { value: c.value, selected: s.conflict_policy === c.value, text: T(c.zh, c.en) })
           ));
 
           body = h('div', { class: 'stack' },
-            h('div', { class: 'field' },
-              h('label', { text: T('数据目录', 'Data folder') }),
-              h('div', { class: 'row' },
-                h('input', {
-                  class: 'input grow mono', readonly: true, spellcheck: 'false',
-                  value: s.data_dir || '—', title: s.data_dir || ''
-                }),
-                h('button', {
-                  class: 'btn ghost sm icon', disabled: !s.data_dir,
-                  title: T('打开目录', 'Open folder'), 'aria-label': T('打开目录', 'Open folder'),
-                  onclick: () => reveal(s.data_dir)
-                }, icon('external', 14)),
-                h('button', { class: 'btn sm', onclick: pickDataDir }, icon('folder', 14),
-                  h('span', { text: T('更改…', 'Change…') }))
-              ),
-              h('div', { class: 'desc', text: T('索引、缓存与 settings.json 所在位置；更改只迁移配置', 'Index, cache and settings.json; changing migrates the config only') })
-            ),
-            h('div', { class: 'grid-3' },
-              h('div', { class: 'field' },
-                h('label', { text: T('递归深度', 'Recursive depth') }),
-                depthInput,
-                h('div', { class: 'desc', text: T('1 到 4 层', '1 to 4 levels') })
-              ),
-              h('div', { class: 'field' },
-                h('label', { text: T('同名冲突', 'Name clashes') }),
-                conflictSelect,
-                h('div', { class: 'desc', text: T('整理文件时的默认策略', 'Default tidy policy') })
-              ),
-              h('div', { class: 'field' },
-                h('label', { text: T('日志保留天数', 'Log retention') }),
-                keepInput,
-                h('div', { class: 'desc', text: T('1 到 3650 天', '1 to 3650 days') })
-              )
-            ),
-            h('div', { class: 'row wrap' },
-              h('label', { class: 'check' },
-                h('input', {
-                  type: 'checkbox', checked: s.default_recursive,
-                  onchange: (e) => { s.default_recursive = e.target.checked; paintHint(); }
-                }),
-                h('span', { text: T('默认递归子目录', 'Recurse into subfolders by default') })
-              ),
-              h('label', { class: 'check' },
-                h('input', {
-                  type: 'checkbox', checked: s.default_content,
-                  onchange: (e) => { s.default_content = e.target.checked; paintHint(); }
-                }),
-                h('span', { text: T('按内容识别文件类型', 'Identify file types by content') })
-              )
+            h('div', { class: 'set-card' },
+              setRow(T('数据目录', 'Data folder'),
+                h('div', { class: 'row' },
+                  h('input', {
+                    class: 'input grow mono', readonly: true, spellcheck: 'false',
+                    value: s.data_dir || '—', title: s.data_dir || ''
+                  }),
+                  h('button', {
+                    class: 'btn ghost sm icon', disabled: !s.data_dir,
+                    title: T('打开目录', 'Open folder'), 'aria-label': T('打开目录', 'Open folder'),
+                    onclick: () => reveal(s.data_dir)
+                  }, icon('external', 14)),
+                  h('button', { class: 'btn sm', onclick: pickDataDir }, icon('folder', 14),
+                    h('span', { text: T('更改…', 'Change…') }))
+                ),
+                T('索引、缓存与 settings.json 所在位置；更改只迁移配置', 'Index, cache and settings.json; changing migrates the config only')),
+              /* 三个短字段并一行，与 AI 区块的「参数」行同一套密度 */
+              setRow(T('整理规则', 'Tidy rules'),
+                h('div', { class: 'set-tri' },
+                  h('div', { class: 'field' },
+                    h('label', { text: T('递归深度', 'Recursive depth') }),
+                    depthInput),
+                  h('div', { class: 'field' },
+                    h('label', { text: T('同名冲突', 'Name clashes') }),
+                    conflictSelect),
+                  h('div', { class: 'field' },
+                    h('label', { text: T('日志保留', 'Log retention') }),
+                    keepInput)
+                ),
+                T('递归 1–4 层 · 冲突默认改名 · 日志 1–3650 天', 'Depth 1-4 · clashes rename by default · logs kept 1-3650 days')),
+              setRow(T('默认行为', 'Defaults'),
+                h('div', { class: 'row wrap' },
+                  h('label', { class: 'check' },
+                    h('input', {
+                      type: 'checkbox', checked: s.default_recursive,
+                      onchange: (e) => { s.default_recursive = e.target.checked; paintHint(); }
+                    }),
+                    h('span', { text: T('默认递归子目录', 'Recurse into subfolders by default') })
+                  ),
+                  h('label', { class: 'check' },
+                    h('input', {
+                      type: 'checkbox', checked: s.default_content,
+                      onchange: (e) => { s.default_content = e.target.checked; paintHint(); }
+                    }),
+                    h('span', { text: T('按内容识别文件类型', 'Identify file types by content') })
+                  )
+                ))
             ),
             h('div', { class: 'action-bar' },
               h('span', { class: 'small muted', text: T('改动只写入引擎设置，不影响已有文件', 'Changes only affect engine settings') }),
@@ -494,21 +502,15 @@
 
         const active = modes.find((m) => m.id === state.mode) || modes[0];
         const body = h('div', { class: 'stack' },
-          h('div', { class: 'field' },
-            h('label', { text: T('运行模式', 'Power mode') }),
-            h('div', { class: 'row wrap' }, ...chips),
-            h('div', { class: 'desc', text: active.desc })
-          ),
-          h('div', { class: 'grid-2' },
-            h('div', { class: 'field' },
-              h('label', { text: T('动画强度', 'Motion') }),
-              motionSel,
-              h('div', { class: 'desc', text: T('静默模式自动使用精简动画；「关闭」让所有过渡立即完成', 'Silent uses lite automatically; Off makes every transition instant') })
-            ),
-            h('div', { class: 'field' },
-              h('label', { class: 'check' }, gpuCb, h('span', { text: T('GPU 加速', 'GPU acceleration') })),
-              h('div', { class: 'desc', text: T('关闭可降低显存与内存占用，重启后生效', 'Lower GPU and memory use. Restart to apply.') })
-            )
+          h('div', { class: 'set-card' },
+            setRow(T('运行模式', 'Power mode'),
+              h('div', { class: 'row wrap' }, ...chips),
+              active.desc),
+            setRow(T('动画强度', 'Motion'), motionSel,
+              T('静默模式自动使用精简动画；「关闭」让所有过渡立即完成', 'Silent uses lite automatically; Off makes every transition instant')),
+            setRow(T('GPU 加速', 'GPU'),
+              h('label', { class: 'check' }, gpuCb, h('span', { text: T('启用 GPU 加速', 'Use GPU acceleration') })),
+              T('关闭可降低显存与内存占用，重启后生效', 'Lower GPU and memory use. Restart to apply.'))
           ),
           h('div', { class: 'desc', text: T('窗口隐藏或最小化后自动进入静默：暂停引擎轮询、按模式释放引擎进程；再次打开会立即恢复', 'Hiding or minimizing enters idle: polling pauses and the engine is released by mode; it resumes instantly when shown again') })
         );
@@ -624,25 +626,20 @@
         });
 
         const body = h('div', { class: 'stack' },
-          h('div', { class: 'grid-2' },
-            h('div', { class: 'field' },
-              h('label', { text: T('运行时间', 'Run time') }),
-              timeInput,
-              h('div', { class: 'desc', text: T('每天执行一次，使用 Windows 计划任务；关闭应用后也会运行', 'Runs daily through a Windows scheduled task, even when the app is closed') })
-            ),
-            h('div', { class: 'field' },
-              h('label', { text: T('截图保留天数', 'Keep screenshots for') }),
-              daysInput,
-              h('div', { class: 'desc', text: T('只清理早于这个天数的截图；缓存不受影响', 'Only screenshots older than this are removed; cache is unaffected') })
-            )
+          h('div', { class: 'set-card' },
+            setRow(T('运行时间', 'Run time'), timeInput,
+              T('每天执行一次，使用 Windows 计划任务；关闭应用后也会运行', 'Runs daily through a Windows scheduled task, even when the app is closed')),
+            setRow(T('截图保留', 'Screenshots'), daysInput,
+              T('只清理早于这个天数的截图；缓存不受影响', 'Only screenshots older than this are removed; cache is unaffected')),
+            setRow(T('清理范围', 'What to clean'),
+              h('div', { class: 'row wrap' },
+                h('label', { class: 'check' }, cacheCb,
+                  h('span', { text: T('清理缓存（仅安全项）', 'Clean cache (safe items only)') })),
+                h('label', { class: 'check' }, shotsCb,
+                  h('span', { text: T('清理截图', 'Clean screenshots') }))
+              ),
+              T('删除内容会进回收站，可在回收站还原；谨慎/高级项不会被自动清理', 'Removed items go to the Recycle Bin. Caution/advanced items are never auto-cleaned.'))
           ),
-          h('div', { class: 'row wrap' },
-            h('label', { class: 'check' }, cacheCb,
-              h('span', { text: T('清理缓存（仅安全项）', 'Clean cache (safe items only)') })),
-            h('label', { class: 'check' }, shotsCb,
-              h('span', { text: T('清理截图', 'Clean screenshots') }))
-          ),
-          h('div', { class: 'desc', text: T('删除内容会进回收站，可在回收站还原；谨慎/高级项不会被自动清理', 'Removed items go to the Recycle Bin. Caution/advanced items are never auto-cleaned.') }),
           h('div', { class: 'action-bar' },
             h('label', { class: 'check' },
               h('input', {
@@ -1130,26 +1127,16 @@
           onchange: (e) => saveAgent({ [key]: Math.max(lo, Math.min(hi, Number(e.target.value) || def)) })
         });
 
-        /* 一张卡、若干行、行间 0.5px 细线：分组标题只在卡内出现一次，
-           不再「每条一块」——那样十几项会散成十几张卡，扫读成本高。 */
-        const setRow = (label, node, desc, tail) => h('div', { class: 'set-row' },
-          h('div', { class: 'set-label', text: label }),
-          h('div', { class: 'set-body' },
-            node,
-            desc ? h('div', { class: 'desc', text: desc }) : null,
-            tail || null)
-        );
-        const setCap = (text, tail) => h('div', { class: 'set-cap' },
-          h('span', { class: 'set-cap-text', text }),
-          tail || null);
-
         const agentBadge = h('span', {
           class: 'badge' + (pol.mode === 'off' ? '' : (pol.mode === 'full' ? ' warn' : ' ok')),
           text: pol.mode === 'off' ? T('只读', 'Read-only') : T('已开启', 'Enabled')
         });
 
-        const body = h('div', { class: 'stack set-stack' },
-          h('div', { class: 'set-card' },
+        /* 三张卡、两栏摆：左「连接」右「模型」，下面通栏「行为与权限」。
+           原来是一条 15 行的长单列，AI 区块自己就超过一屏，滚到下面
+           就找不到上面改过的字段。分组依据是「改一处会不会牵连另一处」：
+           连接与模型是同一件事的两面，行为与权限是另一件事。 */
+        const cardConn = h('div', { class: 'set-card' },
             setCap(T('连接', 'Connection'), h('span', { class: 'set-cap-tail', text: AIStore.isConfigured(d) ? T('已配置', 'Configured') : T('未配置', 'Not configured') })),
             setRow(T('服务商', 'Provider'), provBox),
             setRow(T('接口地址', 'Endpoint'), endpointIn,
@@ -1162,29 +1149,47 @@
                   onclick: () => { state.aiKeyShown = !state.aiKeyShown; paint(); }
                 }, h('span', { text: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show') }))
               ),
-              T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported')),
+              T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported'))
+        );
 
-            setCap(T('模型', 'Model')),
+        const cardModel = h('div', { class: 'set-card' },
+            setCap(T('模型', 'Model'), h('span', { class: 'set-cap-tail', text: winSrc })),
             setRow(T('模型名', 'Model'),
               h('div', { class: 'row' }, modelIn, fetchBtn),
               T('填接口文档里的模型名，也可以点「获取模型」让端点自己报', 'Type a model name, or let the endpoint list them'),
               h('div', null,
                 state.aiModelsErr ? h('div', { class: 'small', style: 'color:var(--danger)', text: state.aiModelsErr }) : null,
-                modelReport)),
-            setRow(T('上下文窗口', 'Context window'),
-              h('div', { class: 'row' }, ctxIn, h('span', { class: 'badge' + (reported ? ' ok' : ''), text: winSrc })),
-              reported
-                ? T('读自端点 /models 的 max context length；历史超过窗口 50% 起按需裁剪，85% 压成摘要，不会失忆', 'Read from the endpoint; history is trimmed past 50% of the window and summarized at 85%')
-                : T('端点没有报告这个值：按模型名推断，推断不出按 1M。历史超过窗口 50% 起自动裁剪，85% 压成摘要', 'Not reported; inferred from the model name, else 1M. History is trimmed past 50% and summarized at 85%')),
-            setRow(T('温度', 'Temperature'),
-              h('div', { class: 'row wrap' },
-                h('label', { class: 'check' }, tempAutoCb, h('span', { text: T('按任务自动', 'Auto by task') })),
-                tempIn),
-              d.tempAuto !== false
-                ? T('自动：查文件 0.1 · 算数字 0 · 写文案 0.85。温度管「答案有多发散」，与思考强度无关', 'Auto: 0.1 for files, 0 for math, 0.85 for writing. Temperature controls variety, not effort')
-                : T('手填值对所有任务生效；推理模型会锁死温度，那时这个数字不发送', 'Applies to every task; reasoning models lock temperature and this value is not sent')),
-            setRow(T('查证轮数上限', 'Max tool steps'),
-              h('div', { class: 'row wrap' },
+                modelReport))
+        );
+        /* 三个数字字段并一行：窗口 / 温度 / 轮数都是短值，
+           各占一整行会白掉三行高度。说明文字各自压进 title。 */
+        cardModel.appendChild(h('div', { class: 'set-row' },
+          h('div', { class: 'set-label', text: T('参数', 'Params') }),
+          h('div', { class: 'set-body' },
+            h('div', { class: 'set-tri' },
+              h('div', { class: 'field' },
+                h('label', {
+                  title: reported
+                    ? T('读自端点 /models 的 max context length；历史超过窗口 50% 起按需裁剪，85% 压成摘要，不会失忆', 'Read from the endpoint; history is trimmed past 50% of the window and summarized at 85%')
+                    : T('端点没有报告这个值：按模型名推断，推断不出按 1M。历史超过窗口 50% 起自动裁剪，85% 压成摘要', 'Not reported; inferred from the model name, else 1M. History is trimmed past 50% and summarized at 85%'),
+                  text: T('上下文窗口', 'Context')
+                }),
+                ctxIn),
+              h('div', { class: 'field' },
+                h('label', {
+                  title: d.tempAuto !== false
+                    ? T('自动：查文件 0.1 · 算数字 0 · 写文案 0.85。温度管「答案有多发散」，与思考强度无关', 'Auto: 0.1 for files, 0 for math, 0.85 for writing. Temperature controls variety, not effort')
+                    : T('手填值对所有任务生效；推理模型会锁死温度，那时这个数字不发送', 'Applies to every task; reasoning models lock temperature and this value is not sent'),
+                  text: T('温度', 'Temp')
+                }),
+                h('div', { class: 'row wrap' },
+                  h('label', { class: 'check', title: T('按任务自动选温度', 'Pick temperature by task') }, tempAutoCb, h('span', { text: T('自动', 'Auto') })),
+                  tempIn)),
+              h('div', { class: 'field' },
+                h('label', {
+                  title: T('这是防一路跑飞的安全闸，不是强度；超了会先给结论，不会无限查。与强度档位取小：关 6 / 低 8 / 中 10 / 高 14', 'A safety cap, not effort; it stops with a conclusion instead of looping. Capped by level: off 6 / low 8 / medium 10 / high 14'),
+                  text: T('查证轮数', 'Steps')
+                }),
                 h('input', {
                   class: 'input', type: 'number', min: '1', max: '30', step: '1',
                   value: String(d.maxSteps),
@@ -1194,31 +1199,42 @@
                     AIStore.save({ maxSteps: n });
                     paint();
                   }
-                }),
-                h('span', { class: 'small muted', text: T('与强度档位取小：关 6 / 低 8 / 中 10 / 高 14', 'Capped by level: off 6 / low 8 / medium 10 / high 14') })),
-              T('这是防一路跑飞的安全闸，不是强度；超了会先给结论，不会无限查', 'A safety cap, not effort; it stops with a conclusion instead of looping')),
+                }))
+            )
+          )
+        ));
 
-            setCap(T('行为', 'Behaviour')),
+        const cardAct = h('div', { class: 'set-card' },
+            setCap(T('行为与权限', 'Behaviour & permissions'), agentBadge),
             setRow(T('开关', 'Switches'),
               h('div', { class: 'row wrap' },
                 h('label', { class: 'check' }, enabledCb, h('span', { text: T('启用 AI 助手', 'Enable AI assistant') })),
                 h('label', { class: 'check' }, jsonCb, h('span', { text: T('要求 JSON 模式', 'Request JSON mode') })))),
-
-            setCap(T('允许 AI 动手', 'Let the AI act'), agentBadge),
             setRow(T('档位', 'Mode'),
               h('div', { class: 'ai-modes' }, ...modeBtns),
               MODE_TIP[pol.mode] || ''),
-            setRow(T('能力范围', 'Capabilities'),
-              h('div', { class: 'agent-cats' }, ...catBoxes),
-              pol.mode === 'off' ? T('档位在「只读」时这些开关不生效', 'Inactive while the mode is read-only') : null),
-            setRow(T('上限', 'Limits'),
-              h('div', { class: 'agent-limits' },
-                h('div', { class: 'field' }, h('label', { text: T('每轮最多提案', 'Proposals per turn') }), numIn('maxOpsPerTurn', 1, 10, 2)),
-                h('div', { class: 'field' }, h('label', { text: T('每会话最多执行', 'Executions per session') }), numIn('maxOpsPerSession', 1, 200, 30)),
-                h('div', { class: 'field' }, h('label', { text: T('单次最多项目', 'Items per action') }), numIn('maxItems', 10, 20000, 200))
+            /* 能力范围 + 上限合成一行：都是「动手能到什么程度」，
+               原来分成两行、各带一句说明，白掉将近 100px。 */
+            setRow(T('范围与上限', 'Scope & limits'),
+              h('div', { class: 'set-body' },
+                h('div', { class: 'agent-cats' }, ...catBoxes),
+                h('div', { class: 'set-sub' },
+                  h('label', { text: T('每轮提案 / 每会话执行 / 单次项目', 'Per turn / per session / items') }),
+                  h('div', { class: 'agent-limits' },
+                    h('div', { class: 'field' }, numIn('maxOpsPerTurn', 1, 10, 2)),
+                    h('div', { class: 'field' }, numIn('maxOpsPerSession', 1, 200, 30)),
+                    h('div', { class: 'field' }, numIn('maxItems', 10, 20000, 200))
+                  )
+                )
               ),
-              T('每次执行都写进 ai\\journal 审计日志；把档位切回「只读」，助手立刻失去动手能力', 'Every run is journalled under ai\\journal; switching back to read-only revokes everything'))
-          ),
+              pol.mode === 'off'
+                ? T('档位在「只读」时这些开关不生效', 'Inactive while the mode is read-only')
+                : T('每次执行都写进 ai\\journal 审计日志；把档位切回「只读」，助手立刻失去动手能力', 'Every run is journalled under ai\\journal; switching back to read-only revokes everything'))
+        );
+
+        const body = h('div', { class: 'stack set-stack' },
+          h('div', { class: 'set-cols' }, cardConn, cardModel),
+          cardAct,
           test && !test.ok
             ? h('div', { class: 'small', style: 'color:var(--danger)', text: test.msg })
             : null,
@@ -1602,21 +1618,23 @@
         const body = h('div', { class: 'stack' },
           state.appError
             ? empty(T('应用信息读取失败', 'Could not read app info'), state.appError)
-            : h('dl', { class: 'kv' },
-              kvRow(T('版本', 'Version'), h('span', { class: 'mono', text: (app && app.version) || '—' })),
-              kvRow(T('程序目录', 'Program folder'), pathRow(app && app.exe_dir)),
-              kvRow(T('数据目录', 'Data folder'), pathRow(app && app.data_dir)),
-              kvRow(T('日志目录', 'Log folder'), pathRow(app && app.log_dir)),
-              kvRow(T('引擎状态', 'Engine'), h('div', { class: 'row' }, status,
-                h('span', { class: 'small muted', text: eng && eng.pid ? 'PID ' + eng.pid : '' }))),
-              kvRow(T('权限', 'Privileges'), state.admin
-                ? h('span', { class: 'badge ok', text: T('管理员', 'Administrator') })
-                : h('span', { class: 'badge warn', text: T('普通权限', 'Standard user') }))
+            /* 三个目录行各自带「打开」按钮（pathRow 里就有），
+               原来工具栏又把同样三个按钮排了一遍，纯重复。 */
+            : h('div', { class: 'set-card' },
+              h('dl', { class: 'kv' },
+                kvRow(T('版本', 'Version'), h('span', { class: 'mono', text: (app && app.version) || '—' })),
+                kvRow(T('程序目录', 'Program folder'), pathRow(app && app.exe_dir)),
+                kvRow(T('数据目录', 'Data folder'), pathRow(app && app.data_dir)),
+                kvRow(T('日志目录', 'Log folder'), pathRow(app && app.log_dir)),
+                kvRow(T('引擎状态', 'Engine'), h('div', { class: 'row' }, status,
+                  h('span', { class: 'small muted', text: eng && eng.pid ? 'PID ' + eng.pid : '' }))),
+                kvRow(T('权限', 'Privileges'), state.admin
+                  ? h('span', { class: 'badge ok', text: T('管理员', 'Administrator') })
+                  : h('span', { class: 'badge warn', text: T('普通权限', 'Standard user') }))
+              )
             ),
-          h('div', { class: 'toolbar' },
-            app && app.exe_dir ? h('button', { class: 'btn sm', onclick: () => reveal(app.exe_dir) }, icon('folder', 14), h('span', { text: T('打开程序目录', 'Open program folder') })) : null,
-            app && app.data_dir ? h('button', { class: 'btn sm', onclick: () => reveal(app.data_dir) }, icon('folder', 14), h('span', { text: T('打开数据目录', 'Open data folder') })) : null,
-            app && app.log_dir ? h('button', { class: 'btn sm', onclick: () => reveal(app.log_dir) }, icon('folder', 14), h('span', { text: T('打开日志目录', 'Open log folder') })) : null,
+          h('div', { class: 'action-bar' },
+            h('span', { class: 'small muted', text: T('版本号同时写进 tauri.conf.json 与 Cargo.toml', 'The version is written to both tauri.conf.json and Cargo.toml') }),
             h('div', { class: 'spacer' }),
             h('button', { class: 'btn sm', onclick: refreshMaintenance }, icon('refresh', 14), h('span', { text: T('刷新', 'Refresh') }))
           ),
