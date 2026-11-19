@@ -23,6 +23,17 @@
     current: 'organize',
     cfg: null,
     async boot() {
+      /* 前端异常原来只进控制台，用户看到的是「点了没反应」；这里兜一条可见提示，
+         免得一个渲染错误把功能变成哑巴。 */
+      window.addEventListener('error', (e) => {
+        try { UI.toast('脚本错误：' + ((e && e.message) || '未知'), 'error'); } catch (err) { /* ignore */ }
+      });
+      window.addEventListener('unhandledrejection', (e) => {
+        try {
+          const r = e && e.reason;
+          UI.toast('脚本错误：' + ((r && r.message) || String(r || '未知')), 'error');
+        } catch (err) { /* ignore */ }
+      });
       try { this.cfg = await API.configGet(); } catch { this.cfg = {}; }
       const sizes = [15, 30, 60, 100, 200];
       UI.state.pageSize = sizes.includes(Number(this.cfg.page_size)) ? Number(this.cfg.page_size) : 15;

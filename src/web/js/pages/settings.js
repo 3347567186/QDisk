@@ -739,7 +739,8 @@
           paint();
           /* 已经有 Key：直接落盘，选完就能用；没 Key 则只填表单，提示补 Key 后保存 */
           if (d.key) {
-            saveAi();
+            /* 让弹窗先关完再落盘：立刻重绘会把关闭动画和校验挤在一起 */
+            setTimeout(() => { saveAi(); }, 0);
           } else {
             toast(T('已填入 ' + p.name + ' · ' + m[0] + '；填好 Key 再点保存', 'Filled ' + p.name + ' · ' + m[0] + '; add a key, then save'), 'ok');
           }
@@ -1124,7 +1125,7 @@
       }
 
       async function saveAi() {
-        const d = state.aiDraft;
+        const d = state.aiDraft || state.ai;
         if (state.aiBusy || !d) return;
         if (!d.endpoint) return toast(T('请先填接口地址', 'Fill the endpoint first'), 'error');
         const rawEndpoint = d.endpoint;
@@ -1132,8 +1133,9 @@
         const endpointFixed = d.endpoint !== rawEndpoint;
         if (!/^https?:\/\//i.test(d.endpoint)) return toast(T('接口地址要以 http:// 或 https:// 开头', 'Endpoint must start with http:// or https://'), 'error');
         if (!d.model) return toast(T('请先填模型名', 'Fill the model name first'), 'error');
-        state.aiBusy = true; paint();
+        state.aiBusy = true;
         try {
+          paint();
           const prev = state.ai || {};
           const changed = prev.endpoint !== d.endpoint || prev.model !== d.model;
           const next = await AIStore.save(d);
@@ -1161,7 +1163,9 @@
         } catch (e) {
           toast(errText(e), 'error');
         } finally {
-          state.aiBusy = false; paint();
+          state.aiBusy = false;
+          /* 渲染一旦抛错，不能让 busy 卡在 true，否则保存/测试按钮从此点不动 */
+          try { paint(); } catch (e) { state.aiBusy = false; }
         }
       }
 
@@ -1169,11 +1173,12 @@
          只做①的话，模型不认 JSON 约定也显示「连接正常」，
          用户到对话页才撞上「输出格式不对」，等于测试骗了自己。 */
       async function testAi() {
-        const d = state.aiDraft;
+        const d = state.aiDraft || state.ai;
         if (state.aiTesting || !d) return;
         if (!d.endpoint || !d.model) return toast(T('先填接口地址与模型名', 'Fill endpoint and model first'), 'error');
         d.endpoint = normEndpoint(d.endpoint);
-        state.aiTesting = true; state.aiTest = null; paint();
+        state.aiTesting = true; state.aiTest = null;
+        try { paint(); } catch (e) { state.aiTesting = false; }
         const t0 = Date.now();
         const send = (body) => API.aiHttp({
           url: d.endpoint,
@@ -1209,7 +1214,9 @@
         } catch (e) {
           state.aiTest = { ok: false, msg: errText(e) };
         } finally {
-          state.aiTesting = false; paint();
+          state.aiTesting = false;
+          /* 同上：渲染抛错也要把「测试中」解锁 */
+          try { paint(); } catch (e) { state.aiTesting = false; }
         }
       }
 
