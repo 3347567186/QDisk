@@ -3388,13 +3388,19 @@ html[data-theme="dark"] .ai-page {
 
 .ai-report-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .ai-report-filter { width: 100%; }
-/* 弹窗里清单自己滚，标题和筛选框不动 */
+/* 弹窗里清单自己滚，标题和筛选框不动。
+   overflow-x 必须显式藏住：只写 overflow-y: auto 时，浏览器会把 overflow-x
+   一并算成 auto，于是组标题那条 margin: 0 -8px 的负边距撑出的 16px
+   就会变成一条横向滚动条。 */
 .ai-report-list {
   display: flex; flex-direction: column; gap: 6px;
-  max-height: min(52vh, 460px); overflow-y: auto;
+  max-height: min(52vh, 460px); overflow-y: auto; overflow-x: hidden;
   padding-right: 2px; scrollbar-width: thin; overscroll-behavior: contain;
 }
 .ai-report-list::-webkit-scrollbar { width: 8px; }
+/* 组标题在清单里不能再往两侧出血：容器已经藏了横向溢出，
+   负边距只会让标题右侧少一截，所以改回 0 */
+.ai-report-list .section-head { margin: 0; }
 .ai-report-group { display: flex; flex-direction: column; padding: 2px 0; }
 .ai-report-miss {
   padding: 18px 8px; text-align: center;
