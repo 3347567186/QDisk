@@ -5,14 +5,16 @@
    检查项（方案 §13 的五条硬指标）：
      1. schema 合法率 = 100%
      2. 越权拦截率 = 100%
-     3. 期望工具序列完全匹配 ≥ 20/24
+     3. 期望工具序列完全匹配 ≥ 20 条（当前 40 条）
      4. 回答里的数字必须能在工具返回里找到
      5. 单轮估算 token 不超预算
-   另有 G32–G36 五条针对真实故障的回归：
+   另有针对真实故障的回归（G32–G38）：
      部分结果自报家门（整盘扫描超时不再假装扫完）、
      编造体积先打回、改正后仍编则如实降级、
      历史回合把「查过什么/哪步失败」带进下一轮、
-     断点能落盘再捡回来。 */
+     断点能落盘再捡回来、
+     503 退避重试并告知用户、
+     额度用完不白重试且直说多久恢复。 */
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -171,7 +173,7 @@ function scripted(list) {
 
 const settings = { endpoint: 'http://127.0.0.1:9/v1/chat/completions', apiKey: 'k', model: 'test', maxSteps: 6 };
 
-/* ---------------- 24 条用例 ---------------- */
+/* ---------------- 用例表 ---------------- */
 const CASES = [
   // 1–4 单步问答（不需要工具）
   {
@@ -774,6 +776,31 @@ for (const c of CASES) {
   if (n < 2) bad.push('503 没有触发重试，只请求了 ' + n + ' 次');
   if (!notices.some((m) => /重试/.test(String(m)))) bad.push('没有告诉用户正在自动重试');
   results.push({ id: 'G37', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* ---------------- 追加：额度用完不许假装重试 ----------------
+   真实场景：免费端点回 429 + 「Retry after 52932 seconds」（14 小时）。
+   以前的实现会 2 秒、5 秒各重试一次，白等还骗用户；现在必须直接说清多久恢复。 */
+{
+  let n = 0;
+  const quota = async () => {
+    n += 1;
+    return {
+      status: 429,
+      body: '{"error":{"message":"You have reached the daily limit of 60 free-model requests. Retry after 52932 seconds"}}'
+    };
+  };
+  const agent = createAgent({ transport: quota, tools, prompt, settings });
+  let err = null;
+  try {
+    await agent.run({ userText: '下载文件夹里有什么', ctx: { page: 'ai', dir: 'D:\\Downloads' } });
+  } catch (e) { err = e; }
+  const bad = [];
+  if (!err) bad.push('额度用完却当成成功返回了');
+  if (err && !err.quota) bad.push('没有把额度用完标成 quota');
+  if (n !== 1) bad.push('额度用完还白重试了 ' + (n - 1) + ' 次');
+  if (err && !/小时|分钟/.test(String(err.message))) bad.push('没告诉用户多久恢复：' + (err && err.message));
+  results.push({ id: 'G38', group: '重试', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;

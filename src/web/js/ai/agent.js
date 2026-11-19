@@ -686,13 +686,25 @@
               continue;
             }
           }
-          /* 临时性故障（免费端点常见的 429/500/502/503/504）不该一次就放弃：
+          /* 临时性故障（500/502/503/504）不该一次就放弃：
              真实日志里一整轮「还没开始查就失败」几乎都是这里被 503 直接怼死。
-             退避重试两次，每次把等待时间往上抬——比让用户手动点「重试」强。 */
-          const transient = [429, 500, 502, 503, 504].indexOf(res.status) >= 0;
-          if (transient && busyLeft > 0) {
+             退避重试两次，每次把等待时间往上抬——比让用户手动点「重试」强。
+             429 要看清楚再决定：额度限流（Retry-After 很长）重试是白等，
+             真是一时拥塞（没给等待时间）才值得退避。 */
+          const transient = [500, 502, 503, 504].indexOf(res.status) >= 0;
+          const rateLimited = res.status === 429;
+          let retryAfter = 0;
+          if (rateLimited) {
+            const secs = /retry[ -]?after[\s:]*(\d+)/i.exec(detail);
+            if (secs) retryAfter = Number(secs[1]) || 0;
+          }
+          /* ≥60 秒基本就是「今天用完了」或长时段限流，别让用户盯着假转圈 */
+          const worthWaiting = rateLimited ? retryAfter > 0 && retryAfter <= 60 : true;
+          if ((transient || (rateLimited && worthWaiting)) && busyLeft > 0) {
             busyLeft -= 1;
-            const wait = Math.min(8000, 1200 * Math.pow(2, 2 - busyLeft));
+            const wait = retryAfter > 0
+              ? Math.min(8000, retryAfter * 1000)
+              : Math.min(8000, 1200 * Math.pow(2, 2 - busyLeft));
             if (onEvent) {
               onEvent({
                 type: 'notice',
@@ -707,6 +719,19 @@
           const err = new Error(`接口返回 HTTP ${res.status}${detail ? '：' + detail : ''}`);
           err.code = res.status === 401 || res.status === 403 ? 'auth'
             : (res.status === 429 ? 'rate' : 'http');
+          /* 额度用完要直说什么时候恢复，而不是丢一句 HTTP 429，
+             也别给「重试」按钮骗用户点 —— 点了也不会成功。 */
+          if (rateLimited) {
+            err.code = 'quota';
+            err.quota = true;
+            if (retryAfter > 60) {
+              const mins = Math.round(retryAfter / 60);
+              const hours = Math.round(mins / 60);
+              err.message = '免费额度用完了：接口说还要等 '
+                + (hours >= 1 ? hours + ' 小时' : mins + ' 分钟')
+                + '才恢复。可以换一个模型，或在设置里换成自己的密钥。';
+            }
+          }
           throw err;
         }
         const streamed = wantStream && sawSse;
@@ -946,7 +971,9 @@
           if ((e && e.code === 'aborted') || stop.isStopped()) return stoppedResult();
           const msg = (e && e.message) || '模型调用失败';
           const code = (e && e.code) || 'error';
-          if (code === 'auth' || code === 'rate') throw Object.assign(new Error(msg), { code });
+          if (code === 'auth' || code === 'rate' || code === 'quota') {
+            throw Object.assign(new Error(msg), { code, quota: e && e.quota === true });
+          }
           degraded = true;
           return {
             ok: false,

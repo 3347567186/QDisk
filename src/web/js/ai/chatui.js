@@ -1159,8 +1159,9 @@
           onclick: () => { continueTurn(); }
         }, T('继续', 'Continue')));
       }
-      /* 历史回放没有 lastAsk，「重试」会是个点不动的按钮——那种不如不给 */
-      if (!res.replay) {
+      /* 历史回放没有 lastAsk，「重试」会是个点不动的按钮——那种不如不给。
+         额度用完（quota）也一样：点了必然失败，给按钮等于骗人。 */
+      if (!res.replay && !res.quota) {
         bar.appendChild(h('button', {
           class: 'btn sm ghost',
           onclick: () => { retryLast(); }
@@ -1441,7 +1442,9 @@
           evidence: [],
           suggest: [],
           followUps: [],
-          trace: []
+          trace: [],
+          /* 额度用完这类错误：告诉用户「等多久/换什么」，别给点了必然失败的重试 */
+          quota: !!(e && e.quota)
         };
       }
 
