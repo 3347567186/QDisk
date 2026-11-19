@@ -1,6 +1,6 @@
 [package]
 name = "tidy-assistant"
-version = "1.41.4"
+version = "1.41.5"
 edition = "2021"
 
 [build-dependencies]
