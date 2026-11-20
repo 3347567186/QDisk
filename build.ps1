@@ -169,7 +169,11 @@ function Build-Engine {
       & py -V:$pyTag -m PyInstaller --noconfirm --distpath "$work\dist" --workpath "$work\build" '整理助手引擎.spec'
     }
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 构建失败' }
-  } finally { Pop-Location }
+  } finally {
+    Pop-Location
+    C:\Users\十二\AppData\Local\Temp = 
+    C:\Users\十二\AppData\Local\Temp = 
+  }
 
   # 遍历器是独立进程，放到引擎目录根下，tidy.py 会优先用它
   Copy-Item $walkExe (Join-Path $work 'dist\整理助手引擎\indexwalk.exe') -Force
@@ -204,7 +208,11 @@ function Build-App {
       & cargo build --release --target x86_64-pc-windows-gnu
     }
     if ($LASTEXITCODE -ne 0) { throw 'Rust 构建失败' }
-  } finally { Pop-Location }
+  } finally {
+    Pop-Location
+    C:\Users\十二\AppData\Local\Temp = 
+    C:\Users\十二\AppData\Local\Temp = 
+  }
 
   # 运行中的实例会锁住 exe，先关掉（引擎跟着退）
   $running = Get-Process -Name tidy-assistant,整理助手引擎 -ErrorAction SilentlyContinue
@@ -297,7 +305,11 @@ function Invoke-TidyTestGate {
         Write-Host ("  [绿] {0}：{1}" -f $m, $tail) -ForegroundColor DarkGray
       }
     }
-  } finally { Pop-Location }
+  } finally {
+    Pop-Location
+    C:\Users\十二\AppData\Local\Temp = 
+    C:\Users\十二\AppData\Local\Temp = 
+  }
 
   # 前端自测：6 个 *.selftest.mjs 各自 process.exit(非0) 表示失败
   $node = (Get-Command node -ErrorAction SilentlyContinue).Source
