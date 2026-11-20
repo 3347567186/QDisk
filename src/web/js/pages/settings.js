@@ -454,7 +454,8 @@
         const o = state.original;
         if (!s || !o) return [];
         return ['data_dir', 'recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content',
-          'index_freshness', 'index_max_mb', 'index_rebuild_idle']
+          'index_freshness', 'index_max_mb', 'index_rebuild_idle',
+          'prune_enabled', 'prune_history_keep', 'prune_thumbs_mb', 'prune_backup_keep']
           .filter((k) => s[k] !== o[k]);
       }
 
@@ -512,6 +513,43 @@
             type: 'checkbox', checked: !!s.index_rebuild_idle,
             onchange: (e) => { s.index_rebuild_idle = e.target.checked; paintHint(); }
           });
+
+          /* 本地数据保留的四个控件。数字键都允许 0：
+             历史留 0 份 = 关掉撤销能力（有人就是不要），缩略图 0 = 不限制，
+             备份 0 = 卸载前不留（危险但明确）。语义各异，所以 hint 里写清。 */
+          const histKeepInput = h('input', {
+            class: 'input', type: 'number', min: '0', max: '10000', step: '10',
+            value: String(s.prune_history_keep),
+            oninput: (e) => { s.prune_history_keep = Number(e.target.value); paintHint(); }
+          });
+          const thumbCapInput = h('input', {
+            class: 'input', type: 'number', min: '0', max: '65536', step: '64',
+            value: String(s.prune_thumbs_mb),
+            oninput: (e) => { s.prune_thumbs_mb = Number(e.target.value); paintHint(); }
+          });
+          const bakKeepInput = h('input', {
+            class: 'input', type: 'number', min: '0', max: '1000', step: '1',
+            value: String(s.prune_backup_keep),
+            oninput: (e) => { s.prune_backup_keep = Number(e.target.value); paintHint(); }
+          });
+          const pruneEnabledCb = h('input', {
+            type: 'checkbox', checked: s.prune_enabled !== false,
+            onchange: (e) => { s.prune_enabled = e.target.checked; paintHint(); }
+          });
+          /* 预演：只报数字不删。真删的入口不放在设置页 ——
+             用户要的是「不再长」，不是「再给他一个清理按钮」。 */
+          function previewPrune() {
+            try {
+              API.engine('prune.run', { dry_run: true }).then((r) => {
+                const mb = ((r && r.bytes) || 0) / 1048576;
+                const n = (r && r.files) || 0;
+                toast(n ? ('现在能清 ' + n + ' 项，约 ' + mb.toFixed(1) + ' MB；这些会在下次启动或整理后自动收掉')
+                        : '没有可清的东西，本地数据已经是最新状态');
+              }, () => toast('预览失败，引擎没有响应'));
+            } catch (e) {
+              toast('预览失败：' + (e && e.message ? e.message : e));
+            }
+          }
 
           body = h('div', { class: 'stack' },
             h('div', { class: 'set-card' },
@@ -580,7 +618,33 @@
                   )
                 ),
                 T('热目录（桌面/文档/下载等）重扫一次约 0.3 秒 · 上限填 0 表示不限制 · 软件自己整理或删除的文件会立即同步，不靠这里的扫描',
-                  'Hot folders take about 0.3 s to rescan · 0 means no cap · files the app moves or deletes sync instantly without waiting for a scan'))
+                  'Hot folders take about 0.3 s to rescan · 0 means no cap · files the app moves or deletes sync instantly without waiting for a scan')),
+              /* 本地数据保留：用户原话是「都做保留最新版数据，不然体积爆炸」。
+                 这里不设「目录清理」那样的扫描按钮 —— 它清的是软件自己在数据
+                 目录里攒的东西，路径固定、体量小，给一份份数的上限就够了。 */
+              setRow(T('本地数据保留', 'Local data retention'),
+              h('div', { class: 'set-tri' },
+                h('div', { class: 'field' },
+                  h('label', { text: T('整理历史', 'History') }),
+                  histKeepInput),
+                h('div', { class: 'field' },
+                  h('label', { text: T('缩略图上限 (MB)', 'Thumbs cap (MB)') }),
+                  thumbCapInput),
+                h('div', { class: 'field' },
+                  h('label', { text: T('卸载备份', 'App backups') }),
+                  bakKeepInput)
+                ),
+              h('div', { class: 'row', style: 'gap:8px;align-items:center' },
+                h('label', { class: 'check' },
+                  pruneEnabledCb,
+                  h('span', { text: T('只保留最新版，不让历史无限增长', 'Keep only the newest, never grow unbounded') })
+                ),
+                h('button', {
+                  class: 'btn ghost sm', type: 'button',
+                  onclick: previewPrune
+                }, icon('search', 14), h('span', { text: T('先看能清多少', 'Preview') }))
+              )
+            )
             ),
             h('div', { class: 'action-bar' },
               h('span', { class: 'small muted', text: T('改动只写入引擎设置，不影响已有文件', 'Changes only affect engine settings') }),
@@ -723,7 +787,11 @@
           default_content: !!s.default_content,
           index_freshness: s.index_freshness,
           index_max_mb: Number(s.index_max_mb),
-          index_rebuild_idle: !!s.index_rebuild_idle
+          index_rebuild_idle: !!s.index_rebuild_idle,
+          prune_enabled: s.prune_enabled !== false,
+          prune_history_keep: Number(s.prune_history_keep),
+          prune_thumbs_mb: Number(s.prune_thumbs_mb),
+          prune_backup_keep: Number(s.prune_backup_keep)
         };
         const keys = Object.keys(patch).filter((k) => patch[k] !== state.original[k]);
         if (!keys.length) { toast(T('没有需要保存的更改', 'Nothing to save'), 'info'); return; }
@@ -1960,7 +2028,11 @@
             default_content: !!(s && s.default_content),
             index_freshness: (s && s.index_freshness) || 'check',
             index_max_mb: Number(s && s.index_max_mb) || 2048,
-            index_rebuild_idle: s && s.index_rebuild_idle !== undefined ? !!s.index_rebuild_idle : true
+            index_rebuild_idle: s && s.index_rebuild_idle !== undefined ? !!s.index_rebuild_idle : true,
+            prune_enabled: s && s.prune_enabled !== undefined ? !!s.prune_enabled : true,
+            prune_history_keep: s && s.prune_history_keep !== undefined ? Number(s.prune_history_keep) : 50,
+            prune_thumbs_mb: s && s.prune_thumbs_mb !== undefined ? Number(s.prune_thumbs_mb) : 256,
+            prune_backup_keep: s && s.prune_backup_keep !== undefined ? Number(s.prune_backup_keep) : 3
           };
           state.settings = value;
           state.original = Object.assign({}, value);

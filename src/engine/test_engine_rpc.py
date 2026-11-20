@@ -1153,6 +1153,171 @@ class TestIndexTouchGuard(EngineCase):
                          "目录数超过上限时应该整体放弃，实际刷了 %d 个" % touched)
 
 
+class TestPrune(EngineCase):
+    """本地数据保留：只留最新，别让历史/日志/缩略图/备份无限长。
+
+    这组测试全部进程内直接 import tidy，不走子进程 —— 原因和
+    TestIndexTouchGuard 一样：保留策略读的是模块级 S 与 data_dir()，
+    起一个子进程的话，改 S 对被测代码毫无影响，测试会恒绿。
+    """
+
+    def setUp(self):
+        import tidy as T
+        self.T = T
+        self.tmp = tempfile.mkdtemp(prefix="prune_", dir=self.root)
+        old_data = T.S.get("data_dir")
+        old_cache = T.S.get("cache_dir")
+        self.addCleanup(self._restore, old_data, old_cache)
+        T.S["data_dir"] = self.tmp
+        T.S["cache_dir"] = os.path.join(self.tmp, "cache")
+        # 每个用例从干净的保留策略开始，避免相互污染
+        for k, v in T._PRUNE_DEFAULT.items():
+            T.S[k] = v
+        T.S["log_keep_days"] = 30
+        T._PRUNE_LAST["at"] = 0.0
+
+    def _restore(self, old_data, old_cache):
+        self.T.S["data_dir"] = old_data
+        self.T.S["cache_dir"] = old_cache
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _age(self, path, seconds):
+        """把 mtime 往前拨，造出「谁更旧」的次序。"""
+        t = time.time() - seconds
+        os.utime(path, (t, t))
+
+    def test_history_keeps_only_newest(self):
+        """整理历史只留最新的 N 份 —— 撤销只认最近那条，老的留着没用。"""
+        T = self.T
+        hist = T.hist_dir()
+        os.makedirs(hist, exist_ok=True)
+        for i in range(8):
+            p = os.path.join(hist, "2026010%d_120000_f%d.json" % (i + 1, i))
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{}")
+            self._age(p, (8 - i) * 100)      # i 越大越新
+        T.S["prune_history_keep"] = 3
+        rep = T.prune_data_dir()
+        left = sorted(os.listdir(hist))
+        self.assertEqual(len(left), 3, "应该只剩 3 份，实际 %r" % (left,))
+        self.assertEqual(rep["items"]["history"]["files"], 5)
+        # 留下的必须是最新的三个
+        for i in (5, 6, 7):
+            self.assertIn("2026010%d_120000_f%d.json" % (i + 1, i), left)
+
+    def test_dry_run_deletes_nothing(self):
+        """预演只报数字：设置页拿它显示「能清多少」，点之前不该动磁盘。"""
+        T = self.T
+        hist = T.hist_dir()
+        os.makedirs(hist, exist_ok=True)
+        for i in range(5):
+            p = os.path.join(hist, "h%d.json" % i)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{}")
+            self._age(p, (5 - i) * 100)
+        T.S["prune_history_keep"] = 2
+        rep = T.prune_data_dir(dry_run=True)
+        self.assertEqual(len(os.listdir(hist)), 5, "预演不该真的删")
+        self.assertEqual(rep["items"]["history"]["files"], 3)
+        self.assertTrue(rep["dry_run"])
+
+    def test_bak_siblings_keep_only_latest(self):
+        """同一个原文件只留最新一份 .bak-时间戳。
+
+        「覆盖」策略会给我们自己留 .bak，同一天覆盖三次就有三个副本。
+        要的就是只保留最新版，而用户自己的「文件 (2).txt」这类重名命名
+        绝不能碰 —— 那不是我们生成的。
+        """
+        T = self.T
+        d = tempfile.mkdtemp(prefix="bak_", dir=self.tmp)
+        target = os.path.join(d, "报告.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("new")
+        baks = []
+        for i, stamp in enumerate(("20260101120000", "20260102120000", "20260103120000")):
+            p = os.path.join(d, "报告.bak-%s.txt" % stamp)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("old%d" % i)
+            self._age(p, (3 - i) * 100)
+            baks.append(os.path.basename(p))
+        # 用户自己的重名文件，长得像但不是我们生成的
+        user_a = os.path.join(d, "报告 (2).txt")
+        user_b = os.path.join(d, "报告.bak-手写.txt")
+        for p in (user_a, user_b):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("mine")
+        T._prune_bak_siblings(target)
+        left = set(os.listdir(d))
+        self.assertIn(baks[-1], left, "最新那份必须留着")
+        self.assertNotIn(baks[0], left, "旧的 .bak 该被收掉")
+        self.assertNotIn(baks[1], left, "旧的 .bak 该被收掉")
+        self.assertIn(os.path.basename(user_a), left, "用户自己的重名文件不能动")
+        self.assertIn(os.path.basename(user_b), left, "不是我们生成的 .bak 不能动")
+
+    def test_pending_migration_job_is_never_pruned(self):
+        """正在跑的迁移任务不许删，哪怕它 mtime 最旧。
+
+        按 mtime 排序时，一个跑了两小时的大任务会排在最后 —— 把它当垃圾
+        清掉等于扔掉用户正在搬的文件的操作记录，撤销和续跑全没了。
+        """
+        T = self.T
+        jobs = T.mig_jobs_dir()
+        os.makedirs(jobs, exist_ok=True)
+        import sqlite3 as _sq
+        for i in range(6):
+            jd = os.path.join(jobs, "job%02d" % i)
+            os.makedirs(jd, exist_ok=True)
+            db = _sq.connect(os.path.join(jd, "journal.db"))
+            db.execute("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)")
+            status = "pending" if i == 0 else "done"
+            db.execute("INSERT INTO meta VALUES('status', ?)", (status,))
+            db.commit()
+            db.close()
+            self._age(jd, (6 - i) * 100)     # job00 最旧
+        T.S["prune_jobs_keep"] = 2
+        T.prune_data_dir()
+        left = sorted(os.listdir(jobs))
+        self.assertIn("job00", left, "pending 的任务被删了 —— 那是正在跑的数据")
+        self.assertIn("job05", left, "最新的任务必须留着")
+        self.assertLessEqual(len(left), 3,
+                             "除了 protected 的 job00 还应只留 2 份，实际 %r" % (left,))
+
+    def test_webview_bak_removed_only_when_live_exists(self):
+        """WebView2 旧目录只在正主还在时清；正主不在，那份可能才是唯一数据。"""
+        T = self.T
+        bak = os.path.join(self.tmp, "webview.bak-2218")
+        os.makedirs(os.path.join(bak, "EBWebView"), exist_ok=True)
+        with open(os.path.join(bak, "EBWebView", "cookie"), "wb") as f:
+            f.write(b"x" * 2048)
+        # 正主不在：不许动
+        T.prune_data_dir()
+        self.assertTrue(os.path.isdir(bak), "正主不在时不能删 —— 那是唯一的数据")
+        # 正主在：旧目录该被收掉
+        os.makedirs(os.path.join(self.tmp, "webview"), exist_ok=True)
+        rep = T.prune_data_dir()
+        self.assertFalse(os.path.isdir(bak), "正主在线时旧的 webview.bak 该清掉")
+        self.assertGreaterEqual(rep["items"]["webview_bak"]["files"], 1)
+
+    def test_thumbs_capped_by_size(self):
+        """缩略图按总体积封顶，超了从最旧的删起。"""
+        T = self.T
+        folder = os.path.join(self.tmp, "thumbs")
+        os.makedirs(folder, exist_ok=True)
+        for i in range(6):
+            p = os.path.join(folder, ("%02d" % i) + ".png")
+            with open(p, "wb") as f:
+                f.write(b"x" * (200 * 1024))       # 每个 200 KB
+            self._age(p, (6 - i) * 100)
+        T.S["prune_thumbs_mb"] = 0                 # 0 = 不限制，先确认它真的不动
+        T.prune_data_dir()
+        self.assertEqual(len(os.listdir(folder)), 6, "上限为 0 表示不限制")
+        T.S["prune_thumbs_mb"] = 1                 # 1 MB ≈ 装得下 5 个
+        T.prune_data_dir()
+        self.assertLess(len(os.listdir(folder)), 6, "超上限该淘汰")
+        self.assertIn("05.png", os.listdir(folder), "最新的不能被淘汰")
+        self.assertNotIn("00.png", os.listdir(folder), "最旧的该先走")
+
+
 class TestUndo(EngineCase):
     """undo：参数错走协议错误；没有记录是业务提示；整理后能原样移回。"""
 
@@ -2192,6 +2357,38 @@ class TestSettingsSet(EngineCase):
                            ("index_max_mb", -1),
                            ("index_max_mb", 100000),
                            ("index_rebuild_idle", "yes")):
+            r = self.rpc("settings.set", {"key": key, "value": value})
+            self.assertFalse(r["ok"], (key, value, r))
+
+    def test_prune_keys_are_writable(self):
+        """本地保留的四个键必须能存能读，否则设置页画得出来却存不进去。
+
+        1.42.2 就在索引三键上踩过这个坑：DEFAULT_SETTINGS 里有、设置页也画了，
+        但 _ENGINE_SETTINGS_TYPES 白名单没加，保存时引擎直接拒绝，重载后控件
+        退回默认值 —— 用户看到的是「改了没效果」。
+        """
+        for key, value in (("prune_enabled", False),
+                           ("prune_history_keep", 20),
+                           ("prune_thumbs_mb", 128),
+                           ("prune_backup_keep", 1)):
+            r = self.rpc_ok("settings.set", {"key": key, "value": value})
+            self.assertEqual(r["value"], value, key)
+        got = self.rpc_ok("settings.get", {})
+        self.assertFalse(got["prune_enabled"])
+        self.assertEqual(got["prune_history_keep"], 20)
+        self.assertEqual(got["prune_thumbs_mb"], 128)
+        self.assertEqual(got["prune_backup_keep"], 1)
+
+    def test_prune_rejects_bad_values(self):
+        """越界要拒绝：prune_history_keep 存成负数会让「留几份」变成无限删。
+
+        留 0 份是合法的（等于关掉撤销能力），所以下界是 0 不是 1。
+        """
+        for key, value in (("prune_history_keep", -1),
+                           ("prune_history_keep", 99999),
+                           ("prune_thumbs_mb", -5),
+                           ("prune_backup_keep", -1),
+                           ("prune_enabled", "yes")):
             r = self.rpc("settings.set", {"key": key, "value": value})
             self.assertFalse(r["ok"], (key, value, r))
 

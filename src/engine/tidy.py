@@ -200,6 +200,11 @@ DEFAULT_SETTINGS = {
     "index_max_mb": 2048,
     # 索引新鲜度档位：live（跟随热目录）/ check（启动 + 定时抽查）/ manual
     "index_freshness": "check",
+    # ── 本地数据保留（只留最新，否则体积会一直长）──
+    "prune_enabled": True,
+    "prune_history_keep": 50,       # 整理历史留几份（撤销靠最近那条）
+    "prune_thumbs_mb": 256,         # 缩略图总量上限（MB），0 = 不限制
+    "prune_backup_keep": 3,         # 卸载备份留几份
 }
 
 # 启动时发现设置里的数据目录不在了（盘没接 / 被删），置 True，界面起来后提示一次
@@ -283,6 +288,367 @@ def backup_dir():
 def mig_jobs_dir():
     """数据迁移页的任务目录；跟着数据目录走，别写死成启动时那份路径。"""
     return os.path.join(data_dir(), "迁移")
+
+
+# ---------------------------------------------------------------- 数据保留
+# 用户原话：「索引库只保留最新版，不要有备份，包括其他的有较大缓存的功能
+# 都做保留最新版数据，不然体积爆炸」。
+#
+# 先纠正一个前提：索引库本来就不留备份。_index_build_one 先写 <id>.db.new，
+# 建完 os.replace 原子换上去，成功路径上没有第二份副本。实测数据目录里
+# cache\indexes 只有两个 .db 和一份 catalog.json，没有 .new / -wal / -shm
+# 残留。所以 101.9 MB 不是冗余，是 141 万文件的真实数据。
+#
+# 真正会无上限长的是另外五处：
+#   history\      每整理一次写一条 json（撤销靠它），从来没有删过
+#   logs\         app-<日期>.log（Rust 写）与 scan-<日期>.log（引擎写）
+#   thumbs\       按内容哈希存缩略图，命中就复用，没有淘汰
+#   卸载备份\      每次卸载导出注册表 + 拷一份程序数据，撞名只顺延编号
+#   *.bak-<时间>  整理选「覆盖」时旧文件改名留下，迁移也会留
+#
+# 统一按「只留最新 N 份」处理，不按天。按天删在「一天整理两百次」和
+# 「三个月整理一次」两种用法下体积差两个数量级；按份数才是真的封顶。
+
+_PRUNE_DEFAULT = {
+    "prune_enabled": True,
+    "prune_history_keep": 50,     # 整理历史：撤销要用最近的那条，留 50 条够回溯很久
+    "prune_thumbs_mb": 256,       # 缩略图：0 表示不限制
+    "prune_backup_keep": 3,       # 卸载备份：每个程序留最近 3 次
+    "prune_jobs_keep": 5,         # 迁移任务：每个任务都带一份 backup\，留最近 5 次
+}
+
+# 日志另有一套：设置里本来就有 log_keep_days（界面能改、能存、能读回来），
+# 但全项目没有一处用它删过文件 —— 是个只存不用的键。这里让它真正生效，
+# 而不是再并排加一个「保留几份」，那种并存才是最难查的。
+_PRUNE_LOG_HARD_MAX = 60          # 无论多少天，文件数也不许超过这个
+
+
+def _prune_logs_keep():
+    """日志保留：先按 log_keep_days 算天数，再按份数封顶，两者取更严的。"""
+    try:
+        days = int(S.get("log_keep_days", 30))
+    except (TypeError, ValueError):
+        days = 30
+    return max(1, min(days, 3650))
+
+
+def _prune_cfg():
+    """把设置里的保留策略读成干净的类型；坏值回默认，不让它炸掉整个清理。"""
+    out = {}
+    for key, default in _PRUNE_DEFAULT.items():
+        raw = S.get(key, default)
+        try:
+            out[key] = bool(raw) if isinstance(default, bool) else int(raw)
+        except (TypeError, ValueError):
+            out[key] = default
+    if out["prune_history_keep"] < 0:
+        out["prune_history_keep"] = _PRUNE_DEFAULT["prune_history_keep"]
+    if out["prune_thumbs_mb"] < 0:
+        out["prune_thumbs_mb"] = 0
+    if out["prune_backup_keep"] < 0:
+        out["prune_backup_keep"] = 0
+    if out["prune_jobs_keep"] < 0:
+        out["prune_jobs_keep"] = 0
+    return out
+
+
+def _prune_stat(p):
+    try:
+        st = os.stat(p)
+        return st.st_mtime, st.st_size
+    except OSError:
+        return 0.0, 0
+
+
+def _prune_keep_newest(folder, keep, pattern=None, dirs_only=False, protect=None):
+    """只留最新的 keep 份，返回 (删掉几个, 释放多少字节)。
+
+    最新的判据是 mtime，不是文件名：日志和历史都是「_<时间戳>」结尾，
+    但重名顺延的后缀会让字典序和时间序在跨天时错位，用 mtime 更稳。
+
+    protect 是个回调：给它路径，返回 True 就跳过不删。用来保护「还在跑」
+    的东西（比如状态还是 pending 的迁移任务）—— 那些不是旧数据，是活数据。
+
+    删不掉的（被占用、权限）直接跳过，不抛异常 —— 清理是维护动作，
+    不该因为一个文件删不掉就把整次整理/保存搞失败。
+    """
+    if keep < 0 or not os.path.isdir(folder):
+        return 0, 0
+    rows = []
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                try:
+                    if dirs_only and not e.is_dir():
+                        continue
+                    if not dirs_only and not e.is_file():
+                        continue
+                    if pattern and not re.search(pattern, e.name):
+                        continue
+                    mt, size = _prune_stat(e.path)
+                    rows.append((mt, e.path, size))
+                except OSError:
+                    continue
+    except OSError:
+        return 0, 0
+    rows.sort(key=lambda r: r[0], reverse=True)
+    gone = freed = 0
+    for _mt, path, size in rows[max(0, keep):]:
+        if protect is not None:
+            try:
+                if protect(path):
+                    continue
+            except Exception:
+                continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            gone += 1
+            freed += size
+        except OSError:
+            continue
+    return gone, freed
+
+
+def _mig_job_busy(job_path):
+    r"""迁移任务是不是还在跑。读 journal.db 的 status，pending 就不许删。
+
+    读不出来（没有 journal.db、库坏了、被占用）返回 False —— 那说明它不像
+    一个活任务；留着也不会被撤销用上，删掉才是对的。
+
+    这条路径上必然是「整理助手数据\迁移\<job>\journal.db」这种带中文的路径，
+    所以这里用普通 connect 而不是 file:...?mode=ro 的 URI（URI 形式带非 ASCII
+    会连不上，于是每个任务都被判成「不忙」，正在跑的那个照样被清掉）。
+    """
+    try:
+        import sqlite3          # 顶层没有模块级导入，这里必须自带
+        db_path = os.path.join(job_path, "journal.db")
+        if not os.path.isfile(db_path):
+            return False
+        db = sqlite3.connect(db_path)
+        try:
+            row = db.execute("SELECT v FROM meta WHERE k='status'").fetchone()
+        finally:
+            db.close()
+        return (row[0] if row else "") == "pending"
+    except Exception:
+        return False
+
+
+def _prune_bak_siblings(path):
+    """同一个原文件只留最新一份 .bak-<时间戳>，返回删掉几个。
+
+    这些 .bak 是我们自己在「覆盖」和「迁移」时留下的，属于同一个原文件的
+    旧副本。留着三份八个版本没有意义 —— 要的就是「只保留最新版」。
+    只在同一目录、同一主名、且严格匹配我们自己生成的命名时才动，
+    绝不按通配符扫用户目录。
+
+    path 既可以是刚生成的那个 .bak（resolve_dst 的用法），也可以是原文件
+    （批量收的时候按原文件找）。所以判据是「这组 .bak 里按 mtime 最新那份
+    留下」，不是「除了 path 之外都删」—— 后者在传原文件时会把三份新备份
+    一起删光，那正好把用户刚被覆盖的文件扔掉。
+    """
+    folder = os.path.dirname(path) or "."
+    base, ext = os.path.splitext(os.path.basename(path))
+    pat = r"^%s\.bak-\d{8,14}" % re.escape(base)
+    ext_re = re.escape(ext) + "$" if ext else "$"
+    rows = []
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                try:
+                    if not e.is_file():
+                        continue
+                    if not re.search(pat + ext_re, e.name):
+                        continue
+                    rows.append((e.stat().st_mtime, e.path))
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    if len(rows) <= 1:
+        return 0
+    rows.sort(key=lambda r: r[0], reverse=True)
+    gone = 0
+    for _mt, p in rows[1:]:
+        try:
+            os.remove(p)
+            gone += 1
+        except OSError:
+            continue
+    return gone
+
+
+def prune_data_dir(dry_run=False):
+    """把几处会无上限长的本地数据收成「只留最新」。
+
+    dry_run=True 只报不删（设置页预览用）。返回每个目标的
+    {files, bytes, kept, note}，方便界面上说清「清理了什么」。
+    """
+    cfg = _prune_cfg()
+    report = {"enabled": cfg["prune_enabled"], "dry_run": bool(dry_run),
+              "items": {}, "files": 0, "bytes": 0}
+    if not cfg["prune_enabled"]:
+        report["note"] = "数据保留已关闭，什么都没动"
+        return report
+
+    def one(name, folder, keep, pattern=None, dirs_only=False, note="", protect=None):
+        if dry_run:
+            # 预演：只数会被删的份数，不碰磁盘
+            rows = []
+            if os.path.isdir(folder):
+                try:
+                    with os.scandir(folder) as it:
+                        for e in it:
+                            if dirs_only and not e.is_dir():
+                                continue
+                            if not dirs_only and not e.is_file():
+                                continue
+                            if pattern and not re.search(pattern, e.name):
+                                continue
+                            mt, size = _prune_stat(e.path)
+                            rows.append((mt, e.path, size))
+                except OSError:
+                    pass
+            rows.sort(key=lambda r: r[0], reverse=True)
+            tail = rows[max(0, keep):]
+            if protect is not None:
+                kept = []
+                for _m, p, s in tail:
+                    try:
+                        if protect(p):
+                            continue
+                    except Exception:
+                        continue
+                    kept.append(s)
+                tail = [(0, "", s) for s in kept]
+            gone, freed = len(tail), sum(s for _m, _p, s in tail)
+        else:
+            gone, freed = _prune_keep_newest(folder, keep, pattern, dirs_only, protect)
+        report["items"][name] = {"files": gone, "bytes": freed,
+                                 "kept": keep, "path": folder, "note": note}
+        report["files"] += gone
+        report["bytes"] += freed
+
+    one("history", hist_dir(), cfg["prune_history_keep"], r"\.json$",
+        note="整理历史，撤销靠最近那条")
+    one("logs", log_dir(), min(_prune_logs_keep(), _PRUNE_LOG_HARD_MAX), r"\.log$",
+        note="按天写的运行日志（受 log_keep_days 控制，最多 %d 份）" % _PRUNE_LOG_HARD_MAX)
+    one("backup", backup_dir(), cfg["prune_backup_keep"], dirs_only=True,
+        note="卸载程序前的注册表与数据备份")
+    # 迁移任务目录：每个任务一个子目录，里面是 journal.db 加一份 backup\（被覆盖
+    # 的旧目标都挪在那儿）。任务本身只在撤销时要，但 backup\ 会一直占着体积，
+    # 所以这里按「任务数」封顶，最旧的整套一起清。
+    #
+    # 必须护住正在跑的那个：它 mtime 也许不是最新（大任务跑很久），按 mtime
+    # 排序完全可能把它排到末尾删掉 —— 那等于把用户正在搬的文件的操作记录
+    # 扔了，撤销和续跑都没了。状态还是 pending 的一律不碰。
+    one("migrate", mig_jobs_dir(), cfg["prune_jobs_keep"], dirs_only=True,
+        note="迁移任务与它的备份区（已完成的）", protect=_mig_job_busy)
+
+    # 缩略图按总体积封顶，超了就从最旧的开始删到上限以内。
+    cap = cfg["prune_thumbs_mb"] * 1024 * 1024
+    folder = os.path.join(data_dir(), "thumbs")
+    t_files = t_bytes = 0
+    if cap > 0 and os.path.isdir(folder):
+        rows = []
+        try:
+            with os.scandir(folder) as it:
+                for e in it:
+                    if not e.is_file():
+                        continue
+                    mt, size = _prune_stat(e.path)
+                    rows.append((mt, e.path, size))
+        except OSError:
+            rows = []
+        total = sum(r[2] for r in rows)
+        if total > cap:
+            rows.sort(key=lambda r: r[0])          # 最旧的先删
+            for _mt, path, size in rows:
+                if total <= cap:
+                    break
+                if dry_run:
+                    t_files += 1
+                    t_bytes += size
+                    total -= size
+                    continue
+                try:
+                    os.remove(path)
+                    t_files += 1
+                    t_bytes += size
+                    total -= size
+                except OSError:
+                    continue
+    report["items"]["thumbs"] = {"files": t_files, "bytes": t_bytes,
+                                 "kept": cfg["prune_thumbs_mb"],
+                                 "path": folder, "note": "缩略图缓存，超上限按最旧淘汰"}
+    report["files"] += t_files
+    report["bytes"] += t_bytes
+
+    # WebView2 的旧数据目录：正常情况下一份就够（主进程把
+    # WEBVIEW2_USER_DATA_FOLDER 固定指到 <data>\webview）。带 .bak- 的那些
+    # 是改了数据目录或者手工改名时留下的整份副本，一份十几 MB 却永远不会
+    # 再被打开。只在「正主还在」时清 —— 正主不在说明这份可能就是唯一的数据，
+    # 那时候删它就是删用户的书签和登录态。
+    live = os.path.join(data_dir(), "webview")
+    w_files = w_bytes = 0
+    if os.path.isdir(live):
+        try:
+            with os.scandir(data_dir()) as it:
+                for e in it:
+                    if not e.is_dir():
+                        continue
+                    if not re.search(r"^webview\.bak-\d", e.name, re.I):
+                        continue
+                    size = 0
+                    for r, _ds, fs in os.walk(e.path):
+                        for f in fs:
+                            try:
+                                size += os.path.getsize(os.path.join(r, f))
+                            except OSError:
+                                pass
+                    if dry_run:
+                        w_files += 1
+                        w_bytes += size
+                        continue
+                    try:
+                        shutil.rmtree(e.path)
+                        w_files += 1
+                        w_bytes += size
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+    report["items"]["webview_bak"] = {"files": w_files, "bytes": w_bytes, "kept": 1,
+                                      "path": data_dir(),
+                                      "note": "WebView2 旧数据目录，正主在线才清"}
+    report["files"] += w_files
+    report["bytes"] += w_bytes
+    return report
+
+
+# 保留策略不需要每次写文件都跑一遍：这些目录的规模变化是「每天几条」的量级。
+# 一小时至多扫一次，扫的是几十个文件名的 stat，成本可以忽略；但省掉的是
+# 每次整理都去 scandir 四个目录。
+_PRUNE_LAST = {"at": 0.0}
+_PRUNE_EVERY = 3600.0
+
+
+def prune_maybe(force=False):
+    """节流版的 prune_data_dir：写点顺手调它，不阻塞主流程。
+
+    任何异常都吞掉 —— 清理失败不该让用户的整理/截图/卸载失败。
+    """
+    now = time.time()
+    if not force and now - _PRUNE_LAST["at"] < _PRUNE_EVERY:
+        return None
+    _PRUNE_LAST["at"] = now
+    try:
+        return prune_data_dir()
+    except Exception:
+        return None
 
 
 def check_data_dir(path, old=None):
@@ -992,7 +1358,11 @@ def resolve_dst(dst, policy):
     if policy == "skip":
         return None
     if policy == "overwrite":
-        os.replace(dst, backup_name(dst))     # 旧文件改名备份，不删除
+        bak = backup_name(dst)
+        os.replace(dst, bak)     # 旧文件改名备份，不删除
+        # 同一个原文件只留这一份 .bak：之前几次「覆盖」留下的旧副本一起收掉。
+        # 用户原话是「只保留最新版」，而三份八个版本的 .bak 谁也说不清哪个是哪个。
+        _prune_bak_siblings(bak)
         return dst
     return rename_dup(dst)
 
@@ -1091,6 +1461,9 @@ def apply(plans, root, rules, policy=None, date_fmt=None, progress=None,
                   f, ensure_ascii=False, indent=1)
     # 先让索引认账再返回：用户整理完立刻问「什么最占空间」，答案必须是整理后的
     index_touch([b for _a, b in moved] + [a for a, _b in moved])
+    # 整理是历史记录增长最快的来源（每整理一次一条），顺手按保留策略收一次。
+    # 节流到一小时一次，正常使用下这里绝大多数时候什么都不做。
+    prune_maybe()
     return len(moved), failed, mf
 
 
@@ -12423,6 +12796,10 @@ def _engine_settings():
         "index_freshness": s.get("index_freshness") or "check",
         "index_max_mb": int(s.get("index_max_mb") or 2048),
         "index_rebuild_idle": bool(s.get("index_rebuild_idle", True)),
+        "prune_enabled": bool(s.get("prune_enabled", True)),
+        "prune_history_keep": int(s.get("prune_history_keep", 50) or 0),
+        "prune_thumbs_mb": int(s.get("prune_thumbs_mb", 256) or 0),
+        "prune_backup_keep": int(s.get("prune_backup_keep", 3) or 0),
         "settings_path": SETTINGS_PATH,
     }
 
@@ -13597,6 +13974,23 @@ def _engine_search_hot(params):
     return out
 
 
+def _engine_prune(params):
+    """prune.run：把本地数据按「只留最新」收一遍，返回删了什么。
+
+    默认真删；dry_run=true 只报数字，给设置页预览用。
+
+    为什么不复用 cache.clean：那套是清「系统里的缓存」（其他软件的缓存目录），
+    走的是 CACHE_FORBIDDEN 白名单与回收站。这里清的是**我们自己**在数据目录
+    里攒下的历史/日志/缩略图，路径全部来自 data_dir()/cache_dir()，不该走
+    用户的回收站 —— 那些东西进回收站只会变成另一种垃圾。
+    """
+    dry = bool(params.get("dry_run")) if isinstance(params, dict) else False
+    rep = prune_data_dir(dry_run=dry)
+    if not dry:
+        _PRUNE_LAST["at"] = time.time()      # 手动跑过，别忘了节流时间戳
+    return rep
+
+
 def _engine_search_status(params):
     """search.status：所有索引的清单、体积、覆盖与合计。"""
     st = index_stats()
@@ -13850,6 +14244,10 @@ _ENGINE_SETTINGS_TYPES = {
     "index_freshness": str,
     "index_max_mb": int,
     "index_rebuild_idle": bool,
+    "prune_enabled": bool,
+    "prune_history_keep": int,
+    "prune_thumbs_mb": int,
+    "prune_backup_keep": int,
 }
 _ENGINE_SETTINGS_CHOICES = {
     "conflict_policy": ("rename", "skip", "overwrite"),
@@ -13864,6 +14262,11 @@ _ENGINE_SETTINGS_RANGES = {
     "shot_min_kb": (0, 10 * 1024 * 1024),
     # 0 表示不限制（index_quota_ok 里就是这么判的），所以下界是 0 而不是 1
     "index_max_mb": (0, 65536),
+    # 0 是合法的「不限制 / 一份都不留」之外的边界：history 留 0 份等于
+    # 把撤销能力关掉，仍允许（有人就是不要历史），但不接受负数。
+    "prune_history_keep": (0, 10000),
+    "prune_thumbs_mb": (0, 65536),
+    "prune_backup_keep": (0, 1000),
 }
 
 
@@ -14386,6 +14789,7 @@ _ENGINE_METHODS = {
     "search.remove": _engine_search_remove,
     "search.selfcheck": _engine_search_selfcheck,
     "search.hot": _engine_search_hot,
+    "prune.run": _engine_prune,
     "settings.set": _engine_settings_set,
     "rules.validate": _engine_rules_validate,
     "rules.preview": _engine_rules_preview,
@@ -14439,6 +14843,15 @@ def run_engine():
                 os._exit(0)
 
     threading.Thread(target=_idle_watch, name='engine-idle', daemon=True).start()
+    # 启动时先按「只留最新」收一遍本地数据。放在线程里做，不挡第一条 RPC：
+    # 用户开软件不该等一次磁盘清理。挂在这里而不是只在整理后跑，是因为
+    # 「从来不整理、只是天天开软件的搜索」这种用法根本不会触发 apply()，
+    # 而历史/日志/缩略图照样在长。
+    try:
+        threading.Thread(target=prune_maybe, kwargs={"force": True},
+                         name='engine-prune', daemon=True).start()
+    except Exception:
+        pass
     # 后台抽查索引：只在空闲时跑，抽样几十毫秒，判定过期才重建。
     # 启动它意味着「用户什么都不用做，索引也会跟上磁盘」。
     try:
