@@ -2501,6 +2501,13 @@ html[data-theme="dark"] .ai-page {
    免得某些浏览器把 hidden 容器里的 flex 子项也算进高度。 */
 .ai-panes { display: none; }
 
+/* 抽屉关掉时整个对话界面的停靠点（chatui.js 的 detach）。
+   现场要留着后台继续跑，但界面不能还占着位置；之所以不直接摘出文档，
+   是因为节点脱离文档后 follow 的 ResizeObserver 不再回调、写出来的内容
+   也没人看得见。hidden 已经足够，这里再用 !important 兜一道：
+   谁给它加上 display:flex 之类都会被压回去。 */
+.ai-parked { display: none !important; }
+
 /* 消息：照 Claude 的做法——用户那句是右侧一块浅底气泡，助手回答就是正文。
    两边都不再挂「你 / 助手」的标签：位置和底色已经说明了是谁在说。 */
 .ai-msg { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
@@ -3734,6 +3741,38 @@ html[data-theme="dark"] .ai-tnav-pop {
 .ai-drawer-title { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding-left: 4px; }
 .ai-dw-title { font-size: var(--fs-small); font-weight: 600; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ai-dw-sub { font-size: var(--fs-tiny); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 抽屉的「正在运行」条：整页左栏有 .ai-busy，抽屉以前完全没有，
+   于是在抽屉里切到别的会话就再也看不见那条还在跑。
+   口径与 .ai-busy 对齐（同一个描边 / 圆角 / 底色 / 字号 token），
+   只是窄一些：抽屉没有左栏，一行只留标题 + 排队数。 */
+.ai-dw-busy {
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: 1px;
+  margin: 0 12px 6px; padding: 5px 5px 4px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.ai-dw-busy[hidden] { display: none; }
+.ai-dw-busy-row {
+  display: flex; align-items: baseline; gap: 6px; width: 100%;
+  padding: 3px 5px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--text-2); cursor: pointer; text-align: left;
+  font-size: var(--fs-small); font-family: inherit;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.ai-dw-busy-row:hover { background: var(--hover); color: var(--text-1); }
+.ai-dw-busy-row[data-active] { color: var(--text-1); }
+.ai-dw-busy-title {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.ai-dw-busy-tag {
+  flex: 0 0 auto; font-size: var(--fs-tiny); color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+/* 呼吸点直接复用整页那份 .ai-busy-dot 与 ai-busy-pulse 关键帧，
+   这里只补「跟文字对齐」：行是 baseline 对齐，圆点得自己居中。 */
+.ai-dw-busy .ai-busy-dot { width: 6px; height: 6px; align-self: center; }
 
 /* 历史面板：从头部下面推下来，不盖住输入框 */
 .ai-drawer-hist {

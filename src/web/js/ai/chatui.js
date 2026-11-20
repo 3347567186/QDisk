@@ -241,8 +241,14 @@
 
   function create(rootEl, opts) {
     const options = opts || {};
-    const ctxProvider = options.ctx || (() => ({}));
-    const compact = !!options.compact;
+    /* 两个入口（整页 / 右侧抽屉）现在共用同一个现场，上下文要跟着宿主换：
+       整页给的是「页面 + 工具集」，抽屉给的是调用方此刻的目录上下文。
+       以前这里是 const，attach 换宿主时就只能一直沿用第一个宿主的 ctx，
+       抽屉里问「这个目录」会答成整页的上下文。 */
+    let ctxProvider = options.ctx || (() => ({}));
+    /* 同理：compact 是「宿主长什么样」的属性，不是现场自己的属性。
+       抽屉窄、整页宽，换宿主时 shell 与输入框的紧凑类都要跟着换。 */
+    let compact = !!options.compact;
 
     const scroller = h('div', { class: 'ai-scroll' });
     /* 消息容器以前是 const：切会话只能把里面的节点删掉，而正在跑的那一轮
@@ -279,6 +285,23 @@
     const paneStore = h('div', { class: 'ai-panes' });
     paneStore.hidden = true;
     shell.appendChild(paneStore);
+    /* detach 之后整个 shell 停靠在这个隐藏容器里（仍然在文档中）。
+       为什么不直接 shell.remove()：后台那一轮还在往 pane.msgs 里写，
+       节点一旦脱离文档，follow 的 ResizeObserver 会停止回调、滚动量恒为 0，
+       写出来的内容也再没有人看得到——用户重开抽屉只能从历史里重读一遍。 */
+    let parked = null;
+    /* boot 只该跑一次：obtain 复用已有现场时再 boot 会把当前会话重放一遍，
+       正在飞的那一轮的节点会被存档副本顶掉。 */
+    let booted = false;
+    /* 订阅者改成多播：以前 onSessions / onBusy 各只有一个回调，
+       谁后 attach 谁就把前一个顶掉——整页在跑的时候抽屉一打开，
+       整页左栏的「正在运行」就再也不刷新了。
+       现在按宿主登记，attach 时整体换一批（同一时刻只有一个宿主在用，
+       所以「清空重加」比「按宿主标记增删」更简单，也不会漏掉注销）。 */
+    const sessionSubs = [];
+    const busySubs = [];
+    if (typeof options.onSessions === 'function') sessionSubs.push(options.onSessions);
+    if (typeof options.onBusy === 'function') busySubs.push(options.onBusy);
     /* 当前可见的 pane：所有「看得见的界面」只认它（滚动、跟随、输入框忙态） */
     let activePane = null;
     /* destroy() 之后为 true。后台会话可能还在飞，它收尾时不该再去碰
@@ -1937,21 +1960,24 @@
       }), tgt);
     }
 
-    /* 会话列表变了（新建 / 落盘 / 载入）就让外面重画右侧的归档列表 */
+    /* 会话列表变了（新建 / 落盘 / 载入）就让外面重画右侧的归档列表。
+       多播：整页与抽屉都要跟着刷新，而它们不会同时是「当前宿主」——
+       换宿主时这里注册的仍是那一批（attach 负责整体替换）。 */
     function notifySessions() {
-      if (typeof options.onSessions === 'function') {
-        try { options.onSessions(); } catch (e) { /* 外面的重画失败不该影响对话 */ }
-      }
+      sessionSubs.forEach(function (fn) {
+        try { fn(); } catch (e) { /* 外面的重画失败不该影响对话 */ }
+      });
     }
 
     /* 「谁在跑」变了就告诉外面。
        后台会话在跑的时候界面上原本一点痕迹都没有（切走就看不见了），
        用户只能凭空猜「刚才那条到底跑完没有」。这里把运行集合推给页面，
-       由左栏画成一排「运行中」，点一下就切回去看。 */
+       由左栏 / 抽屉头部画成一排「运行中」，点一下就切回去看。 */
     function notifyBusy() {
-      if (typeof options.onBusy === 'function') {
-        try { options.onBusy(activity()); } catch (e) { /* 画不出来不该影响对话本身 */ }
-      }
+      const snap = activity();
+      busySubs.forEach(function (fn) {
+        try { fn(snap); } catch (e) { /* 画不出来不该影响对话本身 */ }
+      });
     }
 
     /* 运行态快照：给页面用的最小信息集（不把 DOM / state 漏出去）。
@@ -2269,10 +2295,93 @@
       return pane;
     }
 
+    /* 换宿主时同步「紧凑」外观。
+       shell 上的 compact 类由这里管；输入框那层是 composer.js 在 create 时
+       一次性拼进 wrap 的类名（`dac` + `dac-compact`），它没有对外暴露
+       setCompact，所以直接改 composer.el 的 classList —— composer.el 就是
+       那个 .dac 外壳本身（composer.js 的 api.el = wrap），改它不会碰内部结构。 */
+    function syncCompact() {
+      shell.classList.toggle('compact', compact);
+      try {
+        if (composer && composer.el && composer.el.classList) {
+          composer.el.classList.toggle('dac-compact', compact);
+        }
+      } catch (e) { /* 输入框已经拆掉时换宿主：少一个类不影响能用 */ }
+    }
+
+    /* 把界面挂到一个新宿主上。
+       应用级只有一个现场（panes / queue / inFlight / 历史 / 运行态），
+       整页和抽屉轮流「借用」同一份界面：谁需要就把 shell 搬进自己容器。
+       两个实例的旧做法会让「单飞位」变成两份，而 Rust 侧的 AI_CANCEL
+       是全局单一标志位（main.rs 的 static AI_CANCEL）——两条并行时点任意
+       一个「停止」会互相打断。这是硬约束，所以现场必须唯一。 */
+    function attach(rootEl, opts) {
+      if (!rootEl) return;
+      const o = opts || {};
+      /* 上下文跟着宿主换：抽屉的「这个目录」和整页的「这一页」不是一回事 */
+      if (typeof o.ctx === 'function') ctxProvider = o.ctx;
+      compact = !!o.compact;
+      syncCompact();
+      /* 订阅者整体换一批：同一时刻只有一个宿主在用，
+         清空重加比按宿主标记增删更简单，也不会漏掉注销（旧的抽屉回调
+         继续收通知只会往已经 remove 掉的 DOM 上画）。 */
+      sessionSubs.length = 0;
+      busySubs.length = 0;
+      if (typeof o.onSessions === 'function') sessionSubs.push(o.onSessions);
+      if (typeof o.onBusy === 'function') busySubs.push(o.onBusy);
+      /* 从停靠点（或上一个宿主）搬过来。先摘再挂：
+         一个节点同时挂在两处是不可能的，不摘就是「静默不动」。 */
+      if (shell.parentNode !== rootEl) {
+        if (shell.parentNode) shell.parentNode.removeChild(shell);
+        rootEl.appendChild(shell);
+      }
+      /* 停靠容器在 shell 搬走之后就是个空壳，留着只会一路堆在 body 上 */
+      if (parked) {
+        if (parked.parentNode) parked.parentNode.removeChild(parked);
+        parked = null;
+      }
+      /* 重新挂上就复活：后台那一轮收尾时会问 isVisible，立过 destroyed 牌子
+         它就不再往界面写了——抽屉关一次再打开，等于那一轮白跑。 */
+      destroyed = false;
+      /* 空状态文案按新宿主的宽度重画（compact 的示例问题只有两条） */
+      renderEmpty();
+      setEmpty(!(msgs && msgs.children.length));
+      /* 跟随器盯的是「容器 + 滚动条」：shell 换过位置，旧的观测对象
+         可能已经脱离文档，重建一次比修它便宜也可靠。 */
+      rebuildFollow();
+      /* 模型清单要跟着重拉一次：宿主的上下文可能换了端点（抽屉在别的页面打开） */
+      Promise.resolve().then(function () { return AIStore.load(); }).then(function (s) {
+        applyModels(s);
+      }).catch(function () { /* 读不到就沿用上一份清单，不挡对话 */ });
+      notifyBusy();
+      notifySessions();
+    }
+
+    /* 把界面从宿主上摘下来，但现场一个字节都不清。
+       抽屉关掉不等于这一轮结束：agent.run 没被打断，它收尾时还要往
+       pane.msgs 里写。所以 shell 停靠到一个隐藏容器里（仍在文档中），
+       而不是 remove() 掉——节点脱离文档后 follow 的 ResizeObserver 不再
+       回调、写出来的内容也没人看得见，用户只能重开抽屉从历史里重读。
+       以前这里走的是 destroy()：inFlight = null、queue 清空、panes 删 DOM，
+       在飞那一轮回来时 pane 已经没了，界面接不回来。 */
+    function detach() {
+      if (parked && parked.parentNode) parked.parentNode.removeChild(parked);
+      parked = h('div', { class: 'ai-parked' });
+      parked.hidden = true;
+      document.body.appendChild(parked);
+      if (shell.parentNode) shell.parentNode.removeChild(shell);
+      parked.appendChild(shell);
+      /* 不动 destroyed / panes / queue / inFlight：后台继续跑，
+         下一轮写入照样落进它自己的 pane。 */
+    }
+
     return {
       ask,
       retry: retryLast,
       composer,
+      /* 换宿主 / 摘界面：整页与抽屉共用同一个现场靠这两个 */
+      attach: attach,
+      detach: detach,
       /* 运行态快照：页面用它画「哪些会话还在跑」，点一下切回去看。
          返回的是拷贝，页面改它不会影响对话内部状态。 */
       activity: activity,
@@ -2341,8 +2450,12 @@
         return AIStore.listSessions();
       },
       /* 挂载时叫它：恢复上次的界面偏好（强度 / 权限 / 模型）与上次那个会话。
-         记忆是锦上添花——读失败或会话文件没了就按默认值继续，不报错。 */
+         记忆是锦上添花——读失败或会话文件没了就按默认值继续，不报错。
+         只跑一次：obtain 复用已有现场时，两个入口都会叫 boot，
+         再跑一遍会把当前会话重放一次，正在飞的那一轮节点会被存档副本顶掉。 */
       async boot() {
+        if (booted) return state.session;
+        booted = true;
         /* 先把闸门的三个真值拿到手：万一用户一进来就让你动手，
            配置还没到的话路径检查会漏判 */
         try { await ensureGuard(); } catch (e) { /* 拿不到就让每次提议自己去查 */ }
@@ -2424,5 +2537,24 @@
     };
   }
 
-  root.AIChat = { create };
+  /* 应用级唯一的对话现场：整页与右侧抽屉共用它。
+     两个实例会让「单飞位」和 Rust 的全局 AI_CANCEL 对不上（见文件头注释）：
+     抽屉在跑时打开整页再发一条会真并行两条 agent.run，而 main.rs 的
+     static AI_CANCEL 只有一个标志位，点任意一个「停止」会互相打断。
+     所以入口一律走 obtain()：第一个调用者创建，后面的只换宿主（attach）。 */
+  let shared = null;
+
+  function obtain(rootEl, opts) {
+    if (!shared) shared = create(rootEl, opts);
+    else shared.attach(rootEl, opts);
+    return shared;
+  }
+
+  /* 摘界面但不销毁现场：应用真正退出时才需要 destroy（这次不做调用点）。
+     保留 release 这个名字是给「当前没人用它」的调用方一个明确说法。 */
+  function release() {
+    if (shared) shared.detach();
+  }
+
+  root.AIChat = { create, obtain, release, scene: () => shared };
 })(typeof window !== 'undefined' ? window : globalThis);

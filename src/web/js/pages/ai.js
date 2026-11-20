@@ -277,7 +277,12 @@
         paintActive();
       }
 
-      chat = AIChat.create(chatRoot, {
+      /* 走 obtain 而不是 create：整页和右侧抽屉共用同一个应用级对话现场。
+         各建一个实例会让「单飞位」变成两份，而 Rust 侧 AI_CANCEL 是全局
+         单一标志位（main.rs 的 static AI_CANCEL），两条并行时点任意一个
+         「停止」会互相打断。obtain 会把界面挂到 chatRoot 上（attach），
+         现场里的 panes / queue / 运行态是接着用的那一份。 */
+      chat = AIChat.obtain(chatRoot, {
         ctx: () => ({ page: 'ai', tools: AIPrompt.PAGE_TOOLS.ai }),
         /* 新会话落盘 / 载入后刷新左栏，标题与排序跟着变 */
         onSessions: () => { renderList(); },
@@ -286,7 +291,9 @@
         onBusy: (snap) => { renderBusy(snap); }
       });
       /* 上次的强度 / 权限 / 模型 / 会话都从 ai_ui 恢复；
-         读完再点亮左栏高亮，避免先亮一个再跳一个 */
+         读完再点亮左栏高亮，避免先亮一个再跳一个。
+         boot 内部只跑一次（chatui 里立了 booted 牌子）：抽屉先开过时
+         现场已经 boot 过了，这里再跑会把当前会话重放一遍。 */
       chat.boot().then(() => {
         activeId = chat.session ? chat.session.id : null;
         paintActive();
@@ -306,8 +313,13 @@
         document.removeEventListener('keydown', onKey);
         try { AIDrawer.close(); } catch { /* 忽略 */ }
         if (chat) {
-          try { chat.setBusy(false); } catch { /* 忽略 */ }
-          try { chat.destroy(); } catch { /* 忽略 */ }
+          /* 只摘界面，不销毁现场：离开这一页不等于这一轮结束，
+             后台任务还要跑完、结果还要落盘。
+             以前这里调 destroy()，inFlight / queue / panes 一起清掉，
+             于是「聊到一半切走」就等于把在飞那一轮的界面扔了。
+             也不再 setBusy(false)：那会把可见会话标成「不忙」，
+             可它其实还在跑，语义正好反了。 */
+          try { chat.detach(); } catch { /* 忽略 */ }
           chat = null;
         }
       };
