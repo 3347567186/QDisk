@@ -5707,6 +5707,31 @@ def _ix_verify_one(item):
     if db is None:
         return {"ok": False, "checked": 0, "missing": 0, "dirty": 0,
                 "why": "索引库不存在"}
+    # 旧格式库必须先判「过期」，否则升级路径永远不触发。
+    #
+    # 这里是 1.42.0–1.42.2 的一个真缺口：schema 2 的库没有 n_files 列，
+    # 下面那条 SELECT 会抛异常，然后被当成「读不了 → 保守放过」。结果就是
+    # 老用户升级到 1.42.x 之后，抽查永远说「没问题」、永远不重建、库永远停在
+    # schema 2 —— 于是 size_sum 快查用不了、写穿跳过、保鲜也跳过，整套新
+    # 能力**静默失效**，而界面上一切正常。
+    #
+    # 「读不懂」和「没问题」是两件事。读不懂要修（重建一次就升级了），
+    # 不能当成没事。
+    try:
+        can_fast = _index_has_totals(db)
+    except Exception:
+        can_fast = False
+    if not can_fast:
+        try:
+            ver = _index_schema_version(db)
+        except Exception:
+            ver = 0
+        try:
+            db.close()
+        except Exception:
+            pass
+        return {"ok": False, "checked": 0, "missing": 0, "dirty": 0,
+                "why": "索引是旧版格式（schema %d），重建一次即可升级" % ver}
     try:
         rows = db.execute(
             "SELECT path, mtime, n_files FROM dirs ORDER BY RANDOM() LIMIT ?",

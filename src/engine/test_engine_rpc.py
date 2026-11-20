@@ -620,6 +620,54 @@ class TestHotFreshness(EngineCase):
         self.assertIsInstance(rep["files"], int)
         self.assertGreaterEqual(rep["files"], 0)
 
+    def test_selfcheck_marks_old_schema_index_as_stale(self):
+        """旧格式的索引库必须被判「过期」，否则它永远不会升级。
+
+        1.42.0–1.42.2 的真缺口：schema 2 的库没有 n_files 列，抽查的
+        SELECT 直接抛异常，被当成「读不懂 → 保守放过」。于是一个从旧版升上来
+        的用户，抽查永远说没问题、永远不重建、库永远停在 schema 2，而
+        size_sum 快查、写穿、保鲜全部依赖新列 —— 整套新能力静默失效。
+
+        用真实的老库构造：直接改掉 user_version 并删掉新列，模拟升级前的状态。
+        """
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_old_schema_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "root")
+        os.makedirs(root, exist_ok=True)
+        for i in range(4):
+            with open(os.path.join(root, "f%d.txt" % i), "wb") as f:
+                f.write(b"x" * 16)
+
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+        item = T._ix_load()[0]
+        self.assertTrue(T._index_has_totals(
+            T._index_open(T._ix_db_abspath(item))))
+
+        # 把它降级成 schema 2 的形状：去掉新列、user_version 改回去
+        db = T._index_open(T._ix_db_abspath(item))
+        try:
+            with db:
+                db.execute("ALTER TABLE dirs DROP COLUMN size_sum")
+                db.execute("ALTER TABLE dirs DROP COLUMN n_files")
+                db.execute("ALTER TABLE dirs DROP COLUMN scanned_at")
+                db.execute("PRAGMA user_version=2")
+        finally:
+            db.close()
+
+        v = T._ix_verify_one(item)
+        self.assertFalse(
+            v.get("ok"),
+            "旧格式库被判成「没问题」了 —— 那它永远不会触发重建升级：%r" % (v,))
+        self.assertIn("旧版格式", v.get("why") or "", v)
+
     def test_hot_roots_stay_inside_indexed_scope(self):
         """保鲜对象必须落在用户已索引的范围之内。
 
@@ -694,7 +742,7 @@ class TestHotFreshness(EngineCase):
         self.assertEqual(sorted(i.get("root") for i in T._ix_load()), before,
                          "保鲜改动了索引清单")
 
-
+    def test_hot_refresh_is_safe_when_two_callers_race(self):
         """后台节拍和「搜不到就补扫」会同时进来。
 
         两条路径都在同一个 *.db.new staging 上建库：一个在写、另一个把它删了
