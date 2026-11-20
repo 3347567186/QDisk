@@ -38,7 +38,7 @@
 .dv-list { display: flex; flex-direction: column; min-width: 0; }
 .dv-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) 62px 92px 150px;
+  grid-template-columns: 18px minmax(0, 1fr) 62px 92px 96px;
   align-items: center;
   gap: var(--space-2);
   padding: 4px 6px;
@@ -62,7 +62,9 @@
 .dv-name { min-width: 0; font-size: var(--fs-small); }
 .dv-ext { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dv-size { text-align: right; }
-.dv-time { text-align: right; }
+/* 现在的时间是 MM-DD HH:mm 十一个字，92px 足够；nowrap 是兜底，
+   防止有人把字体调大或改成本地化长格式时又折成两行。 */
+.dv-time { text-align: right; white-space: nowrap; }
 .dv-more { align-self: flex-start; }
 
 @media (max-width: 720px) {

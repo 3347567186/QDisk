@@ -44,6 +44,20 @@
     return i > 0 ? s.slice(i + 1).toLowerCase() : '';
   }
 
+  /* 引擎给的扩展名清单里有重复（02_压缩包 的 .tar 出现两次），
+     照着念出来像程序出了错。显示前统一去重。 */
+  function dedupeExts(list) {
+    const seen = new Set();
+    const out = [];
+    (list || []).forEach((e) => {
+      const v = String(e || '').toLowerCase().replace(/^\./, '');
+      if (!v || seen.has(v)) return;
+      seen.add(v);
+      out.push(v);
+    });
+    return out;
+  }
+
   /* 分组标题下面那行：这一组是按什么收进来的。
      兜底分组要额外说清楚 —— 用户最常问「为什么这些没被认出来」，
      答案就是它们的扩展名没登记在规则里，必须直接列出来，
@@ -73,7 +87,7 @@
       return;
     }
 
-    const rule = (catRules && catRules.byCat[g.cat]) || [];
+    const rule = dedupeExts(catRules && catRules.byCat[g.cat]);
     if (rule.length) {
       const head = rule.slice(0, 10).map((e) => '.' + e).join(' ');
       const zh = rule.length > 10

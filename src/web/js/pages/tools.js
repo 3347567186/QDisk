@@ -210,6 +210,25 @@
       return dv;
     }
 
+    /* 一进页面就把浏览区建出来。
+       以前只在「从结果位置跳过来」时才 ensureDv()，于是用户自己点开「空间工具」
+       看到的是一个只有标题的空块（1.41.8 真机就是这样），得先跳一次才有内容。
+       没有初始路径时 dirview 自己画一句「选一个文件夹」，不是白板。 */
+    ensureDv();
+
+    /* 没被跳转到具体目录时，退回上一次用过的那一个。
+       用户刚在「整理文件」里扫过某个文件夹，接着点「空间工具」多半就是想知道
+       东西去哪了 —— 让他重新选一次目录纯属白费一步。configGet 是异步的，
+       回来时如果已经有人 setPath（跳转分支），就不覆盖。 */
+    Promise.resolve()
+      .then(() => API.configGet())
+      .then((cfg) => {
+        if (!dv || dv.getPath()) return;
+        const last = String((cfg && (cfg.last_folder || cfg.lastFolder)) || '');
+        if (last) dv.setPath(last);
+      })
+      .catch(() => {});
+
     root.appendChild(jumpBox);
     root.appendChild(browseSection);
     root.appendChild(bigSection);

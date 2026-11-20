@@ -71,6 +71,20 @@
     return EXEC_EXT.indexOf(extOf(name)) >= 0;
   }
 
+  /* 时间列窄，`toLocaleString()` 的结果（2026/11/20 17:05:54）在真机上折成两行。
+     压成 MM-DD HH:mm，只有不是今年的才带年份。 */
+  function fmtWhen(ts) {
+    const n = Number(ts);
+    if (!n) return '';
+    const d = new Date(n * 1000);
+    const pad = (v) => (v < 10 ? '0' + v : String(v));
+    const md = pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return d.getFullYear() === new Date().getFullYear()
+      ? md + ' ' + hm
+      : d.getFullYear() + '-' + md;
+  }
+
   function create(host, opts) {
     const o = opts || {};
     let dir = '';
@@ -144,8 +158,10 @@
       if (!dir) {
         stateBox.hidden = false;
         stateBox.appendChild(h('div', { class: 'dv-hint' },
-          T('选一个文件夹，或者从「结果位置」「大文件」点「在应用内看」直接进来。',
-            'Pick a folder, or arrive here from a result chip.')));
+          /* 提示里只能写真实存在的入口：右键菜单那一项叫「在空间工具里查看」。
+             以前这里写了「在应用内看」，但界面上根本没有这么一个按钮。 */
+          T('选一个文件夹；或者右键任意位置，选「在空间工具里查看」。',
+            'Pick a folder, or right-click any path and choose "Show in space tools".')));
         return;
       }
       if (!busy && !items.length) {
@@ -173,7 +189,7 @@
         row.appendChild(h('span', { class: 'dv-size num muted small' }, fmtBytes(it.size || 0)));
       }
       row.appendChild(h('span', { class: 'dv-time muted small num' },
-        it.mtime ? new Date(Number(it.mtime) * 1000).toLocaleString() : ''));
+        it.mtime ? fmtWhen(it.mtime) : ''));
 
       const openIt = () => {
         if (isDir) { setPath(path); return; }
@@ -186,13 +202,20 @@
         }
         Promise.resolve(API.openPath(path)).catch((e) => toast(errText(e), 'error'));
       };
-      row.addEventListener('dblclick', openIt);
+      /* 目录：单击就进去（资源管理器、浏览器都是这个手感），**不绑 dblclick** ——
+         双击会先触发一次 click（已进入新目录，列表重画），第二下落在新行上会莫名跳走。
+         文件反过来：单击只选中，双击才打开，因为打开是外部动作，不能误触。 */
+      if (isDir) {
+        row.addEventListener('click', openIt);
+      } else {
+        row.addEventListener('click', () => {
+          listBox.querySelectorAll('.dv-row[data-sel]').forEach((n) => n.removeAttribute('data-sel'));
+          row.setAttribute('data-sel', '');
+        });
+        row.addEventListener('dblclick', openIt);
+      }
       row.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); openIt(); }
-      });
-      row.addEventListener('click', () => {
-        listBox.querySelectorAll('.dv-row[data-sel]').forEach((n) => n.removeAttribute('data-sel'));
-        row.setAttribute('data-sel', '');
       });
       if (typeof attachMenu === 'function') {
         attachMenu(row, () => [
