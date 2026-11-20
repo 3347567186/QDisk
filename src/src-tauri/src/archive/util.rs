@@ -407,10 +407,11 @@ pub fn io_err(e: impl std::fmt::Display) -> String {
 
 /// 判一段字节像不像文本（前 8 KiB 采样）：含 NUL 即非文本，控制字符占比超 5% 即非文本。
 ///
-/// 当前唯一的调用方是 preview.rs 的 maybe_text，而那条分支还没接上（见 preview.rs
-/// 那段注释）。别把它当死代码删掉 —— 它是「未知扩展名但内容是文本」这条规格的
-/// 唯一实现，删了下次要接还得重写一遍判据。
-#[allow(dead_code)] // 有意保留的未接入功能，不是漏删
+/// 调用方是 preview.rs 的 maybe_text —— 未知扩展名的条目靠它决定走文本视图还是
+/// 十六进制视图（无扩展名的 LICENSE、Makefile、.gitignore、README 走前者）。
+///
+/// 判据取样的代价必须小：它跑在双击预览的同步路径上，用的是已经读进来的 64 KiB
+/// 头（HEX_LIMIT），不额外读盘。改判据要连着 preview.rs 那段注释一起看。
 pub fn is_probably_text(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return true;

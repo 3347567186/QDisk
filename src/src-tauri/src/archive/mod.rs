@@ -208,37 +208,72 @@ pub struct RarStatus {
     pub version: u32,
 }
 
+/// 压缩包后缀清单：**唯一来源**。
+///
+/// `detect()` 和「打开压缩包」对话框的过滤器都从这张表生成，前端
+/// `web/js/pages/archive.js` 的正则由 `tests::js_regex_covers_every_suffix` 盯着。
+///
+/// 为什么集中到一处：这份清单以前写了三遍（detect 的 if 链、`pick_archive` 的
+/// `add_filter`、前端正则）。漂移的表现不是报错，而是「对话框里挑不出 .cb7，
+/// 但把它拖进窗口又能打开」——这种不一致没有任何人会把当 bug 报上来，
+/// 所以我选择让它在编译期/测试期就无处可藏。
+///
+/// 顺序有意义：**长后缀必须排在它的短尾之前**（`.tar.gz` 在 `.gz` 前），
+/// 否则 `a.tar.gz` 会先命中 `.gz` 被当成单流压缩包。
+pub(crate) const ARCHIVE_SUFFIXES: &[(&str, Kind)] = &[
+    (".tar.gz", Kind::TarGz),
+    (".tar.bz2", Kind::TarBz2),
+    (".tar.xz", Kind::TarXz),
+    (".tgz", Kind::TarGz),
+    (".tbz2", Kind::TarBz2),
+    (".tbz", Kind::TarBz2),
+    (".txz", Kind::TarXz),
+    (".zip", Kind::Zip),
+    (".zipx", Kind::Zip),
+    (".cbz", Kind::Zip),
+    (".7z", Kind::SevenZ),
+    (".cb7", Kind::SevenZ),
+    (".rar", Kind::Rar),
+    (".cbr", Kind::Rar),
+    (".tar", Kind::Tar),
+    (".gz", Kind::Gz),
+    (".bz2", Kind::Bz2),
+    (".xz", Kind::Xz),
+];
+
+/// 按后缀名判类型。传进来的名字必须已经小写。
+pub(crate) fn kind_of_suffix(name: &str) -> Option<Kind> {
+    ARCHIVE_SUFFIXES
+        .iter()
+        .find(|(suffix, _)| name.ends_with(suffix))
+        .map(|(_, kind)| *kind)
+}
+
+/// 文件对话框过滤器用的裸扩展名。
+///
+/// 对话框只看最后一段，所以 `.tar.gz` 只需列一次 `gz`——这正是原来手写清单的
+/// 做法（里面有 gz 没有 tar.gz），这里保持同一语义，只是改成从表里推出来，
+/// 不再有第二份手抄。
+pub(crate) fn archive_ext_names() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (suffix, _) in ARCHIVE_SUFFIXES {
+        let last = suffix.rsplit('.').next().unwrap_or("");
+        if !last.is_empty() && !out.contains(&last) {
+            out.push(last);
+        }
+    }
+    out
+}
+
 pub fn detect(path: &Path) -> Result<Kind> {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    let kind = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        Some(Kind::TarGz)
-    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
-        Some(Kind::TarBz2)
-    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
-        Some(Kind::TarXz)
-    } else if name.ends_with(".zip") || name.ends_with(".zipx") || name.ends_with(".cbz") {
-        Some(Kind::Zip)
-    } else if name.ends_with(".7z") || name.ends_with(".cb7") {
-        Some(Kind::SevenZ)
-    } else if name.ends_with(".rar") || name.ends_with(".cbr") {
-        Some(Kind::Rar)
-    } else if name.ends_with(".tar") {
-        Some(Kind::Tar)
-    } else if name.ends_with(".gz") {
-        Some(Kind::Gz)
-    } else if name.ends_with(".bz2") {
-        Some(Kind::Bz2)
-    } else if name.ends_with(".xz") {
-        Some(Kind::Xz)
-    } else {
-        None
-    };
-    if let Some(k) = kind {
+    if let Some(k) = kind_of_suffix(&name) {
         return Ok(k);
     }
+    // 后缀靠不住时（被改过、或者干脆没有后缀）再看文件头。
     sniff(path)
 }
 
@@ -680,14 +715,10 @@ pub async fn archive_rar_install(
 #[tauri::command]
 pub async fn pick_archive() -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
+        // 过滤器从 ARCHIVE_SUFFIXES 推出来，不再是第二份手抄清单。
+        let names = archive_ext_names();
         rfd::FileDialog::new()
-            .add_filter(
-                "压缩包",
-                &[
-                    "zip", "zipx", "cbz", "7z", "cb7", "rar", "cbr", "tar", "tgz", "tbz",
-                    "tbz2", "txz", "gz", "bz2", "xz",
-                ],
-            )
+            .add_filter("压缩包", &names)
             .add_filter("所有文件", &["*"])
             .pick_file()
             .map(|p| p.display().to_string())
@@ -724,6 +755,96 @@ pub async fn pick_archive_save(default_name: Option<String>) -> Result<Option<St
     })
     .await
     .map_err(|e| format!("任务失败: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 长后缀必须先匹配：`a.tar.gz` 是 TarGz，不是 Gz。
+    ///
+    /// 这条不只是「表里顺序对不对」，它固定的是 ARCHIVE_SUFFIXES 的唯一硬约束。
+    /// 顺序错了不会有编译错误、不会有警告，只会让 tar.gz 被当成单流 gzip 打开，
+    /// 用户看到的是一堆乱码一样的 tar 头。
+    #[test]
+    fn longest_suffix_wins() {
+        assert_eq!(kind_of_suffix("a.tar.gz"), Some(Kind::TarGz));
+        assert_eq!(kind_of_suffix("a.tar.bz2"), Some(Kind::TarBz2));
+        assert_eq!(kind_of_suffix("a.tar.xz"), Some(Kind::TarXz));
+        assert_eq!(kind_of_suffix("a.gz"), Some(Kind::Gz));
+        assert_eq!(kind_of_suffix("a.bz2"), Some(Kind::Bz2));
+        assert_eq!(kind_of_suffix("a.xz"), Some(Kind::Xz));
+        assert_eq!(kind_of_suffix("a.tar"), Some(Kind::Tar));
+    }
+
+    /// 表里每一项都能被自己匹配到，没有写了却永远命不中的死条目。
+    #[test]
+    fn every_suffix_resolves_to_its_own_kind() {
+        for (suffix, kind) in ARCHIVE_SUFFIXES {
+            let name = format!("x{suffix}");
+            assert_eq!(
+                kind_of_suffix(&name),
+                Some(*kind),
+                "后缀 {suffix} 在表里，但匹配不到它自己"
+            );
+        }
+    }
+
+    /// 过滤器里的裸扩展名必须覆盖表中所有后缀的最后一段。
+    ///
+    /// 对话框只认最后一段，漏一个的表现是「这个格式能打开，但在选择框里挑不出来」。
+    #[test]
+    fn filter_names_cover_every_suffix() {
+        let names = archive_ext_names();
+        for (suffix, _) in ARCHIVE_SUFFIXES {
+            let last = suffix.rsplit('.').next().unwrap();
+            assert!(
+                names.contains(&last),
+                "后缀 {suffix} 的扩展名 {last} 没进对话框过滤器（当前：{names:?}）"
+            );
+        }
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "过滤器里有重复扩展名：{names:?}");
+    }
+
+    /// 前端那份正则是同一份知识的第三处副本，这条测试直接读 JS 源码比对。
+    ///
+    /// 为什么值得跨语言读文件做断言：漂移的表现不是崩溃，而是「拖进窗口能打开、
+    /// 但从页面上的判断走另一条路」——没人会把它当 bug 报上来，只会觉得软件偶尔
+    /// 怪一下。宁可让测试在 CI 里红，也不要这种静默不一致。
+    #[test]
+    fn js_regex_covers_every_suffix() {
+        let js_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("web")
+            .join("js")
+            .join("pages")
+            .join("archive.js");
+        let src = match fs::read_to_string(&js_path) {
+            Ok(s) => s,
+            // 读不到 web 目录时不该让构建失败，但也不能假装验证过了。
+            Err(e) => {
+                eprintln!("跳过 JS 正则比对（读不到 {}: {e}）", js_path.display());
+                return;
+            }
+        };
+        let line = src
+            .lines()
+            .find(|l| l.contains("const ARCHIVE_EXT"))
+            .expect("archive.js 里找不到 ARCHIVE_EXT 定义");
+        for (suffix, _) in ARCHIVE_SUFFIXES {
+            // 正则写成 `tar\.(?:gz|bz2|xz)` 这种分段形式，逐段核对字面量。
+            let parts: Vec<&str> = suffix.trim_start_matches('.').split('.').collect();
+            for part in &parts {
+                assert!(
+                    line.contains(part),
+                    "前端正则漏了 {part}（来自后缀 {suffix}）：{line}"
+                );
+            }
+        }
+    }
 }
 
 
