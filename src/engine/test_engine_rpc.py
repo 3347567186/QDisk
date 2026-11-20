@@ -620,7 +620,81 @@ class TestHotFreshness(EngineCase):
         self.assertIsInstance(rep["files"], int)
         self.assertGreaterEqual(rep["files"], 0)
 
-    def test_hot_refresh_is_safe_when_two_callers_race(self):
+    def test_hot_roots_stay_inside_indexed_scope(self):
+        """保鲜对象必须落在用户已索引的范围之内。
+
+        1.42.0/1.42.1 的真实缺陷：_hot_roots() 直接拿 default_index_roots()
+        （按 USERPROFILE 推桌面/下载/文档/图片/视频）当保鲜对象，配上
+        missing 里的 index_add —— 对一个只索引了 D:\\、E:\\ 的用户，等于
+        软件自己偷偷把 C:\\Users\\你\\Downloads 塞进索引：占用排行变了，
+        用户从没同意过。「刷新缓存」越权成了「改变配置」。
+
+        这条锁的是不变式本身，而不是某个实现细节：不管 _hot_roots 以后怎么
+        找，它返回的每个目录都必须落在某条已索引根之下。旧实现会被这条
+        立刻抓住（它返回的 C:\\Users\\... 谁都不在索引里）。
+        """
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_scope_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        home = os.path.join(tmp, "home")
+        outside = os.path.join(home, "Downloads")
+        os.makedirs(outside, exist_ok=True)
+        with open(os.path.join(outside, "outside.txt"), "wb") as f:
+            f.write(b"y" * 16)
+
+        owned = os.path.join(tmp, "owned")
+        inner = os.path.join(owned, "下载")
+        os.makedirs(inner, exist_ok=True)
+        with open(os.path.join(inner, "inside.txt"), "wb") as f:
+            f.write(b"x" * 16)
+
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        old_home = os.environ.get("USERPROFILE")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("USERPROFILE", old_home)
+            if old_home is not None else os.environ.pop("USERPROFILE", None))
+        os.environ["USERPROFILE"] = home
+
+        T.index_add([owned])
+        T.build_index(roots=[owned])
+        before = sorted(i.get("root") for i in T._ix_load())
+
+        hot = T._hot_roots()
+        owned_key = os.path.normcase(os.path.abspath(owned)).rstrip("\\") + "\\"
+        for p in hot:
+            k = os.path.normcase(os.path.abspath(p))
+            self.assertTrue(
+                (k + "\\").startswith(owned_key),
+                "保鲜对象 %r 不在已索引范围 %r 之内 —— 刷缓存不能顺带扩大"
+                "索引范围（全部：%r）" % (p, before, hot))
+
+        # 用户自己索引进来的「下载」子目录，必须被某个热目录覆盖到。
+        # 注意不能要求它本身出现在列表里：小索引根是整棵都热的（owned 直接
+        # 入选），这时「下载」是被 owned 覆盖的，没必要再单列一次。
+        def covered(path, roots):
+            k = os.path.normcase(os.path.abspath(path)).rstrip("\\") + "\\"
+            for r in roots:
+                rk = os.path.normcase(os.path.abspath(r)).rstrip("\\") + "\\"
+                if k == rk or k.startswith(rk):
+                    return True
+            return False
+
+        self.assertTrue(
+            covered(inner, hot),
+            "已索引范围里的「下载」子目录没有被任何热目录覆盖：%r" % (hot,))
+
+        # 保鲜动作不得改动索引清单
+        T.hot_refresh(force=True)
+        self.assertEqual(sorted(i.get("root") for i in T._ix_load()), before,
+                         "保鲜改动了索引清单")
+
+
         """后台节拍和「搜不到就补扫」会同时进来。
 
         两条路径都在同一个 *.db.new staging 上建库：一个在写、另一个把它删了
@@ -656,7 +730,12 @@ class TestHotFreshness(EngineCase):
                         if old_home is not None else os.environ.pop("USERPROFILE", None))
         os.environ["USERPROFILE"] = tmp
 
+        # 必须先真的建一次库。index_add 只是往清单里登记，.db 还不存在；
+        # 而 1.42.2 起 hot_refresh 不再调用 build_index（那样会把热目录注册
+        # 成新索引根），它对没有库的目录只能跳过 —— 不先建库，这条测试就
+        # 变成在测「空目录并发」，什么都读不出来。
         T.index_add([hot])
+        T.build_index(roots=[hot])
 
         # 直接断言互斥本身，而不是去赌时序。
         #

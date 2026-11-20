@@ -5370,6 +5370,79 @@ def _ix_drop_subtree(db, folder):
     return len(rows)
 
 
+def _ix_refresh_subtree(db, folder):
+    """把一个已经在索引里的目录子树，按磁盘现值重扫一遍（不新增索引根）。
+
+    为什么要单独有这么一个函数，而不是直接 build_index(roots=[folder])：
+    build_index 的 roots 分支会先 index_add(folder) 把它**登记成一个新的
+    索引根**。对「整盘 D:\\ 已索引」的用户，刷新 D:\\下载 时那样一来索引
+    清单里就多了一条 D:\\下载 —— 范围被悄悄改了，占用排行也跟着变，而
+    用户从没同意过。保鲜必须只改库里的行，不改清单。
+
+    做法：整棵走一遍（热目录都很小，实测 D:\\下载 6 个目录 30 个文件
+    22 毫秒、E:\\下载 216 个目录 2741 个文件 34 毫秒），把扫到的目录逐个
+    upsert；再把库里「在 folder 这个前缀下、但磁盘上已经没有」的目录行清掉
+    —— 只做前一半的话，删掉的文件夹会永远留在排行里。
+
+    返回 (目录数, 文件数)。
+    """
+    folder = os.path.abspath(str(folder or ""))
+    if not folder or not os.path.isdir(folder):
+        return 0, 0
+    prefix = folder.rstrip("\\/") + os.sep
+    seen_dirs = []
+    stack = [folder]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                entries = list(it)
+        except OSError:
+            # 权限不够 / 刚被删：跳过这一层，别让整棵刷新失败
+            continue
+        seen_dirs.append(cur)
+        try:
+            _ix_refresh_dir(db, cur)
+        except Exception:
+            pass
+        for e in entries:
+            try:
+                if not e.is_dir(follow_symlinks=False):
+                    continue
+                # 和建库时同一套跳过规则，否则刷新会把建库特意跳过的
+                # node_modules / .git 之类又塞回索引里
+                if e.name.lower() in INDEX_SKIP or e.name.startswith("$"):
+                    continue
+            except OSError:
+                continue
+            stack.append(e.path)
+    # 清掉磁盘上已经不存在的旧目录行
+    try:
+        rows = db.execute(
+            "SELECT path FROM dirs WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            (folder, _like_literal(prefix) + "%")).fetchall()
+    except Exception:
+        rows = []
+    seen_keys = {os.path.normcase(p) for p in seen_dirs}
+    for (path,) in rows:
+        if os.path.normcase(path) not in seen_keys:
+            try:
+                db.execute("DELETE FROM files WHERE dir_id IN"
+                           " (SELECT id FROM dirs WHERE path = ?)", (path,))
+                db.execute("DELETE FROM dirs WHERE path = ?", (path,))
+            except Exception:
+                continue
+    total = 0
+    try:
+        total = int(db.execute(
+            "SELECT COALESCE(SUM(n_files), 0) FROM dirs WHERE path = ? OR"
+            " path LIKE ? ESCAPE '\\'",
+            (folder, _like_literal(prefix) + "%")).fetchone()[0] or 0)
+    except Exception:
+        total = 0
+    return len(seen_dirs), total
+
+
 # 一次写穿最多刷多少个目录。整理 5000 个文件通常只涉及几十个目标目录，
 # 去重之后远小于这个数；真超过说明动的范围太大，直接重建索引更划算。
 _IX_TOUCH_MAX_DIRS = 4000
@@ -5761,23 +5834,108 @@ _HOT_MIN_GAP = 15.0
 # 到 3 万个文件就是两秒级，用户会感到「搜索卡了一下」。超过就交给后台。
 _HOT_INLINE_MAX = 30000
 
-def _hot_roots():
-    """要「保鲜」的热目录：桌面/文档/下载/图片/视频。
+# 名字像「新文件落脚点」的目录。用来在**已索引的根底下**找下载夹/桌面。
+_DOWNLOADISH = ("下载", "downloads", "download", "dl", "desktop", "桌面", "迅雷下载")
 
-    跳过已经被更大索引根覆盖的那些 —— 用户要是把整个 D: 索引了，热目录
-    自然含在里面，单独再建一份只会重复占地方。
+# 小索引根本身就算「热」：文件数在这个量级以下，整棵刷新也就几百毫秒，
+# 没必要再去猜它的哪个子目录是热点。实测整盘 D:\ 有 59.5 万文件、E:\ 82.2 万，
+# 远超这个线，不会被误当成热目录。
+_HOT_SMALL_ROOT = 20000
+
+
+def _hot_roots():
+    """要「保鲜」的目录 = 用户当前索引范围**之内**、新文件最可能落下的那几个。
+
+    这里有一条必须讲清楚的边界：保鲜只能刷新「已经在索引范围内的东西」，
+    绝不能顺手把范围扩大。旧版（1.42.0/1.42.1）把 default_index_roots()
+    直接当成保鲜对象，还在 missing 里 index_add 进去 —— 对一个只索引了
+    D:\\ 和 E:\\ 的用户，那等于软件自己偷偷往索引里塞了 C:\\Users\\你\\Downloads：
+    索引范围变了，占用排行榜也跟着变，而用户从没同意过。这是「保鲜」越权
+    成了「扩张」，方向错了。
+
+    正确的找法是反过来：在用户已经索引的根下面，找名字像下载/桌面的直接
+    子目录。用户把盘索引了，就扫 D:\\下载、E:\\下载；只索引了用户目录，
+    就扫那边的下载桌面。两种情况都只碰范围内。
+
+    ── 为什么不去掉「找下载夹」这一步、直接靠 mtime 差异判断哪些目录变了 ──
+    实测过：D:\\ 上 75,932 个目录逐个 os.stat 要 12,029 毫秒，完全不能放进
+    查询路径。浅层（深度 ≤2）只有 622 个、50 毫秒，可信噪比太低（新文件
+    多半落在更深处）。而按名字定位下载夹几乎不要钱：D:\\ 顶层 21 个条目、
+    E:\\ 顶层 19 个条目，两次 scandir 就找完了。
     """
-    covered = []
-    for item in _ix_load():
-        r = item.get("root") or ""
+    items = _ix_load()
+    roots = []
+    for it in items:
+        r = str(it.get("root") or "")
         if r and os.path.isdir(r):
-            covered.append(os.path.normcase(os.path.abspath(r)).rstrip("\\") + "\\")
+            roots.append(os.path.abspath(r))
+    if not roots:
+        return []
     out = []
-    for p in default_index_roots():
-        key = os.path.normcase(os.path.abspath(p)).rstrip("\\") + "\\"
-        if any(key.startswith(c) and key != c for c in covered):
-            continue
+    seen = set()
+
+    def add(p):
+        try:
+            k = os.path.normcase(os.path.abspath(p))
+        except (ValueError, OSError):
+            return
+        if k in seen:
+            return
+        if not os.path.isdir(p):
+            return
+        seen.add(k)
         out.append(p)
+
+    # 一、小索引根：整棵就是热的（用户自己加的某个小文件夹、测试目录）。
+    for it in items:
+        r = str(it.get("root") or "")
+        if not r:
+            continue
+        try:
+            if int(it.get("files") or 0) <= _HOT_SMALL_ROOT:
+                add(r)
+        except (TypeError, ValueError):
+            continue
+
+    # 二、大索引根（整盘）：在它下面找「下载 / 桌面」这类新文件落脚点。
+    for it in items:
+        r = str(it.get("root") or "")
+        if not r:
+            continue
+        try:
+            big = int(it.get("files") or 0) > _HOT_SMALL_ROOT
+        except (TypeError, ValueError):
+            big = False
+        if not big:
+            continue
+        try:
+            with os.scandir(os.path.abspath(r)) as scan:
+                for e in scan:
+                    try:
+                        if not e.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if e.name.lower() in _DOWNLOADISH:
+                        add(e.path)
+        except OSError:
+            continue
+
+    # 三、默认索引根（桌面/文档/下载/图片/视频）如果本来就落在某条索引范围
+    # 里，它们自己就是落脚点，直接收进来（不新增范围，只是确认它在范围里）。
+    for p in default_index_roots():
+        try:
+            kp = os.path.normcase(os.path.abspath(p))
+        except (ValueError, OSError):
+            continue
+        for r in roots:
+            try:
+                rk = os.path.normcase(os.path.abspath(r)).rstrip("\\/")
+            except (ValueError, OSError):
+                continue
+            if kp == rk or kp.startswith(rk + os.sep):
+                add(p)
+                break
     return out
 
 
@@ -5832,14 +5990,49 @@ def _hot_refresh_locked(force):
                 return {"roots": roots, "files": 0, "elapsed_ms": 0,
                         "skipped": "热目录有 %d 个文件，超过同步重扫上限，"
                                    "交给后台抽查" % known}
-        missing = [p for p in roots
-                   if os.path.normcase(os.path.abspath(p)) not in known_roots]
-        if missing:
-            index_add(missing)
-        files, errs = build_index(roots=roots)
+        # 只刷新「已经在索引范围内」的目录，绝不 index_add 新根。
+        # 1.42.0/1.42.1 在这里对 missing 调了 index_add —— 保鲜顺手把范围
+        # 扩了：用户只索引了 D:\，却多出一份 C:\Users\...\Downloads，占用
+        # 排行也跟着变。那是越权，不是保鲜。
+        #
+        # 也不能用 build_index(roots=...)：它的 roots 分支同样先 index_add，
+        # 会把 D:\下载 登记成第二条索引根。这里逐个目录 upsert 库里的行，
+        # 清单一个字都不动。
+        roots = [p for p in roots
+                 if _ix_items_for_path(p)]
+        if not roots:
+            return {"roots": [], "files": 0, "elapsed_ms": 0,
+                    "skipped": "热目录还没进过索引，等一次正常建库"}
+        total_dirs = 0
+        total_files = 0
+        errs = []
+        for p in roots:
+            owners = _ix_items_for_path(p)
+            if not owners:
+                continue
+            item = owners[0][0]
+            db = None
+            try:
+                db = _index_open(_ix_db_abspath(item))
+                if db is None or not _index_has_totals(db):
+                    # 老库没有 size_sum：等它重建时自然升级
+                    continue
+                with db:
+                    d, f = _ix_refresh_subtree(db, p)
+                total_dirs += d
+                total_files += f
+            except Exception as exc:
+                errs.append((p, str(exc)))
+            finally:
+                try:
+                    if db is not None:
+                        db.close()
+                except Exception:
+                    pass
         # 时间戳记在这里而不是调用方：查询补扫和后台节拍走的是同一个函数。
         _INDEX_WATCH["hot"] = time.time()
-        return {"roots": roots, "files": files, "errs": list(errs or []),
+        return {"roots": roots, "files": total_files, "dirs": total_dirs,
+                "errs": errs,
                 "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
     except Exception as exc:
         return {"roots": roots, "files": 0, "elapsed_ms": 0, "error": str(exc)}
