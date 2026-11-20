@@ -65,7 +65,11 @@
     logClear: () => invoke('log_clear'),
     logLine: (level, msg) => invoke('log_line', { level, msg }),
     /* AI 助手：列目录 / 读文件 / 磁盘根 / 唯一网络出口 / 会话落盘 */
-    listDir: (dir, limit) => invoke('list_dir', { dir, limit: limit || null }),
+    listDir: (dir, limit, offset) => invoke('list_dir', {
+      dir,
+      limit: limit || null,
+      offset: offset || null
+    }),
     fileRead: (path, offset, maxChars) => invoke('agent_read', {
       path,
       offset: offset || null,

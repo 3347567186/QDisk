@@ -963,14 +963,22 @@
 
     function loadDir() {
       return resolveDir().then(function (d) {
-        if (!d) return { dir: '', items: [] };
-        if (dirCacheKey === d && dirCache) return { dir: d, items: dirCache };
+        if (!d) return { dir: '', items: [], total: 0, truncated: false };
+        if (dirCacheKey === d && dirCache) return dirCache;
+        /* listDir 一页最多 200 条，超出的部分后端只在 total 里体现。
+           以前这里把 truncated/total 全丢掉，于是「@ 里搜不到某个文件」
+           看起来像功能坏了，其实是那个目录里第 201 项以后根本没读进来。 */
         return Promise.resolve(API.listDir(d)).then(function (res) {
           const items = (res && (res.items || res.entries)) || [];
-          dirCache = items;
+          dirCache = {
+            dir: d,
+            items: items,
+            total: (res && Number(res.total)) || items.length,
+            truncated: !!(res && res.truncated)
+          };
           dirCacheKey = d;
-          return { dir: d, items: items };
-        }).catch(function () { return { dir: d, items: [] }; });
+          return dirCache;
+        }).catch(function () { return { dir: d, items: [], total: 0, truncated: false }; });
       });
     }
 
@@ -1020,6 +1028,13 @@
           return b;
         });
         field.appendChild(box);
+        /* 只读了前 200 项时必须说一声：否则用户搜不到某个明明存在的文件，
+           会以为 @ 功能坏了。这行不参与键盘上下选择，只是提示。 */
+        if (res.truncated) {
+          box.appendChild(el('div', 'dac-mention-hint',
+            T('这个目录共 ' + res.total + ' 项，@ 只列出前 ' + res.items.length + ' 项',
+              res.total + ' entries in this folder — @ lists the first ' + res.items.length)));
+        }
         mentionState = { box: box, rows: rows, token: token, index: 0 };
         input.setAttribute('aria-expanded', 'true');
       });

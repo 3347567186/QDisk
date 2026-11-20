@@ -22,6 +22,12 @@
     current.panel.classList.remove('in');
     const c = current;
     current = null;
+    /* 轮询必须跟着抽屉一起停：抽屉关了没人看，再每 700ms 查一次
+       只是白跑；而且回调里拿 current.chat 判断归属，关掉后也点不动。 */
+    if (c.busyTimer) {
+      clearInterval(c.busyTimer);
+      c.busyTimer = 0;
+    }
     setTimeout(() => {
       /* 先把「这个抽屉还占着界面吗」判掉，再动 DOM。
          180ms 的退场动画里完全可能已经发生了两件事：
@@ -141,17 +147,32 @@
     let busyStamp = '';
     function renderBusyBar(snap) {
       const items = (snap && snap.items) || [];
-      /* 通知来得很密（开跑 / 收尾 / 出队 / 切会话各一次），
-         内容没变就别重建 DOM：正在点的那个按钮会被换掉，光标也跟着丢。 */
-      const stamp = items.map((it) => it.id + ':' + (it.running ? 'r' : '') + it.queued + (it.visible ? 'v' : '')).join('|');
-      if (stamp === busyStamp) return;
-      busyStamp = stamp;
-      busyBar.innerHTML = '';
+      /* 先判「该不该显示」，再判「要不要重画」。
+         这两件事以前混在同一个指纹早退里：空快照命中指纹就 return，
+         于是「该藏起来」靠初始的 hidden 属性兜住，而「该显示」完全
+         依赖那条推送能不能到 —— 推送一断，条就永远不出现。
+         现在显示与否只看快照里有没有在跑的条目，重画才看指纹去重
+         （通知很密，正在点的那个按钮不能被换掉）。 */
       if (!items.length) {
         busyBar.hidden = true;
+        if (busyStamp !== '') {
+          busyStamp = '';
+          busyBar.innerHTML = '';
+        }
         return;
       }
+      const stamp = items.map((it) => it.id + ':' + (it.running ? 'r' : '') + it.queued + (it.visible ? 'v' : '')).join('|');
+      if (stamp === busyStamp && !busyBar.hidden) return;
+      busyStamp = stamp;
       busyBar.hidden = false;
+      busyBar.innerHTML = '';
+      /* 标题行：跟整页左栏的 .ai-busy-head 同构。
+         加它不只是好看 —— 只画一行标题的按钮，用户看不出那是「正在运行」，
+         会以为是个普通的历史条目。 */
+      busyBar.appendChild(h('div', { class: 'ai-dw-busy-head' },
+        h('span', { class: 'ai-busy-dot' }),
+        h('span', { text: T('正在运行', 'Running') })
+      ));
       items.forEach((it) => {
         const label = it.queued > 0
           ? T('+' + it.queued + ' 排队', '+' + it.queued + ' queued')
@@ -179,7 +200,6 @@
             }).catch(() => {});
           }
         },
-          h('span', { class: 'ai-busy-dot' }),
           h('span', { class: 'ai-dw-busy-title' }, it.title),
           label ? h('span', { class: 'ai-dw-busy-tag' }, label) : null
         ));
@@ -195,12 +215,24 @@
       onBusy: (snap) => { renderBusyBar(snap); },
       onSessions: () => { histRows = null; if (histOpen) setHist(true); }
     });
-    current = { mask, panel, body, chat };
+    current = { mask, panel, body, chat, busyTimer: 0 };
     /* 主动拉一次：attach 里那次补发发生在 open() 把 current 赋上之前，
        而 renderBusyBar 的点击回调用 current.chat 判断「现场在不在」，
        那一次通知里点按钮会直接 return。这里在 current 就位后再拉一遍，
        画出的行才点得动。没有在跑的会话时 renderBusyBar 自己会藏起来。 */
-    try { if (chat.activity) renderBusyBar(chat.activity()); } catch (e) { /* 拉不到就不画 */ }
+    function pullBusy() {
+      try {
+        if (chat && chat.activity) renderBusyBar(chat.activity());
+      } catch (e) { /* 拉不到就沿用上一次画出来的结果 */ }
+    }
+    pullBusy();
+    /* 拉取式兜底：抽屉开着的时候每 700ms 自己查一次「谁在跑」。
+       原来只靠 chatui 的推送（notifyBusy → onBusy），那条链路一旦在某处
+       断掉（订阅被后一次 attach 整体替换、回调抛错被 try 吞掉），
+       表现就是「明明在跑，抽屉顶上什么都没有」——而这条症状在真机上
+       反复出现又定位不到断点。定时拉一次不依赖任何推送，代价是
+       每 700ms 一次纯内存遍历（activity() 只读 Map，不碰磁盘）。 */
+    if (current) current.busyTimer = setInterval(pullBusy, 700);
 
     /* ---- 历史列表：打开抽屉才读，读完缓存到下次打开 ---- */
 
@@ -313,7 +345,16 @@
       chat.focus();
     });
 
-    chat.newSession();
+    /* 这里原来是 newSession()：每开一次抽屉就新建一个空会话，
+       于是「关掉再打开」等于把刚才那一轮对话丢掉，抽屉里永远空空如也。
+       用户说的「侧边对话栏没同步」有一半就是这个。
+       改成 boot()：整页与抽屉共用同一个现场，boot 内部有 booted 闸门，
+       重复调用不会重放当前会话；第一次打开时它会接上次的会话。
+       真要开新的，头部「新对话」按钮还在。 */
+    try {
+      const r = chat.boot();
+      if (r && typeof r.catch === 'function') r.catch(() => { /* 起不来也别拦住打开 */ });
+    } catch (e) { /* 同上 */ }
     if (options.question) {
       setTimeout(() => chat.ask(options.question), 120);
     } else {

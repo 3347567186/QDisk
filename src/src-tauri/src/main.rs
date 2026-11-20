@@ -1429,8 +1429,13 @@ fn ai_store(op: String, name: Option<String>, content: Option<String>) -> Result
 }
 
 /// 只读列目录：目录在前，按名字排序；给 agent 的「这个目录里有什么」。
+///
+/// `offset` 是分页起点（默认 0）。加它是因为原来的实现把「目录」截满 cap 之后
+/// 才轮到文件：一个装了 300 个子目录的文件夹，文件永远显示不出来，而且界面
+/// 只能看到 `truncated: true` 却没地方翻页 —— 用户会以为「里面就这些」。
+/// 现在先拼成一条「目录在前、文件在后」的序列，再按 offset/cap 切，能一页页翻完。
 #[tauri::command(async)]
-fn list_dir(dir: String, limit: Option<usize>) -> Result<Value, String> {
+fn list_dir(dir: String, limit: Option<usize>, offset: Option<usize>) -> Result<Value, String> {
     let p = PathBuf::from(dir.trim());
     if p.as_os_str().is_empty() {
         return Err("缺少目录".into());
@@ -1442,9 +1447,9 @@ fn list_dir(dir: String, limit: Option<usize>) -> Result<Value, String> {
         return Err(format!("这不是文件夹：{}", p.display()));
     }
     let cap = limit.unwrap_or(100).clamp(1, 200);
+    let skip = offset.unwrap_or(0);
     let mut files: Vec<Value> = Vec::new();
     let mut dirs: Vec<Value> = Vec::new();
-    let mut total = 0usize;
     let rd = std::fs::read_dir(&p).map_err(|e| format!("无法读取目录：{e}"))?;
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().to_string();
@@ -1452,7 +1457,6 @@ fn list_dir(dir: String, limit: Option<usize>) -> Result<Value, String> {
             Ok(m) => m,
             Err(_) => continue,
         };
-        total += 1;
         let is_dir = meta.is_dir();
         let ext = if is_dir {
             String::new()
@@ -1490,17 +1494,21 @@ fn list_dir(dir: String, limit: Option<usize>) -> Result<Value, String> {
     };
     dirs.sort_by(by_name);
     files.sort_by(by_name);
-    let shown = total.min(cap);
-    dirs.truncate(cap);
-    let left = cap.saturating_sub(dirs.len());
-    files.truncate(left);
-    let mut items = dirs;
-    items.extend(files);
+    let dir_count = dirs.len();
+    let file_count = files.len();
+    // 目录在前、文件在后拼成一条序列，分页只在序列上切一段。
+    let all: Vec<Value> = dirs.into_iter().chain(files.into_iter()).collect();
+    let items: Vec<Value> = all.iter().skip(skip).take(cap).cloned().collect();
+    let shown = items.len();
     Ok(json!({
         "dir": p.to_string_lossy(),
-        "total": total,
+        "total": dir_count + file_count,
+        "offset": skip,
         "shown": shown,
-        "truncated": total > shown,
+        "dirs": dir_count,
+        "files": file_count,
+        // 只在「后面还有」时为真：翻到最后一页它会变 false，界面据此收掉「加载更多」。
+        "truncated": skip + shown < dir_count + file_count,
         "items": items,
     }))
 }

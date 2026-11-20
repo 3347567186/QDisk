@@ -13,6 +13,80 @@
   /* ---------------- 纯工具 ---------------- */
   const errText = UI.errText;
 
+  /* 分类规则来自引擎的 rules.explain，不是前端猜的。
+     拉一次缓存起来给所有分组共用 —— 每个分组都去问一遍会把引擎打爆，
+     而这份规则在一次会话里不会变。 */
+  let catRules = null;        // { byCat: { 分类名: [扩展名] }, fallback: '15_其他' }
+  let catRulesPending = null;
+
+  function loadCatRules() {
+    if (catRules) return Promise.resolve(catRules);
+    if (catRulesPending) return catRulesPending;
+    catRulesPending = Promise.resolve()
+      .then(() => window.API.engine('rules.explain', {}))
+      .then((res) => {
+        const byCat = {};
+        ((res && res.categories) || []).forEach((c) => { byCat[c.cat] = c.exts || []; });
+        catRules = { byCat: byCat, fallback: (res && res.fallback) || '' };
+        return catRules;
+      })
+      .catch(() => {
+        /* 拿不到就退化成「不显示扩展名清单」，页面其它部分照常工作 */
+        catRules = { byCat: {}, fallback: '' };
+        return catRules;
+      });
+    return catRulesPending;
+  }
+
+  function extOfName(name) {
+    const s = String(name || '');
+    const i = s.lastIndexOf('.');
+    return i > 0 ? s.slice(i + 1).toLowerCase() : '';
+  }
+
+  /* 分组标题下面那行：这一组是按什么收进来的。
+     兜底分组要额外说清楚 —— 用户最常问「为什么这些没被认出来」，
+     答案就是它们的扩展名没登记在规则里，必须直接列出来，
+     否则用户永远不知道是「规则没覆盖」还是「程序坏了」。 */
+  function fillGroupRule(line, g) {
+    if (!line || !g) return;
+    line.replaceChildren();
+    const fallback = (catRules && catRules.fallback) || '';
+    const isFallback = !!fallback && g.cat === fallback;
+
+    const mine = [];
+    const seen = new Set();
+    (g.files || []).forEach((f) => {
+      const e = extOfName(f.name);
+      if (!e || seen.has(e)) return;
+      seen.add(e);
+      mine.push(e);
+    });
+    mine.sort();
+
+    if (isFallback) {
+      line.appendChild(h('span', { class: 'badge warn' }, T('兜底分类', 'Fallback')));
+      const names = mine.slice(0, 24).map((e) => '.' + e).join(' ');
+      line.appendChild(h('span', { class: 'small muted' },
+        T('这些扩展名没有登记在分类规则里', 'These extensions are not registered') +
+        '：' + (mine.length ? names + (mine.length > 24 ? ' …' : '') : T('（无扩展名）', '(no extension)'))));
+      return;
+    }
+
+    const rule = (catRules && catRules.byCat[g.cat]) || [];
+    if (rule.length) {
+      const head = rule.slice(0, 10).map((e) => '.' + e).join(' ');
+      const zh = rule.length > 10
+        ? '收 ' + head + ' 等 ' + rule.length + ' 种扩展名'
+        : '收 ' + head + ' 这些扩展名';
+      const en = head + (rule.length > 10 ? ' +' + rule.length + ' more' : '');
+      line.appendChild(h('span', { class: 'small muted' }, T(zh, en)));
+    } else {
+      line.appendChild(h('span', { class: 'small muted' },
+        T('按内容识别分到这一组，不是按扩展名', 'Matched by content, not by extension')));
+    }
+  }
+
   function clampAge(v) {
     let n = Number(v);
     if (!isFinite(n)) n = 0;
@@ -456,7 +530,12 @@
     const previewHint = h('span', { class: 'hint ellipsis', style: { maxWidth: '52%' } }, '');
     const results = h('div', { class: 'stack' });
 
-    const previewBody = h('div', { class: 'preview-body' }, results);
+    /* 整理跑完之后文件去哪了 —— 这是用户最主要的困惑。
+       这一条放在预览卡顶部、results 之外，所以 doScan 重扫把预览清空时
+       它还在，用户随时能点回结果目录。 */
+    const lastRunBar = h('div', { class: 'last-run', hidden: true });
+
+    const previewBody = h('div', { class: 'preview-body' }, lastRunBar, results);
     const previewCard = card(
       h('div', { class: 'card-title' },
         h('h2', null, T('扫描预览', 'Scan preview')),
@@ -472,6 +551,48 @@
     root.appendChild(optsSection);
     root.appendChild(previewCard);
     root.classList.add('page-fill');
+
+    /* 整理结果条：告诉用户搬了多少、搬进了哪几个分类文件夹，
+       再给一个「在应用内看」的入口（不再只能跳系统资源管理器）。 */
+    function showLastRun(info) {
+      lastRunBar.replaceChildren();
+      const moved = Number(info && info.moved) || 0;
+      if (!moved) {
+        lastRunBar.hidden = true;
+        return;
+      }
+      const folder = String((info && info.folder) || state.folder || '');
+      const cats = (info && info.cats) || [];
+      const catText = cats.length
+        ? cats.slice(0, 3).map((c) => c.cat + (c.n ? '（' + c.n + '）' : '')).join('、') +
+          (cats.length > 3 ? T(' 等 ' + cats.length + ' 个分类', ' +' + cats.length) : '')
+        : '';
+      lastRunBar.appendChild(h('span', { class: 'last-run-text' },
+        T('已整理 ' + fmtCount(moved) + ' 个文件',
+          'Moved ' + fmtCount(moved) + ' file(s)') +
+        (catText ? T('，进了 ', ' into ') + catText : '') +
+        T('（' + ((info && info.when) || '') + '）', (info && info.when) ? ' (' + info.when + ')' : '')));
+      lastRunBar.appendChild(h('span', { class: 'spacer' }));
+      lastRunBar.appendChild(h('button', {
+        class: 'btn sm',
+        type: 'button',
+        onclick: () => {
+          if (!folder) return;
+          /* 走「空间工具」的目录浏览，在应用内一层层看，不跳资源管理器 */
+          try {
+            window.App.jump('tools', { dir: folder, paths: [folder], action: 'browse' });
+          } catch (e) {
+            if (window.navigate) window.navigate('tools');
+          }
+        }
+      }, T('去看结果', 'See result')));
+      lastRunBar.appendChild(h('button', {
+        class: 'btn ghost sm',
+        type: 'button',
+        onclick: () => { doUndo(); }
+      }, T('撤销这次', 'Undo')));
+      lastRunBar.hidden = false;
+    }
 
     /* ---------------- 顶部动作（撤销 / 导出 / 打开目录） ---------------- */
     const btnUndo = topBtn('撤销上次整理', 'Undo last tidy', 'undo', doUndo);
@@ -994,8 +1115,20 @@
       );
 
       const body = h('div', { class: 'group-body' });
+      /* 收起状态下也要能看出「这一组凭什么收这些东西」，
+         所以说明行放在标题和内容之间、且不受收起影响。 */
+      const ruleLine = h('div', { class: 'group-rule' });
       el.appendChild(head);
+      el.appendChild(ruleLine);
       el.appendChild(body);
+      fillGroupRule(ruleLine, g);
+      /* 规则是异步拉的；先画标题，等规则回来再把这一行补上。
+         不用 await 拦住整个列表 —— 扫描结果优先。 */
+      if (!catRules) {
+        loadCatRules().then(() => {
+          if (ruleLine.isConnected) fillGroupRule(ruleLine, g);
+        });
+      }
 
       let built = false;
       let tbody = null;
@@ -1175,6 +1308,12 @@
       if (!yes) return;
 
       setBtnBusy(btnOrganize, true, '整理中…', 'Tidying…');
+      /* 搬之前先把「要搬进哪几个分类、各多少个」记下来 ——
+         搬完 doScan 会把 state.groups 重建，那时候就查不到了。 */
+      const runCats = Array.from(state.groups.values())
+        .map((g) => ({ cat: g.cat, n: (g.files || []).length }))
+        .sort((a, b) => b.n - a.n);
+      const runFolder = String(state.folder || '');
       let err = null;
       const res = await busy(async () => {
         try {
@@ -1233,6 +1372,9 @@
         state.sources = merged;
         renderSources();
       }
+      /* 这一条要在 doScan 之前画：重扫完预览会变成空的，
+         用户如果只看到「没有需要整理的文件」，就不知道东西去哪了。 */
+      showLastRun({ moved: moved, folder: runFolder, cats: runCats, when: fmtTime(Math.floor(Date.now() / 1000)) });
       await doScan(true);
     }
 
@@ -1270,6 +1412,10 @@
       if (restored) {
         toast(T('已恢复 ' + fmtCount(restored) + ' 个文件',
           'Restored ' + fmtCount(restored) + ' file(s)'), 'ok');
+        /* 撤销成功就说明「上一次整理的结果」已经不存在了，
+           结果条留着会把用户指向一个已经空了的目录。 */
+        lastRunBar.hidden = true;
+        lastRunBar.replaceChildren();
       } else if (failed.length) {
         // 业务提示（无整理记录）会以 name 为空的失败项返回
         const hint = failed.find((f) => !f.name);

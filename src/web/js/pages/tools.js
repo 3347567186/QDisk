@@ -192,7 +192,26 @@
     );
 
     const jumpBox = h('div', { class: 'ai-jump', hidden: true });
+
+    /* ---------------- 文件夹浏览（应用内） ----------------
+       整理跑完会把文件移进 01_安装包程序 这类分类子文件夹，而以前应用里
+       没有任何地方能看见它们 —— 结果位置的入口只会拉起系统资源管理器。
+       这一块就是那个缺口：只读、能一层层进去、能翻页、能被跳转命中。 */
+    const dvHost = h('div', { class: 'stack' });
+    const browseSection = section(
+      '文件夹浏览',
+      dvHost,
+      { open: true, hint: '在应用内一层层看，不用跳资源管理器' }
+    );
+    let dv = null;
+    function ensureDv() {
+      if (dv || !window.DirView) return dv;
+      dv = window.DirView.create(dvHost, {});
+      return dv;
+    }
+
     root.appendChild(jumpBox);
+    root.appendChild(browseSection);
     root.appendChild(bigSection);
     root.appendChild(emptySection);
     setActions();
@@ -304,6 +323,20 @@
       const dirs = paths.filter((p) => !isFile(p));
       const dir = dirs[0] || parentOf(files[0]) || '';
       paintJump(paths, String((data && data.why) || ''), dir);
+
+      /* 目录浏览：整理页的「去看结果」和右键「在应用内看」都走这里。
+         要先开这一块再 setPath —— 藏在收起的 section 里 setPath 也能跑，
+         但用户看不见，等于没发生。 */
+      if (want === 'browse' || (data && data.dir)) {
+        openSection(browseSection);
+        const view = ensureDv();
+        if (view) {
+          const start = stripSlash(String((data && data.dir) || dir || ''));
+          if (start) view.showPath(start, paths[0] || '');
+        }
+        if (browseSection.scrollIntoView) browseSection.scrollIntoView({ block: 'nearest' });
+        return;
+      }
 
       /* 空文件夹这一类去空目录那一块；其余都走大文件排行 */
       if (want === 'delete' && dirs.length && !files.length) {
@@ -680,6 +713,8 @@
     return function unmount() {
       /* 页面卸载后跳转接收器必须失效，否则 AI 的跳转会把结果写进已经拆掉的 DOM */
       liveJump = null;
+      /* 目录浏览持有 DOM 与行索引，不拆会随切页次数累积 */
+      if (dv) { try { dv.destroy(); } catch (e) { /* 拆不掉也让页面先走 */ } dv = null; }
     };
   }
 

@@ -865,6 +865,38 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .group.open .group-head .caret { transform: rotate(90deg); }
 .group-body { display: none; }
 .group.open .group-body { display: block; padding-bottom: var(--space-2); }
+/* 分组说明行：收起也显示。左边距对齐标题文字（caret 14 + gap + 勾选框），
+   让它看起来是标题的附属说明，而不是另一行内容。 */
+.group-rule {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 8px 6px 46px;
+}
+.group-rule:empty { display: none; }
+.group-rule .badge { flex: 0 0 auto; }
+
+/* 整理完成后的结果条：告诉用户东西搬去了哪几个分类文件夹。
+   放在预览卡顶部、扫描结果之外，重扫清空预览时仍然留着。 */
+.last-run {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.last-run[hidden] { display: none; }
+.last-run-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
 
 .list { display: flex; flex-direction: column; }
 .list-item {
@@ -3753,6 +3785,13 @@ html[data-theme="dark"] .ai-tnav-pop {
   background: var(--surface);
 }
 .ai-dw-busy[hidden] { display: none; }
+/* 标题行：跟整页左栏的 .ai-busy-head 同口径，只把左边距收到 5px
+   （抽屉这条自己的 padding 已经是 5px，再按整页的 6px 会顶到描边上）。 */
+.ai-dw-busy-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 5px 3px;
+  font-size: var(--fs-tiny); color: var(--text-3); letter-spacing: .04em;
+}
 .ai-dw-busy-row {
   display: flex; align-items: baseline; gap: 6px; width: 100%;
   padding: 3px 5px; border: 0; border-radius: var(--radius-sm);
