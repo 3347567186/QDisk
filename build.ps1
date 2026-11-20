@@ -1,4 +1,4 @@
-<#
+﻿<#
   整理助手 构建脚本
   ------------------------------------------------------------------
   .\build.ps1                           全量：重建外壳 + 打安装包 + 打便携包（默认）
@@ -291,6 +291,14 @@ function Invoke-TidyTestGate {
   }
   $failed = @()
 
+  # 临时目录固定在 D:\Builds\temp\sub1\sub2（纯 ASCII 且避开 AppData 与中文路径）
+  $testTemp = 'D:\Builds\temp\sub1\sub2'
+  if (-not (Test-Path $testTemp)) { New-Item -ItemType Directory -Path $testTemp -Force | Out-Null }
+  $prevEnvTemp = $env:TEMP
+  $prevEnvTmp = $env:TMP
+  $env:TEMP = $testTemp
+  $env:TMP = $testTemp
+
   $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
   Push-Location $engineSrc
   try {
@@ -307,8 +315,8 @@ function Invoke-TidyTestGate {
     }
   } finally {
     Pop-Location
-    C:\Users\十二\AppData\Local\Temp = 
-    C:\Users\十二\AppData\Local\Temp = 
+    $env:TEMP = $prevEnvTemp
+    $env:TMP = $prevEnvTmp
   }
 
   # 前端自测：6 个 *.selftest.mjs 各自 process.exit(非0) 表示失败
