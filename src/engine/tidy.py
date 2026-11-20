@@ -5591,13 +5591,27 @@ def _index_build_one(item, walker, progress):
 
     try:
         os.replace(staging, target)
-    except OSError:
-        for suffix in ("", "-journal", "-wal", "-shm"):
+    except OSError as exc:
+        # Windows 上 os.replace 到「已经被人打开的目标文件」会失败：WinError 5
+        # 拒绝访问。实测确认过：另一个连接还开着 target.db 时，replace 抛
+        # PermissionError。
+        #
+        # 读的那一头通常只持有几十毫秒（一次查询、一次抽查），所以先重试几次
+        # 再认输 —— 让一次瞬时读取把整次建库判死，是最不合算的失败。
+        for delay in (0.05, 0.1, 0.2, 0.4, 0.8, 1.2):
+            time.sleep(delay)
             try:
-                os.remove(staging + suffix)
-            except OSError:
-                pass
-        raise RuntimeError("索引写入失败")
+                os.replace(staging, target)
+                break
+            except OSError as exc2:
+                exc = exc2
+        else:
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                try:
+                    os.remove(staging + suffix)
+                except OSError:
+                    pass
+            raise RuntimeError("索引写入失败：目标库被占用（%s）" % (exc,))
 
     try:
         size_bytes = os.path.getsize(target)
@@ -5621,7 +5635,18 @@ def build_index(roots=None, ids=None, progress=None, full=False):
     大部分时间花在遍历上（实测占 92%，写库只占 8%），所以遍历交给 Rust 的
     indexwalk.exe（多线程枚举，实测 52 万文件 22.9s → 2.6s），找不到就回退
     Python 的 os.scandir 实现。full 参数保留只为兼容调用方。
+
+    整段拿 _HOT_LOCK：它和 hot_refresh 写的是同一批 *.db staging 文件。后台
+    watchdog 线程可能在做 hot_refresh（只刷子树），主线程同时在跑这里的全量
+    重建 —— 两边都会对同一个 `<id>.db.new` 动手，一个正在写、另一个把它删了
+    重建，最后 replace 上去的就是半个库。_HOT_LOCK 是 RLock，hot_refresh 里
+    再调进来也不会死锁。
     """
+    with _HOT_LOCK:
+        return _build_index_locked(roots, ids, progress, full)
+
+
+def _build_index_locked(roots, ids, progress, full):
     items = _ix_load()
     if ids:
         want = set(str(i) for i in ids)
@@ -5644,9 +5669,13 @@ def build_index(roots=None, ids=None, progress=None, full=False):
         try:
             files, ierrs = _index_build_one(item, walker, progress)
         except Exception as exc:
+            # 建库失败时不能把 files/dirs 清零。原来这里写 0，含义是「这个根
+            # 里没东西」—— 那会让占用排行、保鲜规模判断、配额统计全部当真。
+            # 一次被占用的库文件（WinError 5）就能把用户 82 万文件的索引在
+            # 清单里改成 0 条，而磁盘上一个字节都没变。
+            #
+            # 失败就是「这次没建成」，旧的记数保持原样；why 里说清原因。
             item["why"] = "建立失败：%s" % (exc,)
-            item["files"] = 0
-            item["dirs"] = 0
             files, ierrs = 0, [(item["root"], item["why"])]
             # 遍历器出过事就整体回退，后面的条目直接走 Python
             if "遍历器" in item["why"]:

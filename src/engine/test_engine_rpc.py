@@ -668,6 +668,156 @@ class TestHotFreshness(EngineCase):
             "旧格式库被判成「没问题」了 —— 那它永远不会触发重建升级：%r" % (v,))
         self.assertIn("旧版格式", v.get("why") or "", v)
 
+    def test_build_failure_does_not_zero_the_catalog(self):
+        """建库失败不许把清单里的文件数清零。
+
+        Windows 上 os.replace 到「已经被人打开的目标库」会 WinError 5。原来
+        那条失败分支把 item["files"]/["dirs"] 写成 0，含义是「这个根里没
+        东西」—— 一次瞬时占用就能把 82 万文件的索引在清单里改成 0 条，而磁盘
+        上一个字节都没变。占用排行、配额、保鲜规模判断全部跟着错。
+        """
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_zero_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "root")
+        os.makedirs(root, exist_ok=True)
+        for i in range(3):
+            with open(os.path.join(root, "z%d.txt" % i), "wb") as f:
+                f.write(b"z" * 8)
+
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+        before = [i for i in T._ix_load() if i.get("root") == root]
+        self.assertEqual(len(before), 1, before)
+        self.assertGreater(int(before[0].get("files") or 0), 0, before)
+
+        # 让 _index_build_one 必然失败，模拟「库文件被占用 / 写入失败」
+        orig = T._index_build_one
+
+        def boom(item, walker, progress):
+            raise RuntimeError("索引写入失败：目标库被占用")
+        T._index_build_one = boom
+        self.addCleanup(setattr, T, "_index_build_one", orig)
+
+        T.build_index(roots=[root])
+
+        after = [i for i in T._ix_load() if i.get("root") == root]
+        self.assertEqual(len(after), 1, after)
+        self.assertGreater(
+            int(after[0].get("files") or 0), 0,
+            "建库失败之后清单里的文件数被清零了 —— 一次瞬时占用不该等于"
+            "「这个根里没东西」：%r" % (after[0],))
+        self.assertIn("失败", after[0].get("why") or "", after[0])
+
+    def test_concurrent_reader_does_not_make_build_fail(self):
+        """有人正在读库的时候建库，必须最终成功。
+
+        os.replace 到被打开的目标文件在 Windows 上是 WinError 5。读的那一头
+        通常只持有几十毫秒，所以建库这边要重试，不能一次撞上就认输。
+        """
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_busy_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "root")
+        os.makedirs(root, exist_ok=True)
+        for i in range(3):
+            with open(os.path.join(root, "b%d.txt" % i), "wb") as f:
+                f.write(b"b" * 8)
+
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+        item = [i for i in T._ix_load() if i.get("root") == root][0]
+
+        # 打开目标库并一直持有句柄，同时在另一个线程里重建
+        holder = T._index_open(T._ix_db_abspath(item))
+        self.assertIsNotNone(holder)
+
+        # 建库放到工作线程，句柄由主线程关闭 —— sqlite3 连接默认
+        # check_same_thread=True，跨线程 close() 会直接抛异常，句柄反而
+        # 更不会被释放，测试就变成「永远占用」了。
+        err = []
+
+        def run():
+            try:
+                T.build_index(roots=[root])
+            except Exception as exc:
+                err.append(exc)
+
+        worker = threading.Thread(target=run, name="busy-build")
+        worker.start()
+        time.sleep(0.35)
+        holder.close()
+        worker.join(30)
+
+        self.assertEqual(err, [], "建库线程本身抛了异常：%r" % (err,))
+        self.assertFalse(worker.is_alive(), "建库线程没有结束")
+
+        after = [i for i in T._ix_load() if i.get("root") == root][0]
+        self.assertGreater(
+            int(after.get("files") or 0), 0,
+            "有人短暂读库就把整次建库判死了：%r" % (after,))
+        self.assertNotIn("失败", after.get("why") or "", after)
+
+    def test_build_index_and_hot_refresh_never_overlap(self):
+        """全量重建和热目录刷新共用同一把锁。
+
+        两者最终都会对同一批索引库动手：build_index 重建 staging 后 replace
+        到活库，hot_refresh 刷新子树。同时进来时 replace 会撞上「目标被打开」
+        （WinError 5），靠重试能熬过去，但那是一次本该不必发生的失败。
+
+        这条直接量锁的效果：先让另一个线程抓住 _HOT_LOCK 300 毫秒，主线程在
+        这期间调 build_index —— 有锁就必须等，没锁就会立刻穿过去。
+        """
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_overlap_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = os.path.join(tmp, "root")
+        os.makedirs(root, exist_ok=True)
+        for i in range(3):
+            with open(os.path.join(root, "o%d.txt" % i), "wb") as f:
+                f.write(b"o" * 8)
+
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+
+        held = threading.Event()
+
+        def hold():
+            with T._HOT_LOCK:
+                held.set()
+                time.sleep(0.35)
+
+        t = threading.Thread(target=hold, name="hold-hot-lock")
+        t.start()
+        self.assertTrue(held.wait(5), "抓锁线程没起来")
+        t0 = time.perf_counter()
+        T.build_index(roots=[root])
+        waited = time.perf_counter() - t0
+        t.join(10)
+
+        self.assertGreater(
+            waited, 0.2,
+            "build_index 没等 _HOT_LOCK（只用了 %.3fs）—— 它和热刷新会同时"
+            "对同一批索引库动手，replace 会撞上被占用的目标" % waited)
+
     def test_hot_roots_stay_inside_indexed_scope(self):
         """保鲜对象必须落在用户已索引的范围之内。
 
