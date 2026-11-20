@@ -171,8 +171,6 @@ function Build-Engine {
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 构建失败' }
   } finally {
     Pop-Location
-    C:\Users\十二\AppData\Local\Temp = 
-    C:\Users\十二\AppData\Local\Temp = 
   }
 
   # 遍历器是独立进程，放到引擎目录根下，tidy.py 会优先用它
@@ -210,8 +208,6 @@ function Build-App {
     if ($LASTEXITCODE -ne 0) { throw 'Rust 构建失败' }
   } finally {
     Pop-Location
-    C:\Users\十二\AppData\Local\Temp = 
-    C:\Users\十二\AppData\Local\Temp = 
   }
 
   # 运行中的实例会锁住 exe，先关掉（引擎跟着退）
