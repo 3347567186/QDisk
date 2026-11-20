@@ -135,12 +135,72 @@ impl Progress {
     }
 }
 
-/// Copy while honouring cancellation and a byte budget. The callback receives
-/// each chunk so the UI can show movement inside a large member.
+/// 跨成员累计的字节预算。整次解压共用一个，不是每个成员各一份。
+///
+/// 为什么需要这个：`copy_cancellable` 原来的计数器是函数内局部的，于是
+/// `MAX_TOTAL_UNPACKED` 的实际语义变成了「单个成员不超过 32 GiB」。一个含
+/// 上千个 31 GiB 成员的压缩包（全部由零字节构成、压缩后可能只有几百 MB）
+/// 会一路写到磁盘满为止 —— 用户看到的是「解压到一半报错、盘红了」，而不是
+/// 「检测到可疑压缩包，已停止」。实测见 `cap_is_cumulative`。
+///
+/// 两道闸：`check_declared` 在动手之前用归档头声明的尺寸算总量（一个字节都
+/// 不写就拒绝），`charge` 在实际写出的过程中累计（防声明的尺寸本身撒谎）。
+pub struct Budget {
+    used: AtomicU64,
+    cap: u64,
+}
+
+impl Budget {
+    pub fn new(cap: u64) -> Self {
+        Self {
+            used: AtomicU64::new(0),
+            cap,
+        }
+    }
+
+    pub fn for_extraction() -> Self {
+        Self::new(MAX_TOTAL_UNPACKED)
+    }
+
+    /// 动手之前的预检：归档声明的解压后总量已经超限，就直接拒绝。
+    ///
+    /// 先拒绝而不是写到一半再拒绝，是因为前者只留下一个错误提示，后者会
+    /// 在磁盘上留下成百上千个半成品文件，而且那些文件正是用户要清理的对象。
+    pub fn check_declared(&self, declared: u64) -> Result<()> {
+        if declared > self.cap {
+            bail!(
+                "解压后总量约 {} GiB，超过 {} GiB 上限，已停止（未写入任何文件）",
+                declared / (1024 * 1024 * 1024),
+                self.cap / (1024 * 1024 * 1024)
+            );
+        }
+        Ok(())
+    }
+
+    /// 实际写出的字节记账。并发路径下由多个线程同时调用。
+    fn charge(&self, n: u64) -> Result<()> {
+        let total = self.used.fetch_add(n, Ordering::Relaxed) + n;
+        if total > self.cap {
+            bail!(
+                "解压数据累计超过 {} GiB 上限，已停止",
+                self.cap / (1024 * 1024 * 1024)
+            );
+        }
+        Ok(())
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+}
+
+/// Copy while honouring cancellation and a shared byte budget. The callback
+/// receives each chunk so the UI can show movement inside a large member.
 pub fn copy_cancellable<R: Read + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
     cancel: &AtomicBool,
+    budget: &Budget,
     mut on_bytes: impl FnMut(u64),
 ) -> Result<u64> {
     let mut buf = vec![0u8; 256 * 1024];
@@ -155,9 +215,8 @@ pub fn copy_cancellable<R: Read + ?Sized, W: Write>(
         }
         writer.write_all(&buf[..n])?;
         total += n as u64;
-        if total > MAX_TOTAL_UNPACKED {
-            bail!("解压数据超过 32 GiB 上限，已停止");
-        }
+        // 记在整个任务的账上，不是这个成员自己的账上
+        budget.charge(n as u64)?;
         on_bytes(n as u64);
     }
     Ok(total)
@@ -256,6 +315,11 @@ impl Overwrite {
 }
 
 /// Resolve a destination. Directories always merge; files follow the policy.
+///
+/// 覆盖分支要额外看一眼落点：如果目标位置是个符号链接（或 junction），
+/// `File::create` 会**跟随它**把内容写到链接指向的地方去。`safe_join` 只校验
+/// 成员名是安全的相对路径，管不到这件事 —— 名字校验得再严，落点是链接就
+/// 全白费。判据用 `symlink_metadata`（不跟随），查不到就当普通文件。
 pub fn resolve_dest(path: PathBuf, is_dir: bool, policy: Overwrite) -> Result<Option<PathBuf>> {
     if is_dir {
         return Ok(Some(path));
@@ -264,9 +328,41 @@ pub fn resolve_dest(path: PathBuf, is_dir: bool, policy: Overwrite) -> Result<Op
         return Ok(Some(path));
     }
     match policy {
-        Overwrite::Overwrite => Ok(Some(path)),
+        Overwrite::Overwrite => {
+            if is_reparse(&path) {
+                // 不顺着链接覆盖：改名放旁边，用户能看见、也不会写到自己
+                // 没指定的地方去。
+                return Ok(Some(unique_path(&path)));
+            }
+            Ok(Some(path))
+        }
         Overwrite::Skip => Ok(None),
         Overwrite::Rename => Ok(Some(unique_path(&path))),
+    }
+}
+
+/// 这个路径本身是不是重解析点（符号链接 / junction / 其他 reparse 标签）。
+///
+/// 用 `symlink_metadata` 而不是 `metadata`：后者会跟随链接、永远返回目标的
+/// 属性，那样这个判断永远为假。读不到就当不是 —— 目标不存在时本来也不会走
+/// 到需要判断的分支。
+fn is_reparse(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(m) => {
+            if m.file_type().is_symlink() {
+                return true;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return true;
+                }
+            }
+            false
+        }
+        Err(_) => false,
     }
 }
 
@@ -594,5 +690,101 @@ mod tests {
         // 与 wide_path 必须逐元素一致：download.rs 用前者、rar.rs 用后者，
         // 两者一旦漂移，Win32 调用会在不同路径上看到不同的字符串。
         assert_eq!(w, wide_path(Path::new("ab")));
+    }
+
+    /// 上限必须是「整个解压任务累计」，不是「每个成员各一份」。
+    ///
+    /// 这条用例用 io::repeat + io::sink 跑真实函数、不碰磁盘。两个 17 GiB
+    /// 成员合计 34 GiB，超过 MAX_TOTAL_UNPACKED。第二个成员必须在写出去的
+    /// 过程中被拦住 —— 如果它通过了，说明计数器是函数内局部的，那么一个含
+    /// N 个大成员的压缩包能把磁盘写满到 N×32 GiB 才停。
+    ///
+    /// 标了 ignore：要跑 34 GiB 的内存拷贝，约十几秒，不值得每次门禁都跑。
+    /// 手动验证用 `cargo test --release cap_is_cumulative -- --ignored`。
+    #[test]
+    #[ignore = "要跑 34 GiB 内存拷贝，手动验证上限语义时再跑"]
+    fn cap_is_cumulative() {
+        use std::io;
+        let cancel = AtomicBool::new(false);
+        let budget = Budget::for_extraction();
+        let half: u64 = MAX_TOTAL_UNPACKED / 2 + 1024 * 1024 * 1024; // 略过一半
+        let mut s1 = io::repeat(0).take(half);
+        let mut d1 = io::sink();
+        let a = copy_cancellable(&mut s1, &mut d1, &cancel, &budget, |_| {})
+            .expect("第一个成员低于上限，应当通过");
+        assert_eq!(a, half);
+        assert_eq!(budget.used(), half, "预算必须记在整任务上");
+
+        let mut s2 = io::repeat(0).take(half);
+        let mut d2 = io::sink();
+        let b = copy_cancellable(&mut s2, &mut d2, &cancel, &budget, |_| {});
+        assert!(
+            b.is_err(),
+            "合计 {} GiB 已超过 32 GiB 上限，第二个成员应当被拦住；\
+             这里通过说明上限是逐成员算的，整包总量没有任何封顶",
+            (half * 2) / (1024 * 1024 * 1024)
+        );
+    }
+
+    /// 动手前就能用归档头声明的尺寸拒绝：一个字节都不写。
+    ///
+    /// 与上一条的分工：`cap_is_cumulative` 管「写到一半发现超了」，这条管
+    /// 「还没写就发现超了」。后者才是 ZIP / 7Z 的常规路径。
+    #[test]
+    fn declared_total_is_rejected_before_writing() {
+        let budget = Budget::for_extraction();
+        assert!(budget.check_declared(1024).is_ok());
+        let over = MAX_TOTAL_UNPACKED + 1;
+        let e = budget.check_declared(over).unwrap_err().to_string();
+        assert!(e.contains("未写入任何文件"), "错误信息要说清没动磁盘: {e}");
+        assert!(
+            budget.check_declared(MAX_TOTAL_UNPACKED).is_ok(),
+            "恰好等于上限不算超"
+        );
+    }
+
+    /// 覆盖策略不得顺着已存在的符号链接写到目标目录之外。
+    ///
+    /// 场景：解压目录里事先有一个叫 `a.txt` 的符号链接指向外部文件。
+    /// 用户选「覆盖」解压同名成员时，`File::create` 会跟随链接把内容写到
+    /// 链接目标上 —— 名字校验（safe_relative）管不住这件事，因为它只校验
+    /// 成员名是不是安全的相对路径，不校验落点是不是重解析点。
+    ///
+    /// 需要创建符号链接，普通权限下会失败。创建不了就跳过，不把环境限制
+    /// 当成测试失败。
+    #[test]
+    fn overwrite_does_not_follow_existing_symlink() {
+        use std::os::windows::fs::symlink_file;
+        let root = std::env::temp_dir().join(format!("tidy_link_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let outside = root.join("outside.txt");
+        fs::write(&outside, b"original").unwrap();
+        let inner = root.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        let link = inner.join("a.txt");
+        if symlink_file(&outside, &link).is_err() {
+            let _ = fs::remove_dir_all(&root);
+            eprintln!("跳过：当前权限下创建符号链接失败（需要管理员或开发者模式）");
+            return;
+        }
+
+        let got = resolve_dest(link.clone(), false, Overwrite::Overwrite).unwrap();
+        // 落点解析出来还是那个链接本身 —— 说明后续 File::create 会顺着它写出去
+        let resolved_is_link = got
+            .as_deref()
+            .map(|p| fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false))
+            .unwrap_or(false);
+        // 而且必须给出一个替代落点，不能让调用方拿到 None 把文件静默丢掉
+        let has_alternative = got.as_deref().map(|p| p != link.as_path()).unwrap_or(false);
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            !resolved_is_link,
+            "覆盖策略把符号链接当成了普通文件；File::create 会跟随它写到目标目录之外"
+        );
+        assert!(
+            has_alternative,
+            "碰到链接应当改成相邻的新名字，而不是静默跳过这个文件"
+        );
     }
 }

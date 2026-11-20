@@ -9,7 +9,7 @@ use zip::write::SimpleFileOptions;
 use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
 use super::util::{
-    collect_sources, copy_cancellable, ensure_parent, resolve_dest, safe_join, zip_datetime,
+    collect_sources, copy_cancellable, ensure_parent, resolve_dest, safe_join, zip_datetime, Budget,
     Overwrite, Progress,
 };
 use super::{CreateReport, ExtractReport};
@@ -140,6 +140,16 @@ fn extract_sequential(
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
     };
+    // 动手之前先看总量：ZIP 的中央目录里写了每个成员解压后的大小，
+    // 加起来超限就一个字节都不写。以前这个判断是逐成员的（在
+    // copy_cancellable 内部从零算起），于是「单次解压上限 32 GiB」这句
+    // 承诺对整包并不成立。
+    let budget = Budget::for_extraction();
+    let declared: u64 = selected
+        .iter()
+        .filter_map(|&i| zip.by_index_raw(i).ok().map(|e| e.size()))
+        .sum();
+    budget.check_declared(declared)?;
 
     for i in 0..zip.len() {
         if !selected.contains(&i) {
@@ -194,7 +204,7 @@ fn extract_sequential(
         ensure_parent(&target)?;
         let mut out = File::create(&target)
             .with_context(|| format!("无法写入 {}", target.display()))?;
-        let n = copy_cancellable(&mut entry, &mut out, cancel, |n| progress.add_bytes(n))?;
+        let n = copy_cancellable(&mut entry, &mut out, cancel, &budget, |n| progress.add_bytes(n))?;
         out.sync_all().ok();
         report.files += 1;
         report.bytes += n;
@@ -284,6 +294,15 @@ fn extract_parallel(
     if jobs.len() < 2 {
         return Ok(None);
     }
+    // 并行路径同样要按整包算总量。这里已经把所有成员的索引扫过一遍，
+    // 声明的解压后大小可以直接从中央目录取，不用再解压。
+    let budget = Budget::for_extraction();
+    let declared: u64 = jobs
+        .iter()
+        .filter_map(|j| zip.by_index_raw(j.index).ok().map(|e| e.size()))
+        .sum();
+    budget.check_declared(declared)?;
+    let budget = &budget;
     for d in &dir_targets {
         fs::create_dir_all(d)?;
     }
@@ -330,7 +349,7 @@ fn extract_parallel(
                         ensure_parent(&job.target)?;
                         let mut out = File::create(&job.target)
                             .with_context(|| format!("无法写入 {}", job.target.display()))?;
-                        let n = match copy_cancellable(&mut entry, &mut out, cancel, |n| {
+                        let n = match copy_cancellable(&mut entry, &mut out, cancel, budget, |n| {
                             progress.add_bytes(n)
                         }) {
                             Ok(n) => n,

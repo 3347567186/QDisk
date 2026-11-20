@@ -14,7 +14,7 @@ use lzma_rust2::XzReader;
 
 use super::util::{
     collect_sources, copy_cancellable, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join, Overwrite, Progress,
+    safe_join, Budget, Overwrite, Progress,
 };
 use super::{ArchiveInfo, CreateReport, EntryInfo, ExtractReport, Kind};
 
@@ -141,6 +141,12 @@ pub fn extract(
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
     };
+    // TAR 不做动手前的总量预检：它是流式格式，要「先说清整包有多大」就得
+    // 把压缩流解一遍、再从头解一遍写盘 —— gz/tar.gz 上等于双倍解压时间。
+    // 所以这里只靠写盘时的累计记账：一样封住整包总量，只是会在写出一部分
+    // 之后才停。ZIP 和 7Z 的头部里有现成的大小表，那两条路径仍然是「一个
+    // 字节都不写就拒绝」。
+    let budget = Budget::for_extraction();
     for (idx, item) in ar.entries().context("TAR 读取失败")?.enumerate() {
         if !selected.contains(&idx) {
             continue;
@@ -210,7 +216,7 @@ pub fn extract(
         ensure_parent(&target)?;
         let mut out = File::create(&target)
             .with_context(|| format!("无法写入 {}", target.display()))?;
-        let n = copy_cancellable(&mut entry, &mut out, cancel, |n| progress.add_bytes(n))?;
+        let n = copy_cancellable(&mut entry, &mut out, cancel, &budget, |n| progress.add_bytes(n))?;
         out.sync_all().ok();
         report.files += 1;
         report.bytes += n;
@@ -265,7 +271,9 @@ pub fn extract_single(
     ensure_parent(&target)?;
     let mut src = single_reader(path, kind)?;
     let mut out = File::create(&target)?;
-    let n = copy_cancellable(&mut src, &mut out, cancel, |n| progress.add_bytes(n))?;
+    // 单个 .gz/.bz2/.xz 的总量就是它自己解出来的大小，同样走累计记账。
+    let budget = Budget::for_extraction();
+    let n = copy_cancellable(&mut src, &mut out, cancel, &budget, |n| progress.add_bytes(n))?;
     out.sync_all().ok();
     progress.file_done();
     progress.finish();

@@ -15,7 +15,7 @@ use sevenz_rust2::{
 
 use super::util::{
     collect_sources, copy_cancellable, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join, Overwrite, Progress, SourceItem,
+    safe_join, Budget, Overwrite, Progress, SourceItem,
 };
 use super::{modified_string, ArchiveInfo, CreateReport, EntryInfo, ExtractReport};
 
@@ -278,6 +278,19 @@ pub fn extract(
             .collect();
         names.into_iter().collect()
     };
+    // 7Z 的头部同样带每个条目解压后的大小，和 ZIP 一样可以「一个字节都不写
+    // 就拒绝」。以前这个上限是逐条目算的，整包总量没有封顶。
+    let budget = Budget::for_extraction();
+    let declared: u64 = reader
+        .archive()
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| selected.contains(i))
+        .filter(|(_, e)| !e.is_directory)
+        .map(|(_, e)| e.size)
+        .sum();
+    budget.check_declared(declared)?;
     let mut report = ExtractReport {
         files: 0,
         dirs: 0,
@@ -352,7 +365,9 @@ pub fn extract(
                     return Ok(EntryDecision::Continue);
                 }
             };
-            match copy_cancellable(&mut *data, &mut out, cancel, |n| progress.add_bytes(n)) {
+            match copy_cancellable(&mut *data, &mut out, cancel, &budget, |n| {
+                progress.add_bytes(n)
+            }) {
                 Ok(n) => {
                     report.files += 1;
                     report.bytes += n;
