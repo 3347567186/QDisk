@@ -484,6 +484,9 @@ test('policyFor 的档位由调用方显式传入', (fail) => {
   if (badCalls.length) fail('有调用没传第三参：' + badCalls.join(' / '));
 });
 
+/* 1.41.6 起 ask() 按会话复位（`const st = tgt ? tgt.state : state; st.running = false`），
+   原来这条断言把 `state.running` 写死，于是代码改对之后测试反而红了 40 多个版本。
+   这里只要求「catch 里把本轮的 running 放回去」，不规定变量叫 state 还是 st。 */
 test('ask 有兜底：抛错也要把 running 放回去', (fail) => {
   const src = readFileSync(join(AI_DIR, 'chatui.js'), 'utf8');
   const clean = stripNoise(src);
@@ -492,7 +495,9 @@ test('ask 有兜底：抛错也要把 running 放回去', (fail) => {
   const body = clean.slice(at, at + 900);
   if (!/try\s*\{/.test(body)) fail('ask() 里没有 try');
   if (!/catch\s*\(/.test(body)) fail('ask() 里没有 catch');
-  if (!/state\.running\s*=\s*false/.test(body)) fail('catch 里没把 state.running 置回 false');
+  if (!/(?:^|[^.\w])(?:st|state)\.running\s*=\s*false/.test(body)) {
+    fail('catch 里没把这一轮的 running 置回 false');
+  }
   if (!/setBusy\s*\(\s*false/.test(body)) fail('catch 里没把 composer 的 busy 解开');
 });
 

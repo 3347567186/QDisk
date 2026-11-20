@@ -1250,6 +1250,41 @@ for (const c of CASES) {
   results.push({ id: 'G49', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
 }
 
+/* G49b 数据旧了必须自报年龄，不能把半小时前的快照说成「现在」
+   用户原话：「盘里面要是新增内容的话索引就是旧的了」。旧不是错，
+   不说才是错 —— 用户会照着半小时前的账本去删东西。 */
+{
+  const staleApi = Object.assign({}, fakeApi, {
+    engine: async (method, params) => {
+      if (method === 'search.status') return { files: 900, dirs: 40, roots: ['D:\\'] };
+      if (method === 'search.folders') {
+        return {
+          items: [{ path: 'D:\\Downloads', name: 'Downloads', size: 3221225472, files: 12, pct: 100 }],
+          total: 1, source: 'index', roots: ['D:\\'], indexed: 900,
+          depth: 3, bytes: 3221225472, built: false, elapsed_ms: 40,
+          age_sec: 2280, age_text: '38 分钟前', stale: true
+        };
+      }
+      return fakeApi.engine(method, params);
+    }
+  });
+  const staleTools = makeTools({ API: staleApi });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('top_folders', { limit: 5 }),
+      answer({ answer: '最占空间的是 Downloads（3.0 GB）。这是 38 分钟前的数据，之后可能有变化。' })
+    ]),
+    tools: staleTools, prompt, settings
+  });
+  const res = await agent.run({ userText: '现在什么最占空间？', ctx: { page: 'ai' } });
+  const r = (res.trace[0] && res.trace[0].result) || {};
+  const bad = [];
+  if (r.data_age !== '38 分钟前') bad.push('data_age 没有传给模型，模型无法说出数据有多旧');
+  if (!r.data_age_note) bad.push('过期数据没有给 data_age_note，模型不知道要提醒可能已变');
+  if (!res.ok) bad.push('这一轮应该能正常作答');
+  results.push({ id: 'G49b', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
+}
+
 /* G50 「关」强度也必须给完整结论，不许一句话打发
    用户实测踩到的坑：thinking=off 的提示词原文是「只做必要的一次查询」，
    模型照做，答案就只剩一个裸路径。关只该省查证步骤，不该省答案内容。 */

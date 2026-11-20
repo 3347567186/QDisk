@@ -453,7 +453,8 @@
         const s = state.settings;
         const o = state.original;
         if (!s || !o) return [];
-        return ['data_dir', 'recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content']
+        return ['data_dir', 'recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content',
+          'index_freshness', 'index_max_mb', 'index_rebuild_idle']
           .filter((k) => s[k] !== o[k]);
       }
 
@@ -487,6 +488,30 @@
           }, CONFLICTS.map((c) =>
             h('option', { value: c.value, selected: s.conflict_policy === c.value, text: T(c.zh, c.en) })
           ));
+
+          /* 索引新鲜度：三个档位对应「多久扫一次热目录」。
+             用户原话是「最好可以可控不然扫磁盘次数多会伤磁盘」——
+             所以这里给的不是一个开关，而是三档明确的扫盘频率。 */
+          const freshSel = h('select', {
+            class: 'select',
+            'aria-label': T('索引新鲜度', 'Index freshness'),
+            onchange: (e) => { s.index_freshness = e.target.value; paintHint(); }
+          }, [
+            ['live', T('实时（每分钟扫一次热目录）', 'Live (rescan hot folders every minute)')],
+            ['check', T('按需（每 10 分钟，默认）', 'On demand (every 10 min, default)')],
+            ['manual', T('只手动（不自动扫盘）', 'Manual only (never scans by itself)')]
+          ].map(([v, label]) => h('option', { value: v, selected: s.index_freshness === v }, label)));
+
+          const capInput = h('input', {
+            class: 'input', type: 'number', min: '0', max: '65536', step: '128',
+            value: String(s.index_max_mb),
+            oninput: (e) => { s.index_max_mb = Number(e.target.value); paintHint(); }
+          });
+
+          const idleCb = h('input', {
+            type: 'checkbox', checked: !!s.index_rebuild_idle,
+            onchange: (e) => { s.index_rebuild_idle = e.target.checked; paintHint(); }
+          });
 
           body = h('div', { class: 'stack' },
             h('div', { class: 'set-card' },
@@ -535,7 +560,27 @@
                     }),
                     h('span', { text: T('按内容识别文件类型', 'Identify file types by content') })
                   )
-                ))
+                )),
+              /* 索引新鲜度三档：不给开关给频率。用户要的是「可控」，
+                 一个「自动/手动」的复选框无法表达「多久扫一次」。 */
+              setRow(T('索引新鲜度', 'Index freshness'),
+                h('div', { class: 'set-tri' },
+                  h('div', { class: 'field' },
+                    h('label', { text: T('自动扫描', 'Auto scan') }),
+                    freshSel),
+                  h('div', { class: 'field' },
+                    h('label', { text: T('索引上限 (MB)', 'Index cap (MB)') }),
+                    capInput),
+                  h('div', { class: 'field' },
+                    h('label', { text: T('后台维护', 'Background') }),
+                    h('label', { class: 'check' },
+                      idleCb,
+                      h('span', { text: T('空闲时校验并重建', 'Verify and rebuild when idle') })
+                    )
+                  )
+                ),
+                T('热目录（桌面/文档/下载等）重扫一次约 0.3 秒 · 上限填 0 表示不限制 · 软件自己整理或删除的文件会立即同步，不靠这里的扫描',
+                  'Hot folders take about 0.3 s to rescan · 0 means no cap · files the app moves or deletes sync instantly without waiting for a scan'))
             ),
             h('div', { class: 'action-bar' },
               h('span', { class: 'small muted', text: T('改动只写入引擎设置，不影响已有文件', 'Changes only affect engine settings') }),
@@ -662,13 +707,23 @@
           toast(T('日志保留天数需为 1 到 3650 的整数', 'Log retention must be an integer from 1 to 3650'), 'warn');
           return;
         }
+        const maxMb = Number(s.index_max_mb);
+        /* 0 是合法的「不限制」，但负数和小数不是：超限判断靠它做分母，
+           写成 -1 会让 index_quota_ok() 永远返回超限，索引从此再也不刷新。 */
+        if (!Number.isInteger(maxMb) || maxMb < 0 || maxMb > 65536) {
+          toast(T('索引上限需为 0 到 65536 的整数（0 表示不限制）', 'Index cap must be an integer from 0 to 65536 (0 means no limit)'), 'warn');
+          return;
+        }
         const patch = {
           data_dir: dataDir,
           recursive_depth: depth,
           conflict_policy: s.conflict_policy,
           log_keep_days: keep,
           default_recursive: !!s.default_recursive,
-          default_content: !!s.default_content
+          default_content: !!s.default_content,
+          index_freshness: s.index_freshness,
+          index_max_mb: Number(s.index_max_mb),
+          index_rebuild_idle: !!s.index_rebuild_idle
         };
         const keys = Object.keys(patch).filter((k) => patch[k] !== state.original[k]);
         if (!keys.length) { toast(T('没有需要保存的更改', 'Nothing to save'), 'info'); return; }
@@ -1902,7 +1957,10 @@
             conflict_policy: (s && s.conflict_policy) || 'rename',
             log_keep_days: Number(s && s.log_keep_days) || 30,
             default_recursive: !!(s && s.default_recursive),
-            default_content: !!(s && s.default_content)
+            default_content: !!(s && s.default_content),
+            index_freshness: (s && s.index_freshness) || 'check',
+            index_max_mb: Number(s && s.index_max_mb) || 2048,
+            index_rebuild_idle: s && s.index_rebuild_idle !== undefined ? !!s.index_rebuild_idle : true
           };
           state.settings = value;
           state.original = Object.assign({}, value);

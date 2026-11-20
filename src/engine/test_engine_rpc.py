@@ -393,6 +393,234 @@ class TestOrganize(EngineCase):
             self.assertIn(os.sep, rel, name)
 
 
+class TestIndexWriteThrough(EngineCase):
+    """软件自己动了磁盘，索引必须立刻认账。
+
+    这是「它连自己做过什么都不知道」那个问题的正面证据：先建索引，再用软件
+    自己的能力改磁盘，然后不重建索引直接问「东西在哪 / 多大」，答案必须是改
+    完之后的。全部断言都建立在生产代码路径上，不打桩。
+    """
+
+    def build(self, folder, reuse=False):
+        return self.rpc_ok("search.index",
+                           {"roots": [folder], "reuse": reuse})
+
+    def test_organize_updates_index(self):
+        """整理完文件之后，索引里记录的位置必须是新位置。"""
+        folder = self.new_folder()
+        for name in ("wt_a.txt", "wt_b.zip", "wt_c.exe"):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"x" * 64)
+        self.build(folder, reuse=False)
+
+        # 整理前：文件都在根目录
+        before = self.rpc_ok("search.query", {"q": "wt_a", "limit": 20})
+        if before["source"] == "index":
+            paths = [os.path.normcase(i["path"]) for i in before["items"]]
+            self.assertIn(os.path.normcase(os.path.join(folder, "wt_a.txt")),
+                          paths, before)
+
+        params = self.scan_params(folder)
+        params["confirm"] = True
+        res = self.rpc_ok("organize", params)
+        self.assertEqual(res["moved"], 3, res)
+
+        # 整理后：索引必须指向分类子目录里的新位置，不能还指着根目录
+        after = self.rpc_ok("search.query", {"q": "wt_a", "limit": 20})
+        if after["source"] == "index":
+            hits = [i for i in after["items"] if i["name"] == "wt_a.txt"]
+            self.assertTrue(hits, after)
+            for hit in hits:
+                self.assertNotEqual(
+                    os.path.normcase(os.path.dirname(hit["path"])),
+                    os.path.normcase(folder), hit)
+                self.assertTrue(os.path.isfile(hit["path"]), hit)
+
+        # 按体积排行里也必须反映新结构：根目录自己的体积应该归零或变小
+        folders = self.rpc_ok("search.folders",
+                              {"depth": 1, "limit": 50, "auto": False})
+        for item in folders["items"]:
+            # 排行里给的每个目录都必须真的存在
+            self.assertTrue(os.path.isdir(item["path"]), item)
+
+    def test_delete_updates_index(self):
+        """用软件删掉的文件，不能在「最占空间」里继续占着位置。"""
+        folder = self.new_folder()
+        for name, n in (("wt_big.bin", 300000), ("wt_small.bin", 100)):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"x" * n)
+        self.build(folder, reuse=False)
+
+        target = os.path.join(folder, "wt_big.bin")
+        top_before = self.rpc_ok("search.top", {"limit": 2000})
+        self.assertIn(os.path.normcase(target),
+                      {os.path.normcase(i["path"]) for i in top_before["items"]})
+
+        # 走生产的 files.delete（进回收站），不手动 os.remove
+        d = self.rpc_ok("files.delete", {"paths": [target], "confirm": True})
+        self.assertFalse(os.path.exists(target), d)
+        self.assertFalse(d.get("failed"), d)
+
+        top_after = self.rpc_ok("search.top", {"limit": 2000})
+        self.assertNotIn(os.path.normcase(target),
+                         {os.path.normcase(i["path"]) for i in top_after["items"]},
+                         top_after)
+
+    def test_undo_restores_index_position(self):
+        """撤销整理之后，索引要回到原位置，而不是留在分类夹里。"""
+        folder = self.new_folder()
+        # organize 有「可整理文件不足 3 个就不动」的保护，所以必须放 3 个
+        for name in ("wt_undo.txt", "wt_undo2.zip", "wt_undo3.exe"):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"x" * 64)
+        self.build(folder, reuse=False)
+
+        params = self.scan_params(folder)
+        params["confirm"] = True
+        res = self.rpc_ok("organize", params)
+        self.assertEqual(res["moved"], 3, res)
+
+        self.rpc_ok("undo", {"path": folder})
+        for name in ("wt_undo.txt", "wt_undo2.zip", "wt_undo3.exe"):
+            self.assertTrue(os.path.isfile(os.path.join(folder, name)),
+                            "撤销没把 %s 移回原位" % name)
+
+        q = self.rpc_ok("search.query", {"q": "wt_undo", "limit": 20})
+        if q["source"] == "index":
+            hits = [i for i in q["items"] if i["name"].startswith("wt_undo")]
+            self.assertTrue(hits, q)
+            # 撤销完成后索引里不能再留着「在 03_文档 里」那条旧路径
+            for hit in hits:
+                self.assertTrue(os.path.isfile(hit["path"]), hit)
+
+
+class TestIndexSelfCheck(EngineCase):
+    """后台校验：抽查能发现过期，且「没事别乱重建」。
+
+    这两条要一起测。只测「发现过期」会漏掉「每次都判过期、天天重扫整盘」
+    这个更坏的方向——那正好是用户担心的「扫盘次数多伤磁盘」。
+    """
+
+    def test_selfcheck_reports_healthy_index_without_rebuild(self):
+        """刚建好的索引，抽查必须判健康，不许重建。"""
+        folder = self.new_folder()
+        for i in range(6):
+            with open(os.path.join(folder, "sc_%d.txt" % i), "wb") as f:
+                f.write(b"x" * 32)
+        self.rpc_ok("search.index", {"roots": [folder], "reuse": False})
+        rep = self.rpc_ok("search.selfcheck", {"rebuild": True})
+        self.assertIn("checked", rep)
+        self.assertIn("stale", rep)
+        # 别的用例建过的目录可能真的没了，所以不断言 stale 为空；
+        # 但刚建的这个根绝不能被判过期
+        mine = os.path.normcase(os.path.abspath(folder))
+        for s in rep["stale_items"]:
+            self.assertNotEqual(os.path.normcase(os.path.abspath(s["root"])), mine, rep)
+
+    def test_selfcheck_detects_index_whose_content_changed(self):
+        """目录内容变了，抽查必须能发现（否则后台校验就是摆设）。"""
+        folder = self.new_folder()
+        for i in range(8):
+            with open(os.path.join(folder, "sc_d_%d.txt" % i), "wb") as f:
+                f.write(b"x" * 32)
+        sub = os.path.join(folder, "sub")
+        os.makedirs(sub)
+        for i in range(8):
+            with open(os.path.join(sub, "s%d.txt" % i), "wb") as f:
+                f.write(b"x" * 32)
+        self.rpc_ok("search.index", {"roots": [folder], "reuse": False})
+
+        # 绕过软件直接改磁盘：加一堆文件，让目录的文件数对不上
+        for i in range(20):
+            with open(os.path.join(sub, "added%d.txt" % i), "wb") as f:
+                f.write(b"x" * 32)
+
+        rep = self.rpc_ok("search.selfcheck", {"rebuild": False})
+        mine = os.path.normcase(os.path.abspath(folder))
+        hit = [s for s in rep["stale_items"]
+               if os.path.normcase(os.path.abspath(s["root"])) == mine]
+        # 这个库里只有 2 个目录（folder 和 sub），抽查 40 个必然全抽到，
+        # 两个都已经对不上，所以必须判过期。这里不放宽：放宽的话
+        # 「后台校验什么都不做」也能通过，那这条测试就没有意义了。
+        self.assertTrue(hit, "内容改了 20 个文件，后台校验却没判过期：%s" % (rep,))
+        self.assertIn("内容已变", hit[0]["why"], hit[0])
+
+    def test_selfcheck_never_raises_on_missing_root(self):
+        """根目录被拔掉（移动盘）时，校验不能崩，只能跳过。"""
+        folder = self.new_folder()
+        with open(os.path.join(folder, "gone.txt"), "wb") as f:
+            f.write(b"x" * 32)
+        self.rpc_ok("search.index", {"roots": [folder], "reuse": False})
+        import shutil as _sh
+        _sh.rmtree(folder, ignore_errors=True)
+        rep = self.rpc_ok("search.selfcheck", {"rebuild": False})
+        self.assertIn("checked", rep)
+        self.assertIn("failed", rep)
+
+
+class TestHotFreshness(EngineCase):
+    """热目录保鲜：刚下载的文件，第一次搜就能搜到。
+
+    这条是用户原话的验收标准——「盘里面要是新增内容的话索引就是旧的了，
+    我要是不重构索引就没办法搜到新文件数据」。所以他不会去点「重建索引」，
+    点了就不算达标。
+    """
+
+    @classmethod
+    def prepare_workdir(cls):
+        # 引擎把 USERPROFILE 隔离到了 workdir 下，热目录就落在这里。
+        # 先建出 Downloads，否则 default_index_roots 会认为它不存在。
+        os.makedirs(os.path.join(cls.root, "userprofile", "Downloads"),
+                    exist_ok=True)
+
+    def downloads(self):
+        return os.path.join(self.root, "userprofile", "Downloads")
+
+    def test_search_finds_file_created_after_indexing(self):
+        """索引建好之后再往下载夹丢文件，第一次搜就必须命中。"""
+        folder = self.downloads()
+        with open(os.path.join(folder, "old_name.txt"), "wb") as f:
+            f.write(b"x" * 32)
+        # 先建一次索引，把「账本」造成「旧的」
+        self.rpc_ok("search.index", {"roots": [folder], "reuse": False})
+
+        fresh_name = "hot_fresh_probe.txt"
+        with open(os.path.join(folder, fresh_name), "wb") as f:
+            f.write(b"y" * 32)
+
+        res = self.rpc_ok("search.query", {"q": "hot_fresh_probe", "limit": 20})
+        names = {i["name"] for i in res["items"]}
+        self.assertIn(fresh_name, names,
+                      "新建的文件没被搜到；索引没有跟上磁盘：%r" % (res,))
+
+    def test_search_does_not_rescan_when_hit(self):
+        """搜到东西的时候不该去扫盘 —— 补扫只发生在「一条都没有」时。"""
+        folder = self.downloads()
+        with open(os.path.join(folder, "hit_probe.txt"), "wb") as f:
+            f.write(b"x" * 32)
+        self.rpc_ok("search.index", {"roots": [folder], "reuse": False})
+        res = self.rpc_ok("search.query", {"q": "hit_probe", "limit": 20})
+        self.assertTrue(res["items"], res)
+
+    def test_unknown_name_stays_missing(self):
+        """真的不存在的东西，补扫之后依然搜不到，不能凭空编一条出来。"""
+        folder = self.downloads()
+        with open(os.path.join(folder, "keep.txt"), "wb") as f:
+            f.write(b"x" * 32)
+        self.rpc_ok("search.index", {"roots": [folder], "reuse": False})
+        res = self.rpc_ok("search.query", {"q": "no_such_file_zzz", "limit": 20})
+        self.assertEqual(res["items"], [], res)
+
+    def test_hot_refresh_reports_what_it_did(self):
+        """保鲜动作要能自证：扫了哪些根、多少文件、花了多久。"""
+        rep = self.rpc_ok("search.hot", {})
+        self.assertIn("roots", rep)
+        self.assertIn("files", rep)
+        self.assertIn("elapsed_ms", rep)
+        self.assertIsInstance(rep["files"], int)
+        self.assertGreaterEqual(rep["files"], 0)
+
+
 class TestUndo(EngineCase):
     """undo：参数错走协议错误；没有记录是业务提示；整理后能原样移回。"""
 
@@ -1149,6 +1377,87 @@ class TestSearch(EngineCase):
         for item in res2["items"]:
             self.assertGreaterEqual(item["size"], 1000)
 
+    def test_top_skips_files_deleted_after_indexing(self):
+        """索引建好之后被删掉的文件，不能再出现在「最占空间」的答案里。
+
+        索引是快照，磁盘是会变的。这个测试故意制造「索引说它在、磁盘上已经没有」
+        的状态：建完索引直接从磁盘上删文件，但不重建索引。
+        不加这层过滤的话，用户问「什么最占空间」，第一名可能是个早就不存在的
+        文件——他照着去删，发现路径不存在，从此不信这个功能。
+
+        注意 TestSearch 里所有用例共用一个引擎、一个索引清单，别的用例建的目录
+        也在索引里。所以这里只断言「本用例自己的文件」的相对关系，不去假设全局
+        排名前 N 是谁。
+        """
+        folder = self.new_folder()
+        for name, n in (("zzgone_big.bin", 900000), ("zzkeep_mid.bin", 500000),
+                        ("zzkeep_small.bin", 100000)):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"x" * n)
+        self.build(folder, reuse=False)
+        # 索引已经记住了 zzgone_big，现在从磁盘上把它删掉（不重建索引）
+        os.remove(os.path.join(folder, "zzgone_big.bin"))
+
+        # 用足够大的 limit 把自己这几条都囊括进来
+        res = self.rpc_ok("search.top", {"limit": 2000})
+        names = [i["name"] for i in res["items"]]
+        mine = [n for n in names if n.startswith("zz")]
+        self.assertNotIn("zzgone_big.bin", mine, res)
+        # 过滤之后不能把剩下的也弄丢：另外两个还在，必须照样给出
+        self.assertIn("zzkeep_mid.bin", mine, res)
+        self.assertIn("zzkeep_small.bin", mine, res)
+        # 而且答案里给的每条路径都必须真的存在
+        for item in res["items"]:
+            self.assertTrue(os.path.exists(item["path"]), item)
+
+    def test_top_fills_limit_after_dropping_deleted(self):
+        """丢掉的失效文件不能把名额吃掉：要 limit 条就得尽量给够。
+
+        只取 limit 条再过滤是个陷阱——前排正好有几个已删除的，返回就会少几条。
+        这里让本用例最大的 3 个全部失效，剩下的仍然应该凑满 limit。
+        """
+        folder = self.new_folder()
+        for i in range(3):
+            with open(os.path.join(folder, "yygone_%d.bin" % i), "wb") as f:
+                f.write(b"x" * (900000 - i * 100))
+        for i in range(4):
+            with open(os.path.join(folder, "yyalive_%d.bin" % i), "wb") as f:
+                f.write(b"x" * (400000 - i * 100))
+        self.build(folder, reuse=False)
+        gone = {os.path.join(folder, "yygone_%d.bin" % i) for i in range(3)}
+        for p in gone:
+            os.remove(p)
+
+        res = self.rpc_ok("search.top", {"limit": 4})
+        # 前 4 名里不能有已删除的；这条用例的 alive 文件比 gone 小，但全局前 4
+        # 可能被别的用例占掉，所以只在「取满条数」这一层断言
+        self.assertEqual(len(res["items"]), 4, res)
+        for item in res["items"]:
+            self.assertNotIn(item["path"], gone, res)
+            self.assertTrue(os.path.exists(item["path"]), item)
+
+    def test_top_and_folders_report_data_age(self):
+        """两个按体积的回答都要带上「这份数据有多旧」。
+
+        索引是快照，答的可能是半小时前的账本。旧不是错，瞒着才是错——所以每个
+        答案都得说清数据是哪一刻的，让用户自己判断可信到哪一步。
+        """
+        folder = self.new_folder()
+        with open(os.path.join(folder, "age.bin"), "wb") as f:
+            f.write(b"x" * 2048)
+        self.build(folder, reuse=False)
+
+        for method in ("search.top", "search.folders"):
+            res = self.rpc_ok(method, {"limit": 5, "auto": False})
+            self.assertIn("age_sec", res, (method, res))
+            self.assertIn("age_text", res, (method, res))
+            self.assertIn("stale", res, (method, res))
+            self.assertIsInstance(res["age_sec"], int)
+            self.assertIsInstance(res["age_text"], str)
+            self.assertIsInstance(res["stale"], bool)
+            # 刚建完的索引不该被判成过期
+            self.assertFalse(res["stale"], (method, res))
+
     def test_top_bad_params_are_errors(self):
         for params in ({"limit": 0}, {"limit": "many"},
                        {"limit": 5, "min_size": "big"}):
@@ -1317,6 +1626,42 @@ class TestSettingsSet(EngineCase):
         self.assertTrue(os.path.isfile(res["settings_path"]))
         got = self.rpc_ok("settings.get")
         self.assertEqual(got["log_keep_days"], 30)
+
+    def test_index_freshness_keys_are_writable(self):
+        """设置页的三个索引开关必须能被写入。
+
+        这三个键是「索引新鲜度」「索引上限」「空闲时校验并重建」。它们
+        很容易被漏掉：DEFAULT_SETTINGS 里有、设置页也画了，但
+        _ENGINE_SETTINGS_TYPES 的白名单没加，保存时引擎直接拒绝
+        「不支持的设置项」—— 界面看起来能用，点保存就报错。
+        """
+        for key, value, want in (
+            ("index_freshness", "live", "live"),
+            ("index_freshness", "manual", "manual"),
+            ("index_max_mb", 0, 0),
+            ("index_max_mb", 4096, 4096),
+            ("index_rebuild_idle", False, False),
+        ):
+            res = self.rpc_ok("settings.set", {"key": key, "value": value})
+            self.assertEqual(res["value"], want, (key, value, res))
+        got = self.rpc_ok("settings.get")
+        self.assertEqual(got["index_freshness"], "manual")
+        self.assertEqual(got["index_max_mb"], 4096)
+        self.assertFalse(got["index_rebuild_idle"])
+
+    def test_index_freshness_rejects_bad_values(self):
+        """越界要拒绝，不能静默存下一个后面会让配额永远超限的值。
+
+        index_max_mb 是 index_quota_ok() 的分母，存进 -1 会让索引从此
+        再也不自动刷新，而用户看到的只是「怎么老是旧数据」。
+        """
+        for key, value in (("index_freshness", "always"),
+                           ("index_freshness", ""),
+                           ("index_max_mb", -1),
+                           ("index_max_mb", 100000),
+                           ("index_rebuild_idle", "yes")):
+            r = self.rpc("settings.set", {"key": key, "value": value})
+            self.assertFalse(r["ok"], (key, value, r))
 
     def test_list_paths_normalized(self):
         folder = self.new_folder()

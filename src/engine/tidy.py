@@ -192,6 +192,14 @@ DEFAULT_SETTINGS = {
     "cache_auto": False,
     "cache_time": "23:40",
     "cache_to_trash": False,
+    # ── 索引新鲜度 ──
+    # 后台空闲时抽查索引、发现确实过期就重建。默认开：不开的话用户永远
+    # 得手动点「重建索引」，而那正是他不想做的事。
+    "index_rebuild_idle": True,
+    # 索引占用上限（MB）。超了只保留最近用过的根，其余等用户手动重建。
+    "index_max_mb": 2048,
+    # 索引新鲜度档位：live（跟随热目录）/ check（启动 + 定时抽查）/ manual
+    "index_freshness": "check",
 }
 
 # 启动时发现设置里的数据目录不在了（盘没接 / 被删），置 True，界面起来后提示一次
@@ -1081,6 +1089,8 @@ def apply(plans, root, rules, policy=None, date_fmt=None, progress=None,
                    "created_dirs": created_dirs,
                    "moves": [{"from": a, "to": b} for a, b in moved]},
                   f, ensure_ascii=False, indent=1)
+    # 先让索引认账再返回：用户整理完立刻问「什么最占空间」，答案必须是整理后的
+    index_touch([b for _a, b in moved] + [a for a, _b in moved])
     return len(moved), failed, mf
 
 
@@ -1196,6 +1206,7 @@ def undo(folder):
     p, d = found
 
     restored, failed = 0, []
+    back = []
     for mv in reversed(d["moves"]):
         src, dst = mv["to"], mv["from"]
         if not os.path.exists(src):
@@ -1206,6 +1217,7 @@ def undo(folder):
         try:
             shutil.move(src, dst)
             restored += 1
+            back.extend([src, dst])
         except OSError as ex:
             failed.append((os.path.basename(src), str(ex).split(":")[0]))
 
@@ -1215,9 +1227,12 @@ def undo(folder):
         if os.path.isdir(cp) and not os.listdir(cp):
             try:
                 os.rmdir(cp)
+                back.append(cp)
             except OSError:
                 pass
     os.remove(p)
+    # 撤销也是改磁盘：还原后的位置要立刻写回索引，否则搜索还指着分类夹里
+    index_touch(back)
     return restored, failed
 
 
@@ -1802,6 +1817,9 @@ def trash_delete(paths):
             ok.append(p)
         except Exception as ex:
             fail.append((p, str(ex)))
+    # 进了回收站的内容对「占多少空间」已经不算了，索引要同步摘掉
+    if ok:
+        index_touch(ok)
     return ok, fail
 
 
@@ -1857,6 +1875,10 @@ def hard_delete(paths):
             pending.append(p)
         else:
             fail.append((p, str(err)))
+    if ok:
+        index_touch(ok)
+    if pending:
+        index_touch(pending)
     return ok, fail, pending
 
 
@@ -2796,6 +2818,7 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
     整棵跳过，可执行文件/程序文件按扩展名保留，跳过的记进 skipped。
     """
     removed, failed, freed = 0, [], 0
+    gone = []                    # 真删掉的路径，最后一次性写回索引
     rules = rules or app_guard_rules()
     protect = bool(rules and rules.cache_skip_apps)
     keep_exts = rules.cache_keep_exts if rules else set()
@@ -2859,6 +2882,7 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
                 if not stuck:
                     removed += c
                     freed += s
+                    gone.append(p)
                     continue
                 for fp, why in stuck:
                     failed.append((fp, why))
@@ -2866,6 +2890,7 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
                 s2, c2 = _tree_size(p)
                 removed += max(0, c - c2)
                 freed += max(0, s - s2)
+                gone.append(p)
                 continue
             try:
                 sz = os.path.getsize(p)
@@ -2875,8 +2900,13 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
             if ok:
                 removed += 1
                 freed += sz
+                gone.append(p)
             else:
                 failed.append((p, why))
+    # 清缓存是最典型的「软件自己腾了空间」：不清索引，用户清完再问
+    # 「什么最占空间」，看到的还是清之前那份账
+    if gone:
+        index_touch(gone)
     return removed, failed, freed
 
 
@@ -4836,7 +4866,17 @@ def migrate_data(old, new, progress=None):
 
 # ─────────────────────────── 文件名索引与搜索 ───────────────────────────
 #
-# 表结构（schema 2）：目录去重。
+# 表结构（schema 3）：目录去重 + 目录合计预聚合。
+#
+#   dirs (id, path, mtime, scanned_at, fresh, f0, n, size_sum, n_files)
+#   files(dir_id, name, size, mtime)
+#   meta (k, v)
+#
+# size_sum / n_files 是「这个目录里所有文件的字节总和 / 个数」，建库时一次
+# 算好（见 _index_insert_dir）。问「什么最占空间」只需要扫 dirs 表，不用
+# JOIN files 再 GROUP BY —— 实测 536 ms → 32 ms。
+# scanned_at 是这次遍历该目录的时间，用来回答「数据多旧」。
+# fresh 是历史遗留列（schema 2 起恒为 1、无人读取），保留只为旧库兼容。
 #   dirs (id, path, mtime, fresh, f0, n)   一个目录只存一次路径
 #   files(dir_id, name, size, mtime)       文件名 / 大小 / 修改时间
 #   meta (k, v)                            根目录、建库时间、模式
@@ -4851,7 +4891,20 @@ def migrate_data(old, new, progress=None):
 # 只复用「目录 mtime 没变」的子树 —— 目录里增删改名都会更新目录 mtime，
 # 所以这一步是安全的；代价是复用到的文件不再刷新大小/时间（拿它们要列目录）。
 
-INDEX_SCHEMA = 2
+# schema 3 把「每个目录合计多大」在建库时就写进 dirs.size_sum / dirs.n_files。
+#
+# 为什么：问「什么最占空间」走的是按目录聚合。schema 2 每次都要
+# JOIN files 再 GROUP BY —— 实测 82 万文件 536 ms，而排行本身只需要 32 ms。
+# 实测给 files(size) 或 files(dir_id) 建索引都**没用**（671→639→696 ms，
+# 没有统计意义）：聚合必须扫完 files 的每一行，索引改变不了这一点。
+# 把合计提前算好，查询退化成一次全表扫 dirs（3.9 万行）→ 32 ms，16 倍。
+# 代价是库大 9.3 MB（58.6→67.9 MB），写一个目录多做一次 UPDATE（实测 0.2 ms）。
+#
+# dirs.scanned_at 记这次遍历该目录的时间，用来回答「数据多旧」，也是
+# 后续增量校验的锚点。旧库（schema 2）不强制重建：查询时回退老 SQL，
+# 只是慢，功能不缺。
+INDEX_SCHEMA = 3
+INDEX_SCHEMA_MIN = 2        # 还能读的最老版本，低于它才算不可用
 
 _INDEX_PRAGMAS = (
     "journal_mode=OFF",
@@ -4863,6 +4916,12 @@ _INDEX_PRAGMAS = (
 
 # 最近一次建索引的统计，给 RPC 层回报进度用
 _index_last_run = {}
+
+# 清单是「读 → 改 → 写」三段，后台校验线程和主线程都可能走这条路。
+# 不加锁的话，一次 index_add 和一次后台重建交错，后写的会把先写的覆盖掉，
+# 表现成「刚加的目录过一会儿不见了」——最难查的那种偶发。锁只保护清单，
+# 不保护建库（建库动的是各自独立的 .db，本来就不冲突）。
+_IX_LOCK = threading.RLock()
 
 
 def _index_open(path):
@@ -4887,6 +4946,26 @@ def _index_schema_version(db):
         return int(db.execute("PRAGMA user_version").fetchone()[0] or 0)
     except Exception:
         return 0
+
+
+def _index_can_read(db):
+    """这个库的结构还读得了吗：只要不低于 INDEX_SCHEMA_MIN 就凑合能用。
+
+    刻意不要求等于 INDEX_SCHEMA：升级后旧库（schema 2）没有 size_sum 列，
+    但 files/dirs 都在，回退老 SQL 一样能答，只是慢。为了多一列就逼用户
+    重建几百万文件的索引，代价远大于收益。
+    """
+    v = _index_schema_version(db)
+    return INDEX_SCHEMA_MIN <= v <= INDEX_SCHEMA
+
+
+def _index_has_totals(db):
+    """库里有 dirs.size_sum 吗（决定走快 SQL 还是回退聚合）。"""
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(dirs)")}
+    except Exception:
+        return False
+    return "size_sum" in cols
 
 
 
@@ -4915,10 +4994,18 @@ def _index_walker_exe():
 
 
 def _index_insert_dir(db, path, mtime, files, total):
-    """写一个目录块：目录行 + 它的文件行。返回新的文件累计数。"""
+    """写一个目录块：目录行 + 它的文件行。返回新的文件累计数。
+
+    size_sum / n_files 在这里就累好，查询时不用再 JOIN files 聚合。
+    """
+    size_sum = 0
+    for _nm, sz, _mt in files:
+        size_sum += sz or 0
     did = db.execute(
-        "INSERT INTO dirs(path, mtime, fresh, f0, n) VALUES(?,?,1,?,?)",
-        (path, mtime, total + 1, len(files))).lastrowid
+        "INSERT INTO dirs(path, mtime, scanned_at, fresh, f0, n, size_sum, n_files)"
+        " VALUES(?,?,?,1,?,?,?,?)",
+        (path, mtime, time.time(), total + 1, len(files), size_sum,
+         len(files))).lastrowid
     if files:
         db.executemany(
             "INSERT INTO files(dir_id, name, size, mtime) VALUES(?,?,?,?)",
@@ -5119,7 +5206,6 @@ def _ix_save(items):
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-
 def _ix_db_abspath(item):
     """条目对应的 .db 绝对路径。清单里只存文件名，避免移动缓存目录后失效。"""
     name = os.path.basename(str(item.get("db") or "")) or (item["id"] + ".db")
@@ -5128,22 +5214,23 @@ def _ix_db_abspath(item):
 
 def index_add(roots):
     """把若干根目录加进清单（已存在的不重复加），返回最新清单。"""
-    items = _ix_load()
-    have = {i["id"] for i in items}
-    changed = False
-    for root in roots or []:
-        root = os.path.abspath(str(root or ""))
-        if not root or not os.path.isdir(root):
-            continue
-        ident = _ix_make_id(root)
-        if ident in have:
-            continue
-        items.append(_ix_normalize({"root": root, "id": ident}))
-        have.add(ident)
-        changed = True
-    if changed:
-        _ix_save(items)
-    return items
+    with _IX_LOCK:
+        items = _ix_load()
+        have = {i["id"] for i in items}
+        changed = False
+        for root in roots or []:
+            root = os.path.abspath(str(root or ""))
+            if not root or not os.path.isdir(root):
+                continue
+            ident = _ix_make_id(root)
+            if ident in have:
+                continue
+            items.append(_ix_normalize({"root": root, "id": ident}))
+            have.add(ident)
+            changed = True
+        if changed:
+            _ix_save(items)
+        return items
 
 
 def index_remove(ids):
@@ -5151,23 +5238,215 @@ def index_remove(ids):
     want = set(str(i) for i in (ids or []))
     if not want:
         return []
-    items = _ix_load()
-    keep = []
-    gone = []
-    for it in items:
-        if it["id"] not in want:
-            keep.append(it)
+    with _IX_LOCK:
+        items = _ix_load()
+        keep = []
+        gone = []
+        for it in items:
+            if it["id"] not in want:
+                keep.append(it)
+                continue
+            path = _ix_db_abspath(it)
+            for suffix in ("", "-journal", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except OSError:
+                    pass
+            gone.append(it["id"])
+        if gone:
+            _ix_save(keep)
+        return gone
+
+
+def _ix_items_for_path(path):
+    """找出覆盖这个路径的索引条目，返回 [(item, root)]，根最长（最具体）的在前。
+
+    同一棵树可能同时被「D:\\」和「D:\\App」两条索引覆盖，此时只更新最具体
+    的那条，避免同一份改动写两遍库。
+    """
+    path = os.path.abspath(str(path or ""))
+    if not path:
+        return []
+    key = os.path.normcase(path)
+    out = []
+    for it in _ix_load():
+        root = str(it.get("root") or "")
+        if not root:
             continue
-        path = _ix_db_abspath(it)
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            try:
-                os.remove(path + suffix)
-            except OSError:
-                pass
-        gone.append(it["id"])
-    if gone:
-        _ix_save(keep)
-    return gone
+        try:
+            rk = os.path.normcase(os.path.abspath(root)).rstrip("\\/")
+        except (ValueError, OSError):
+            continue
+        if key == rk or key.startswith(rk + os.sep):
+            out.append((it, root))
+    out.sort(key=lambda pair: len(pair[1]), reverse=True)
+    return out
+
+
+def _ix_scan_direct(folder):
+    """扫一个目录的直接内容；返回 [(name, size, mtime)] 和目录自身 mtime。
+
+    只扫这一层，不递归 —— schema 3 的 size_sum 记的是「这个目录自己的文件」，
+    跨目录的累加在查询期按前缀做，所以刷一层就足以让排行正确。
+    """
+    with os.scandir(folder) as it:
+        entries = list(it)
+    files = []
+    for e in entries:
+        try:
+            if e.is_dir(follow_symlinks=False):
+                continue
+            info = e.stat(follow_symlinks=False)
+            files.append((e.name, int(info.st_size or 0),
+                          float(info.st_mtime or 0)))
+        except OSError:
+            # 单个文件读不到（被独占、刚被删）：跳过它，不要让整个刷新生效不了
+            continue
+    try:
+        dir_mtime = float(os.stat(folder).st_mtime)
+    except OSError:
+        dir_mtime = 0.0
+    return files, dir_mtime
+
+
+def _ix_refresh_dir(db, folder):
+    """把一个目录在索引里的记录换成当前磁盘事实。返回 True 表示改到了。
+
+    目录还没进过索引（整理时刚建出来的分类夹就是这种）就补一行；已经有行就
+    把它的文件块整体换掉。补新行时 f0 取「当前最大 rowid + 1」，保证
+    dirs.f0/n 指向的区间仍然连续 —— _ix_query_one 的第二个分支靠这个区间
+    直接取文件，区间断了就查不到整个目录。
+    """
+    folder = os.path.abspath(folder)
+    if not os.path.isdir(folder):
+        return False
+    try:
+        files, dir_mtime = _ix_scan_direct(folder)
+    except OSError:
+        return False
+    size_sum = sum(sz for _n, sz, _m in files)
+    now = time.time()
+
+    row = db.execute("SELECT id FROM dirs WHERE path = ?", (folder,)).fetchone()
+    if row is None:
+        nxt = (db.execute(
+            "SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] or 0) + 1
+        did = db.execute(
+            "INSERT INTO dirs(path, mtime, scanned_at, fresh, f0, n, size_sum, n_files)"
+            " VALUES(?,?,?,1,?,?,?,?)",
+            (folder, dir_mtime, now, nxt, len(files), size_sum,
+             len(files))).lastrowid
+    else:
+        did = row[0]
+        # 先删旧文件块再重算 f0：删完 MAX(rowid) 可能变小，新块仍连续
+        db.execute("DELETE FROM files WHERE dir_id = ?", (did,))
+        nxt = (db.execute(
+            "SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] or 0) + 1
+        db.execute(
+            "UPDATE dirs SET mtime=?, scanned_at=?, f0=?, n=?, size_sum=?,"
+            " n_files=? WHERE id=?",
+            (dir_mtime, now, nxt, len(files), size_sum, len(files), did))
+    if files:
+        db.executemany(
+            "INSERT INTO files(dir_id, name, size, mtime) VALUES(?,?,?,?)",
+            ((did, nm, sz, mt) for nm, sz, mt in files))
+    return True
+
+
+def _ix_drop_subtree(db, folder):
+    """目录被删掉之后，把它和它下面所有目录的索引行一起清掉。
+
+    不清理的话，删掉一整棵目录树之后，「什么最占空间」还会继续报这棵树，
+    用户点进去发现路径不存在 —— 这比没有答案更糟。
+    """
+    folder = os.path.abspath(folder)
+    prefix = folder.rstrip("\\/") + os.sep
+    rows = db.execute(
+        "SELECT id FROM dirs WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+        (folder, _like_literal(prefix) + "%")).fetchall()
+    for (did,) in rows:
+        db.execute("DELETE FROM files WHERE dir_id = ?", (did,))
+        db.execute("DELETE FROM dirs WHERE id = ?", (did,))
+    return len(rows)
+
+
+# 一次写穿最多刷多少个目录。整理 5000 个文件通常只涉及几十个目标目录，
+# 去重之后远小于这个数；真超过说明动的范围太大，直接重建索引更划算。
+_IX_TOUCH_MAX_DIRS = 4000
+
+
+def index_touch(paths):
+    """Tier 0 写穿：软件自己动了磁盘，立刻把索引改成新事实。
+
+    为什么需要这个：索引是一份快照，而软件自己的整理 / 撤销 / 删除 / 清理
+    每天都在改磁盘。不写穿的话，用户刚用软件整理完文件，同一个软件再去回答
+    「什么最占空间」或者搜索，给出的还是整理之前的位置 —— 它连自己做过什么
+    都不记得。这不是索引机制的缺陷，是没有把「自己也是改动源」这件事算进去。
+
+    成本几乎为零：一次移动只涉及源目录和目标目录两个目录，各扫一层就够
+    （schema 3 的 size_sum 是单目录粒度，聚合在查询期做）。去重之后，整理
+    几百个文件往往只需要刷十几个目录，总共几十毫秒。
+
+    paths 里每个元素是「刚被创建 / 移动 / 删除的那条路径」。函数自己判断它
+    现在还在不在：还在就刷父目录，不在就顺手把那棵子树从索引里摘掉。
+
+    失败一律吞掉：写穿是优化，不是业务的一部分。它出错绝不能连带让用户的
+    整理操作失败 —— 那种取舍是拿数据正确性换缓存新鲜度，方向反了。
+    """
+    try:
+        raw = [p for p in (paths or []) if isinstance(p, str) and p.strip()]
+    except TypeError:
+        return 0
+    if not raw:
+        return 0
+
+    # 按「哪个库 + 哪个目录」去重：一次整理常把几十个文件搬进同一个分类夹
+    plan = {}
+    dropped = {}
+    for p in raw:
+        try:
+            ap = os.path.abspath(p)
+        except (ValueError, OSError):
+            continue
+        parent = os.path.dirname(ap.rstrip("\\/")) or ap
+        owners = _ix_items_for_path(parent)
+        if owners:
+            item = owners[0][0]
+            plan.setdefault(item["id"], (item, set()))[1].add(parent)
+        if not os.path.exists(ap):
+            owners2 = _ix_items_for_path(ap)
+            if owners2:
+                item2 = owners2[0][0]
+                dropped.setdefault(item2["id"], (item2, set()))[1].add(ap)
+
+    if len(plan) > _IX_TOUCH_MAX_DIRS:
+        # 一次动了几千个目录：逐个刷不如等下一次重建，别在这里拖住用户
+        return 0
+
+    touched = 0
+    for ident, (item, dirs) in plan.items():
+        db = None
+        try:
+            db = _index_open(_ix_db_abspath(item))
+            if db is None or not _index_has_totals(db):
+                # 老库（schema 2）没有 size_sum/n_files：等它重建时自然升级，
+                # 这里硬写会报「没有那一列」
+                continue
+            with db:
+                for folder in dirs:
+                    if _ix_refresh_dir(db, folder):
+                        touched += 1
+                for folder in dropped.get(ident, (item, set()))[1]:
+                    touched += _ix_drop_subtree(db, folder)
+        except Exception:
+            continue
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+    return touched
 
 
 def _index_build_one(item, walker, progress):
@@ -5192,7 +5471,9 @@ def _index_build_one(item, walker, progress):
     try:
         db.executescript(
             "CREATE TABLE dirs(id INTEGER PRIMARY KEY, path TEXT, mtime REAL,"
-            " fresh INTEGER, f0 INTEGER, n INTEGER);"
+            " scanned_at REAL, fresh INTEGER, f0 INTEGER, n INTEGER,"
+            " size_sum INTEGER NOT NULL DEFAULT 0,"
+            " n_files INTEGER NOT NULL DEFAULT 0);"
             "CREATE TABLE files(dir_id INTEGER, name TEXT, size INTEGER, mtime REAL);"
             "CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);"
             "PRAGMA user_version=%d;" % INDEX_SCHEMA)
@@ -5300,7 +5581,19 @@ def build_index(roots=None, ids=None, progress=None, full=False):
         errs.extend(ierrs)
 
     if targets:
-        _ix_save(items)
+        # 不直接写回 build 开始时那份清单：建库可能跑几十秒，这期间用户可能
+        # 在搜索页加了别的目录。重新读一遍、只覆盖这次真正建过的条目，
+        # 这样两边的改动都不会丢。
+        with _IX_LOCK:
+            fresh = _ix_load()
+            by_id = {i["id"]: i for i in fresh}
+            for item in targets:
+                if item["id"] in by_id:
+                    by_id[item["id"]].update(item)
+                else:
+                    fresh.append(item)
+                    by_id[item["id"]] = item
+            _ix_save(fresh)
 
     _index_last_run.clear()
     _index_last_run.update({
@@ -5315,13 +5608,353 @@ def build_index(roots=None, ids=None, progress=None, full=False):
     return total_files, errs
 
 
+# ── Tier 3：校验式重建（后台，只在抽样证明索引确实烂了时才动） ──────────
+
+# 抽查多少个目录。40 次 scandir 在几十毫秒量级，比全量重建 7 秒便宜两个数量级。
+_IX_VERIFY_DIRS = 40
+# 超过这些比例就认为索引真的烂了，值得重建
+_IX_MISSING_MAX = 0.10      # 抽到的目录里超过 10% 已经不存在
+_IX_DIRTY_MAX = 0.25        # 抽到的目录里超过 25% 的文件数与 mtime 对不上
+
+
+def _ix_verify_one(item):
+    """抽查一个索引库，判断它还值不值得信。
+
+    为什么抽查目录而不是核对文件：全量核对等于把建索引再跑一遍，那样这个
+    后台任务本身就变成了「扫盘伤磁盘」的来源，恰好是用户担心的事。目录级的
+    两个信号已经够用 —— 目录没了、或者目录里的文件数/mtime 变了，都说明这份
+    账本跟磁盘对不上了。
+
+    返回 {ok, checked, missing, dirty, why}。任何异常都算「不知道」，返回 ok=True
+    保守放过：后台任务不该因为自己读不懂就删掉用户的索引。
+    """
+    db = _index_open(_ix_db_abspath(item))
+    if db is None:
+        return {"ok": False, "checked": 0, "missing": 0, "dirty": 0,
+                "why": "索引库不存在"}
+    try:
+        rows = db.execute(
+            "SELECT path, mtime, n_files FROM dirs ORDER BY RANDOM() LIMIT ?",
+            (_IX_VERIFY_DIRS,)).fetchall()
+    except Exception:
+        return {"ok": True, "checked": 0, "missing": 0, "dirty": 0,
+                "why": "读不了目录表"}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    if not rows:
+        return {"ok": False, "checked": 0, "missing": 0, "dirty": 0,
+                "why": "索引是空的"}
+
+    missing = 0
+    dirty = 0
+    for path, mtime, n_files in rows:
+        try:
+            st = os.stat(path)
+        except OSError:
+            missing += 1
+            continue
+        # mtime 变了就说明这个目录被改过；再数一遍文件数，确认不是只有时间戳变
+        try:
+            actual = sum(1 for e in os.scandir(path) if not e.is_dir())
+        except OSError:
+            missing += 1
+            continue
+        if actual != int(n_files or 0):
+            dirty += 1
+        elif abs(float(st.st_mtime) - float(mtime or 0)) > 1.0:
+            dirty += 1
+
+    checked = len(rows)
+    miss_ratio = missing / float(checked)
+    dirty_ratio = dirty / float(checked)
+    ok = miss_ratio <= _IX_MISSING_MAX and dirty_ratio <= _IX_DIRTY_MAX
+    why = ""
+    if not ok:
+        why = "抽查 %d 个目录：%d 个已不存在，%d 个内容已变" % (
+            checked, missing, dirty)
+    return {"ok": ok, "checked": checked, "missing": missing,
+            "dirty": dirty, "why": why}
+
+
+def index_selfcheck(rebuild=True, progress=None):
+    """抽查所有索引库，把确实过期的那些重建掉。返回一份报告。
+
+    这是「用户不用管」的那一层：他从不点「重建索引」，索引也一样会跟上磁盘。
+    但它必须便宜 —— 抽查是几十毫秒，重建只在抽查判定过期时才发生，两者差
+    三个数量级。不做无条件定时重建，因为那正是用户说的「扫盘次数多伤磁盘」。
+    """
+    report = {"checked": 0, "stale_items": [], "rebuilt": [], "failed": [],
+              "elapsed_ms": 0}
+    t0 = time.perf_counter()
+    items = _ix_load()
+    if not items:
+        report["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+        return report
+
+    stale_ids = []
+    for item in items:
+        if not os.path.isdir(item.get("root") or ""):
+            # 盘没接 / 目录没了：不是过期，是离线，交给 index_stats 报告
+            continue
+        v = _ix_verify_one(item)
+        report["checked"] += 1
+        if not v.get("ok"):
+            stale_ids.append(item["id"])
+            report["stale_items"].append({"id": item["id"], "root": item.get("root"),
+                                    "why": v.get("why") or ""})
+
+    if rebuild and stale_ids:
+        try:
+            build_index(ids=stale_ids, progress=progress)
+            report["rebuilt"] = list(stale_ids)
+        except Exception as exc:
+            report["failed"] = [{"ids": stale_ids, "why": str(exc)}]
+    report["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
+    return report
+
+
+def _freshness_mode():
+    """索引新鲜度档位。读设置失败一律当 check（最稳的那一档）。"""
+    try:
+        m = str(load_settings().get("index_freshness") or "check")
+    except Exception:
+        return "check"
+    return m if m in ("live", "check", "manual") else "check"
+
+
+def index_quota_ok():
+    """索引总占用是否还在上限内。超了不删数据，只是不再主动扩范围。"""
+    try:
+        cap_mb = int(load_settings().get("index_max_mb") or 2048)
+    except Exception:
+        cap_mb = 2048
+    if cap_mb <= 0:
+        return True, 0, 0
+    used = 0
+    for item in _ix_load():
+        try:
+            used += int(item.get("bytes") or 0)
+        except Exception:
+            pass
+    return used <= cap_mb * 1024 * 1024, used, cap_mb * 1024 * 1024
+
+
+# 热目录多久重扫一次。实测五个热目录（桌面/文档/下载/图片/视频）全量重建
+# 只要 300 毫秒左右、库总共 0.45 MB —— 这个数字决定了这里不需要文件监听器。
+_HOT_SECS = {"live": 60, "check": 600}
+
+# 「没搜到就补扫一次热目录」的最小间隔。这是查询里唯一会扫盘的地方，
+# 必须有个下限，否则用户每敲一个字搜一次，就是每秒三次扫盘。
+_HOT_MIN_GAP = 15.0
+
+# 查询里同步补扫的规模上限。实测五个热目录 4,426 个文件、300 毫秒；
+# 到 3 万个文件就是两秒级，用户会感到「搜索卡了一下」。超过就交给后台。
+_HOT_INLINE_MAX = 30000
+
+
+def _hot_roots():
+    """要「保鲜」的热目录：桌面/文档/下载/图片/视频。
+
+    跳过已经被更大索引根覆盖的那些 —— 用户要是把整个 D: 索引了，热目录
+    自然含在里面，单独再建一份只会重复占地方。
+    """
+    covered = []
+    for item in _ix_load():
+        r = item.get("root") or ""
+        if r and os.path.isdir(r):
+            covered.append(os.path.normcase(os.path.abspath(r)).rstrip("\\") + "\\")
+    out = []
+    for p in default_index_roots():
+        key = os.path.normcase(os.path.abspath(p)).rstrip("\\") + "\\"
+        if any(key.startswith(c) and key != c for c in covered):
+            continue
+        out.append(p)
+    return out
+
+
+def hot_refresh(force=False):
+    """把热目录重扫一遍，让「刚下载的文件」尽快能搜到。
+
+    为什么不写文件监听器（ReadDirectoryChangesW / USN 日志）：监听要常驻
+    句柄、维护白名单、处理漏事件，换来的只是这两三百毫秒的窗口期。而定期
+    重扫一次就是 300ms、0.45 MB —— 用 300ms 换掉一整套监听器，是明显划算
+    的那一边。这是实测结论，不是估计。
+
+    代价有个前提：热目录是「小」的。整盘 140 万文件要 7.5 秒，所以这里
+    只说热目录，不碰整盘；整盘靠 index_selfcheck 的抽查重建。
+    """
+    roots = _hot_roots()
+    if not roots:
+        return {"roots": [], "files": 0, "elapsed_ms": 0, "skipped": "没有可保鲜的热目录"}
+    try:
+        ok, used, cap = index_quota_ok()
+        if not ok:
+            # 超限就不再主动扩范围，但也不删用户已有的索引
+            return {"roots": roots, "files": 0, "elapsed_ms": 0,
+                    "skipped": "索引已占 %d MB，超过上限 %d MB"
+                               % (used // 1048576, cap // 1048576)}
+    except Exception:
+        pass
+    t0 = time.perf_counter()
+    try:
+        items = _ix_load()
+        known_roots = {}
+        for item in items:
+            root = os.path.normcase(os.path.abspath(item.get("root") or ""))
+            known_roots[root] = max(known_roots.get(root, 0),
+                                    int(item.get("files") or 0))
+        # 热目录也可能很大（有人把几十万个文件的目录当下载夹）。后台节拍
+        # 不该在这种机器上每 10 分钟烧掉几秒 CPU，交给 index_selfcheck 的
+        # 抽查更划算。用户自己点「立即刷新」不受这个限制。
+        if not force:
+            known = max([known_roots.get(os.path.normcase(os.path.abspath(p)), 0)
+                         for p in roots] or [0])
+            if known > _HOT_INLINE_MAX:
+                return {"roots": roots, "files": 0, "elapsed_ms": 0,
+                        "skipped": "热目录有 %d 个文件，超过同步重扫上限，"
+                                   "交给后台抽查" % known}
+        missing = [p for p in roots
+                   if os.path.normcase(os.path.abspath(p)) not in known_roots]
+        if missing:
+            index_add(missing)
+        files, errs = build_index(roots=roots)
+        # 时间戳记在这里而不是调用方：查询补扫和后台节拍走的是同一个函数。
+        _INDEX_WATCH["hot"] = time.time()
+        return {"roots": roots, "files": files, "errs": list(errs or []),
+                "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
+    except Exception as exc:
+        return {"roots": roots, "files": 0, "elapsed_ms": 0, "error": str(exc)}
+
+
+def _hot_maybe_stale():
+    """这次「没搜到」值不值得先给热目录补扫一遍？
+
+    判据不是「索引多久没更新」，而是「上一次补扫距今够不够久」。理由：按
+    索引年龄判断有个必然的漏洞——文件恰好在重建之后、搜索之前下载下来，
+    那一刻索引是最新的，于是这次搜索会搜不到，然后要等下一个周期。而按
+    冷却时间判断，任何一次没搜到都会立刻补扫一次（300ms），只有「连续
+    搜同一个不存在的名字」才会被 15 秒冷却挡掉重复劳动。
+
+    manual 档不补扫：用户选「只手动」就是要自己掌握扫盘时机。
+    """
+    try:
+        if _freshness_mode() == "manual":
+            return False
+        if not _hot_roots():
+            return False
+        # 热目录特别大的机器（比如下载夹里塞了 20 万个文件）不能在查询里
+        # 同步重扫，那会把「搜一下」变成几十秒的卡顿。超过这个规模就交给
+        # 后台线程，查询立刻返回空结果 + hint。
+        known = 0
+        hot = {os.path.normcase(os.path.abspath(p)) for p in _hot_roots()}
+        for item in _ix_load():
+            root = os.path.normcase(os.path.abspath(item.get("root") or ""))
+            if root in hot:
+                known = max(known, int(item.get("files") or 0))
+        if known > _HOT_INLINE_MAX:
+            return False
+        # 冷却只针对「上一次因为没搜到而补扫」，不针对后台那次定期刷新。
+        # 两者混用一个时间戳会出现这种事：后台刚刷过，用户三秒后下载了文件
+        # 再搜，明明该补扫却被冷却挡住，等下一次搜索才命中。分开放就没有
+        # 这个窗口，而防抖的效果不变。
+        last = float(_INDEX_WATCH.get("miss") or 0)
+        return (time.time() - last) >= _HOT_MIN_GAP
+    except Exception:
+        return False
+
+
+# 后台校验线程的开关。引擎是单线程 RPC，重建要几十秒，只能放子线程；
+# 而 sqlite 连接不能跨线程共享（check_same_thread=True），所以子线程里
+# 一律自己 open、自己 close，绝不复用主线程的连接。
+_INDEX_WATCH = {"started": False, "stop": False, "last": 0.0, "hot": 0.0,
+                "miss": 0.0, "last_report": None, "last_hot": None,
+                "busy": False}
+
+
+def index_watch_tick(force=False):
+    """后台校验的一拍：先给热目录保鲜，偶尔再抽查一次全库。
+
+    两件事的节奏差着两个数量级，所以分开计时：
+      - 热目录重扫：300ms 级，live 档 60 秒一次、check 档 10 分钟一次。
+        这是「刚下载的文件多久能搜到」的答案。
+      - 全库抽查：几秒到几十秒，6 小时一次。这是「索引有没有烂掉」的答案。
+
+    没轮到时返回 None。
+    """
+    if _INDEX_WATCH["busy"]:
+        return None
+    try:
+        if not load_settings().get("index_rebuild_idle", True):
+            return None
+    except Exception:
+        pass
+    mode = _freshness_mode()
+    if mode == "manual" and not force:
+        return None
+
+    now = time.time()
+    _INDEX_WATCH["busy"] = True
+    try:
+        out = {}
+        hot_every = _HOT_SECS.get(mode, 600)
+        if force or now - _INDEX_WATCH["hot"] >= hot_every:
+            rep = hot_refresh()
+            _INDEX_WATCH["hot"] = time.time()
+            _INDEX_WATCH["last_hot"] = rep
+            out["hot"] = rep
+
+        if force or now - _INDEX_WATCH["last"] >= 6 * 3600:
+            rep = index_selfcheck(rebuild=True)
+            _INDEX_WATCH["last"] = time.time()
+            _INDEX_WATCH["last_report"] = rep
+            out["selfcheck"] = rep
+
+        return out or None
+    except Exception:
+        return None
+    finally:
+        _INDEX_WATCH["busy"] = False
+
+
+def start_index_watchdog():
+    """启动后台校验线程。启动后先等 30 秒再第一次抽查，别和界面抢开机那几秒。
+
+    线程每 30 秒醒一次，具体跑什么由 index_watch_tick 按各自的节奏决定
+    （热目录 60 秒 / 全库 6 小时）。醒得比该做的勤不是问题：醒着的那次
+    只读两个设置、比一次时间，成本可以忽略。
+    """
+    if _INDEX_WATCH["started"]:
+        return False
+    _INDEX_WATCH["started"] = True
+
+    def loop():
+        time.sleep(30)
+        while not _INDEX_WATCH["stop"]:
+            try:
+                index_watch_tick()
+            except Exception:
+                pass
+            for _ in range(3):
+                if _INDEX_WATCH["stop"]:
+                    return
+                time.sleep(10)
+
+    threading.Thread(target=loop, name="index-watchdog", daemon=True).start()
+    return True
+
+
+
 def _ix_query_one(db_path, kw, limit):
     """查单个库，返回 [(完整路径, 名字, 大小, 时间)]。"""
     db = _index_open(db_path)
     if db is None:
         return []
     try:
-        if _index_schema_version(db) != INDEX_SCHEMA:
+        if not _index_can_read(db):
             return []
         rows = db.execute(
             "SELECT d.path, f.name, f.size, f.mtime FROM files f "
@@ -5407,24 +6040,38 @@ def _ix_top_one(db_path, limit, min_size):
     根本不需要重新遍历磁盘 —— 一条 ORDER BY 就够了。
     以前没有这条查询，模型问「什么最占空间」只能去 top_files 现扫，
     整盘 20 秒预算扫不完，于是答「只扫了前 20 秒」。
+
+    索引是快照，磁盘会变：文件被删、被移走之后索引还留着它。所以这里对
+    取出来的候选逐个验一下还在不在，不在了就丢掉、继续往后补。刻意多取
+    4 倍再截断——只取 limit 条再过滤，一旦前排有几个失效就会少给答案。
+    验 80 个路径的 stat 代价可以忽略（微秒级），换来「答案里不会出现
+    已经不存在的文件」。
     """
     db = _index_open(db_path)
     if db is None:
         return []
     try:
-        if _index_schema_version(db) != INDEX_SCHEMA:
+        if not _index_can_read(db):
             return []
+        want = max(1, int(limit))
         rows = db.execute(
             "SELECT d.path, f.name, f.size, f.mtime FROM files f "
             "JOIN dirs d ON d.id = f.dir_id "
             "WHERE f.size >= ? ORDER BY f.size DESC LIMIT ?",
-            (int(min_size), int(limit))).fetchall()
-        return [(os.path.join(folder, name), name, int(size or 0), mtime)
-                for folder, name, size, mtime in rows]
+            (int(min_size), want * 4)).fetchall()
     except Exception:
         return []
     finally:
         db.close()
+    out = []
+    for folder, name, size, mtime in rows:
+        full = os.path.join(folder, name)
+        if not os.path.exists(full):
+            continue
+        out.append((full, name, int(size or 0), mtime))
+        if len(out) >= want:
+            break
+    return out
 
 
 def search_index_top(limit=50, ids=None, min_size=0):
@@ -5490,19 +6137,30 @@ def _ix_folders_one(db_path, root, depth):
     为什么按目录而不按文件：人问「什么最占空间」想知道的是「哪个文件夹 / 哪个
     软件」，不是「哪个 .pak」。单个 pak 5.4 GB 对人没有意义，PUBG 占 60 GB 才有。
 
-    先在 SQL 里按 dir 聚合（11 万行），再在 Python 里归并前缀 —— 直接 SELECT 每个
-    文件会是 142 万行，实测要 26 秒，人不可能等。
+    schema 3 起 dirs 自带 size_sum / n_files，直接扫一遍 3.9 万行目录就行
+    （实测 32 ms）。旧库（schema 2）没有这两列，回退 JOIN files 聚合
+    （实测 536 ms）——慢 16 倍但答案一样，不值得为它逼用户重建索引。
+
+    刻意**不**给 files 建索引：实测 files(size)、files(dir_id) 对这两个查询
+    都没帮助（671→639→696 ms，全在噪声里），聚合本来就要扫完 files 每一行。
     """
     db = _index_open(db_path)
     if db is None:
         return {}
     try:
-        if _index_schema_version(db) != INDEX_SCHEMA:
+        if not _index_can_read(db):
             return {}
-        rows = db.execute(
-            "SELECT d.path, SUM(f.size), COUNT(*) FROM files f "
-            "JOIN dirs d ON d.id = f.dir_id GROUP BY d.id"
-        ).fetchall()
+        if _index_has_totals(db):
+            # n_files > 0 必须留着：schema 2 的 JOIN files 天然排除了空目录，
+            # 直接读 dirs 会把空目录也带出来（实测 3.9 万目录里多出 9392 个），
+            # 于是「下钻 Root」会多出一行体积为 0 的 Root 自己。
+            rows = db.execute(
+                "SELECT path, size_sum, n_files FROM dirs WHERE n_files > 0"
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT d.path, SUM(f.size), COUNT(*) FROM files f "
+                "JOIN dirs d ON d.id = f.dir_id GROUP BY d.id").fetchall()
     except Exception:
         return {}
     finally:
@@ -5552,6 +6210,40 @@ def search_index_folders(depth=3, limit=20, min_size=0, ids=None, parent=None):
         rows.append((key, size, files))
     rows.sort(key=lambda r: (-r[1], os.path.normcase(r[0])))
     return rows[:limit], total
+
+
+def _fmt_age(sec):
+    """把秒数说成人话：「12 分钟前」「3 小时前」「2 天前」。"""
+    sec = max(0, int(sec))
+    if sec < 60:
+        return "刚刚"
+    if sec < 3600:
+        return "%d 分钟前" % (sec // 60)
+    if sec < 86400:
+        return "%d 小时前" % (sec // 3600)
+    return "%d 天前" % (sec // 86400)
+
+
+def index_age():
+    """这份索引有多旧：返回 {age_sec, age_text, built_at, stale}。
+
+    为什么要主动报年龄：索引是快照，答「什么最占空间」用的可能是半小时前
+    的账本。旧不是错——CDN 的 Cache-Control、DNS 的 TTL 都允许旧数据存在，
+    前提是**说出来**。让用户自己判断「这个答案可信到哪一步」，比假装实时
+    然后被现实打脸要好。
+
+    stale 的阈值取 10 分钟：短于它的过期数据对「哪个文件夹大」这类问题没有
+    实质影响（体积变化的尺度是天/周），长于它才值得提醒。
+    """
+    items = _ix_load()
+    if not items:
+        return {"age_sec": 0, "age_text": "", "built_at": 0, "stale": False}
+    built = max(int(i.get("built_at") or 0) for i in items)
+    if not built:
+        return {"age_sec": 0, "age_text": "", "built_at": 0, "stale": False}
+    age = max(0, int(time.time()) - built)
+    return {"age_sec": age, "age_text": _fmt_age(age),
+            "built_at": built, "stale": age > 600}
 
 
 def _engine_search_folders(params):
@@ -5618,6 +6310,8 @@ def _engine_search_folders(params):
               "roots": roots, "indexed": int(st.get("files") or 0),
               "depth": depth, "bytes": int(total), "built": built,
               "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
+    # 数据年龄一并交给上层：模型和 UI 都该知道这份答案是哪一刻的账本
+    result.update(index_age())
     if build_error:
         result["error"] = build_error
     if not roots:
@@ -11430,6 +12124,11 @@ def _engine_settings():
         "log_keep_days": s.get("log_keep_days"),
         "close_action": s.get("close_action"),
         "tray_pin": s.get("tray_pin"),
+        # 索引新鲜度三键：能写就必须能读回来。少一个，设置页重新加载后
+        # 控件会退回默认值 —— 用户改过的东西看着像没保存。
+        "index_freshness": s.get("index_freshness") or "check",
+        "index_max_mb": int(s.get("index_max_mb") or 2048),
+        "index_rebuild_idle": bool(s.get("index_rebuild_idle", True)),
         "settings_path": SETTINGS_PATH,
     }
 
@@ -12573,6 +13272,37 @@ def _engine_paths_same(a, b):
     return key(a) == key(b)
 
 
+def _engine_search_selfcheck(params):
+    """search.selfcheck：抽查索引，判定过期的就重建，返回报告。
+
+    给设置页的「立即校验」按钮用，也给启动时那一拍用。不传 rebuild 时默认
+    真的重建——用户点这个按钮就是想让它修好，不是想看一份报告。
+    """
+    rebuild = params.get("rebuild", True)
+    if not isinstance(rebuild, bool):
+        rebuild = True
+    rep = index_selfcheck(rebuild=rebuild, progress=_engine_progress)
+    rep["rebuild"] = rebuild
+    rep.update(index_age())
+    ok, used, cap = index_quota_ok()
+    rep["quota"] = {"ok": ok, "used_bytes": used, "cap_bytes": cap}
+    rep["freshness"] = _freshness_mode()
+    return rep
+
+
+def _engine_search_hot(params):
+    """search.hot：立刻给热目录保鲜一次，返回扫了哪些根、多少文件、多久。
+
+    给设置页的「立即刷新」按钮用。平时不需要点 —— 后台线程每 60 秒做一次，
+    搜索没命中时也会顺手补一次。留这个入口是为了「用户就是想确认一下」的
+    时候有个东西可按，而不是只能等。
+    """
+    rep = hot_refresh(force=True)
+    out = dict(rep)
+    out.update(index_age())
+    return out
+
+
 def _engine_search_status(params):
     """search.status：所有索引的清单、体积、覆盖与合计。"""
     st = index_stats()
@@ -12745,6 +13475,16 @@ def _engine_search_query(params):
     if rows is None:                  # 没有 es.exe 或调用失败 → 退回本地索引
         source = "index"
         rows = search_index(q, limit, ids=ids)
+        # 一条都没搜到，而用户又刚下载了东西 —— 这几乎一定是索引还没跟上，
+        # 不是「本机没有这个文件」。热目录重扫一次只要 300 毫秒，直接补上再查
+        # 一遍，比让用户看着空结果自己猜「是不是要重建索引」好得多。
+        # 只查一次，不循环；重扫后仍然没有，那就是真的没有。
+        if not rows and _hot_maybe_stale():
+            _INDEX_WATCH["miss"] = time.time()
+            hot_refresh()
+            rows = search_index(q, limit, ids=ids)
+            if rows:
+                source = "index"
     items = [{"name": name or os.path.basename(path), "path": path,
               "size": int(size or 0), "mtime": int(mtime or 0)}
              for path, name, size, mtime in rows]
@@ -12779,6 +13519,7 @@ def _engine_search_top(params):
     result = {"items": items, "total": len(items), "source": "index",
               "roots": roots, "indexed": int(st.get("files") or 0),
               "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
+    result.update(index_age())
     if not roots:
         result["hint"] = "本地还没有索引：先在「搜索」页添加目录并建立一次，之后这里就能直接按体积排"
     return result
@@ -12812,17 +13553,23 @@ _ENGINE_SETTINGS_TYPES = {
     "index_roots": list,
     "shot_dirs": list,
     "cache_custom_dirs": list,
+    "index_freshness": str,
+    "index_max_mb": int,
+    "index_rebuild_idle": bool,
 }
 _ENGINE_SETTINGS_CHOICES = {
     "conflict_policy": ("rename", "skip", "overwrite"),
     "close_action": ("tray", "exit", "ask"),
     "tray_pin": ("taskbar", "overflow", "system"),
+    "index_freshness": ("live", "check", "manual"),
 }
 _ENGINE_SETTINGS_RANGES = {
     "recursive_depth": (1, 4),
     "log_keep_days": (1, 3650),
     "shot_keep_days": (0, 36500),
     "shot_min_kb": (0, 10 * 1024 * 1024),
+    # 0 表示不限制（index_quota_ok 里就是这么判的），所以下界是 0 而不是 1
+    "index_max_mb": (0, 65536),
 }
 
 
@@ -13343,6 +14090,8 @@ _ENGINE_METHODS = {
     "search.folders": _engine_search_folders,
     "search.add": _engine_search_add,
     "search.remove": _engine_search_remove,
+    "search.selfcheck": _engine_search_selfcheck,
+    "search.hot": _engine_search_hot,
     "settings.set": _engine_settings_set,
     "rules.validate": _engine_rules_validate,
     "rules.preview": _engine_rules_preview,
@@ -13396,6 +14145,13 @@ def run_engine():
                 os._exit(0)
 
     threading.Thread(target=_idle_watch, name='engine-idle', daemon=True).start()
+    # 后台抽查索引：只在空闲时跑，抽样几十毫秒，判定过期才重建。
+    # 启动它意味着「用户什么都不用做，索引也会跟上磁盘」。
+    try:
+        if _freshness_mode() != "manual":
+            start_index_watchdog()
+    except Exception:
+        pass
 
     while True:
         line = sys.stdin.readline()

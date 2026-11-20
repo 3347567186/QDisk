@@ -447,7 +447,13 @@ def build_plan(sources, dest, opts):
         if not os.path.exists(lp(src)):
             plan.issues.append(Issue("error", "missing", "来源不存在", src))
             continue
-        base = dest if opts.flatten else os.path.join(
+        # flatten 只对「目录来源」有意义：它的意思是「把目录里的内容倒进 dest，
+        # 不多套一层」。文件来源没有层可以压平，仍然要落在 dest 里面。
+        # 以前这里不分种类一律 base = dest，于是单个文件来源会算出 dst = dest
+        # 这个「目录路径」，再被重名策略改名成 「dest (2)」——用户的 a.txt
+        # 搬完就变成了同级的另一个文件，名字还叫「dst (2)」。
+        flat_dir = opts.flatten and os.path.isdir(lp(src)) and not is_reparse(src)
+        base = dest if flat_dir else os.path.join(
             dest, os.path.basename(src.rstrip("\\/")))
         plan.cross_volume = not same_volume(src, dest)
         _walk(plan, src, base, opts, seen, depth=0)
@@ -476,7 +482,13 @@ def _walk(plan, src, dst, opts, seen, depth):
 
     if stat.S_ISDIR(st.st_mode):
         is_root = depth == 0
-        if is_root and os.path.exists(lp(dst)):
+        # 压平（flatten）模式的顶层：dst 就是 dest 本身，dest 已存在不是冲突，
+        # 而是压平的前提。以前这里也走重名策略，于是 dest 已存在时整棵目录
+        # 被搬进「dest (2)」——用户勾了「不套一层」，东西却没落到 dest 里。
+        flat_into_dest = (is_root and opts_.flatten
+                          and os.path.normcase(os.path.abspath(dst))
+                          == os.path.normcase(plan.dest))
+        if is_root and not flat_into_dest and os.path.exists(lp(dst)):
             # 顶层同名：按用户选的冲突策略处理。
             # 以前一律 merge，导致「搬过去只看到里面的内容、外面那层没建」。
             policy = opts_.conflict

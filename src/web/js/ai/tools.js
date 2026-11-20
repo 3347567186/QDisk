@@ -335,6 +335,14 @@
             hint: (r && r.hint) || '',
             error: (r && r.error) || ''
           };
+          /* 这份账本是快照，不是实时读数。旧不是错 —— CDN 的 max-age、
+             DNS 的 TTL 都允许旧数据存在，前提是说出来。模型拿到 age_text
+             必须转述给用户，否则用户会以为「此刻」磁盘就是这样。
+             超过 10 分钟（引擎侧 stale=true）时额外给一句硬话。 */
+          if (r && r.age_text) {
+            base.data_age = r.age_text;
+            if (r.stale) base.data_age_note = '索引是' + r.age_text + '建的，这段时间里磁盘可能变了；需要最新结果就重新扫一次';
+          }
           /* 按风险分好组，把「能清多少」直接算出来给模型。
              不这么做的话，实测模型会把「Steam 游戏库」和「缓存」并列成
              「这些文件都可以进行清理」—— 用户照做就删掉几十 GB 的游戏本体。
@@ -519,6 +527,11 @@
           };
           if (!(r.roots || []).length) {
             base.note = '本地索引还没建，这个结果不能当整机统计；需要的话先去「搜索」页建立一次索引';
+          }
+          /* 同 top_folders：快照要自报年龄，否则模型会把「半小时前」说成「现在」。 */
+          if (r && r.age_text) {
+            base.data_age = r.age_text;
+            if (r.stale) base.data_age_note = '索引是' + r.age_text + '建的，这段时间里磁盘可能变了；需要最新结果就重新扫一次';
           }
           return pageFit(base, items, off, want);
         },

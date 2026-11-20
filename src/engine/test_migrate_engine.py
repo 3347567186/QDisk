@@ -98,6 +98,40 @@ class TestMove(Base):
 
 
 class TestConflict(Base):
+    def test_flatten_into_existing_dest_is_not_renamed(self):
+        """勾了「不套一层」时，目标已存在是前提不是冲突。
+
+        回归：以前 flatten 也走 conflict=rename，于是整棵目录被搬进
+        「dst (2)」，用户勾了不套一层，东西却没落到 dst 里。
+        """
+        self.make("a.txt")
+        plan, rep = self.run_plan(self.O(conflict="rename"))
+        self.assertEqual(rep.failed, 0, rep.failures)
+        self.assertEqual(self.names(self.dst), ["a.txt"])
+        self.assertFalse(os.path.exists(self.dst + " (2)"))
+
+    def test_flatten_single_file_source_lands_inside_dest(self):
+        """文件来源没有层可压平，必须落在 dest 里面，不能顶替 dest。"""
+        solo = self.make("solo.txt")
+        plan = M.build_plan([solo], self.dst, self.O())
+        self.assertEqual([i.dst for i in plan.items],
+                         [os.path.join(self.dst, "solo.txt")])
+
+    def test_flatten_two_sources_same_name_both_kept(self):
+        """多个来源压平到同一层，同名文件改名共存，不互相覆盖。"""
+        b = os.path.join(self.root, "b")
+        os.makedirs(b)
+        self.make("same.txt", b"from-a")
+        with open(os.path.join(b, "same.txt"), "wb") as f:
+            f.write(b"from-b")
+        plan, rep = self.run_plan(sources=[self.src, b])
+        self.assertEqual(rep.failed, 0, rep.failures)
+        self.assertEqual(self.names(self.dst), ["same (2).txt", "same.txt"])
+        with open(os.path.join(self.dst, "same.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"from-a")
+        with open(os.path.join(self.dst, "same (2).txt"), "rb") as f:
+            self.assertEqual(f.read(), b"from-b")
+
     def test_rename(self):
         self.make("a.txt", b"new")
         with open(os.path.join(self.dst, "a.txt"), "wb") as f:

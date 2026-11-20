@@ -9,6 +9,10 @@
   .\build.ps1 -Bump patch|minor|major   递增版本号（写入 tauri.conf.json + Cargo.toml）
   .\build.ps1 -Version 2.1.0            直接指定版本号
   .\build.ps1 -Clean                    先删构建缓存再构建
+  .\build.ps1 -SkipTests                跳过测试门禁（只在自己确认过测试是红的、且与本次改动无关时用）
+
+  测试门禁：构建前跑引擎 4 个 unittest 模块 + 前端 6 个 selftest，
+  任何一项红就中止，不产出任何产物。
 
   默认全量是有原因的：只出 exe 时 release\ 里的安装包会停在老版本，
   用户装了安装包就等于装到旧功能（1.36.8 记过这个坑）。
@@ -34,6 +38,8 @@ param(
   [switch]$AppOnly,
   [switch]$Clean,
   [switch]$Status,
+  [switch]$SkipTests,
+  [switch]$TestsOnly,
   [string]$Version,
   [ValidateSet('patch', 'minor', 'major')]
   [string]$Bump
@@ -259,6 +265,66 @@ RAR：首次打开 RAR 时会自动下载官方 UnRAR64.dll 并校验，需要�
   Write-Host ('便携包：release\{0}（{1:N1} MiB）' -f (Split-Path $zip -Leaf), ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
 }
 
+# ---------------------------------------------------------------- 测试门禁
+
+# 为什么构建前必须跑测试：
+# 这个项目在 1.35–1.41 之间积累了 40 多个版本「测试红了没人跑」的历史——
+# scope.selftest 的一条断言盯死了 state.running，1.41.6 改成多会话之后
+# 代码是对的、测试是红的，一直红到被发现。同一时期 test_migrate_engine
+# 11 条红，对应的是 flatten 迁移把文件放错目录的真实 bug。
+# 没有门禁的时候，「改完不跑测试」和「跑完不看结果」都不留痕迹；
+# 加了门禁之后，坏掉的代码进不了 release\。
+function Invoke-TidyTestGate {
+  Write-Host '跑测试门禁…' -ForegroundColor Cyan
+  $py = 'D:\Builds\engine-venv\Scripts\python.exe'
+  if (-not (Test-Path $py)) {
+    Write-Host '  警告：没找到 engine-venv，用裸 py 跑引擎测试' -ForegroundColor Yellow
+    $py = 'py'
+  }
+  $failed = @()
+
+  $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
+  Push-Location $engineSrc
+  try {
+    foreach ($m in $modules) {
+      $out = & $py -m unittest $m 2>&1
+      $code = $LASTEXITCODE
+      $tail = ($out | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
+      if ($code -ne 0) {
+        $failed += "引擎测试 $m 未通过（$tail）"
+        Write-Host ("  [红] {0}：{1}" -f $m, $tail) -ForegroundColor Red
+      } else {
+        Write-Host ("  [绿] {0}：{1}" -f $m, $tail) -ForegroundColor DarkGray
+      }
+    }
+  } finally { Pop-Location }
+
+  # 前端自测：6 个 *.selftest.mjs 各自 process.exit(非0) 表示失败
+  $node = (Get-Command node -ErrorAction SilentlyContinue).Source
+  if (-not $node) {
+    Write-Host '  警告：没找到 node，跳过前端自测' -ForegroundColor Yellow
+  } else {
+    $aiDir = Join-Path $root 'src\web\js\ai'
+    foreach ($f in (Get-ChildItem $aiDir -Filter '*.selftest.mjs' -File | Sort-Object Name)) {
+      $out = & $node $f.FullName 2>&1
+      $code = $LASTEXITCODE
+      $last = ($out | Where-Object { $_ -match '结果：' } | Select-Object -Last 1)
+      if (-not $last) { $last = ($out | Where-Object { $_ -match '\S' -and $_ -notmatch '^[─━-]+$' } | Select-Object -Last 1) }
+      if ($code -ne 0) {
+        $failed += "前端自测 $($f.Name) 未通过（$last）"
+        Write-Host ("  [红] {0}：{1}" -f $f.Name, $last) -ForegroundColor Red
+      } else {
+        Write-Host ("  [绿] {0}：{1}" -f $f.Name, $last) -ForegroundColor DarkGray
+      }
+    }
+  }
+
+  if ($failed.Count -gt 0) {
+    throw ("测试门禁不通过（{0} 项）：`n  {1}" -f $failed.Count, ($failed -join "`n  "))
+  }
+  Write-Host '测试门禁通过' -ForegroundColor Green
+}
+
 # ---------------------------------------------------------------- 只留最新与上一版
 
 function Remove-OldReleases([string]$pattern) {
@@ -280,6 +346,10 @@ function Remove-OldReleases([string]$pattern) {
 }
 
 # ---------------------------------------------------------------- 主流程（全程持锁）
+
+# 只跑测试门禁：不取构建锁、不改版本号、不产生产物。
+# 改完一处想快速知道有没有碰坏东西时用这个，比全量构建快得多。
+if ($TestsOnly) { Invoke-TidyTestGate; return }
 
 # 默认就把「装得上、发得出」的整套产物一起做：根目录 exe + NSIS 安装包 + 便携 zip。
 # 历史教训（1.36.8 记录的坑）：1.35.x–1.36.x 一直用默认参数构建，只重编了根目录
@@ -333,6 +403,14 @@ try {
   $snapshot = Save-TidySourceSnapshot -Root $root -Version $current -Reason $mode
   $record.git = $snapshot
   if ($snapshot) { Write-Host ("  源码快照：{0}（tag build-{1}）" -f $snapshot, $current) -ForegroundColor DarkGray }
+
+  # 测试门禁放在快照之后、构建之前：红了就中止，一个产物都不动。
+  # 快照先做是有意的——红的那一版源码也值得留痕，方便事后回看。
+  if (-not $SkipTests) {
+    Invoke-TidyTestGate
+  } else {
+    Write-Host '已跳过测试门禁（-SkipTests）' -ForegroundColor Yellow
+  }
 
   # 引擎什么时候要重建：
   #   -Engine            → 明确要求
