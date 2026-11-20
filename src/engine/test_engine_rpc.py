@@ -620,6 +620,124 @@ class TestHotFreshness(EngineCase):
         self.assertIsInstance(rep["files"], int)
         self.assertGreaterEqual(rep["files"], 0)
 
+    def test_hot_refresh_is_safe_when_two_callers_race(self):
+        """后台节拍和「搜不到就补扫」会同时进来。
+
+        两条路径都在同一个 *.db.new staging 上建库：一个在写、另一个把它删了
+        重建，最后 replace 上去的可能是半个库。
+
+        注意这里为什么必须用进程内线程而不是 rpc()：引擎是单线程
+        「读一行→分发→写一行」，两个 RPC 请求天然串行，从协议层根本构造不出
+        并发。真正的并发发生在引擎进程内部 —— 后台 index-watchdog 线程和
+        处理查询的那一次调用。所以这条测试直接 import tidy、直接开线程。
+        """
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_race_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        hot = os.path.join(tmp, "Downloads")
+        os.makedirs(hot, exist_ok=True)
+        for i in range(5):
+            with open(os.path.join(hot, "race_%d.txt" % i), "wb") as f:
+                f.write(b"z" * 16)
+
+        # 把进程内这份 tidy 的数据目录指到临时目录，绝不能碰用户的真实索引
+        old_s = dict(T.S)
+        old_cache = T.S.get("cache_dir")
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        # 热目录由 default_index_roots() 按 USERPROFILE 推出来。不把它也指到
+        # 临时目录的话，hot_refresh() 会去扫真实的桌面/下载——既扫不到这里的
+        # race_*.txt（于是测试假红），也是真在翻用户的家目录。
+        old_home = os.environ.get("USERPROFILE")
+        self.addCleanup(lambda: os.environ.__setitem__("USERPROFILE", old_home)
+                        if old_home is not None else os.environ.pop("USERPROFILE", None))
+        os.environ["USERPROFILE"] = tmp
+
+        T.index_add([hot])
+
+        # 直接断言互斥本身，而不是去赌时序。
+        #
+        # 试过用「4 个线程同时调 hot_refresh」来测，把锁去掉照样通过 —— 建库
+        # 那一段太快，线程几乎不可能恰好撞在一起，赌赢的概率高得离谱。这种
+        # 测试只能证明「没崩」，不能证明「真的没并发」，等于没测。
+        #
+        # 反过来做：在 _hot_refresh_locked 外面包一层，记录「同一时刻在里面
+        # 的有几个」。锁在的时候这个数永远是 1；锁一旦被删，多线程必然撞出
+        # 大于 1。
+        inside = []
+        peak = []
+        orig = T._hot_refresh_locked
+
+        def counting(force):
+            inside.append(1)
+            peak.append(len(inside))
+            try:
+                time.sleep(0.05)            # 放大窗口，让「没锁」必然暴露
+                return orig(force)
+            finally:
+                inside.pop()
+
+        T._hot_refresh_locked = counting
+        self.addCleanup(setattr, T, "_hot_refresh_locked", orig)
+
+        errors = []
+
+        def hit():
+            try:
+                T.hot_refresh(force=True)
+            except Exception as exc:            # noqa: BLE001 - 就是要捕获一切
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=hit) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(120)
+
+        self.assertEqual(errors, [], "并发保鲜出错了：%r" % (errors,))
+        self.assertEqual(max(peak or [0]), 1,
+                         "两个调用方同时进了建库（峰值并发 %d）—— staging 文件"
+                         "会被互相删掉，最后可能留下半个库" % max(peak or [0]))
+        rows = T.search_index("race_1", 20)
+        self.assertTrue(rows, "并发之后索引读不出来了")
+
+
+class TestIndexTouchGuard(EngineCase):
+    """写穿的规模上限：数的是目录数，不是库的个数。
+
+    这台机器通常只有一两个索引库。如果拿 len(plan)（按库分键）当判断条件，
+    _IX_TOUCH_MAX_DIRS 永远不会触发 —— 一次动 5000 个目录也照样逐个刷。
+    """
+
+    def test_touch_gives_up_on_huge_batches(self):
+        import tidy as T
+
+        tmp = tempfile.mkdtemp(prefix="tidy_touch_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+
+        many = [os.path.join(tmp, "bulk", "d%05d" % i, "f.txt")
+                for i in range(20)]
+        for p in many:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(b"b" * 8)
+        T.index_add([tmp])
+        T.build_index(roots=[tmp])
+
+        old = T._IX_TOUCH_MAX_DIRS
+        self.addCleanup(setattr, T, "_IX_TOUCH_MAX_DIRS", old)
+        T._IX_TOUCH_MAX_DIRS = 3
+        touched = T.index_touch(many)
+        self.assertEqual(touched, 0,
+                         "目录数超过上限时应该整体放弃，实际刷了 %d 个" % touched)
+
 
 class TestUndo(EngineCase):
     """undo：参数错走协议错误；没有记录是业务提示；整理后能原样移回。"""

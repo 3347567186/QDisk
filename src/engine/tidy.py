@@ -5112,7 +5112,7 @@ def _index_scan_python(root, db, state, progress):
 
 
 def _like_literal(text):
-    """把用户输入转成 LIKE 的字面量：% _ \ 都加反斜杠转义。
+    r"""把用户输入转成 LIKE 的字面量：% _ \ 都加反斜杠转义。
 
     不转义的话，用户搜一个下划线等于搜「任意一个字符」，会把整个索引捞回来。
     """
@@ -5419,8 +5419,10 @@ def index_touch(paths):
                 item2 = owners2[0][0]
                 dropped.setdefault(item2["id"], (item2, set()))[1].add(ap)
 
-    if len(plan) > _IX_TOUCH_MAX_DIRS:
-        # 一次动了几千个目录：逐个刷不如等下一次重建，别在这里拖住用户
+    if sum(len(v[1]) for v in plan.values()) > _IX_TOUCH_MAX_DIRS:
+        # 一次动了几千个目录：逐个刷不如等下一次重建，别在这里拖住用户。
+        # 注意数的是「目录总数」不是「库的个数」—— plan 按库 id 分键，
+        # 一台机器通常只有一两个库，拿 len(plan) 当判断条件永远不会触发。
         return 0
 
     touched = 0
@@ -5746,6 +5748,10 @@ def index_quota_ok():
 # 热目录多久重扫一次。实测五个热目录（桌面/文档/下载/图片/视频）全量重建
 # 只要 300 毫秒左右、库总共 0.45 MB —— 这个数字决定了这里不需要文件监听器。
 _HOT_SECS = {"live": 60, "check": 600}
+# 保鲜重扫必须串行。查询路径（搜不到就补扫）和后台节拍线程都会进来，
+# 两条路径同时跑会在同一个 *.db.new staging 上对撞。和 _IX_LOCK 分开：
+# 那把锁保护的是清单 json，建库和清单本来就不冲突。
+_HOT_LOCK = threading.RLock()
 
 # 「没搜到就补扫一次热目录」的最小间隔。这是查询里唯一会扫盘的地方，
 # 必须有个下限，否则用户每敲一个字搜一次，就是每秒三次扫盘。
@@ -5754,7 +5760,6 @@ _HOT_MIN_GAP = 15.0
 # 查询里同步补扫的规模上限。实测五个热目录 4,426 个文件、300 毫秒；
 # 到 3 万个文件就是两秒级，用户会感到「搜索卡了一下」。超过就交给后台。
 _HOT_INLINE_MAX = 30000
-
 
 def _hot_roots():
     """要「保鲜」的热目录：桌面/文档/下载/图片/视频。
@@ -5786,7 +5791,17 @@ def hot_refresh(force=False):
 
     代价有个前提：热目录是「小」的。整盘 140 万文件要 7.5 秒，所以这里
     只说热目录，不碰整盘；整盘靠 index_selfcheck 的抽查重建。
+
+    必须串行：查询路径（搜不到就补扫）和后台节拍线程都会调到这里，两条路径
+    同时进来会在同一个 `*.db.new` 上对撞 —— 一个在写、另一个把 staging 删了
+    重建，最后 replace 上去的可能是半个库。用一把独立的锁（不是 _IX_LOCK：
+    那把锁保护的是清单 json，建库和清单本来就不冲突）把整个重扫挡住。
     """
+    with _HOT_LOCK:
+        return _hot_refresh_locked(force)
+
+
+def _hot_refresh_locked(force):
     roots = _hot_roots()
     if not roots:
         return {"roots": [], "files": 0, "elapsed_ms": 0, "skipped": "没有可保鲜的热目录"}
