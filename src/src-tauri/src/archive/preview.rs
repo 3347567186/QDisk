@@ -252,7 +252,18 @@ fn hex_dump(bytes: &[u8]) -> String {
     out
 }
 
-// Keep this helper used by the "unknown extension but text content" path.
+// 这不是死代码，是**没接上的功能**。原意：read_entry() 里当扩展名既不是文本
+// 也不是媒体时，先嗅一下前 8 KB 是不是文本（无扩展名的 LICENSE、Makefile、
+// .gitignore、README 都属于这种），是就按文本预览，否则才走十六进制。
+// 但这个分支从未实现 —— read_entry() 现在对未知扩展名一律 hex_dump。
+//
+// 改动这里之前请先读变更记录 1.16.5：预览路径上换过 4 MiB 读 + hex_dump 生成
+// 20.7 MB 字符串，Chromium 渲染 26 万行文本节点，CPU 跑满 35 秒、渲染进程内存
+// 峰值 1413 MB，窗口假死。修法是把十六进制截到 HEX_LIMIT = 64 KiB。接这条
+// 文本嗅探分支必须用真包实测（大文本 + 无扩展名 + 中文），不能只过编译。
+// 保留 is_probably_text 的另一个理由：它的判据（含 NUL 即非文本、控制字符占比
+// 超 5% 即非文本）是这条分支唯一成文的规格。
+#[allow(dead_code)] // 有意保留的未接入功能，不是漏删
 pub fn maybe_text(bytes: &[u8]) -> bool {
     is_probably_text(bytes)
 }

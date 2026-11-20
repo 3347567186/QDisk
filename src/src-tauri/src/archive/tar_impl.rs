@@ -226,7 +226,8 @@ pub fn read_entry(path: &Path, kind: Kind, index: usize, limit: u64) -> Result<V
         if i != index {
             continue;
         }
-        let mut entry = item?;
+        // 不需要 mut：Read::take 按值消耗 entry。
+        let entry = item?;
         if entry.header().entry_type().is_dir() {
             return Ok(Vec::new());
         }

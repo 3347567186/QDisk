@@ -12,7 +12,8 @@ use libloading::Library;
 
 use super::download;
 use super::util::{
-    ensure_parent, resolve_dest, safe_relative, sha256_file, wide_path, Overwrite, Progress,
+    ensure_parent, resolve_dest, safe_relative, sha256_file, utf16_to_string, wide_path, Overwrite,
+    Progress,
 };
 use super::{ArchiveInfo, EntryInfo, ExtractReport, RarStatus};
 
@@ -338,7 +339,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
         let raw = unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_name_w)) };
         let ansi = unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_name)) };
         let name = if raw[0] != 0 {
-            String::from_utf16_lossy(&raw[..raw.iter().position(|&c| c == 0).unwrap_or(0)])
+            utf16_to_string(&raw)
         } else {
             ansi.iter()
                 .take_while(|&&c| c != 0)
@@ -436,7 +437,7 @@ pub fn extract(
         let raw_w = unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_name_w)) };
         let raw_a = unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_name)) };
         let name = if raw_w[0] != 0 {
-            String::from_utf16_lossy(&raw_w[..raw_w.iter().position(|&c| c == 0).unwrap_or(0)])
+            utf16_to_string(&raw_w)
         } else {
             raw_a
                 .iter()
@@ -568,9 +569,7 @@ pub fn read_entry(
         let Some(h) = header else { break };
         let flags = unsafe { ptr::read_unaligned(ptr::addr_of!(h.flags)) };
         let raw_w = unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_name_w)) };
-        let name = String::from_utf16_lossy(
-            &raw_w[..raw_w.iter().position(|&c| c == 0).unwrap_or(0)],
-        );
+        let name = utf16_to_string(&raw_w);
         if i == index && flags & RHDF_DIRECTORY == 0 {
             let base = safe_relative(&name)
                 .ok()

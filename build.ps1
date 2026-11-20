@@ -319,6 +319,50 @@ function Invoke-TidyTestGate {
     }
   }
 
+  # Rust 侧单元测试：只在 Rust 源码比上次成功跑过时更新时才跑。
+  # 为什么加条件：cargo test 首轮要编译 3 分多钟，每次都跑会把「改一行前端」
+  # 的迭代成本抬高。但只要 src-tauri 下有任何 .rs / Cargo.toml 变过，就必须跑——
+  # 1.42.x 这一轮我在 archive 模块做去重（三处手写 from_utf16 收成一处），
+  # 这类改动编译期零警告、运行期只在遇到特定压缩包时才露头，没有测试就是裸奔。
+  $rustDir = Join-Path $root 'src\src-tauri'
+  $stampPath = 'D:\Builds\.rust-test-stamp'
+  $newest = Get-ChildItem $rustDir -Recurse -File -Include *.rs, Cargo.toml -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\target\\' } |
+    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+  $stamp = if (Test-Path $stampPath) { (Get-Item $stampPath).LastWriteTimeUtc } else { [datetime]::MinValue }
+  if ($newest -and $newest.LastWriteTimeUtc -gt $stamp) {
+    $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+    if (-not $cargo) {
+      Write-Host '  警告：没找到 cargo，跳过 Rust 测试' -ForegroundColor Yellow
+    } else {
+      # 与 Build-IndexWalk 用同一套工具链变量：gnu-d 工具链、ASCII 的 CARGO_HOME、
+      # 独立 target 目录（不和构建共用，避免互相把对方的产物判成过期）。
+      $env:RUSTUP_TOOLCHAIN = 'gnu-d'
+      $env:CARGO_HOME = 'D:\Tool\cargo-ASCII'
+      $env:CARGO_TARGET_DIR = 'D:\Builds\tidyassistant-test-target'
+      $env:PATH = "D:\Tool\binutils\mingw64\bin;$env:PATH"
+      $out = & $cargo test --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
+      $code = $LASTEXITCODE
+      $tail = ($out | Select-String -Pattern '^test result' | ForEach-Object { $_.Line }) -join ' '
+      $warns = ($out | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
+      if ($code -ne 0) {
+        $failed += "Rust 测试未通过（$tail）"
+        Write-Host ("  [红] cargo test：{0}" -f $tail) -ForegroundColor Red
+      } else {
+        Write-Host ("  [绿] cargo test：{0}" -f $tail) -ForegroundColor DarkGray
+      }
+      # 警告不再「忍着」：0 是这个项目的基线。允许的唯一例外是被 #[allow(dead_code)]
+      # 显式标注意图的函数（它们不算 warning）。
+      if ($warns -gt 0) {
+        $failed += "Rust 编译有 $warns 条警告（基线是 0）"
+        Write-Host ("  [红] cargo 警告：{0} 条" -f $warns) -ForegroundColor Red
+      }
+      if ($code -eq 0) { Set-Content -Path $stampPath -Value (Get-Date -Format o) -Encoding UTF8 }
+    }
+  } else {
+    Write-Host '  [跳过] cargo test：Rust 源码自上次通过后没变过' -ForegroundColor DarkGray
+  }
+
   if ($failed.Count -gt 0) {
     throw ("测试门禁不通过（{0} 项）：`n  {1}" -f $failed.Count, ($failed -join "`n  "))
   }

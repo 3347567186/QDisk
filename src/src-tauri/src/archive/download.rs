@@ -14,6 +14,8 @@ use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_QUERY_STATUS_CODE,
 };
 
+use super::util::to_wide as wide;
+
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn download(url: &str, dest: &Path) -> Result<()> {
@@ -144,6 +146,6 @@ pub fn extract_sfx_member(sfx: &Path, member: &str, out_dir: &Path) -> Result<st
     Ok(file)
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+// 本地的 wide() 已删除，统一用 util::to_wide —— 同一段「UTF-16 加 NUL 结尾」
+// 原来在 download.rs、rar.rs、util.rs 各写一遍，是实现漂移的入口。
+

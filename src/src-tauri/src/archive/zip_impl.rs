@@ -376,7 +376,8 @@ pub fn read_entry(path: &Path, index: usize, password: Option<&str>, limit: u64)
         bail!("条目索引超出范围");
     }
     let encrypted = zip.by_index_raw(index).map(|e| e.encrypted()).unwrap_or(false);
-    let mut entry = if encrypted {
+    // 不需要 mut：Read::take 按值消耗 entry，绑定之后只用返回的 Take。
+    let entry = if encrypted {
         let pw = password.filter(|p| !p.is_empty()).context("该文件已加密")?;
         zip.by_index_decrypt(index, pw.as_bytes())
             .map_err(|_| anyhow::anyhow!("密码错误"))?
@@ -405,7 +406,8 @@ mod tests {
     }
 
     fn all_indices(zip_path: &Path) -> HashSet<usize> {
-        let mut archive = open(zip_path).unwrap();
+        // 只读 len()，不需要 mut。
+        let archive = open(zip_path).unwrap();
         (0..archive.len()).collect()
     }
 

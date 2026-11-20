@@ -652,7 +652,9 @@ pub fn archive_preview_clear(state: State<'_, ArchiveCtx>) {
 }
 
 #[tauri::command]
-pub async fn archive_rar_status(app: AppHandle) -> Result<RarStatus, String> {
+// app 参数没有用到（下面的闭包不捕获它），但 tauri::command 的签名里保留它
+// 让前端调用形态与其他命令一致；下划线前缀表明这是有意的，不是漏传。
+pub async fn archive_rar_status(_app: AppHandle) -> Result<RarStatus, String> {
     tauri::async_runtime::spawn_blocking(move || rar::status(&data_dir()).map_err(util::io_err))
         .await
         .map_err(|e| format!("任务失败: {e}"))?

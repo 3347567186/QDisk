@@ -290,29 +290,6 @@ pub fn unique_path(path: &Path) -> PathBuf {
     parent.join(format!("{stem} (copy)"))
 }
 
-pub fn file_size(path: &Path) -> u64 {
-    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-}
-
-pub fn is_archive_ext(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    const EXTS: &[&str] = &[
-        ".zip", ".zipx", ".cbz", ".7z", ".cb7", ".rar", ".cbr", ".tar", ".tgz", ".tbz",
-        ".tbz2", ".txz", ".tar.gz", ".tar.bz2", ".tar.xz", ".gz", ".bz2", ".xz",
-    ];
-    EXTS.iter().any(|e| name.ends_with(e))
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().iter().map(|b| format!("{b:02X}")).collect()
-}
-
 pub fn sha256_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut f = File::open(path).with_context(|| format!("无法读取 {}", path.display()))?;
@@ -363,6 +340,10 @@ pub fn decode_ansi(bytes: &[u8]) -> String {
 }
 
 pub fn utf16_to_string(buf: &[u16]) -> String {
+    // 找不到 NUL 时保留整个缓冲区（unwrap_or(buf.len())），不是返回空串。
+    // rar.rs 原来三处手写的是 unwrap_or(0)，即「没有 NUL 就当空名字」；
+    // 对 HeaderDataEx 里固定 1024 宽、DLL 保证以 NUL 结尾的字段两者等价，
+    // 但「截断到 0」会把一个完整的名字变成空串，是更坏的失败方式。
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
 }
@@ -424,6 +405,12 @@ pub fn io_err(e: impl std::fmt::Display) -> String {
     format!("{e:#}")
 }
 
+/// 判一段字节像不像文本（前 8 KiB 采样）：含 NUL 即非文本，控制字符占比超 5% 即非文本。
+///
+/// 当前唯一的调用方是 preview.rs 的 maybe_text，而那条分支还没接上（见 preview.rs
+/// 那段注释）。别把它当死代码删掉 —— 它是「未知扩展名但内容是文本」这条规格的
+/// 唯一实现，删了下次要接还得重写一遍判据。
+#[allow(dead_code)] // 有意保留的未接入功能，不是漏删
 pub fn is_probably_text(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return true;
@@ -566,12 +553,45 @@ pub fn zip_datetime(path: &Path) -> Option<zip::DateTime> {
     zip::DateTime::from_date_and_time(y, mo, d, h, mi, s).ok()
 }
 
-pub fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let mut f = File::open(path)?;
-    let mut out = Vec::new();
-    f.take(limit + 1).read_to_end(&mut out)?;
-    if out.len() as u64 > limit {
-        out.truncate(limit as usize);
+// 已删除 read_limited：从进入版本库那天起就没被调用过。四个解压实现
+// （zip_impl / tar_impl / sevenz_impl / rar）各自内联了同样的
+// `entry.take(limit).read_to_end(&mut out)`，它只是一份没人用的第三副本。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf16_stops_at_nul() {
+        // HeaderDataEx.file_name_w 是 [u16; 1024]，DLL 填完后面全是 0。
+        let mut buf = vec![0u16; 16];
+        for (i, ch) in "报告.txt".encode_utf16().enumerate() {
+            buf[i] = ch;
+        }
+        assert_eq!(utf16_to_string(&buf), "报告.txt");
     }
-    Ok(out)
+
+    #[test]
+    fn utf16_without_nul_keeps_everything() {
+        // 极端情况：整个缓冲区没有 NUL。旧的三处手写实现是 unwrap_or(0)，
+        // 会把这个完整名字变成空串。空名字会让 safe_relative 拒绝整个条目，
+        // 表现成「压缩包里明明有这个文件，却读不出来」。
+        let buf: Vec<u16> = "abc".encode_utf16().collect();
+        assert_eq!(utf16_to_string(&buf), "abc");
+    }
+
+    #[test]
+    fn utf16_empty_is_empty() {
+        assert_eq!(utf16_to_string(&[]), "");
+        assert_eq!(utf16_to_string(&[0u16, 0, 0]), "");
+    }
+
+    #[test]
+    fn to_wide_appends_nul() {
+        let w = to_wide("ab");
+        assert_eq!(w, vec![0x61u16, 0x62, 0]);
+        // 与 wide_path 必须逐元素一致：download.rs 用前者、rar.rs 用后者，
+        // 两者一旦漂移，Win32 调用会在不同路径上看到不同的字符串。
+        assert_eq!(w, wide_path(Path::new("ab")));
+    }
 }
