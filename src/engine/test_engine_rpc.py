@@ -405,6 +405,143 @@ class TestIndexWriteThrough(EngineCase):
         return self.rpc_ok("search.index",
                            {"roots": [folder], "reuse": reuse})
 
+    def _iso(self, tag):
+        """把 tidy 的数据目录指到临时目录，返回 (T, tmp, root)。
+
+        这些用例直接在进程内调 tidy 的函数（不走 RPC 子进程），所以必须改
+        模块级的 S，否则会动到用户真实的索引库。
+        """
+        import tidy as T
+        tmp = tempfile.mkdtemp(prefix="tidy_%s_" % tag)
+        self.addCleanup(shutil.rmtree, tmp, True)
+        old_s = dict(T.S)
+        self.addCleanup(lambda: T.S.update(old_s))
+        T.S["cache_dir"] = os.path.join(tmp, "cache")
+        T.S["data_dir"] = tmp
+        root = os.path.join(tmp, "root")
+        os.makedirs(root, exist_ok=True)
+        return T, tmp, root
+
+    def test_search_skips_files_deleted_after_indexing(self):
+        """索引里有、磁盘上已经没了的文件，搜索不许返回。
+
+        索引是快照。用户在资源管理器里删了文件、或者在别的程序里删了，索引
+        不会知道；给一条点进去打不开的结果，比少给一条更糟。
+
+        这条和 `_ix_top_one` 的失效过滤是同一件事的两个入口：搜索也得滤。
+        """
+        T, _tmp, root = self._iso("alive")
+
+        keep = os.path.join(root, "zz_keep_alive.txt")
+        gone = os.path.join(root, "zz_gone_alive.txt")
+        for p in (keep, gone):
+            with open(p, "wb") as f:
+                f.write(b"x" * 16)
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+        self.assertEqual(len(T.search_index("zz_", 50)), 2,
+                         "建完索引应该两条都在")
+
+        os.remove(gone)          # 绕过软件直接删，索引不知道
+
+        paths = [r[0] for r in T.search_index("zz_", 50)]
+        self.assertNotIn(gone, paths,
+                         "磁盘上已经删掉的文件还在搜索结果里：%r" % (paths,))
+        self.assertIn(keep, paths, "还在的文件被误滤掉了：%r" % (paths,))
+
+    def test_search_still_fills_limit_after_dropping_deleted(self):
+        """滤掉失效项之后不能少给答案。
+
+        只取 limit 条再过滤的话，前排有几个失效就会少几条 —— 用户看到的
+        「只有 2 个结果」实际是 5 个里删了 3 个。所以要多取一些再截断。
+        """
+        T, _tmp, root = self._iso("fill")
+
+        paths = []
+        for i in range(8):
+            p = os.path.join(root, "yy_fill_%d.txt" % i)
+            with open(p, "wb") as f:
+                f.write(b"y" * 8)
+            paths.append(p)
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+
+        for p in paths[:3]:      # 前三条删掉，故意让失效项排在前面
+            os.remove(p)
+
+        rows = T.search_index("yy_fill_", 5)
+        self.assertEqual(
+            len(rows), 5,
+            "失效项被滤掉后没补满 limit，只给了 %d 条（应 5 条）：%r"
+            % (len(rows), rows))
+        for r in rows:
+            self.assertTrue(os.path.exists(r[0]),
+                            "结果里混进了已删除的文件：%r" % (r,))
+
+    def test_refresh_dir_does_not_scan_whole_files_table(self):
+        """刷一个目录的开销不能随库的总行数增长。
+
+        `_ix_refresh_dir` 换掉一个目录的文件块时，删旧块用的是 `dirs.f0/n`
+        记的 rowid 区间。如果写成 `DELETE ... WHERE dir_id = ?`，files 上没有
+        dir_id 索引（建表时刻意不建），每刷一个目录都是一次全表扫 —— 实测
+        216 个目录、82 万行的库要 8,409 毫秒，区间删除只要个位数毫秒。
+
+        这里不测时间（那会是机器相关的脆弱断言），而是数 sqlite 执行了多少条
+        VM 指令：`set_progress_handler` 每 N 条指令回调一次。
+
+        关键构造：让库里绝大多数行**不在**被刷新的那个目录里。若被刷目录自
+        己就占了全库，两种写法都要碰同样多的行，测不出差别（我第一版就是这么
+        写的，双向验证时发现撤回修复它照样绿）。
+         """
+        T, _tmp, root = self._iso("scan")
+
+        # 20 个兄弟目录共 800 个文件，被刷新的那个只有 3 个
+        for d in range(20):
+            sub = os.path.join(root, "bulk%02d" % d)
+            os.makedirs(sub, exist_ok=True)
+            for i in range(40):
+                with open(os.path.join(sub, "b%02d_%03d.txt" % (d, i)), "wb") as f:
+                    f.write(b"b" * 4)
+        small = os.path.join(root, "tiny")
+        os.makedirs(small, exist_ok=True)
+        for i in range(3):
+            with open(os.path.join(small, "t%d.txt" % i), "wb") as f:
+                f.write(b"t" * 4)
+
+        T.index_add([root])
+        T.build_index(roots=[root])
+
+        item = [i for i in T._ix_load() if i.get("root") == root][0]
+        db = T._index_open(T._ix_db_abspath(item))
+        self.addCleanup(db.close)
+
+        total = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        self.assertGreater(total, 700, "库太小，测不出全表扫：%d" % total)
+
+        steps = {"n": 0}
+
+        def tick():
+            steps["n"] += 1
+            return 0
+
+        # 先刷一次让它有行（第一次是 INSERT 路径），再量「已有行」的删除路径
+        with db:
+            T._ix_refresh_dir(db, small)
+
+        steps["n"] = 0
+        db.set_progress_handler(tick, 1)
+        with db:
+            T._ix_refresh_dir(db, small)
+        db.set_progress_handler(None, 0)
+
+        self.assertLess(
+            steps["n"], total,
+            "刷新一个只有 3 个文件的目录走了 %d 步 VM 指令，比全库 %d 行还多"
+            "—— 说明删旧块在全表扫 files，应当按 dirs.f0/n 的 rowid 区间删"
+            % (steps["n"], total))
+
     def test_organize_updates_index(self):
         """整理完文件之后，索引里记录的位置必须是新位置。"""
         folder = self.new_folder()

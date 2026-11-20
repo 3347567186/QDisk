@@ -5338,8 +5338,16 @@ def _ix_refresh_dir(db, folder):
              len(files))).lastrowid
     else:
         did = row[0]
-        # 先删旧文件块再重算 f0：删完 MAX(rowid) 可能变小，新块仍连续
-        db.execute("DELETE FROM files WHERE dir_id = ?", (did,))
+        # 删旧文件块必须走 rowid 区间，不能 `DELETE ... WHERE dir_id = ?`：
+        # files 表上**故意没有** dir_id 索引（见建表处注释，一个目录的文件
+        # 是连续插入的，dirs.f0/n 记着这段行号区间），所以按 dir_id 删就是
+        # 全表扫。实测 E:\下载 216 个目录、82 万行的库，逐目录全表扫要 8,409
+        # 毫秒；换成 rowid 区间后是个位数毫秒。
+        blk = db.execute(
+            "SELECT f0, n FROM dirs WHERE id = ?", (did,)).fetchone()
+        if blk and blk[1]:
+            db.execute("DELETE FROM files WHERE rowid BETWEEN ? AND ?",
+                       (int(blk[0]), int(blk[0]) + int(blk[1]) - 1))
         nxt = (db.execute(
             "SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] or 0) + 1
         db.execute(
@@ -6211,21 +6219,46 @@ def start_index_watchdog():
 
 
 def _ix_query_one(db_path, kw, limit):
-    """查单个库，返回 [(完整路径, 名字, 大小, 时间)]。"""
+    """查单个库，返回 [(完整路径, 名字, 大小, 时间)]。
+
+    和 `_ix_top_one` 一样会滤掉「索引里有、磁盘上已经没了」的条目：索引是
+    快照，用户可能在别的程序里删了文件，甚至就是在搜索框里刚删完又来搜。
+    给一条点进去打不开的结果，比少给一条更糟。
+
+    代价是每个命中都要 stat 一次。命中数受 limit 限制（默认 200，最多
+    5000），实测 200 条以内可以忽略；真搜到几千条时用户也不会一条条看。
+    """
     db = _index_open(db_path)
     if db is None:
         return []
     try:
         if not _index_can_read(db):
             return []
+        # 刻意多取一些再过滤：只取 limit 条的话，前排若有几条失效就会少给答案
+        want = max(1, int(limit))
+        take = want * 2
+
+        def alive(rows):
+            out = []
+            for folder, name, size, mtime in rows:
+                full = os.path.join(folder, name)
+                try:
+                    if not os.path.exists(full):
+                        continue
+                except OSError:
+                    continue
+                out.append((full, name, size, mtime))
+                if len(out) >= want:
+                    break
+            return out
+
         rows = db.execute(
             "SELECT d.path, f.name, f.size, f.mtime FROM files f "
             "JOIN dirs d ON d.id = f.dir_id "
             "WHERE f.name LIKE ? ESCAPE '\\' LIMIT ?",
-            (kw, limit)).fetchall()
+            (kw, take)).fetchall()
         if rows:
-            return [(os.path.join(folder, name), name, size, mtime)
-                    for folder, name, size, mtime in rows]
+            return alive(rows)
         out = []
         for dpath, f0, n in db.execute(
                 "SELECT path, f0, n FROM dirs WHERE path LIKE ? ESCAPE '\\' LIMIT 40",
@@ -6235,11 +6268,10 @@ def _ix_query_one(db_path, kw, limit):
             out.extend((dpath, name, size, mtime) for name, size, mtime in db.execute(
                 "SELECT name, size, mtime FROM files "
                 "WHERE rowid BETWEEN ? AND ? LIMIT ?",
-                (f0, f0 + n - 1, limit - len(out))).fetchall())
-            if len(out) >= limit:
+                (f0, f0 + n - 1, take - len(out))).fetchall())
+            if len(out) >= take:
                 break
-        return [(os.path.join(folder, name), name, size, mtime)
-                for folder, name, size, mtime in out]
+        return alive(out)
     except Exception:
         return []
     finally:
