@@ -189,6 +189,10 @@ impl Budget {
         Ok(())
     }
 
+    /// 只给测试看的读数。生产代码不需要知道已经写了多少 —— 判断全在
+    /// `charge` 里做完了。不标 `#[cfg(test)]` 的话 `cargo build --release`
+    /// 会把它算成死代码（`cargo test` 反而看不到，因为测试在用）。
+    #[cfg(test)]
     pub fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }

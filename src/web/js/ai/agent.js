@@ -156,6 +156,9 @@
       if (args.paths.some((p) => typeof p !== 'string')) return { ok: false, error: 'paths 里只能放字符串' };
     }
     if (tool === 'organize_preview') {
+      if (typeof args.path === 'string' && !args.paths) args.paths = [args.path];
+      if (typeof args.dir === 'string' && !args.paths) args.paths = [args.dir];
+      if (typeof args.paths === 'string') args.paths = [args.paths];
       if (!Array.isArray(args.paths)) return { ok: false, error: 'organize_preview 需要 paths 字符串数组' };
       if (args.paths.length > 50) return { ok: false, error: 'paths 一次最多 50 个' };
     }

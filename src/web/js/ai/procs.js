@@ -164,7 +164,10 @@
       return { row: row, out: out };
     }
 
-    /* 思考行：先建行，随后流式片段都往里追加；这一段的原文折在行下 */
+    /* 思考行：先建行，随后流式片段都往里追加；这一段的原文折在行下。
+       1.42.8 起改为「推理时自动展开，落定后自动折叠」：
+       用户需要看到 AI 在怎么想、在干什么——黑箱感是信任的最大杀手。
+       落定后折叠是因为历史消息里的思考行已经不再变化，占着屏幕只会添乱。 */
     function addThought(text) {
       const piece = String(text || '');
       if (!piece) return;
@@ -182,11 +185,16 @@
         thought = { row: row, detail: detail, text: '', textEl: text2, out: box.out };
         counts.thoughts += 1;
         paintTitle();
+        /* 思考一出现就展开整个过程组 + 思考行本身：
+           用户能实时看到推理脉络，而不是对着一个折叠箭头干等 */
+        setOpen(true);
+        row.setAttribute('aria-expanded', 'true');
       }
       thought.text += piece;
       thought.textEl.textContent = thought.text;
       thought.detail.textContent = firstSentence(thought.text);
-      if (running && open) onAppend();
+      /* 展开状态下每次追加都触发滚动，保持思考流底部始终可见 */
+      if (running) onAppend();
     }
 
     /* 工具行：类别 + 参数摘要；展开是结果摘要与原始返回 */
@@ -246,7 +254,9 @@
       paintTitle();
     }
 
-    /* 落定：计数定格、等待行收掉、过程折回一行 */
+    /* 落定：计数定格、等待行收掉、过程折回一行。
+       1.42.8 起思考行一并折叠：推理期间自动展开让用户看过程，
+       落定后自动收起，保持历史消息干练 —— 想回看随时手动展开。 */
     function settle(info) {
       const i = info || {};
       if (Number(i.thoughts) >= 0) counts.thoughts = Math.max(counts.thoughts, Number(i.thoughts) || 0);
@@ -261,6 +271,11 @@
       if (i.label) {
         const base = title.textContent;
         title.textContent = /正在(查证|思考|推理|整理)/.test(base) ? i.label : base + T(' · ', ' · ') + i.label;
+      }
+      /* 折叠思考行（如果有的话）：推理时展开是为了让用户看过程，
+         但结论出来之后推理原文已经完成使命，折回摘要行即可 */
+      if (thought && thought.row) {
+        thought.row.setAttribute('aria-expanded', 'false');
       }
       setOpen(false);
       started = 0;

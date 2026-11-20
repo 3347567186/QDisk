@@ -136,12 +136,18 @@
         date_fmt: { type: 'string', maxLen: 40 }
       },
       async plan(p) {
+        const rawPaths = p.paths || p.path;
+        const paths = (Array.isArray(rawPaths) ? rawPaths : [rawPaths]).filter((x) => typeof x === 'string' && x.trim());
         const r = await E('scan', {
-          paths: p.paths, recursive: p.recursive, skip_recent: false, skip_shortcuts: true
+          paths: paths, recursive: p.recursive, skip_recent: false, skip_shortcuts: true
         });
         const plans = (r && r.plans) || [];
+        const blockedList = Array.isArray(r && r.blocked) ? r.blocked : [];
         const items = [];
         const cats = {};
+        for (const b of blockedList) {
+          items.push({ t: base(b.folder) || b.folder, s: '无法整理：' + (b.error || '受保护'), d: true });
+        }
         for (const pl of plans) {
           if (pl.error) {
             items.push({ t: base(pl.folder), s: '跳过：' + pl.error, d: true });
@@ -154,16 +160,24 @@
           if (n) items.push({ t: base(pl.folder), s: n + ' 个文件' });
         }
         const catLine = Object.keys(cats).slice(0, 8).map((c) => c + ' ' + cats[c]).join(' · ');
-        const plans2 = { paths: p.paths, total: r.total || 0, total_size: r.total_size || 0, blocked: r.blocked || 0 };
+        const plans2 = { paths: paths, total: r.total || 0, total_size: r.total_size || 0, blocked: blockedList.length };
+        const warnings = [];
+        if (blockedList.length) {
+          warnings.push('有 ' + blockedList.length + ' 个路径受保护无法整理：' + blockedList.map((b) => (b.folder + ' (' + (b.error || '受限') + ')')).join('；'));
+        }
         return {
           title: '按类型整理',
-          summary: '把 ' + r.total + ' 个文件（' + fmtBytes(r.total_size) + '）移进分类文件夹' + (catLine ? '：' + catLine : ''),
+          summary: r.total
+            ? ('把 ' + r.total + ' 个文件（' + fmtBytes(r.total_size) + '）移进分类文件夹' + (catLine ? '：' + catLine : ''))
+            : (blockedList.length ? '目标路径受保护或不可整理' : '没有发现需要整理的文件'),
           items: items.slice(0, 8),
           count: Number(r.total) || 0,
           bytes: Number(r.total_size) || 0,
-          warnings: r.blocked ? ['有 ' + r.blocked + ' 个文件因受保护或占用会被跳过'] : [],
+          warnings: warnings,
           params: plans2,
-          note: p.policy === 'overwrite' ? '同名文件会被覆盖' : (p.policy === 'skip' ? '同名文件会跳过' : '同名文件自动改名')
+          note: blockedList.length && !r.total
+            ? blockedList.map((b) => b.folder + '：' + b.error).join('；')
+            : (p.policy === 'overwrite' ? '同名文件会被覆盖' : (p.policy === 'skip' ? '同名文件会跳过' : '同名文件自动改名'))
         };
       },
       async run(p) {

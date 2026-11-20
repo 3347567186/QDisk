@@ -357,6 +357,28 @@ function Invoke-TidyTestGate {
         $failed += "Rust 编译有 $warns 条警告（基线是 0）"
         Write-Host ("  [红] cargo 警告：{0} 条" -f $warns) -ForegroundColor Red
       }
+
+      # 还要单独看一次「不带 cfg(test)」的编译：cargo test 是在 cfg(test) 下编译的，
+      # 只在测试里用到的函数在那次编译里是「有调用者」的，一条警告都不会有；
+      # 而真正发出去的 exe 不带 cfg(test)，同样的函数就是死代码。
+      # 1.42.7 就是这么漏过去的：Budget::used() 只有测试在用，cargo test 全绿，
+      # 构建时刷出一条 warning: method `used` is never used。
+      # 判据和上面一致：0 条，除非显式 #[allow(dead_code)]。
+      $bout = & $cargo build --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
+      $bcode = $LASTEXITCODE
+      $bwarns = ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
+      if ($bcode -ne 0) {
+        $failed += "Rust 发布构建失败（cargo build --release 退出码 $bcode）"
+        Write-Host ("  [红] cargo build --release：退出码 {0}" -f $bcode) -ForegroundColor Red
+      } elseif ($bwarns -gt 0) {
+        $failed += "Rust 发布构建有 $bwarns 条警告（基线是 0；注意这与 cargo test 的警告不是一回事）"
+        Write-Host ("  [红] cargo build 警告：{0} 条" -f $bwarns) -ForegroundColor Red
+        ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } |
+            Select-Object -First 5 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
+      } else {
+        Write-Host '  [绿] cargo build --release：0 条警告' -ForegroundColor DarkGray
+      }
+
       if ($code -eq 0) { Set-Content -Path $stampPath -Value (Get-Date -Format o) -Encoding UTF8 }
     }
   } else {

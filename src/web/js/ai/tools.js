@@ -627,7 +627,8 @@
       organize_preview: {
         label: '整理预演',
         run: async (args) => {
-          const paths = Array.isArray(args && args.paths) ? args.paths.filter((p) => typeof p === 'string') : [];
+          const raw = (args && (args.paths || args.path || args.dir)) || [];
+          const paths = (Array.isArray(raw) ? raw : [raw]).filter((p) => typeof p === 'string' && p.trim());
           if (!paths.length) throw new Error('缺少参数 paths（要整理的目录或文件路径数组）');
           if (paths.length > 50) throw new Error('paths 一次最多 50 个');
           const params = {
@@ -638,8 +639,15 @@
           };
           const r = await withTimeout(API.engine('scan', params), 20000, '整理预演');
           const plans = (r && r.plans) || [];
+          const blockedList = Array.isArray(r && r.blocked) ? r.blocked : [];
           const groups = [];
           let skipped = [];
+          const blockedItems = [];
+
+          for (const b of blockedList) {
+            blockedItems.push({ folder: b.folder, reason: b.error || '受保护或无法访问' });
+          }
+
           for (const p of plans) {
             if (p.error) {
               skipped.push({ name: p.folder, reason: p.error });
@@ -652,14 +660,15 @@
           }
           return fit({
             total: r.total || 0,
-            blocked: r.blocked || 0,
+            blocked: blockedList.length,
+            blocked_folders: blockedItems,
             total_size: fmtBytes(r.total_size || 0),
             groups,
             skipped: skipped.slice(0, 12),
             skipped_total: skipped.length
           }, CAP);
         },
-        summary: (args, r) => `整理预演 · ${r.total} 个文件 / ${r.groups.length} 个类别`
+        summary: (args, r) => '整理预演 · ' + r.total + ' 个文件 / ' + (r.groups ? r.groups.length : 0) + ' 个类别' + (r.blocked ? ' (' + r.blocked + ' 处受阻)' : '')
       },
 
       /* 分类与跳过的「为什么」：规则来自引擎当前的 rules.json，
