@@ -1571,6 +1571,104 @@ for (const c of CASES) {
   results.push({ id: 'G57', group: '代码', pass: bad.length === 0, why: bad.join('；'), tools: 'none', steps: res.usage ? res.usage.steps : 0 });
 }
 
+/* G58 用户声明开发者身份与事实共识，多轮对话牢固记忆，不退回模型厂商先验 */
+{
+  const bad = [];
+  let capturedPrompt = '';
+  const agent = createAgent({
+    transport: async (req) => {
+      const parsedBody = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+      const reqMsgs = parsedBody.messages || [];
+      capturedPrompt = JSON.stringify(reqMsgs);
+      const lastUser = reqMsgs.length && reqMsgs[reqMsgs.length - 1].content;
+      if (lastUser && (lastUser.includes('你是谁开发的') || lastUser.includes('整理助手是谁开发的'))) {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            choices: [{
+              message: {
+                content: JSON.stringify({
+                  answer: '整理助手是由您独立开发的桌面软件，我是内置的 AI 助手小助。'
+                })
+              }
+            }],
+            usage: {}
+          })
+        };
+      }
+      return { status: 200, body: JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: '好的，我记住了。' }) } }], usage: {} }) };
+    },
+    tools, prompt, settings
+  });
+
+  const history = [
+    { role: 'user', content: '你好，你能做什么' },
+    { role: 'assistant', content: '我可以帮你整理文件。' },
+    { role: 'user', content: '整理助手是我开发的啊，你只是智谱的模型，我借用了你来帮忙' },
+    { role: 'assistant', content: '我已经准备好帮助您整理文件和磁盘空间了。' }
+  ];
+
+  const res = await agent.run({
+    userText: '你是谁开发的',
+    history: history,
+    ctx: { page: 'ai' }
+  });
+
+  if (!res.ok) bad.push('运行失败：' + (res.error || '未知'));
+  if (!capturedPrompt.includes('【会话共识与用户事实】')) bad.push('Prompt 中未注入【会话共识与用户事实】');
+  if (!capturedPrompt.includes('软件归属')) bad.push('Prompt 中未注入软件归属事实');
+  if (!Array.isArray(res.facts) || !res.facts.some((f) => f.includes('软件归属'))) bad.push('res.facts 未正确返回软件归属事实');
+  const ans = String(res.answer || '');
+  if (!ans.includes('您独立开发') && !ans.includes('用户')) bad.push('回答未承认用户是软件开发者：' + ans);
+  results.push({ id: 'G58', group: '记忆', pass: bad.length === 0, why: bad.join('；'), tools: 'none', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G59 语义滑窗自适应压缩：长对话压缩时保护 Markdown 代码块与事实摘要 */
+{
+  const bad = [];
+  const { compressHistory } = require('./agent.js');
+  const codeBlock = '```yaml\nrules:\n  - ext: [zip]\n    dest: 02_压缩包\n```';
+  const msgs = [
+    { role: 'system', content: '系统提示' },
+    { role: 'user', content: '帮我写一份规则' },
+    { role: 'assistant', content: '好的，规则如下：\n' + codeBlock },
+    { role: 'user', content: 'D:\\Important 这个目录千万不能删！' },
+    { role: 'assistant', content: '明白，已将该目录标记为受保护。' },
+    { role: 'user', content: '有哪些大文件？' },
+    { role: 'assistant', content: '找到以下文件：\n' + '文件内容说明...'.repeat(20) },
+    { role: 'user', content: '工具结果 list_dir\n' + 'D:\\Downloads\\file.txt 10MB\n'.repeat(200) },
+    { role: 'assistant', content: '扫描完成。' },
+    { role: 'user', content: '还有什么建议？' },
+    { role: 'assistant', content: '可以清理缓存文件。' },
+    { role: 'user', content: '现在空间如何？' },
+    { role: 'assistant', content: '空间充裕。' }
+  ];
+
+  // 1. 软压缩 (窗口较小，例如 3000 token)
+  const copy1 = JSON.parse(JSON.stringify(msgs));
+  const c1 = compressHistory(copy1, 3000);
+  if (c1.level === 'none') bad.push('达到超限阈值却未触发压缩');
+  const joined1 = copy1.map((m) => m.content).join('\n');
+  if (!joined1.includes(codeBlock)) bad.push('软压缩破坏了助手代码块');
+
+  // 2. 摘要压缩 (对话持续膨胀突破 85% 水位时生成语义摘要卡片)
+  const copy2 = JSON.parse(JSON.stringify(msgs));
+  for (let i = 0; i < 30; i += 1) {
+    copy2.push({ role: 'user', content: '继续追问第 ' + i + ' 轮关于磁盘与空间的问题' });
+    copy2.push({ role: 'assistant', content: '针对第 ' + i + ' 轮的详细排查分析与空间建议：\n' + '详细建议项内容...'.repeat(120) });
+  }
+  const c2 = compressHistory(copy2, 4000);
+  if (c2.level !== 'summary') bad.push('超高水位未触发 summary 压缩，实际为：' + c2.level);
+  const summaryMsg = copy2.find((m) => m.content && m.content.includes('【早期对话摘要与共识记忆】'));
+  if (!summaryMsg) bad.push('未生成【早期对话摘要与共识记忆】卡片');
+  else {
+    if (!summaryMsg.content.includes('D:\\Important')) bad.push('摘要卡片遗漏了受保护路径 D:\\Important');
+    if (!summaryMsg.content.includes('不能删')) bad.push('摘要卡片遗漏了否定结论「不能删」');
+  }
+
+  results.push({ id: 'G59', group: '压缩', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

@@ -336,9 +336,9 @@
     let level = 'soft';
 
     // 50–70%：软裁剪
-    // 1) 工具结果留头 8 行 + 尾 2 行
-    // 2) 早期助手的纯文字长回答（无代码块、>400 字）软裁剪首尾
-    for (let i = 1; i < keepIdx; i += 1) {
+    // 1) 工具结果（除最新一条外）留头 8 行 + 尾 2 行
+    // 2) keepIdx 之前助手的纯文字长回答（无代码块、>400 字）软裁剪首尾
+    for (let i = 1; i < msgs.length - 1; i += 1) {
       const m = msgs[i];
       if (!m || !m.content) continue;
       if (m.role === 'user' && /^工具结果/.test(m.content)) {
@@ -346,7 +346,7 @@
         if (lines.length > 11) {
           msgs[i] = { role: 'user', content: lines.slice(0, 8).concat(['…（已截断）'], lines.slice(-2)).join('\n') };
         }
-      } else if (m.role === 'assistant' && !m.content.includes('```') && m.content.length > 400) {
+      } else if (i < keepIdx && m.role === 'assistant' && !m.content.includes('```') && m.content.length > 400) {
         msgs[i] = {
           role: 'assistant',
           content: m.content.slice(0, 200) + '\n…（部分解释已省略）\n' + m.content.slice(-100)
@@ -357,13 +357,13 @@
 
     // 70–85%：硬裁剪
     level = 'hard';
-    for (let i = 1; i < keepIdx; i += 1) {
+    for (let i = 1; i < msgs.length - 1; i += 1) {
       const m = msgs[i];
       if (!m || !m.content) continue;
       if (m.role === 'user' && /^工具结果/.test(m.content)) {
         const head = m.content.split('\n')[0].slice(0, 60);
         msgs[i] = { role: 'user', content: head + ' …（早期结果已省略）' };
-      } else if (m.role === 'assistant' && !m.content.includes('```') && m.content.length > 150) {
+      } else if (i < keepIdx && m.role === 'assistant' && !m.content.includes('```') && m.content.length > 150) {
         msgs[i] = {
           role: 'assistant',
           content: m.content.slice(0, 120) + ' …（早期回答已简略）'

@@ -1844,6 +1844,7 @@
           userText: q || T('看看这些文件：', 'Look at these files: ') + (payload.attachments || []).join(', '),
           ctx: ctx,
           history: st.history,
+          facts: st.facts || [],
           token: st.token,
           resume: resume,
           onEvent: (ev) => {
@@ -1920,6 +1921,7 @@
          用户下一句说「继续」「那个 D 盘的呢」，模型完全不知道自己刚才做过什么，
          只能从头瞎猜 —— 这正是用户抱怨的「没有上下文记忆」。
          trace 摘要（不含完整 result）足够它想起自己查过哪儿、哪儿失败了。 */
+      if (Array.isArray(res.facts)) st.facts = res.facts;
       st.history.push({ role: 'user', content: q });
       st.history.push({
         role: 'assistant',
@@ -1930,8 +1932,9 @@
         ok: res.ok,
         status: res.status || ''
       });
-      if (st.history.length > 40) st.history = st.history.slice(-40);
+      if (st.history.length > 50) st.history = st.history.slice(-50);
       if (st.session) {
+        st.session.facts = st.facts || [];
         st.session.messages.push({ role: 'user', content: q, at: Date.now() });
         /* 回答不是一段文字就完：查证过程、依据、建议、可点入口一起落盘，
            否则回到历史里只剩一句「打开 D:\… 看看」，入口全丢了。 */
@@ -2280,6 +2283,7 @@
       if (proposals) proposals.newSession();
       st.session = session;
       st.history = [];
+      st.facts = Array.isArray(session.facts) ? session.facts.slice() : [];
       pane.lastAsk = null;
       (session.messages || []).forEach(function (m) {
         if (m.role === 'user') {
@@ -2338,11 +2342,13 @@
         id: Date.now().toString(36),
         title: '新会话',
         created: Date.now(),
-        messages: []
+        messages: [],
+        facts: []
       };
       const pane = makePane(session.id);
       pane.state.session = session;
       pane.state.history = [];
+      pane.state.facts = [];
       pane.state.lastResult = null;
       pane.state.token = { stopped: false };
       /* 新会话清空提案队列：上一个会话没确认的动作不能跨会话留着，
