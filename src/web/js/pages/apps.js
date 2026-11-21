@@ -640,6 +640,24 @@
       btnStartupNext.disabled = StartupState.page >= pages;
     }
 
+    async function handleStartupAdminError(err, actionName) {
+      const msg = (err && (err.message || err.error)) || String(err || '');
+      const isDenied = msg.includes('管理员权限') || msg.includes('拒绝访问') || msg.includes('WinError 5') || (err && err.code === 'admin_required');
+      if (isDenied) {
+        const goAdmin = await confirm({
+          title: T('需要管理员权限', 'Administrator Privileges Required'),
+          body: T(`${actionName || '此操作'}涉及系统级（HKLM）注册表或系统启动目录，需要以管理员身份运行才能修改。\n\n是否立即以管理员身份重启整理助手？`,
+            `${actionName || 'This action'} modifies system-level (HKLM) registry or system startup folders, requiring administrator privileges.\n\nRestart TidyAssistant as Administrator now?`),
+          okText: T('以管理员身份重启', 'Restart as admin')
+        });
+        if (goAdmin) {
+          doRestartAsAdmin();
+        }
+        return true;
+      }
+      return false;
+    }
+
     function renderStartupTable() {
       startupTableBox.innerHTML = '';
       if (!StartupState.filtered.length) {
@@ -716,7 +734,8 @@
                         applyStartupFilter();
                       }
                     } catch (e) {
-                      toast(errText(e), 'error');
+                      const handled = await handleStartupAdminError(e, T('切换自启动状态', 'Toggle startup status'));
+                      if (!handled) toast(errText(e), 'error');
                       bToggle.disabled = false;
                     }
                   });
@@ -746,7 +765,8 @@
                   toast(T('已删除自启动配置', 'Startup entry removed'), 'ok');
                   loadStartup(true);
                 } catch (e) {
-                  toast(errText(e), 'error');
+                  const handled = await handleStartupAdminError(e, T('删除自启动项', 'Delete startup entry'));
+                  if (!handled) toast(errText(e), 'error');
                 }
               }, true));
               return h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '4px' } }, ...acts);
@@ -785,7 +805,8 @@
                   applyStartupFilter();
                 }
               } catch (err) {
-                toast(errText(err), 'error');
+                const handled = await handleStartupAdminError(err, T('切换自启动状态', 'Toggle startup status'));
+                if (!handled) toast(errText(err), 'error');
               }
             }
           } : null,
@@ -828,7 +849,8 @@
                 toast(T('已删除自启动配置', 'Startup entry removed'), 'ok');
                 loadStartup(true);
               } catch (err) {
-                toast(errText(err), 'error');
+                const handled = await handleStartupAdminError(err, T('删除自启动项', 'Delete startup entry'));
+                if (!handled) toast(errText(err), 'error');
               }
             }
           }
@@ -853,6 +875,7 @@
       if (!ok) return;
 
       let cleaned = 0;
+      let denied = 0;
       for (const it of brokenList) {
         try {
           await API.engine('startup.delete', {
@@ -863,9 +886,28 @@
             file_path: it.file_path
           });
           cleaned += 1;
-        } catch (e) { /* ignore single error */ }
+        } catch (e) {
+          const msg = (e && (e.message || e.error)) || String(e || '');
+          if (msg.includes('管理员权限') || msg.includes('拒绝访问') || msg.includes('WinError 5') || (e && e.code === 'admin_required')) {
+            denied += 1;
+          }
+        }
       }
-      toast(T(`已清理 ${fmtCount(cleaned)} 项失效启动残留`, `Cleaned ${fmtCount(cleaned)} broken items`), 'ok');
+      if (denied > 0) {
+        const promptText = cleaned > 0
+          ? T(`已成功清理 ${cleaned} 项失效项，其余 ${denied} 项位于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启整理助手继续清理？`,
+              `Cleaned ${cleaned} items. Remaining ${denied} items are in HKLM registry.\n\nRestart as admin to clean?`)
+          : T(`清理失败：${denied} 项失效项属于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启整理助手？`,
+              `Failed: ${denied} items are in HKLM registry.\n\nRestart as admin?`);
+        const goAdmin = await confirm({
+          title: T('需要管理员权限', 'Admin Required'),
+          body: promptText,
+          okText: T('以管理员身份重启', 'Restart as admin')
+        });
+        if (goAdmin) doRestartAsAdmin();
+      } else if (cleaned > 0) {
+        toast(T(`已清理 ${fmtCount(cleaned)} 项失效启动残留`, `Cleaned ${fmtCount(cleaned)} broken items`), 'ok');
+      }
       loadStartup(true);
     }
 
@@ -992,7 +1034,7 @@
       const spinner = h('div', { class: 'center text-muted', style: { padding: '32px' } }, icon('refresh', 20), h('span', { style: { marginLeft: '8px' } }, T('正在生成进程快照…', 'Snapshotting processes…')));
       procTableBox.appendChild(spinner);
       try {
-        const res = await API.engineCall('process.list', { aggregate: true });
+        const res = await API.engine('process.list', { aggregate: true });
         ProcState.items = Array.isArray(res && res.items) ? res.items : [];
         ProcState.totalMemory = Number(res && res.total_memory) || 0;
         ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
@@ -1129,7 +1171,7 @@
         return;
       }
       try {
-        const r = await API.engineCall('process.close', {
+        const r = await API.engine('process.close', {
           name: it.clean_name,
           force: !!force,
           confirm_sensitive: false
@@ -1140,7 +1182,7 @@
             r.warning + '\n\n' + T('确定要强制关闭该进程吗？', 'Are you sure you want to close it?')
           );
           if (!ok) return;
-          await API.engineCall('process.close', {
+          await API.engine('process.close', {
             name: it.clean_name,
             force: true,
             confirm_sensitive: true
@@ -1283,21 +1325,213 @@
     });
 
     /* ================================================================
-       TAB 4: 静态空间画像透视 (Static Space Footprint)
+       TAB 4: 空间透视与系统画像 (Storage & System Performance Footprint)
        ================================================================ */
+    const PerfState = {
+      perfData: null,
+      samples: [],
+      liveTimer: null,
+      isLive: true,
+      lastFetch: 0
+    };
+
+    const livePerfBadge = h('span', {
+      class: 'chip ok sm',
+      style: { cursor: 'pointer', userSelect: 'none', fontSize: '11px', padding: '3px 8px' },
+      title: T('点击暂停/恢复实时采样', 'Click to pause/resume live sampling')
+    }, icon('activity', 12), h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (1.5s)', 'Live (1.5s)')));
+
+    livePerfBadge.onclick = () => {
+      PerfState.isLive = !PerfState.isLive;
+      if (PerfState.isLive) {
+        startLiveMonitoring();
+      } else {
+        stopLiveMonitoring();
+      }
+      updateLiveBadge();
+    };
+
+    function updateLiveBadge() {
+      if (PerfState.isLive && PerfState.liveTimer) {
+        livePerfBadge.className = 'chip ok sm';
+        livePerfBadge.innerHTML = '';
+        livePerfBadge.appendChild(icon('activity', 12));
+        livePerfBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (1.5s)', 'Live (1.5s)')));
+      } else {
+        livePerfBadge.className = 'chip neutral sm';
+        livePerfBadge.innerHTML = '';
+        livePerfBadge.appendChild(icon('pause', 12));
+        livePerfBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('已暂停采样', 'Paused')));
+      }
+    }
+
+    const btnPerfRefresh = btn('刷新快照', 'Refresh Snapshot', 'ghost sm', 'refresh', () => {
+      fetchPerfSample(true);
+      if (!S.items.length) loadApps(false);
+      if (!ProcState.items.length) loadProcs(false);
+    });
+
     const footprintCard = card(
       h('div', { class: 'card-title' },
-        h('h2', null, T('磁盘空间画像', 'Disk Space Footprint')),
-        h('span', { class: 'hint' }, T('静态占用大户透视 · 零后台持续负载', 'Static space overview, zero background CPU'))
+        h('h2', null, T('空间透视与系统画像', 'Storage & System Footprint')),
+        h('span', { class: 'hint' }, T('全盘存储水位 · 实时资源走势 · 空间与内存占用大户治理', 'Partitions, live trend charts & consumer governance')),
+        h('span', { class: 'spacer' }),
+        livePerfBadge,
+        btnPerfRefresh
       ),
-      h('div', { class: 'footprint-body' })
+      h('div', { class: 'footprint-body', style: { display: 'flex', flexDirection: 'column', gap: '16px' } })
     );
     footprintCard.style.display = 'none';
+
+    async function fetchPerfSample(force) {
+      if ((!PerfState.isLive && !force) || currentTab !== 'footprint') return;
+      try {
+        const data = await API.engine('system.performance', {});
+        if (!data) return;
+        PerfState.perfData = data;
+        const now = new Date();
+        const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+        const memPct = Number(data.memory && data.memory.percent) || 0;
+        const cpuPct = Number(data.cpu && data.cpu.percent) || 0;
+        PerfState.samples.push({
+          time: timeStr,
+          memPct,
+          cpuPct,
+          timestamp: Date.now()
+        });
+        if (PerfState.samples.length > 30) {
+          PerfState.samples.shift();
+        }
+        updateFootprintLiveView();
+      } catch (err) {
+        // 静默单次采样失败
+      }
+    }
+
+    function startLiveMonitoring() {
+      if (PerfState.liveTimer) return;
+      PerfState.isLive = true;
+      fetchPerfSample(true);
+      PerfState.liveTimer = setInterval(() => fetchPerfSample(false), 1500);
+      updateLiveBadge();
+    }
+
+    function stopLiveMonitoring() {
+      if (PerfState.liveTimer) {
+        clearInterval(PerfState.liveTimer);
+        PerfState.liveTimer = null;
+      }
+      updateLiveBadge();
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopLiveMonitoring();
+      } else if (currentTab === 'footprint' && PerfState.isLive) {
+        startLiveMonitoring();
+      }
+    });
+
+    function buildTrendSvgHtml(samples) {
+      const W = 600;
+      const H = 90;
+      const padTop = 10;
+      const padBottom = 16;
+      const plotH = H - padTop - padBottom;
+
+      const count = samples.length;
+      if (count === 0) {
+        return `
+          <svg viewBox="0 0 ${W} ${H}" width="100%" height="90" style="display: block;">
+            <line x1="0" y1="${padTop + plotH}" x2="${W}" y2="${padTop + plotH}" stroke="var(--line)" stroke-width="1" />
+            <text x="${W / 2}" y="${H / 2}" fill="var(--text-3)" font-size="12" text-anchor="middle">正在采集实时性能样本…</text>
+          </svg>
+        `;
+      }
+
+      const getX = (i) => {
+        if (count <= 1) return W / 2;
+        return (i / (count - 1)) * (W - 24) + 12;
+      };
+      const getY = (val) => padTop + (1.0 - Math.min(100, Math.max(0, val)) / 100) * plotH;
+
+      const memPoints = samples.map((s, i) => `${getX(i).toFixed(1)},${getY(s.memPct).toFixed(1)}`);
+      const cpuPoints = samples.map((s, i) => `${getX(i).toFixed(1)},${getY(s.cpuPct).toFixed(1)}`);
+
+      const firstX = getX(0).toFixed(1);
+      const lastX = getX(count - 1).toFixed(1);
+      const baseH = (padTop + plotH).toFixed(1);
+
+      const memLineD = `M ${memPoints.join(' L ')}`;
+      const memAreaD = `M ${firstX},${baseH} L ${memPoints.join(' L ')} L ${lastX},${baseH} Z`;
+      const cpuLineD = `M ${cpuPoints.join(' L ')}`;
+
+      const latestSample = samples[count - 1];
+      const lastMemX = getX(count - 1).toFixed(1);
+      const lastMemY = getY(latestSample.memPct).toFixed(1);
+      const lastCpuY = getY(latestSample.cpuPct).toFixed(1);
+
+      return `
+        <svg viewBox="0 0 ${W} ${H}" width="100%" height="90" preserveAspectRatio="none" style="display: block; overflow: visible;">
+          <defs>
+            <linearGradient id="tidyMemGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--chart-1)" stop-opacity="0.25" />
+              <stop offset="100%" stop-color="var(--chart-1)" stop-opacity="0.0" />
+            </linearGradient>
+            <linearGradient id="tidyCpuGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--chart-2)" stop-opacity="0.18" />
+              <stop offset="100%" stop-color="var(--chart-2)" stop-opacity="0.0" />
+            </linearGradient>
+          </defs>
+          <line x1="0" y1="${padTop}" x2="${W}" y2="${padTop}" stroke="var(--line)" stroke-dasharray="3 3" opacity="0.6" />
+          <line x1="0" y1="${padTop + plotH * 0.5}" x2="${W}" y2="${padTop + plotH * 0.5}" stroke="var(--line)" stroke-dasharray="3 3" opacity="0.6" />
+          <line x1="0" y1="${baseH}" x2="${W}" y2="${baseH}" stroke="var(--line)" opacity="0.9" />
+
+          <path d="${memAreaD}" fill="url(#tidyMemGrad)" />
+          <path d="${memLineD}" fill="none" stroke="var(--chart-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+
+          <path d="${cpuLineD}" fill="none" stroke="var(--chart-2)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" />
+
+          <circle cx="${lastMemX}" cy="${lastMemY}" r="3.5" fill="var(--chart-1)" stroke="var(--surface)" stroke-width="1.5" />
+          <circle cx="${lastMemX}" cy="${lastCpuY}" r="3.5" fill="var(--chart-2)" stroke="var(--surface)" stroke-width="1.5" />
+        </svg>
+      `;
+    }
+
+    function updateFootprintLiveView() {
+      const container = footprintCard.querySelector('.footprint-body');
+      if (!container || !PerfState.perfData) return;
+
+      const p = PerfState.perfData;
+      const mem = p.memory || {};
+      const cpu = p.cpu || {};
+      const disk = p.disk_summary || {};
+
+      const elMemVal = container.querySelector('#fp-kpi-mem-val');
+      const elMemBar = container.querySelector('#fp-kpi-mem-bar');
+      const elCpuVal = container.querySelector('#fp-kpi-cpu-val');
+      const elCpuBar = container.querySelector('#fp-kpi-cpu-bar');
+      const elTrendSvg = container.querySelector('#fp-trend-svg-box');
+      const elTrendLegMem = container.querySelector('#fp-trend-leg-mem');
+      const elTrendLegCpu = container.querySelector('#fp-trend-leg-cpu');
+
+      if (elMemVal) elMemVal.textContent = (mem.percent || 0) + '%';
+      if (elMemBar) elMemBar.style.width = Math.min(100, Math.max(0, mem.percent || 0)) + '%';
+      if (elCpuVal) elCpuVal.textContent = (cpu.percent || 0).toFixed(1) + '%';
+      if (elCpuBar) elCpuBar.style.width = Math.min(100, Math.max(0, cpu.percent || 0)) + '%';
+      if (elTrendSvg) elTrendSvg.innerHTML = buildTrendSvgHtml(PerfState.samples);
+      if (elTrendLegMem) elTrendLegMem.textContent = T('物理内存', 'RAM') + ': ' + (mem.percent || 0) + '%';
+      if (elTrendLegCpu) elTrendLegCpu.textContent = 'CPU: ' + (cpu.percent || 0).toFixed(1) + '%';
+    }
 
     function renderFootprint() {
       const container = footprintCard.querySelector('.footprint-body');
       if (!container) return;
       container.innerHTML = '';
+
+      if (!PerfState.perfData) {
+        fetchPerfSample(true);
+      }
 
       const valid = S.items.map((it) => {
         const sz = Number(it.size) || (Number(it.size_kb) ? Number(it.size_kb) * 1024 : 0);
@@ -1305,130 +1539,433 @@
       }).filter((it) => (it.size || 0) > 0);
       valid.sort((a, b) => (b.size || 0) - (a.size || 0));
 
-      if (!valid.length) {
-        const btnMeasure = btn('立即测算', 'Calculate Now', 'primary sm', 'refresh', async () => {
-          setBtnBusy(btnMeasure, true, '正在测算…', 'Measuring…');
-          try {
-            await loadApps(false);
-            renderFootprint();
-          } finally {
-            setBtnBusy(btnMeasure, false);
-          }
-        });
-        const emptyBox = empty(
-          T('暂无已测算大小的应用数据', 'No size data yet'),
-          T('点击「立即测算」扫描系统已安装程序的磁盘空间占用画像', 'Click "Calculate Now" to scan and generate space footprint')
-        );
-        emptyBox.appendChild(h('div', { style: { marginTop: '12px' } }, btnMeasure));
-        container.appendChild(emptyBox);
-        return;
-      }
-
-      const totalSize = valid.reduce((sum, it) => sum + (it.size || 0), 0);
+      const totalAppsSize = valid.reduce((sum, it) => sum + (it.size || 0), 0);
       const topApps = valid.slice(0, 6);
       const topSum = topApps.reduce((sum, it) => sum + (it.size || 0), 0);
-      const otherSize = Math.max(0, totalSize - topSum);
+      const otherSize = Math.max(0, totalAppsSize - topSum);
 
-      const slices = topApps.map((a) => ({
-        name: a.name,
-        size: a.size || 0,
-        pct: (a.size || 0) / totalSize,
-        app: a
-      }));
-      if (otherSize > 0) {
-        slices.push({
-          name: T('其他已安装应用', 'Other installed apps'),
-          size: otherSize,
-          pct: otherSize / totalSize,
-          app: null
-        });
-      }
+      const p = PerfState.perfData || {
+        drives: [],
+        disk_summary: { total: 0, used: 0, free: 0, percent: 0 },
+        memory: { total: 0, available: 0, used: 0, percent: 0 },
+        cpu: { percent: 0, cores: 1 }
+      };
+      const drives = p.drives || [];
+      const mem = p.memory || {};
+      const cpu = p.cpu || {};
+      const disk = p.disk_summary || {};
 
-      const palette = [
-        'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)',
-        'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)', 'var(--chart-7)'
-      ];
-
-      const r = 70;
-      const circ = 2 * Math.PI * r;
-      let offset = 0;
-      const paths = slices.map((s, idx) => {
-        const strokeLen = s.pct * circ;
-        const color = palette[idx % palette.length];
-        const circle = `<circle cx="100" cy="100" r="${r}" fill="none" stroke="${color}" stroke-width="24" stroke-dasharray="${strokeLen} ${circ - strokeLen}" stroke-dashoffset="${-offset}" />`;
-        offset += strokeLen;
-        return circle;
-      }).join('');
-
-      const svgHtml = `
-        <svg viewBox="0 0 200 200" width="180" height="180" style="transform: rotate(-90deg); display: block; flex-shrink: 0;">
-          <circle cx="100" cy="100" r="${r}" fill="none" stroke="var(--line)" stroke-width="24" />
-          ${paths}
-        </svg>
-      `;
-
-      const chartWrap = h('div', {
-        class: 'row wrap',
-        style: { alignItems: 'center', justifyContent: 'center', gap: '32px', padding: '16px 0', borderBottom: '1px solid var(--line)', marginBottom: '16px' }
-      });
-      const svgContainer = h('div', { style: { position: 'relative', width: '180px', height: '180px' } });
-      svgContainer.innerHTML = svgHtml;
-
-      const centerLabel = h('div', {
+      /* ================= SECTION 1: 四大指标核心卡片 ================= */
+      const kpiRow = h('div', {
         style: {
-          position: 'absolute', top: '0', left: '0', width: '100%', height: '100%',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          pointerEvents: 'none'
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+          gap: '12px'
         }
-      },
-        h('span', { class: 'muted small' }, T('总占用', 'Total')),
-        h('strong', { style: { fontSize: '18px', color: 'var(--text-1)' } }, fmtBytes(totalSize))
-      );
-      svgContainer.appendChild(centerLabel);
+      });
 
-      const legendWrap = h('div', { class: 'stack', style: { gap: '6px', flex: '1', minWidth: '220px', maxWidth: '420px' } },
-        ...slices.map((s, idx) => h('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
-          h('span', { style: { width: '10px', height: '10px', borderRadius: '50%', background: palette[idx % palette.length], flexShrink: '0' } }),
-          h('span', { class: 'ellipsis small', style: { flex: '1' }, title: s.name }, s.name),
-          h('span', { class: 'mono small muted' }, fmtBytes(s.size)),
-          h('span', { class: 'mono small', style: { minWidth: '42px', textAlign: 'right', fontWeight: 'bold' } }, (s.pct * 100).toFixed(1) + '%')
-        ))
-      );
-
-      chartWrap.appendChild(svgContainer);
-      chartWrap.appendChild(legendWrap);
-
-      const rankList = h('div', { class: 'stack', style: { gap: '6px' } },
-        h('h3', { style: { margin: '0 0 6px 0', fontSize: 'var(--fs-body)' } }, T('空间大户排行与治理', 'Top Space Consumers')),
-        ...topApps.map((a, i) => h('div', {
-          class: 'row',
+      function createKpiCard(iconName, title, valId, valText, barId, barPct, barColor, subText, footText) {
+        const barFill = h('div', {
+          id: barId,
           style: {
-            padding: '8px 12px',
-            alignItems: 'center',
-            gap: '12px',
-            margin: '0',
-            borderBottom: '1px solid var(--line)',
-            borderRadius: 'var(--radius-sm)'
+            height: '100%',
+            width: Math.min(100, Math.max(0, barPct)) + '%',
+            background: barColor,
+            borderRadius: '2px',
+            transition: 'width 0.4s ease'
+          }
+        });
+        const barTrack = h('div', {
+          style: {
+            height: '4px',
+            background: 'var(--line)',
+            borderRadius: '2px',
+            overflow: 'hidden',
+            margin: '6px 0'
+          }
+        }, barFill);
+
+        return h('div', {
+          style: {
+            padding: '12px 14px',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--line)',
+            borderRadius: 'var(--radius)'
           }
         },
-          h('strong', { class: 'mono' + (i < 3 ? ' badge accent sm' : ' muted'), style: { minWidth: '24px', textAlign: 'center' } }, '#' + (i + 1)),
-          appIcon(a),
-          h('div', { class: 'stack', style: { gap: '2px', flex: '1', minWidth: '0' } },
-            h('span', { class: 'ellipsis', style: { fontWeight: '600' }, title: a.name }, a.name),
-            h('span', { class: 'muted small mono ellipsis' }, a.install_path || a.publisher || '—')
+          h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', color: 'var(--text-3)', fontSize: '12px' } },
+            icon(iconName, 14),
+            h('span', null, title)
           ),
-          h('span', { class: 'badge mono accent' }, fmtBytes(a.size || 0)),
-          btn('定位详情', 'Inspect', 'ghost sm', 'external', () => {
-            switchTab('apps');
-            filterInput.value = a.name;
-            S.filter = a.name.toLowerCase();
-            applyFilter();
-          })
-        ))
+          h('div', {
+            id: valId,
+            style: {
+              fontSize: '22px',
+              fontWeight: '700',
+              fontFamily: 'var(--mono)',
+              color: 'var(--text-1)',
+              margin: '4px 0 2px 0'
+            }
+          }, valText),
+          barTrack,
+          h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-3)' } },
+            h('span', null, subText),
+            h('span', { style: { fontFamily: 'var(--mono)' } }, footText)
+          )
+        );
+      }
+
+      const cardMem = createKpiCard(
+        'cpu',
+        T('物理内存占用', 'Physical Memory'),
+        'fp-kpi-mem-val',
+        (mem.percent || 0) + '%',
+        'fp-kpi-mem-bar',
+        mem.percent || 0,
+        'var(--chart-1)',
+        fmtBytes(mem.used || 0) + ' / ' + fmtBytes(mem.total || 0),
+        T('可用 ', 'Free ') + fmtBytes(mem.available || 0)
       );
 
-      container.appendChild(chartWrap);
-      container.appendChild(rankList);
+      const cardCpu = createKpiCard(
+        'zap',
+        T('处理器实时负载', 'CPU Load'),
+        'fp-kpi-cpu-val',
+        (cpu.percent || 0).toFixed(1) + '%',
+        'fp-kpi-cpu-bar',
+        cpu.percent || 0,
+        'var(--chart-2)',
+        (cpu.cores || 1) + T(' 个逻辑处理器', ' Cores'),
+        (cpu.percent || 0) < 30 ? T('负载平稳', 'Idle/Smooth') : T('正在运转', 'Active')
+      );
+
+      const cardApps = createKpiCard(
+        'box',
+        T('已安装软件总占用', 'Installed Apps'),
+        'fp-kpi-apps-val',
+        fmtBytes(totalAppsSize),
+        'fp-kpi-apps-bar',
+        disk.total ? (totalAppsSize / disk.total) * 100 : 0,
+        'var(--chart-3)',
+        `已统计 ${valid.length} 款软件`,
+        totalAppsSize ? `Top 6 占 ${((topSum / totalAppsSize) * 100).toFixed(1)}%` : '—'
+      );
+
+      const cardDisk = createKpiCard(
+        'folder',
+        T('全盘存储总容量', 'Total Storage'),
+        'fp-kpi-disk-val',
+        fmtBytes(disk.total || 0),
+        'fp-kpi-disk-bar',
+        disk.percent || 0,
+        'var(--chart-4)',
+        `已用 ${fmtBytes(disk.used || 0)} (${disk.percent || 0}%)`,
+        `跨 ${drives.length} 分区 · 余 ${fmtBytes(disk.free || 0)}`
+      );
+
+      kpiRow.appendChild(cardMem);
+      kpiRow.appendChild(cardCpu);
+      kpiRow.appendChild(cardApps);
+      kpiRow.appendChild(cardDisk);
+      container.appendChild(kpiRow);
+
+      /* ================= SECTION 2: 实时性能动态走势折线图 ================= */
+      const trendWrap = h('div', {
+        style: {
+          padding: '12px 16px',
+          background: 'var(--surface-2)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--radius)'
+        }
+      });
+
+      const trendHeader = h('div', {
+        class: 'row',
+        style: { alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }
+      },
+        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('实时性能与内存动态走势', 'Live Performance & Resource Trends')),
+        h('div', { class: 'row', style: { gap: '16px', fontSize: '12px' } },
+          h('span', { class: 'row', style: { alignItems: 'center', gap: '6px' } },
+            h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: 'var(--chart-1)' } }),
+            h('span', { id: 'fp-trend-leg-mem', style: { color: 'var(--text-2)', fontFamily: 'var(--mono)' } },
+              T('物理内存', 'RAM') + ': ' + (mem.percent || 0) + '%'
+            )
+          ),
+          h('span', { class: 'row', style: { alignItems: 'center', gap: '6px' } },
+            h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: 'var(--chart-2)' } }),
+            h('span', { id: 'fp-trend-leg-cpu', style: { color: 'var(--text-2)', fontFamily: 'var(--mono)' } },
+              'CPU: ' + (cpu.percent || 0).toFixed(1) + '%'
+            )
+          )
+        )
+      );
+
+      const trendSvgBox = h('div', { id: 'fp-trend-svg-box', style: { width: '100%', height: '90px' } });
+      trendSvgBox.innerHTML = buildTrendSvgHtml(PerfState.samples);
+
+      const trendTimeAxis = h('div', {
+        class: 'row',
+        style: { justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-3)', marginTop: '4px' }
+      },
+        h('span', null, '-45s'),
+        h('span', null, '-30s'),
+        h('span', null, '-15s'),
+        h('span', null, T('当前 (实时采样)', 'Now (Live)'))
+      );
+
+      trendWrap.appendChild(trendHeader);
+      trendWrap.appendChild(trendSvgBox);
+      trendWrap.appendChild(trendTimeAxis);
+      container.appendChild(trendWrap);
+
+      /* ================= SECTION 3: 磁盘分区水位透视 ================= */
+      if (drives.length) {
+        const partitionsBox = h('div', {
+          style: {
+            padding: '14px 16px',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--line)',
+            borderRadius: 'var(--radius)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px'
+          }
+        },
+          h('div', { class: 'row', style: { alignItems: 'center', justifyContent: 'space-between' } },
+            h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('全盘存储水位与应用分布', 'Disk Partitions & App Distribution')),
+            h('span', { class: 'muted small' }, `共 ${drives.length} 个逻辑驱动器`)
+          )
+        );
+
+        drives.forEach((d) => {
+          const letterUpper = (d.letter || 'C').toUpperCase();
+          const dApps = valid.filter((it) => (it.install_path || '').toUpperCase().startsWith(letterUpper + ':'));
+          const dAppSize = dApps.reduce((s, it) => s + (it.size || 0), 0);
+          const dOtherSize = Math.max(0, (d.used || 0) - dAppSize);
+          const dFree = d.free || 0;
+          const dTotal = Math.max(1, d.total || 1);
+
+          const pctApp = Math.min(100, (dAppSize / dTotal) * 100);
+          const pctOther = Math.min(100 - pctApp, (dOtherSize / dTotal) * 100);
+          const pctFree = Math.max(0, 100 - pctApp - pctOther);
+
+          const bar = h('div', {
+            style: {
+              display: 'flex',
+              height: '8px',
+              borderRadius: 'var(--radius-sm)',
+              overflow: 'hidden',
+              background: 'var(--line)',
+              margin: '6px 0'
+            }
+          },
+            h('div', { style: { width: pctApp + '%', background: 'var(--chart-1)', transition: 'width 0.3s ease' }, title: `已安装软件: ${fmtBytes(dAppSize)}` }),
+            h('div', { style: { width: pctOther + '%', background: '#94a3b8', transition: 'width 0.3s ease' }, title: `系统与其他数据: ${fmtBytes(dOtherSize)}` }),
+            h('div', { style: { width: pctFree + '%', background: 'var(--line)', opacity: 0.4 }, title: `空闲可用: ${fmtBytes(dFree)}` })
+          );
+
+          const driveRow = h('div', { style: { display: 'flex', flexDirection: 'column' } },
+            h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '12px' } },
+              h('div', { class: 'row', style: { alignItems: 'center', gap: '6px' } },
+                icon('folder', 14),
+                h('strong', { style: { color: 'var(--text-1)' } }, d.drive + (d.is_system ? ' (系统盘)' : '')),
+                h('span', { class: 'muted small' }, `已用 ${fmtBytes(d.used || 0)} (${d.percent || 0}%)`)
+              ),
+              h('div', { class: 'row', style: { gap: '10px', fontSize: '11px', color: 'var(--text-3)' } },
+                h('span', null, `软件: ${fmtBytes(dAppSize)} (${pctApp.toFixed(1)}%)`),
+                h('span', null, `系统及其他: ${fmtBytes(dOtherSize)}`),
+                h('span', { style: { fontWeight: '600', color: 'var(--text-2)' } }, `剩余 ${fmtBytes(dFree)}`)
+              )
+            ),
+            bar
+          );
+
+          partitionsBox.appendChild(driveRow);
+        });
+
+        container.appendChild(partitionsBox);
+      }
+
+      /* ================= SECTION 4: 双维度占用大户治理 ================= */
+      const dualGrid = h('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: '16px'
+        }
+      });
+
+      /* 维度一：已安装软件磁盘空间大户 */
+      const diskCol = h('div', {
+        style: {
+          padding: '14px 16px',
+          background: 'var(--surface-2)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--radius)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '10px'
+        }
+      },
+        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('磁盘空间大户排行', 'Top Disk Space Consumers'))
+      );
+
+      if (!valid.length) {
+        diskCol.appendChild(empty(T('暂无已安装软件空间数据', 'No software size data'), T('可切换至「已安装程序」测算应用体积', 'Switch to Installed Apps to scan sizes')));
+      } else {
+        const slices = topApps.map((a) => ({
+          name: a.name,
+          size: a.size || 0,
+          pct: totalAppsSize ? (a.size || 0) / totalAppsSize : 0,
+          app: a
+        }));
+        if (otherSize > 0) {
+          slices.push({
+            name: T('其他已安装应用', 'Other installed apps'),
+            size: otherSize,
+            pct: totalAppsSize ? otherSize / totalAppsSize : 0,
+            app: null
+          });
+        }
+
+        const palette = [
+          'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)',
+          'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)', 'var(--chart-7)'
+        ];
+
+        const r = 50;
+        const circ = 2 * Math.PI * r;
+        let offset = 0;
+        const paths = slices.map((s, idx) => {
+          const strokeLen = s.pct * circ;
+          const color = palette[idx % palette.length];
+          const circle = `<circle cx="65" cy="65" r="${r}" fill="none" stroke="${color}" stroke-width="16" stroke-dasharray="${strokeLen} ${circ - strokeLen}" stroke-dashoffset="${-offset}" />`;
+          offset += strokeLen;
+          return circle;
+        }).join('');
+
+        const donutSvg = `
+          <svg viewBox="0 0 130 130" width="90" height="90" style="transform: rotate(-90deg); display: block; flex-shrink: 0;">
+            <circle cx="65" cy="65" r="${r}" fill="none" stroke="var(--line)" stroke-width="16" />
+            ${paths}
+          </svg>
+        `;
+
+        const donutRow = h('div', { class: 'row wrap', style: { alignItems: 'center', gap: '16px', paddingBottom: '8px', borderBottom: '1px solid var(--line)' } });
+        const svgWrap = h('div', { style: { position: 'relative', width: '90px', height: '90px', flexShrink: 0 } });
+        svgWrap.innerHTML = donutSvg;
+
+        const legendWrap = h('div', { class: 'stack', style: { gap: '4px', flex: '1', minWidth: '160px' } },
+          ...slices.slice(0, 4).map((s, idx) => h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', fontSize: '11px' } },
+            h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: palette[idx % palette.length], flexShrink: '0' } }),
+            h('span', { class: 'ellipsis', style: { flex: '1', color: 'var(--text-1)' }, title: s.name }, s.name),
+            h('span', { style: { fontFamily: 'var(--mono)', color: 'var(--text-3)' } }, fmtBytes(s.size))
+          ))
+        );
+        donutRow.appendChild(svgWrap);
+        donutRow.appendChild(legendWrap);
+        diskCol.appendChild(donutRow);
+
+        const listWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } });
+        topApps.slice(0, 5).forEach((a, i) => {
+          const row = h('div', {
+            class: 'row',
+            style: {
+              alignItems: 'center',
+              gap: '10px',
+              padding: '6px 8px',
+              background: 'var(--surface)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--radius-sm)'
+            }
+          },
+            h('strong', { class: 'mono' + (i < 3 ? ' badge accent sm' : ' muted'), style: { minWidth: '22px', textAlign: 'center' } }, '#' + (i + 1)),
+            h('div', { class: 'stack', style: { flex: '1', minWidth: '0' } },
+              h('span', { class: 'ellipsis small', style: { fontWeight: '600' }, title: a.name }, a.name),
+              h('span', { class: 'muted tiny mono ellipsis' }, a.install_path || a.publisher || '—')
+            ),
+            h('span', { class: 'badge mono accent sm' }, fmtBytes(a.size || 0)),
+            btn('定位', 'Inspect', 'ghost sm', 'external', () => {
+              switchTab('apps');
+              filterInput.value = a.name;
+              S.filter = a.name.toLowerCase();
+              applyFilter();
+            })
+          );
+          listWrap.appendChild(row);
+        });
+        diskCol.appendChild(listWrap);
+      }
+
+      /* 维度二：运行中应用内存占用大户 */
+      const ramCol = h('div', {
+        style: {
+          padding: '14px 16px',
+          background: 'var(--surface-2)',
+          border: '1px solid var(--line)',
+          borderRadius: 'var(--radius)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '10px'
+        }
+      },
+        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('后台运行内存大户', 'Top Running RAM Consumers'))
+      );
+
+      const runningApps = (ProcState.items || []).filter((p) => !p.is_system);
+      if (!runningApps.length) {
+        const btnLoadProcs = btn('获取进程快照', 'Snapshot Processes', 'ghost sm', 'refresh', async () => {
+          setBtnBusy(btnLoadProcs, true);
+          try {
+            await loadProcs(false);
+            renderFootprint();
+          } finally {
+            setBtnBusy(btnLoadProcs, false);
+          }
+        });
+        const emptyProcs = empty(T('暂无运行中进程快照', 'No process snapshot yet'));
+        emptyProcs.appendChild(h('div', { style: { marginTop: '8px' } }, btnLoadProcs));
+        ramCol.appendChild(emptyProcs);
+      } else {
+        const topProcs = runningApps.slice(0, 5);
+        const listProcWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } });
+        topProcs.forEach((p, i) => {
+          const row = h('div', {
+            class: 'row',
+            style: {
+              alignItems: 'center',
+              gap: '10px',
+              padding: '6px 8px',
+              background: 'var(--surface)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--radius-sm)'
+            }
+          },
+            h('strong', { class: 'mono' + (i < 3 ? ' badge accent sm' : ' muted'), style: { minWidth: '22px', textAlign: 'center' } }, '#' + (i + 1)),
+            h('div', { class: 'stack', style: { flex: '1', minWidth: '0' } },
+              h('span', { class: 'ellipsis small', style: { fontWeight: '600' }, title: p.name }, p.name),
+              h('span', { class: 'muted tiny mono ellipsis' }, p.process_count > 1 ? `${p.process_count} 个进程` : `PID ${p.pids ? p.pids[0] : '—'}`)
+            ),
+            h('span', { class: 'badge mono sm' }, fmtSize(p.memory || 0)),
+            btn('结束', 'Close', 'ghost sm danger', 'close', async () => {
+              await closeProcOne(p, false);
+              renderFootprint();
+            }),
+            btn('管理', 'Manage', 'ghost sm', 'external', () => {
+              switchTab('procs');
+              procFilterInput.value = p.clean_name;
+              ProcState.filter = p.clean_name;
+              applyProcFilter();
+            })
+          );
+          listProcWrap.appendChild(row);
+        });
+        ramCol.appendChild(listProcWrap);
+      }
+
+      dualGrid.appendChild(diskCol);
+      dualGrid.appendChild(ramCol);
+      container.appendChild(dualGrid);
     }
 
     function switchTab(tab) {
@@ -1438,12 +1975,18 @@
       tabProcsBtn.className = 'chip' + (tab === 'procs' ? ' active' : '');
       tabFootprintBtn.className = 'chip' + (tab === 'footprint' ? ' active' : '');
 
-      adminBar.style.display = tab === 'apps' ? '' : 'none';
+      adminBar.style.display = (tab === 'apps' || tab === 'startup') ? '' : 'none';
       mainCard.style.display = tab === 'apps' ? '' : 'none';
       loSection.style.display = tab === 'apps' ? '' : 'none';
       startupCard.style.display = tab === 'startup' ? '' : 'none';
       procsCard.style.display = tab === 'procs' ? '' : 'none';
       footprintCard.style.display = tab === 'footprint' ? '' : 'none';
+
+      if (tab === 'footprint') {
+        startLiveMonitoring();
+      } else {
+        stopLiveMonitoring();
+      }
 
       if (tab === 'startup' && !StartupState.items.length) {
         loadStartup(false);
@@ -1451,6 +1994,8 @@
         loadProcs(false);
       } else if (tab === 'footprint') {
         renderFootprint();
+        if (!S.items.length) loadApps(false);
+        if (!ProcState.items.length) loadProcs(false);
       }
     }
 

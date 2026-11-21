@@ -5959,6 +5959,9 @@ def run_clean_shots():
 
 class EngineError(Exception):
     """可以直接回给客户端的可读错误（参数错 / 未知方法等）。"""
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 _ENGINE_RULES = None
@@ -7787,6 +7790,8 @@ def _engine_startup_toggle(params):
                 else:
                     winreg.SetValueEx(k, name, 0, winreg.REG_BINARY, b"\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
         except OSError as ex:
+            if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
+                raise EngineError("修改系统级 (HKLM) 注册表自启动项状态需要管理员权限", code="admin_required")
             raise EngineError("修改自启动状态失败（可能需要管理员权限）：%s" % ex)
     elif source_type == "folder":
         file_path = _engine_get(params, "file_path", "", str)
@@ -7824,6 +7829,8 @@ def _engine_startup_toggle(params):
                         pass
                     os.replace(file_path, new_file_path)
         except OSError as ex:
+            if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
+                raise EngineError("修改系统启动目录快捷方式需要管理员权限", code="admin_required")
             raise EngineError("重命名启动项失败：%s" % ex)
     else:
         raise EngineError("未知的启动项类型：%s" % source_type)
@@ -7850,6 +7857,8 @@ def _engine_startup_delete(params):
             with winreg.OpenKey(hive, key_sub, 0, winreg.KEY_SET_VALUE | flag) as k:
                 winreg.DeleteValue(k, name)
         except OSError as ex:
+            if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
+                raise EngineError("删除系统级 (HKLM) 注册表自启动项需要管理员权限", code="admin_required")
             raise EngineError("删除自启动注册表项失败：%s" % ex)
         try:
             with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", 0, winreg.KEY_SET_VALUE | flag) as ak:
@@ -7876,6 +7885,8 @@ def _engine_startup_delete(params):
                 pass
             os.remove(target_path)
         except OSError as ex:
+            if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
+                raise EngineError("删除系统启动目录快捷方式需要管理员权限", code="admin_required")
             raise EngineError("删除启动项快捷方式失败：%s" % ex)
     else:
         raise EngineError("未知的启动项类型：%s" % source_type)
@@ -8185,6 +8196,133 @@ def _engine_process_list(params=None):
         "total_count": len(items),
         "raw_count": len(raw_procs),
         "total_memory": total_memory
+    }
+
+
+_SYS_PERF_PREV = [None]
+
+
+def _engine_system_performance(params=None):
+    """system.performance：高能效快照全盘分区容量、物理内存状态与瞬时 CPU 负载（0 闲置持续负载）。"""
+    import shutil
+    import ctypes
+    from ctypes import wintypes
+
+    drives = []
+    total_disk_bytes = 0
+    free_disk_bytes = 0
+    used_disk_bytes = 0
+
+    if os.name == "nt":
+        for d in range(65, 91):
+            drive_letter = chr(d) + ":\\"
+            try:
+                dtype = ctypes.windll.kernel32.GetDriveTypeW(drive_letter)
+                if dtype in (0, 1, 5):
+                    continue
+                if not os.path.exists(drive_letter):
+                    continue
+                du = shutil.disk_usage(drive_letter)
+                if du.total <= 0:
+                    continue
+                drives.append({
+                    "drive": drive_letter,
+                    "letter": chr(d),
+                    "total": int(du.total),
+                    "used": int(du.used),
+                    "free": int(du.free),
+                    "percent": round(du.used / du.total * 100, 1) if du.total else 0.0,
+                    "is_system": chr(d).upper() == os.environ.get("SystemDrive", "C:")[0].upper()
+                })
+                total_disk_bytes += int(du.total)
+                used_disk_bytes += int(du.used)
+                free_disk_bytes += int(du.free)
+            except OSError:
+                continue
+
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_uint64),
+                ("ullAvailPhys", ctypes.c_uint64),
+                ("ullTotalPageFile", ctypes.c_uint64),
+                ("ullAvailPageFile", ctypes.c_uint64),
+                ("ullTotalVirtual", ctypes.c_uint64),
+                ("ullAvailVirtual", ctypes.c_uint64),
+                ("ullAvailExtendedVirtual", ctypes.c_uint64)
+            ]
+
+        mem_stat = _MEMORYSTATUSEX()
+        mem_stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem_stat)):
+            mem_total = int(mem_stat.ullTotalPhys)
+            mem_avail = int(mem_stat.ullAvailPhys)
+            mem_used = max(0, mem_total - mem_avail)
+            mem_load = int(mem_stat.dwMemoryLoad)
+        else:
+            mem_total = mem_avail = mem_used = mem_load = 0
+
+        def _get_times():
+            idle = wintypes.FILETIME()
+            kern = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kern), ctypes.byref(user)):
+                return (
+                    (idle.dwHighDateTime << 32) | idle.dwLowDateTime,
+                    (kern.dwHighDateTime << 32) | kern.dwLowDateTime,
+                    (user.dwHighDateTime << 32) | user.dwLowDateTime,
+                    time.perf_counter()
+                )
+            return (0, 0, 0, time.perf_counter())
+
+        now_times = _get_times()
+        cpu_pct = 0.0
+        prev = _SYS_PERF_PREV[0]
+        if prev and (now_times[3] - prev[3]) < 5.0 and (now_times[3] - prev[3]) >= 0.05:
+            idle_delta = now_times[0] - prev[0]
+            kern_delta = now_times[1] - prev[1]
+            user_delta = now_times[2] - prev[2]
+            total_delta = kern_delta + user_delta
+            if total_delta > 0:
+                cpu_pct = round(max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0)), 1)
+        else:
+            time.sleep(0.04)
+            t2 = _get_times()
+            idle_delta = t2[0] - now_times[0]
+            kern_delta = t2[1] - now_times[1]
+            user_delta = t2[2] - now_times[2]
+            total_delta = kern_delta + user_delta
+            if total_delta > 0:
+                cpu_pct = round(max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0)), 1)
+            now_times = t2
+
+        _SYS_PERF_PREV[0] = now_times
+        cpu_cores = os.cpu_count() or 1
+    else:
+        mem_total = mem_avail = mem_used = mem_load = 0
+        cpu_pct = 0.0
+        cpu_cores = 1
+
+    return {
+        "timestamp": int(time.time() * 1000),
+        "drives": drives,
+        "disk_summary": {
+            "total": total_disk_bytes,
+            "used": used_disk_bytes,
+            "free": free_disk_bytes,
+            "percent": round(used_disk_bytes / total_disk_bytes * 100, 1) if total_disk_bytes else 0.0
+        },
+        "memory": {
+            "total": mem_total,
+            "available": mem_avail,
+            "used": mem_used,
+            "percent": mem_load
+        },
+        "cpu": {
+            "percent": cpu_pct,
+            "cores": cpu_cores
+        }
     }
 
 
@@ -9050,6 +9188,7 @@ _ENGINE_METHODS = {
     "startup.delete": _engine_startup_delete,
     "process.close": _engine_process_close,
     "process.list": _engine_process_list,
+    "system.performance": _engine_system_performance,
     "search.status": _engine_search_status,
     "search.index": _engine_search_index,
     "search.query": _engine_search_query,
@@ -9148,6 +9287,8 @@ def run_engine():
             resp = {"id": rid, "ok": True, "result": result}
         except (Exception, SystemExit) as ex:
             resp = {"id": rid, "ok": False, "error": _engine_err_text(ex)}
+            if getattr(ex, "code", None):
+                resp["code"] = ex.code
             try:
                 if isinstance(ex, EngineError):
                     sys.stderr.write("[engine] %s\n" % resp["error"])

@@ -3240,5 +3240,43 @@ class TestProcess(EngineCase):
         self.assertIn("非法进程名", r2["error"])
 
 
+class TestSystemPerformance(EngineCase):
+    def test_system_performance_metrics(self):
+        r = self.rpc_ok("system.performance", {})
+        self.assertIn("drives", r)
+        self.assertIn("memory", r)
+        self.assertIn("cpu", r)
+        self.assertIn("disk_summary", r)
+        self.assertIsInstance(r["drives"], list)
+        self.assertGreater(len(r["drives"]), 0)
+
+        for d in r["drives"]:
+            self.assertIn("drive", d)
+            self.assertIn("letter", d)
+            self.assertGreater(d["total"], 0)
+            self.assertGreaterEqual(d["used"], 0)
+            self.assertGreaterEqual(d["free"], 0)
+            self.assertGreaterEqual(d["percent"], 0.0)
+
+        mem = r["memory"]
+        self.assertGreater(mem["total"], 0)
+        self.assertGreater(mem["available"], 0)
+        self.assertGreaterEqual(mem["percent"], 0)
+
+        cpu = r["cpu"]
+        self.assertGreaterEqual(cpu["percent"], 0.0)
+        self.assertGreaterEqual(cpu["cores"], 1)
+
+    def test_startup_hklm_admin_error_or_success(self):
+        r = self.rpc("startup.delete", {
+            "name": "non_existent_mock_app_123",
+            "source_type": "registry",
+            "hive": "HKLM64",
+            "key": r"Software\Microsoft\Windows\CurrentVersion\Run"
+        })
+        if not r["ok"]:
+            self.assertTrue("管理员权限" in r["error"] or "拒绝访问" in r["error"] or r.get("code") == "admin_required")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
