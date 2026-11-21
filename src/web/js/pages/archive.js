@@ -425,22 +425,24 @@
        2. 筛选与排序只在缓存数组的副本上做，不碰原始 entries；
        3. 三者都没有变化时直接复用上一次的结果（S.viewRows）。 */
   function buildRowsFor(cwd) {
+    let targetCwd = String(cwd || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (targetCwd && !targetCwd.endsWith('/')) targetCwd += '/';
     const map = new Map();
     const entries = (S.info && S.info.entries) || [];
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
       let name = norm(e.name);
       if (!name) continue;
-      if (cwd) {
-        if (!name.startsWith(cwd)) continue;
-        name = name.slice(cwd.length);
+      if (targetCwd) {
+        if (!name.startsWith(targetCwd)) continue;
+        name = name.slice(targetCwd.length).replace(/^\/+/, '');
       }
       if (!name) continue;
       const slash = name.indexOf('/');
       if (slash >= 0) {
         const seg = name.slice(0, slash);
         if (!seg) continue;
-        const key = cwd + seg + '/';
+        const key = targetCwd + seg + '/';
         if (!map.has(key)) map.set(key, {
           key, name: seg, isDir: true, index: null,
           size: 0, packed: 0, fileCount: 0, modified: '', encrypted: false, synthetic: true
@@ -450,11 +452,14 @@
       const isDir = !!e.isDir || name.endsWith('/');
       const clean = name.replace(/\/+$/, '');
       if (!clean) continue;
-      const key = cwd + clean + (isDir ? '/' : '');
+      const key = targetCwd + clean + (isDir ? '/' : '');
       if (!map.has(key)) map.set(key, {
         key, name: clean, isDir, index: e.index,
-        size: e.size || 0, packed: e.packed || 0, fileCount: isDir ? 0 : 1,
-        modified: e.modified || '', encrypted: !!e.encrypted, synthetic: false
+        size: isDir ? 0 : (Number(e.size) || 0),
+        packed: isDir ? 0 : (Number(e.packed) || 0),
+        fileCount: isDir ? 0 : 1,
+        modified: (e.modified && e.modified !== '—') ? e.modified : '',
+        encrypted: !!e.encrypted, synthetic: false
       });
     }
 
@@ -475,7 +480,7 @@
               d.packed += (Number(e.packed) || 0);
               d.fileCount = (d.fileCount || 0) + 1;
             }
-            if (e.modified && (!d.modified || String(e.modified) > String(d.modified))) {
+            if (e.modified && e.modified !== '—' && (!d.modified || String(e.modified) > String(d.modified))) {
               d.modified = String(e.modified);
             }
             if (e.encrypted) d.encrypted = true;
@@ -665,7 +670,9 @@
   }
 
   function goCwd(p) {
-    S.cwd = p || '';
+    let clean = String(p || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (clean && !clean.endsWith('/')) clean += '/';
+    S.cwd = clean;
     S.selected.clear();
     S.filter = '';
     if (els.open) {
@@ -1160,21 +1167,30 @@
     const files = p ? Number(p.files) || 0 : 0;
     const totalFiles = p ? Number(p.totalFiles) || 0 : 0;
     const percent = totalBytes ? pct(bytes, totalBytes) : (totalFiles ? pct(files, totalFiles) : 0);
-    const label = S.busy && !p ? (S.opLabel || T('正在处理…', 'Working…')) : ((p && p.phase) || S.opLabel || T('正在处理…', 'Working…'));
+
+    const isCreate = S.tab === 'create' || (p && p.phase === 'compress');
+    const titleName = isCreate
+      ? (baseName(S.create.dest || (S.lastCreate && S.lastCreate.path) || '') || T('新建压缩包', 'New archive'))
+      : (baseName(S.path) || T('解压任务', 'Extract'));
+    const phaseText = (p && p.phase === 'compress') ? T('正在压缩…', 'Compressing…')
+      : (p && p.phase === 'extract') ? T('正在解压…', 'Extracting…')
+      : (S.opLabel || T('正在处理…', 'Working…'));
+
     els.progress.appendChild(h('div', { class: 'arc-progress-top' },
-      h('div', { class: 'arc-progress-label' }, icon('archive', 15), h('strong', null, label)),
+      h('div', { class: 'arc-progress-label' }, icon('archive', 15), h('strong', { class: 'ellipsis', title: titleName }, titleName)),
       h('div', { class: 'small muted' },
         (totalFiles ? fmtCount(files) + ' / ' + fmtCount(totalFiles) : fmtCount(files)) + ' · ' +
         fmtBytes(bytes) + (totalBytes ? ' / ' + fmtBytes(totalBytes) : ''))
     ));
-    // 至少两个采样点才画曲线；读表阶段和起步瞬间仍用细进度条，免得多出一块空图。
+    // 速率折线图：解压与压缩统一拥有折线速度波形、剩余预估时间与实时速率
     if (S.speed.samples.length >= 2) {
       els.progress.appendChild(buildSpeedChart(percent));
     } else {
       els.progress.appendChild(h('div', { class: 'arc-bar' },
         h('i', { style: { width: (totalBytes || totalFiles) ? percent + '%' : '34%' } })));
     }
-    if (p && p.name) els.progress.appendChild(h('div', { class: 'small muted ellipsis' }, p.name));
+    const currentName = (p && p.name) ? p.name : phaseText;
+    els.progress.appendChild(h('div', { class: 'small muted ellipsis', title: currentName }, currentName));
     if (S.busy) {
       const b = h('button', { class: 'btn ghost sm' }, T('取消', 'Cancel'));
       b.onclick = cancelOp;

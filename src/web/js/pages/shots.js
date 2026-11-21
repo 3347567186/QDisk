@@ -141,18 +141,21 @@
         });
       }
 
-      const sortSelect = h('select', {
-        class: 'select', style: { width: '108px' }, 'aria-label': T('排序方式', 'Sort by'),
-        onchange: (e) => {
-          S.sort = e.target.value;
+      const sortSelect = UI.customSelect({
+        options: [
+          { value: 'size', label: T('按大小', 'By size') },
+          { value: 'time', label: T('按时间', 'By time') },
+          { value: 'name', label: T('按名称', 'By name') }
+        ],
+        value: S.sort,
+        className: 'sm',
+        title: T('排序方式', 'Sort by'),
+        onChange: (v) => {
+          S.sort = v;
           S.page = 1;
           render();
         }
-      },
-        h('option', { value: 'size' }, T('按大小', 'By size')),
-        h('option', { value: 'time' }, T('按时间', 'By time')),
-        h('option', { value: 'name' }, T('按名称', 'By name'))
-      );
+      });
 
       const statCount = h('b', { class: 'shot-num' }, '0');
       const statSize = h('b', { class: 'shot-num' }, '0 B');

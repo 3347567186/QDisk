@@ -605,6 +605,43 @@
         summary: (args, r) => `已安装程序 · 匹配 ${r.matched}/${r.total}`
       },
 
+      startup_list: {
+        label: '自启动项',
+        run: async (args) => {
+          const status = String((args && args.status) || 'all').trim().toLowerCase();
+          const filter = String((args && args.filter) || '').trim().toLowerCase();
+          const r = await withTimeout(API.engine('startup.list', { refresh: !!(args && args.refresh) }), TIMEOUT, '读取自启动项');
+          let items = ((r && r.items) || []).map((it) => ({
+            name: it.name || '',
+            command: it.command || '',
+            enabled: it.enabled === true,
+            status: it.status || (it.exists ? (it.enabled ? 'enabled' : 'disabled') : 'broken'),
+            source_type: it.source_type || 'registry',
+            location: it.location || '',
+            file_path: it.file_path || '',
+            exists: it.exists !== false
+          }));
+          if (status && status !== 'all') {
+            items = items.filter((it) => it.status === status);
+          }
+          if (filter) {
+            items = items.filter((it) => it.name.toLowerCase().includes(filter) || it.command.toLowerCase().includes(filter));
+          }
+          const want = Math.min(Math.max(Number(args && args.limit) || 20, 1), 50);
+          const off = Math.max(0, Math.floor(Number(args && args.offset) || 0));
+          const base = {
+            total: (r && r.total) || 0,
+            enabled_count: (r && r.enabled_count) || 0,
+            disabled_count: (r && r.disabled_count) || 0,
+            broken_count: (r && r.broken_count) || 0,
+            matched: items.length,
+            status_filter: status
+          };
+          return pageFit(base, items, off, want);
+        },
+        summary: (args, r) => `自启动项 · 匹配 ${r.matched}/${r.total}（启用 ${r.enabled_count} / 失效 ${r.broken_count}）`
+      },
+
       search_files: {
         label: '搜索文件',
         run: async (args) => {

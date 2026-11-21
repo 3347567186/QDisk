@@ -138,14 +138,35 @@
 
   /** 检测用户是否要求了原生代码/规则/YAML，或者模型直接输出了 Markdown 代码块 */
   function extractDirectCode(content, userPrompt) {
-    const s = String(content || '').trim();
+    let s = String(content || '').trim();
     if (!s) return null;
+    // 截断容错：若含有未闭合的代码块围栏（如开头是 ``` 但末尾因截断缺少闭合 ```），自动补齐闭合标记
+    const fenceMatches = s.match(/```/g) || [];
+    if (fenceMatches.length % 2 === 1) {
+      s = s + '\n```';
+    }
     const hasCodeFence = /```(?:[a-zA-Z0-9_-]+)?\s*[\s\S]+?```/.test(s);
-    const promptWantsCode = userPrompt && /(?:代码块|```|yaml|json|只输出|不要解释|写一份|起草|规则)/i.test(String(userPrompt));
+    const promptWantsCode = userPrompt && /(?:代码块|```|yaml|json|只输出|不要解释|写一份|起草|规则|脚本)/i.test(String(userPrompt));
     if (hasCodeFence || (promptWantsCode && s.length >= 10)) {
-      return { answer: s.slice(0, 32000), evidence: [], suggest: [] };
+      return { answer: s.slice(0, 64000), evidence: [], suggest: [] };
     }
     return null;
+  }
+
+  /** 修正大模型对软件开发者的归属幻觉（如将当前用户开发的软件归给智谱、OpenAI 等外部厂商） */
+  function fixIdentityAttribution(text) {
+    if (!text || typeof text !== 'string') return text;
+    let s = text;
+    const patterns = [
+      /(?:整理助手|本软件|本程序|本应用)(?:是由|是|为)?\s*(?:智谱\s*AI(?:\s*公司)?|智谱|OpenAI|微软|百度|阿里|腾讯)\s*(?:公司)?\s*(?:独立)?(?:开发|研发|制作|创建)(?:的)?/g,
+      /(?:智谱\s*AI(?:\s*公司)?|智谱|OpenAI|微软|百度|阿里|腾讯)\s*(?:公司)?\s*(?:开发|研发|制作|创建)(?:了)?\s*(?:整理助手|本软件|本程序|本应用)/g
+    ];
+    for (const pat of patterns) {
+      if (pat.test(s)) {
+        s = s.replace(pat, '「整理助手」是由您（开发者）独立设计开发的本地桌面软件，我作为内置助手小助，是由后端语言模型驱动协助您的');
+      }
+    }
+    return s;
   }
 
   /* 参数类型/范围校验（方案 §7 第 3 条） */
@@ -1301,8 +1322,8 @@
         if (parsed.error) {
           /* 用户明确要求代码块/YAML/不要解释，或者模型直接回了完整 Markdown 代码块：
              直接兜住展示，绝不再死板地要求模型改写成 JSON，彻底避免 186 秒截断重试死循环 */
-          const lastUser = [...messages].reverse().find((m) => m && m.role === 'user');
-          const userPrompt = lastUser ? lastUser.content : '';
+          const realUser = [...messages].reverse().find((m) => m && m.role === 'user' && !/^(?:上次输出|你的输出|刚才那次|工具结果|【会话共识)/.test(m.content));
+          const userPrompt = realUser ? realUser.content : '';
           const direct = extractDirectCode(content, userPrompt);
           if (direct) {
             const sv = validateStep(direct, ctxTools, calledTools);
@@ -1324,10 +1345,18 @@
             tokenCap = Math.min(MAX_REPLY_TOKENS, tokenCap * 2);
             remember({ maxTokens: tokenCap });
             messages.push({ role: 'assistant', content: String(content || '').slice(0, 200) });
-            messages.push({
-              role: 'user',
-              content: '上次输出达到长度上限被截断了。请更简短：answer 不超过 150 字，suggest 最多 3 条，只输出一个完整的 JSON 对象。'
-            });
+            const wantsCode = /(?:代码块|```|yaml|json|只输出|不要解释|写一份|起草|规则|脚本)/i.test(String(userPrompt || '')) || /```/i.test(content);
+            if (wantsCode) {
+              messages.push({
+                role: 'user',
+                content: '上次输出达到长度上限被截断了。已为你放宽长度，请继续输出完整的代码或规则内容，直接输出代码块，不要冗余客套话。'
+              });
+            } else {
+              messages.push({
+                role: 'user',
+                content: '上次输出达到长度上限被截断了。请更简短：answer 不超过 150 字，suggest 最多 3 条，只输出一个完整的 JSON 对象。'
+              });
+            }
             if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出太长被截断，正在放宽长度重试' });
             continue;
           }
@@ -1608,6 +1637,8 @@
         if (stop.isStopped()) return stoppedResult();
 
         if (step.kind === 'answer') {
+          // 归属幻觉过滤：坚决拦截将当前用户开发的本地软件指认给第三方模型厂商
+          step.answer = fixIdentityAttribution(step.answer);
           /* 两件事，缺一不可：
              1) evidence 只认「真的成功查过」的工具 —— 以前失败也算调用过，
                 于是「查崩了」也能当依据，答案凭空就有了出处。

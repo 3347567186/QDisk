@@ -2,7 +2,9 @@
 (function () {
   'use strict';
   const { h, T, icon, fmtCount, fmtBytes, toast, busy, confirm, card, section, table,
-    skeleton, empty, attachMenu, modal, softIn } = UI;
+    skeleton, empty, attachMenu, modal, softIn, setActions } = UI;
+
+  let liveJump = null;
 
   /* 每页 50 条；表头粘性由 .table th 的 position:sticky 提供，外层用 .table-wrap */
   let PAGE_SIZE = 15;
@@ -336,27 +338,81 @@
        顶级领域分类 Tab 切换器：严格物理隔离【软件本体】/【开机自启动】/【空间画像】
        ================================================================ */
     let currentTab = 'apps';
-    const tabAppsBtn = h('button', { class: 'btn sm primary', type: 'button' },
+    const tabAppsBtn = h('button', { class: 'chip active', type: 'button' },
       icon('apps', 14), h('span', null, T('已安装程序', 'Installed Apps')));
-    const tabStartupBtn = h('button', { class: 'btn sm ghost', type: 'button' },
+    const tabStartupBtn = h('button', { class: 'chip', type: 'button' },
       icon('spark', 14), h('span', null, T('开机自启动', 'Startup Items')));
-    const tabFootprintBtn = h('button', { class: 'btn sm ghost', type: 'button' },
+    const tabFootprintBtn = h('button', { class: 'chip', type: 'button' },
       icon('chart', 14), h('span', null, T('空间透视画像', 'Space Footprint')));
 
     const topTabBar = h('div', {
-      class: 'row wrap',
+      class: 'row',
       style: {
-        gap: '8px',
-        padding: '6px 10px',
-        background: 'var(--surface-2)',
-        borderRadius: 'var(--radius)',
-        border: '1px solid var(--line)',
-        marginBottom: '6px'
+        alignItems: 'center',
+        gap: '12px',
+        marginBottom: '8px'
       }
     },
-      h('span', { class: 'muted small', style: { alignSelf: 'center', fontWeight: 'bold' } }, T('分类治理：', 'Category: ')),
-      tabAppsBtn, tabStartupBtn, tabFootprintBtn
+      h('span', { class: 'muted small', style: { fontWeight: 'bold' } }, T('分类治理：', 'Category: ')),
+      h('div', { class: 'seg' }, tabAppsBtn, tabStartupBtn, tabFootprintBtn)
     );
+
+    /* 顶栏常驻【问助手】入口（Tab 感知上下文与 SteveAvatar 微动效） */
+    const askMark = window.SteveAvatar
+      ? window.SteveAvatar.el({ size: 24, variant: 'btn' })
+      : icon('spark');
+    const topAskBtn = h('button', {
+      class: 'btn ghost',
+      title: T('让助手分析已安装软件、开机自启与空间透视画像', 'Ask AI about apps, startup items, and space footprint')
+    }, askMark, T('问助手', 'Ask AI'));
+    topAskBtn.onclick = () => {
+      if (window.SteveAvatar) {
+        window.SteveAvatar.spin(askMark);
+      }
+      if (!window.AIDrawer) return;
+      if (currentTab === 'startup') {
+        window.AIDrawer.open({
+          title: T('问助手 · 开机自启', 'Ask AI · Startup items'),
+          ctx: () => ({
+            page: '应用与自启',
+            tool: '开机自启动',
+            tab: 'startup',
+            count: StartupState.items.length,
+            note: `共 ${StartupState.items.length} 个自启动项（已启用 ${StartupState.items.filter((i) => i.enabled).length}，失效 ${StartupState.items.filter((i) => !i.exists).length}）`
+          })
+        });
+      } else if (currentTab === 'footprint') {
+        const valid = S.items.map((it) => {
+          const sz = Number(it.size) || (Number(it.size_kb) ? Number(it.size_kb) * 1024 : 0);
+          return Object.assign({}, it, { size: sz });
+        }).filter((it) => (it.size || 0) > 0);
+        const total = valid.reduce((sum, it) => sum + (it.size || 0), 0);
+        window.AIDrawer.open({
+          title: T('问助手 · 空间画像', 'Ask AI · Space footprint'),
+          ctx: () => ({
+            page: '应用与自启',
+            tool: '空间画像透视',
+            tab: 'footprint',
+            count: S.items.length,
+            size: fmtBytes(total),
+            note: `已测算 ${valid.length} 款软件的磁盘空间占用`
+          })
+        });
+      } else {
+        window.AIDrawer.open({
+          title: T('问助手 · 软件管理', 'Ask AI · Installed apps'),
+          ctx: () => ({
+            page: '应用与自启',
+            tool: '已安装程序',
+            tab: 'apps',
+            count: S.items.length,
+            filter: S.filter,
+            note: `共发现 ${S.items.length} 个已安装程序`
+          })
+        });
+      }
+    };
+    setActions(topAskBtn);
 
     /* ================================================================
        TAB 2: 开机自启动管理 (Startup Items Governance)
@@ -381,17 +437,19 @@
       }
     });
 
+    function setStartupView(kind) {
+      StartupState.view = kind;
+      startupCard.querySelectorAll('.startup-view-btn').forEach((el) => {
+        el.classList.toggle('active', el._kind === kind);
+      });
+      applyStartupFilter();
+    }
+
     function startupViewBtn(kind, zh, en) {
       const b = h('button', {
         class: 'seg-btn' + (StartupState.view === kind ? ' active' : ''),
         type: 'button',
-        onclick: () => {
-          StartupState.view = kind;
-          startupCard.querySelectorAll('.startup-view-btn').forEach((el) => {
-            el.classList.toggle('active', el._kind === kind);
-          });
-          applyStartupFilter();
-        }
+        onclick: () => setStartupView(kind)
       }, T(zh, en));
       b._kind = kind;
       b.classList.add('startup-view-btn');
@@ -537,6 +595,10 @@
                     });
                     if (r && r.ok) {
                       it.enabled = !it.enabled;
+                      if (r.new_file_path) {
+                        it.file_path = r.new_file_path;
+                      }
+                      it.status = it.enabled ? 'enabled' : 'disabled';
                       toast(T(`已${it.enabled ? '启用' : '禁用'}自启动项：${it.name}`, `${it.enabled ? 'Enabled' : 'Disabled'} startup item`), 'ok');
                       applyStartupFilter();
                     }
@@ -631,12 +693,29 @@
       if (!container) return;
       container.innerHTML = '';
 
-      // 提取有体积的已安装程序
-      const valid = S.items.filter((it) => (it.size || 0) > 0);
+      // 提取有体积的已安装程序（优先读取 size，回落 size_kb 换算成字节）
+      const valid = S.items.map((it) => {
+        const sz = Number(it.size) || (Number(it.size_kb) ? Number(it.size_kb) * 1024 : 0);
+        return Object.assign({}, it, { size: sz });
+      }).filter((it) => (it.size || 0) > 0);
       valid.sort((a, b) => (b.size || 0) - (a.size || 0));
 
       if (!valid.length) {
-        container.appendChild(empty(T('暂无已测算大小的应用数据，请切到「已安装程序」稍候再试', 'No size data yet, please check Installed Apps first')));
+        const btnMeasure = btn('立即测算', 'Calculate Now', 'primary sm', 'refresh', async () => {
+          setBtnBusy(btnMeasure, true, '正在测算…', 'Measuring…');
+          try {
+            await loadApps(false);
+            renderFootprint();
+          } finally {
+            setBtnBusy(btnMeasure, false);
+          }
+        });
+        const emptyBox = empty(
+          T('暂无已测算大小的应用数据', 'No size data yet'),
+          T('点击「立即测算」扫描系统已安装程序的磁盘空间占用画像', 'Click "Calculate Now" to scan and generate space footprint')
+        );
+        emptyBox.appendChild(h('div', { style: { marginTop: '12px' } }, btnMeasure));
+        container.appendChild(emptyBox);
         return;
       }
 
@@ -660,7 +739,10 @@
         });
       }
 
-      const palette = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#64748b'];
+      const palette = [
+        'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)',
+        'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)', 'var(--chart-7)'
+      ];
 
       // 构建轻量纯 SVG 环形图 (viewBox 0 0 200 200, r = 70, C = 2 * PI * 70 ≈ 439.82)
       const r = 70;
@@ -712,12 +794,19 @@
       chartWrap.appendChild(svgContainer);
       chartWrap.appendChild(legendWrap);
 
-      // 下方大户清单与直达动作
+      // 下方大户清单与直达动作：消除“盒中盒”嵌套卡片，重构成规范平铺行
       const rankList = h('div', { class: 'stack', style: { gap: '8px' } },
         h('h3', { style: { margin: '0 0 6px 0', fontSize: 'var(--fs-body)' } }, T('空间大户排行与治理', 'Top Space Consumers')),
         ...topApps.map((a, i) => h('div', {
-          class: 'row card',
-          style: { padding: '8px 12px', alignItems: 'center', gap: '12px', margin: '0' }
+          class: 'row',
+          style: {
+            padding: '8px 12px',
+            alignItems: 'center',
+            gap: '12px',
+            margin: '0',
+            borderBottom: '1px solid var(--line)',
+            borderRadius: 'var(--radius-sm)'
+          }
         },
           h('strong', { class: 'mono muted', style: { width: '20px' } }, '#' + (i + 1)),
           h('div', { class: 'stack', style: { gap: '2px', flex: '1', minWidth: '0' } },
@@ -740,9 +829,9 @@
 
     function switchTab(tab) {
       currentTab = tab;
-      tabAppsBtn.className = 'btn sm ' + (tab === 'apps' ? 'primary' : 'ghost');
-      tabStartupBtn.className = 'btn sm ' + (tab === 'startup' ? 'primary' : 'ghost');
-      tabFootprintBtn.className = 'btn sm ' + (tab === 'footprint' ? 'primary' : 'ghost');
+      tabAppsBtn.className = 'chip' + (tab === 'apps' ? ' active' : '');
+      tabStartupBtn.className = 'chip' + (tab === 'startup' ? ' active' : '');
+      tabFootprintBtn.className = 'chip' + (tab === 'footprint' ? ' active' : '');
 
       adminBar.style.display = tab === 'apps' ? '' : 'none';
       mainCard.style.display = tab === 'apps' ? '' : 'none';
@@ -1563,6 +1652,37 @@
     }
 
     /* 第四块不存在：残留内容合并进 loSection，保持顶层 3 块 */
+
+    liveJump = async (payload) => {
+      const tab = (payload && payload.tab) || (payload && payload.status ? 'startup' : 'apps');
+      switchTab(tab);
+      if (tab === 'startup') {
+        if (payload && payload.status) {
+          const st = String(payload.status).toLowerCase();
+          setStartupView(st === 'invalid' ? 'broken' : st);
+        }
+        if (payload && (payload.filter || payload.name || payload.q)) {
+          const kw = String(payload.filter || payload.name || payload.q || '');
+          startupFilterInput.value = kw;
+          StartupState.filter = kw.trim().toLowerCase();
+          applyStartupFilter();
+        }
+      } else if (tab === 'apps') {
+        if (payload && (payload.filter || payload.name || payload.q)) {
+          const kw = String(payload.filter || payload.name || payload.q || '');
+          filterInput.value = kw;
+          S.filter = kw.trim().toLowerCase();
+          applyFilter();
+        }
+      } else if (tab === 'footprint') {
+        renderFootprint();
+      }
+    };
+
+    return function unmount() {
+      liveJump = null;
+      setActions();
+    };
   }
 
   window.Pages = window.Pages || {};
@@ -1570,6 +1690,13 @@
     title: ['应用与自启', 'Apps & Startup'],
     subtitle: ['全面管理已安装程序、开机自启动项与磁盘空间画像',
       'Manage installed software, startup items, and disk space footprint'],
-    mount: mount
+    mount: mount,
+    unmount: () => {
+      setActions();
+      liveJump = null;
+    },
+    jump(payload) {
+      return liveJump ? liveJump(payload || {}) : undefined;
+    }
   };
 })();

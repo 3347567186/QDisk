@@ -3326,1146 +3326,6 @@ def empty_recycle_bin():
         return False, str(ex)
 
 
-def _fallback_icon(kind="img"):
-    """没有缩略图时用的 16x16 小图标（纯 tk.PhotoImage 画，不依赖 PIL）。"""
-    import tkinter as _tk
-    img = _tk.PhotoImage(width=16, height=16)
-    img.put("#ffffff", to=(0, 0, 16, 16))
-    frame = "#9aa2ad"
-    body = "#c9d0d8" if kind == "img" else "#c2cbd6"
-    img.put(frame, to=(1, 2, 15, 3))
-    img.put(frame, to=(1, 13, 15, 14))
-    img.put(frame, to=(1, 2, 2, 14))
-    img.put(frame, to=(14, 2, 15, 14))
-    img.put(body, to=(2, 3, 14, 13))
-    img.put("#f2f5f8", to=(3, 4, 13, 9))
-    if kind == "img":
-        img.put("#8fb6e0", to=(3, 4, 13, 7))          # 天空
-        img.put("#7fbf8a", to=(4, 9, 8, 12))          # 山
-        img.put("#5f9f6c", to=(7, 7, 13, 12))
-        img.put("#f4c542", to=(10, 5, 12, 7))         # 太阳
-    else:                                              # 视频：播放三角
-        img.put("#8d99a8", to=(3, 4, 13, 12))
-        for i in range(6):
-            img.put("#ffffff", to=(6 + i, 6 - i // 2, 7 + i, 8 + i // 2))
-    return img
-
-
-_THUMB_CACHE = {}
-
-
-# ── Windows 缩略图服务（不需要 PIL，能出 jpg/mp4/office/pdf 的缩略图）──
-class _GUID(ctypes.Structure):
-    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
-                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
-
-
-class _SIZE(ctypes.Structure):
-    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
-
-
-_IID_ITEMFACTORY = _GUID(
-    0xbcc18b79, 0xba16, 0x442f,
-    (ctypes.c_ubyte * 8)(0x80, 0xc4, 0x8a, 0x59, 0xc3, 0x0c, 0x46, 0x3b))
-
-
-# ── GDI+ 解码（不需要 PIL，支持 jpg/png/bmp/gif/tiff/webp 等系统有解码器的格式）──
-class _GpRect(ctypes.Structure):
-    _fields_ = [("X", ctypes.c_int), ("Y", ctypes.c_int),
-                ("Width", ctypes.c_int), ("Height", ctypes.c_int)]
-
-
-class _GpBitmapData(ctypes.Structure):
-    _fields_ = [("width", ctypes.c_uint), ("height", ctypes.c_uint),
-                ("stride", ctypes.c_int), ("pixel_format", ctypes.c_int),
-                ("scan0", ctypes.c_void_p), ("reserved", ctypes.c_void_p)]
-
-
-class _GpStartupInput(ctypes.Structure):
-    _fields_ = [("GdiplusVersion", ctypes.c_uint),
-                ("DebugEventCallback", ctypes.c_void_p),
-                ("SuppressBackgroundThread", ctypes.c_int),
-                ("SuppressExternalCodecs", ctypes.c_int)]
-
-
-_GP_TOKEN = None
-_GP_LOCK = threading.Lock()
-_GP_READY = None
-
-
-def _gdiplus():
-    """初始化 GDI+ 并返回 (gdiplus, gdi32)；不可用时返回 (None, None)。"""
-    global _GP_TOKEN, _GP_READY
-    with _GP_LOCK:
-        if _GP_READY is not None:
-            return _GP_READY
-        if os.name != "nt":
-            _GP_READY = (None, None)
-            return _GP_READY
-        try:
-            gp = ctypes.windll.gdiplus
-            tok = ctypes.c_void_p()
-            inp = _GpStartupInput(1, None, 0, 0)
-            if gp.GdiplusStartup(ctypes.byref(tok), ctypes.byref(inp), None) != 0:
-                _GP_READY = (None, None)
-            else:
-                _GP_TOKEN = tok
-                _GP_READY = (gp, ctypes.windll.gdi32)
-        except Exception:
-            _GP_READY = (None, None)
-        return _GP_READY
-
-
-def gdiplus_decode(path, max_side=1024):
-    """用 GDI+ 把图片解码成 (w, h, RGB bytes)，按 max_side 等比缩放。失败返回 None。"""
-    gp, gdi32 = _gdiplus()
-    if not gp:
-        return None
-    src = ctypes.c_void_p()
-    dst = ctypes.c_void_p()
-    gfx = ctypes.c_void_p()
-    try:
-        if gp.GdipCreateBitmapFromFile(ctypes.c_wchar_p(os.path.abspath(path)),
-                                       ctypes.byref(src)) != 0 or not src:
-            return None
-        iw, ih = ctypes.c_uint(0), ctypes.c_uint(0)
-        gp.GdipGetImageWidth(src, ctypes.byref(iw))
-        gp.GdipGetImageHeight(src, ctypes.byref(ih))
-        iw, ih = int(iw.value), int(ih.value)
-        if iw <= 0 or ih <= 0:
-            return None
-        side = max(1, int(max_side))
-        scale = min(1.0, float(side) / max(iw, ih))
-        tw = max(1, int(round(iw * scale)))
-        th = max(1, int(round(ih * scale)))
-
-        PF_ARGB = 0x26200A
-        if gp.GdipCreateBitmapFromScan0(tw, th, tw * 4, PF_ARGB, None,
-                                        ctypes.byref(dst)) != 0 or not dst:
-            return None
-        if gp.GdipGetImageGraphicsContext(dst, ctypes.byref(gfx)) != 0 or not gfx:
-            return None
-        gp.GdipSetInterpolationMode(gfx, 7)      # HighQualityBicubic
-        gp.GdipSetPixelOffsetMode(gfx, 2)        # HighQuality
-        gp.GdipSetSmoothingMode(gfx, 2)
-        gp.GdipDrawImageRectI(gfx, src, 0, 0, tw, th)
-        gp.GdipDeleteGraphics(gfx)
-        gfx = ctypes.c_void_p()
-
-        bd = _GpBitmapData()
-        rect = _GpRect(0, 0, tw, th)
-        if gp.GdipBitmapLockBits(dst, ctypes.byref(rect), 1, PF_ARGB,
-                                 ctypes.byref(bd)) != 0:
-            return None
-        try:
-            stride = int(bd.stride)
-            need = stride * th
-            raw = ctypes.string_at(bd.scan0, need)
-        finally:
-            gp.GdipBitmapUnlockBits(dst, ctypes.byref(bd))
-
-        if stride != tw * 4:
-            raw = b"".join(raw[y * stride: y * stride + tw * 4]
-                           for y in range(th))
-        arr = array.array("B")
-        arr.frombytes(raw)
-        rgb = bytearray(tw * th * 3)
-        rgb[0::3] = arr[2::4]
-        rgb[1::3] = arr[1::4]
-        rgb[2::3] = arr[0::4]
-        return tw, th, bytes(rgb)
-    except Exception:
-        return None
-    finally:
-        for h in (gfx, dst, src):
-            if h:
-                try:
-                    gp.GdipDisposeImage(h)
-                except Exception:
-                    pass
-
-
-# ── WIC 原生解码（读 16/32 位 TIFF、CMYK 等 Pillow 也吃力的图）──
-# 只做两件事：问尺寸、按原生格式取像素；取回后在 Python 里抽样缩小。
-_WIC = {"ok": None, "fac": None}
-
-
-class _WicGUID(ctypes.Structure):
-    _fields_ = [("d1", ctypes.c_ulong), ("d2", ctypes.c_ushort),
-                ("d3", ctypes.c_ushort), ("d4", ctypes.c_ubyte * 8)]
-
-
-def _wg(hexs):
-    a, b, c, d, e = hexs.split("-")
-    return _WicGUID(int(a, 16), int(b, 16), int(c, 16),
-                    (ctypes.c_ubyte * 8)(*bytes.fromhex(d + e)))
-
-
-# PixelFormat GUID 尾部 -> (每像素字节, R偏移, G偏移, B偏移)，16 位格式取高字节
-_WIC_FMT = {
-    0x0907: (3, 0, 1, 2),        # 24bppRGB
-    0x0908: (3, 2, 1, 0),        # 24bppBGR
-    0x0909: (4, 2, 1, 0),        # 32bppBGR
-    0x090a: (4, 2, 1, 0),        # 32bppBGRA
-    0x090b: (4, 2, 1, 0),        # 32bppPBGRA
-    0x090c: (6, 1, 3, 5),        # 48bppRGB（16 位取高字节）
-    0x090d: (8, 1, 3, 5),        # 64bppRGBA（16 位取高字节）
-    0x090e: (8, 2, 4, 6),        # 64bppPRGBA
-}
-_WIC_PF_PREFIX = 0x6FDDC324
-
-
-def _vt_call(ptr, index, restype, argtypes, *args):
-    v = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))
-    return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(
-        v[0][index])(ptr, *args)
-
-
-def _wic_factory():
-    if _WIC["ok"] is not None:
-        return _WIC["fac"]
-    _WIC["ok"] = False
-    if os.name != "nt":
-        return None
-    try:
-        ole32 = ctypes.windll.ole32
-        try:
-            ole32.CoInitializeEx(None, 2)
-        except Exception:
-            pass
-        fac = ctypes.c_void_p()
-        hr = ole32.CoCreateInstance(
-            ctypes.byref(_wg("cacaf262-9370-4615-a13b-9f5539da4c0a")), None, 1,
-            ctypes.byref(_wg("ec5ec8a9-c395-4314-9c77-54d7a935ff70")),
-            ctypes.byref(fac))
-        if hr == 0 and fac:
-            _WIC["fac"] = fac
-            _WIC["ok"] = True
-    except Exception:
-        _WIC["ok"] = False
-    return _WIC["fac"]
-
-
-def _wic_open(path):
-    """返回 (frame指针, 宽, 高, 格式信息) 或 None。"""
-    fac = _wic_factory()
-    if not fac:
-        return None
-    dec = ctypes.c_void_p()
-    try:
-        hr = _vt_call(fac, 3, ctypes.c_long,
-                      [ctypes.c_wchar_p, ctypes.POINTER(_WicGUID),
-                       ctypes.c_uint, ctypes.c_int,
-                       ctypes.POINTER(ctypes.c_void_p)],
-                      ctypes.c_wchar_p(os.path.abspath(path)), None,
-                      0x80000000, 0, ctypes.byref(dec))
-    except Exception:
-        return None
-    if hr != 0 or not dec:
-        return None
-    frame = ctypes.c_void_p()
-    try:
-        hr = _vt_call(dec, 13, ctypes.c_long,
-                      [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)],
-                      0, ctypes.byref(frame))
-    except Exception:
-        hr = -1
-    if hr != 0 or not frame:
-        return None
-    w, h = ctypes.c_uint(0), ctypes.c_uint(0)
-    pf = _WicGUID()
-    try:
-        _vt_call(frame, 3, ctypes.c_long,
-                 [ctypes.POINTER(ctypes.c_uint)] * 2,
-                 ctypes.byref(w), ctypes.byref(h))
-        _vt_call(frame, 4, ctypes.c_long, [ctypes.POINTER(_WicGUID)],
-                 ctypes.byref(pf))
-    except Exception:
-        return None
-    fmt_id = (pf.d4[6] << 8) | pf.d4[7]             # 尾部两字节，如 c9 0d
-    info = _WIC_FMT.get(0x0900 | (fmt_id & 0xFF)) if (fmt_id >> 8) == 0xC9 else None
-    return (frame, w.value, h.value, info)
-
-
-def wic_size(path):
-    """WIC 报的尺寸（不解码像素，很快）。"""
-    got = _wic_open(path)
-    return (got[1], got[2]) if got else None
-
-
-def _wic_copy(frame, W, H, bpp):
-    """按每像素 bpp 字节抓一帧原始像素，返回 bytes 或 None。"""
-    stride = W * bpp
-    n = stride * H
-    if n > 320 * 1024 * 1024:
-        return None
-    buf = ctypes.create_string_buffer(n)
-    try:
-        hr = _vt_call(frame, 7, ctypes.c_long,
-                      [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
-                       ctypes.c_void_p], None, stride, n, buf)
-    except Exception:
-        return None
-    if hr != 0:
-        return None
-    return buf.raw
-
-
-def _wic_row_filled(raw, W, bpp):
-    """抽中间一行，看最后 25% 是不是空白，判断这个 bpp 猜得对不对。"""
-    H = len(raw) // (W * bpp)
-    if H < 2:
-        return True
-    stride = W * bpp
-    row = raw[(H // 2) * stride:(H // 2 + 1) * stride]
-    tail = row[int(stride * 0.75):]
-    return any(tail)
-
-
-def wic_decode(path, max_side=900):
-    """用 WIC 取像素（自动试 24/32/64 位），按步长抽到 max_side 以内。
-
-    返回 (宽, 高, RGB 字节) 或 None。
-    """
-    got = _wic_open(path)
-    if not got:
-        return None
-    frame, W, H, info = got
-    if W <= 0 or H <= 0:
-        return None
-    # 解码器自报的格式优先，然后 24 位 RGB、32 位 BGRA、64 位 RGBA 依次试
-    tries = []
-    if info:
-        bpp, ro, go, bo = info
-        tries.append((bpp, (ro, go, bo), bpp >= 6))
-    for cand in ((3, (0, 1, 2), False), (4, (2, 1, 0), False),
-                 (8, (1, 3, 5), True)):
-        if cand not in tries:
-            tries.append(cand)
-    raw = None
-    pick = None
-    for bpp, order, sixteen in tries:
-        data = _wic_copy(frame, W, H, bpp)
-        if data is None:
-            continue
-        if not _wic_row_filled(data, W, bpp):
-            continue                    # 整行没填满，说明 bpp 猜大了
-        raw, pick = data, (bpp, order, sixteen)
-        break
-    if raw is None:
-        return None
-    bpp, order, sixteen = pick
-    stride = W * bpp
-    step = max(1, int(round(max(W, H) / float(max_side))))
-    ow = max(1, len(range(0, W, step)))
-    oh = max(1, len(range(0, H, step)))
-    inc = bpp * step
-    off = tuple(o + 1 if sixteen else o for o in order)
-    out = bytearray()
-    for y in range(0, H, step):
-        base = y * stride
-        row = raw[base:base + stride]
-        r = row[off[0]::inc][:ow]
-        g = row[off[1]::inc][:ow]
-        b = row[off[2]::inc][:ow]
-        out += b"".join(bytes((rv, gv, bv)) for rv, gv, bv in zip(r, g, b))
-    return ow, oh, bytes(out)
-
-
-# ── Pillow 解码（兼容 TIFF / CMYK JPEG / EXIF 旋转 / WebP / HEIC 等）──
-# 系统缩略图和 GDI+ 都认不出的格式，走这条路；没装 Pillow 时自动跳过。
-try:
-    from PIL import Image as _PILImage
-except Exception:                                    # pragma: no cover
-    _PILImage = None
-
-
-def pillow_ready():
-    return _PILImage is not None
-
-
-def pil_decode(path, max_side=1024):
-    """用 Pillow 解码任意常见图片，返回 (宽, 高, RGB 字节) 或 None。
-
-    - 按 EXIF 方向摆正
-    - 只对 JPEG 用 draft 预缩（其它格式先解码再缩，避免丢细节）
-    - 输出最大边不超过 max_side
-    """
-    if _PILImage is None:
-        return None
-    try:
-        im = _PILImage.open(path)
-    except Exception:
-        return None
-    try:
-        try:
-            im.draft("RGB", (int(max_side), int(max_side)))
-        except Exception:
-            pass
-        try:
-            from PIL import ImageOps as _OPS
-            im = _OPS.exif_transpose(im)
-        except Exception:
-            pass
-        if getattr(im, "n_frames", 1) > 1:
-            try:
-                im.seek(0)
-            except Exception:
-                pass
-        # 多 IFD 的 TIFF：优先挑面积最大的那一帧
-        best = im
-        try:
-            best_size = im.size[0] * im.size[1]
-            for i in range(1, getattr(im, "n_frames", 1)):
-                im.seek(i)
-                if im.size[0] * im.size[1] > best_size:
-                    best, best_size = im, im.size[0] * im.size[1]
-            if best is not im:
-                im.seek(getattr(im, "n_frames", 1) - 1)
-        except Exception:
-            pass
-        im = best
-        try:
-            im = im.convert("RGB")
-        except Exception:
-            return None
-        w, h = im.size
-        longest = max(w, h)
-        if longest > max_side:
-            k = float(max_side) / longest
-            im = im.resize((max(1, int(w * k)), max(1, int(h * k))),
-                           _PILImage.LANCZOS)
-        im = im.convert("RGB")
-        return im.size[0], im.size[1], im.tobytes()
-    except Exception:
-        return None
-    finally:
-        try:
-            im.close()
-        except Exception:
-            pass
-
-
-def pil_photo(path, max_side=1024, master=None):
-    """Pillow 解码后直接转成 PhotoImage。"""
-    got = pil_decode(path, max_side)
-    if not got:
-        return None
-    return rgb_to_photo(got[0], got[1], got[2], master=master)
-
-
-def _decode_best(path, max_side=1600):
-    """挑一个解码结果：Pillow 快，但对某些 TIFF 只给 IFD0 缩略图。
-
-    判据：文件 >4MB 却只解出 <900px，就去问 WIC 要一张更大的。
-    """
-    got = None
-    try:
-        got = pil_decode(path, max_side)
-    except Exception:
-        got = None
-    if got and got[0] >= 32 and got[1] >= 16:
-        try:
-            big_file = os.path.getsize(path) > 4 * 1024 * 1024
-        except OSError:
-            big_file = False
-        if big_file and max(got[0], got[1]) < 900:
-            try:
-                alt = wic_decode(path, max_side)
-            except Exception:
-                alt = None
-            if alt and max(alt[0], alt[1]) > max(got[0], got[1]):
-                return alt
-        return got
-    try:
-        alt = wic_decode(path, max_side)
-    except Exception:
-        alt = None
-    if alt and alt[0] >= 32 and alt[1] >= 16:
-        return alt
-    return got
-
-
-def rgb_scaled_photo(w, h, rgb, side, master=None):
-    """把已解码的 RGB 缩放到长边 side，返回 PhotoImage（预览窗缩放用）。
-
-    有 Pillow 走双线性，没有就最近邻；都是内存操作，不重新读文件。
-    """
-    side = max(16, int(side))
-    k = float(side) / max(1, max(w, h))
-    nw, nh = max(1, int(round(w * k))), max(1, int(round(h * k)))
-    if nw == w and nh == h:
-        return rgb_to_photo(w, h, rgb, master=master)
-    if _PILImage is not None:
-        try:
-            im = _PILImage.frombytes("RGB", (w, h), rgb)
-            # 缩小时 LANCZOS（面积平均，纹理细的地方不糊也不出摩尔纹），
-            # 放大时 BICUBIC（比双线性锐利一点，又不至于像 NEAREST 那样出马赛克）
-            shrink = (nw <= w and nh <= h)
-            rs = _PILImage.LANCZOS if shrink else _PILImage.BICUBIC
-            im = im.resize((nw, nh), rs)
-            return rgb_to_photo(nw, nh, im.tobytes(), master=master)
-        except Exception:
-            pass
-    # 没 Pillow：按步长抽点（够用，且不会崩）
-    sx = max(1, w // nw)
-    sy = max(1, h // nh)
-    out = bytearray()
-    for y in range(0, h, sy):
-        base = y * w * 3
-        row = rgb[base:base + w * 3]
-        r = row[0::3 * sx][:nw]
-        g = row[1::3 * sx][:nw]
-        b = row[2::3 * sx][:nw]
-        out += b"".join(bytes((rv, gv, bv)) for rv, gv, bv in zip(r, g, b))
-    return rgb_to_photo(nw, nh, bytes(out), master=master)
-
-
-_IMG_MAGIC = (
-    (b"\x89PNG", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF8", "gif"),
-    (b"BM", "bmp"), (b"II*\x00", "tif"), (b"MM\x00*", "tif"),
-    (b"II+\x00", "tif"), (b"MM\x00+", "tif"),
-    (b"RIFF", "webp"), (b"\x00\x00\x01\x00", "ico"),
-    (b"\x00\x00\x00\x0cJXL", "jxl"), (b"\xff\x0a", "jxl"),
-)
-
-
-def sniff_image(path):
-    """看文件头判断真实格式，不信扩展名（.JPG 里装 TIFF 的见过）。"""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(32)
-    except OSError:
-        return None
-    for magic, kind in _IMG_MAGIC:
-        if head.startswith(magic):
-            if kind == "webp" and head[8:12] != b"WEBP":
-                continue
-            return kind
-    if head[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypavif",
-                      b"ftypheim", b"ftypheis"):
-        return "heif"
-    return None
-
-
-
-def rgb_to_photo(w, h, rgb, master=None):
-    """把 RGB 字节变成 PhotoImage（写临时 PPM，比逐像素 put 快一个数量级）。"""
-    import tkinter as _tk
-    import tempfile
-    fd, tmp = tempfile.mkstemp(suffix=".ppm")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(b"P6\n%d %d\n255\n" % (w, h))
-            f.write(rgb)
-        return _tk.PhotoImage(file=tmp, master=master)
-    except Exception:
-        return None
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-
-
-def shell_thumb_rgb(path, size=256):
-    """用 IShellItemImageFactory 取 (w, h, 32bpp 自上而下字节)；失败返回 None。"""
-    if os.name != "nt":
-        return None
-    try:
-        from ctypes import wintypes
-        ole32 = ctypes.windll.ole32
-        shell32 = ctypes.windll.shell32
-        gdi32 = ctypes.windll.gdi32
-        user32 = ctypes.windll.user32
-    except Exception:
-        return None
-    try:
-        ole32.CoInitialize(None)
-    except Exception:
-        pass
-
-    pitem = ctypes.c_void_p()
-    try:
-        hr = shell32.SHCreateItemFromParsingName(
-            ctypes.c_wchar_p(os.path.abspath(path)), None,
-            ctypes.byref(_IID_ITEMFACTORY), ctypes.byref(pitem))
-    except Exception:
-        return None
-    if hr != 0 or not pitem:
-        return None
-    try:
-        # 手写 vtable：0 QueryInterface / 1 AddRef / 2 Release / 3 GetImage
-        vtbl = ctypes.cast(
-            ctypes.cast(pitem, ctypes.POINTER(ctypes.c_void_p))[0],
-            ctypes.POINTER(ctypes.c_void_p))
-        GetImage = ctypes.WINFUNCTYPE(
-            ctypes.c_long, ctypes.c_void_p, _SIZE, ctypes.c_uint,
-            ctypes.POINTER(wintypes.HBITMAP))(vtbl[3])
-        hbmp = wintypes.HBITMAP()
-        hr = GetImage(pitem, _SIZE(size, size), 0x4, ctypes.byref(hbmp))
-        if hr != 0 or not hbmp:
-            hr = GetImage(pitem, _SIZE(size, size), 0x0, ctypes.byref(hbmp))
-            if hr != 0 or not hbmp:
-                return None
-        try:
-            class _BITMAP(ctypes.Structure):
-                _fields_ = [("bmType", ctypes.c_long), ("bmWidth", ctypes.c_long),
-                            ("bmHeight", ctypes.c_long),
-                            ("bmWidthBytes", ctypes.c_long),
-                            ("bmPlanes", wintypes.WORD),
-                            ("bmBitsPixel", wintypes.WORD),
-                            ("bmBits", ctypes.c_void_p)]
-            bm = _BITMAP()
-            if not gdi32.GetObjectW(hbmp, ctypes.sizeof(_BITMAP),
-                                    ctypes.byref(bm)):
-                return None
-            w, h = int(bm.bmWidth), int(bm.bmHeight)
-            if w <= 0 or h <= 0 or w > 4096 or h > 4096:
-                return None
-
-            class _BIH(ctypes.Structure):
-                _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
-                            ("biHeight", ctypes.c_long),
-                            ("biPlanes", wintypes.WORD),
-                            ("biBitCount", wintypes.WORD),
-                            ("biCompression", wintypes.DWORD),
-                            ("biSizeImage", wintypes.DWORD),
-                            ("biXPelsPerMeter", ctypes.c_long),
-                            ("biYPelsPerMeter", ctypes.c_long),
-                            ("biClrUsed", wintypes.DWORD),
-                            ("biClrImportant", wintypes.DWORD)]
-
-            class _BI(ctypes.Structure):
-                _fields_ = [("bmiHeader", _BIH), ("bmiColors", wintypes.DWORD * 3)]
-
-            bi = _BI()
-            bi.bmiHeader.biSize = ctypes.sizeof(_BIH)
-            bi.bmiHeader.biWidth = w
-            bi.bmiHeader.biHeight = -h
-            bi.bmiHeader.biPlanes = 1
-            bi.bmiHeader.biBitCount = 32
-            bi.bmiHeader.biCompression = 0
-            buf = ctypes.create_string_buffer(w * h * 4)
-            hdc = user32.GetDC(None)
-            try:
-                got = gdi32.GetDIBits(hdc, hbmp, 0, h, buf,
-                                      ctypes.byref(bi), 0)
-            finally:
-                user32.ReleaseDC(None, hdc)
-            if not got:
-                return None
-            return w, h, buf.raw
-        finally:
-            gdi32.DeleteObject(hbmp)
-    except Exception:
-        return None
-    finally:
-        try:
-            Release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
-            Release(pitem)
-        except Exception:
-            pass
-
-
-def thumb_photo(path, size=256, master=None):
-    """把系统缩略图转成 tk.PhotoImage；失败返回 None。"""
-    import tkinter as _tk
-    data = shell_thumb_rgb(path, size)
-    if not data:
-        return None
-    w, h, raw = data
-    img = _tk.PhotoImage(master=master, width=w, height=h)
-    rows = []
-    step = w * 4
-    for y in range(h):
-        off = y * step
-        line = raw[off:off + step]
-        cells = []
-        for i in range(0, step, 4):
-            b, g, r, a = line[i], line[i + 1], line[i + 2], line[i + 3]
-            if a == 0:
-                cells.append("#ffffff")
-            elif a != 255:
-                r = (r * a + 255 * (255 - a)) // 255
-                g = (g * a + 255 * (255 - a)) // 255
-                b = (b * a + 255 * (255 - a)) // 255
-                cells.append("#%02x%02x%02x" % (r, g, b))
-            else:
-                cells.append("#%02x%02x%02x" % (r, g, b))
-        rows.append("{" + " ".join(cells) + "}")
-    img.put(" ".join(rows))
-    return img
-
-
-def shot_icon(path, box=26, limit=90):
-    """优先返回真实缩略图（Tk 8.6 原生支持 PNG/GIF），失败就给通用图标。"""
-    import tkinter as _tk
-    key = os.path.normcase(path)
-    if key in _THUMB_CACHE:
-        return _THUMB_CACHE[key]
-    if len(_THUMB_CACHE) >= limit:
-        return None
-    ic = None
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".png", ".gif"):
-        try:
-            img = _tk.PhotoImage(file=path)
-            w, h = img.width(), img.height()
-            k = max(1, int(round(max(w, h) / float(box))))
-            if k > 1:
-                img = img.subsample(k, k)
-            ic = img
-        except Exception:
-            ic = None
-    if ic is None:
-        # jpg/webp/bmp/视频 交给系统缩略图（不用 PIL）
-        try:
-            ic = thumb_photo(path, box)
-        except Exception:
-            ic = None
-    if ic is None:
-        kind = "video" if ext in (".mp4", ".mov", ".mkv", ".avi") else "img"
-        if kind not in _THUMB_CACHE:
-            _THUMB_CACHE[kind] = _fallback_icon(kind)
-        ic = _THUMB_CACHE[kind]
-    _THUMB_CACHE[key] = ic
-    return ic
-
-
-_PREVIEW_CACHE = {}
-
-# 能在列表里显示封面的类型（图片 + 视频）
-MEDIA_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".ico",
-             ".tif", ".tiff", ".heic", ".mp4", ".mov", ".mkv", ".avi",
-             ".webm", ".wmv", ".m4v", ".flv"}
-
-
-def load_image_photo(path, max_side=520, master=None, allow_zoom=False):
-    """把图片变成能直接显示的 PhotoImage。
-
-    先让 Tk 自己解码（PNG/GIF 是原图像素，绝不会变成系统占位图标），
-    不行再退到 Windows 缩略图（jpg/webp/bmp/视频）。
-
-    allow_zoom=True 时，若目标尺寸比原图还大，会按整数倍放大（预览窗缩放用）。
-    """
-    import tkinter as _tk
-    ext = os.path.splitext(path)[1].lower()
-    key = (os.path.normcase(path), int(max_side), bool(allow_zoom))
-    if key in _PREVIEW_CACHE:
-        return _PREVIEW_CACHE[key]
-    ph = None
-    if ext in (".png", ".gif", ".ppm", ".pgm"):
-        try:
-            img = _tk.PhotoImage(file=path, master=master)
-            cur = max(img.width(), img.height())
-            k = max(1, int(math.ceil(cur / float(max_side))))
-            if k > 1:
-                img = img.subsample(k, k)
-            elif allow_zoom and cur * 2 <= int(max_side):
-                z = min(4, int(max_side) // max(1, cur))
-                if z > 1:
-                    img = img.zoom(z, z)
-            ph = img
-        except Exception:
-            ph = None
-    if ph is None:
-        # Pillow 优先：TIFF、CMYK JPEG、EXIF 旋转都靠它
-        got = None
-        try:
-            got = pil_decode(path, max_side)
-        except Exception:
-            got = None
-        # Pillow 只读到了缩略图 IFD（文件很大但读出来很小）时，改用 WIC 原生解码
-        try:
-            small = (got is None
-                     or (got[0] * got[1] < 1000000
-                         and os.path.getsize(path) > 4 * 1024 * 1024))
-        except OSError:
-            small = got is None
-        if small:
-            try:
-                w2 = wic_decode(path, max_side)
-            except Exception:
-                w2 = None
-            if w2 and (got is None or w2[0] * w2[1] > got[0] * got[1]):
-                got = w2
-        if got:
-            try:
-                ph = rgb_to_photo(got[0], got[1], got[2], master=master)
-            except Exception:
-                ph = None
-    if ph is None:
-        try:
-            ph = thumb_photo(path, max_side, master=master)
-        except Exception:
-            ph = None
-    if len(_PREVIEW_CACHE) > 40:
-        _PREVIEW_CACHE.clear()
-    _PREVIEW_CACHE[key] = ph
-    return ph
-
-
-def reveal_in_explorer(path):
-    """在资源管理器里选中这个文件/文件夹。"""
-    try:
-        p = os.path.normpath(path)
-        if not os.path.exists(p):
-            return False
-        subprocess.Popen('explorer /select,"%s"' % p, shell=False)
-        return True
-    except Exception:
-        return False
-
-
-def open_with_default(path):
-    try:
-        if not os.path.exists(path):
-            return False
-        os.startfile(path)
-        return True
-    except Exception:
-        return False
-
-
-# ── 预览窗口：滚轮缩放 / 上一张下一张 / 拖动平移 / 删除 ──
-IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".ico",
-           ".tif", ".tiff"}
-TXT_EXT = {".txt", ".md", ".log", ".csv", ".json", ".py", ".js", ".html",
-           ".css", ".xml", ".yml", ".yaml", ".ini", ".bat", ".ps1"}
-
-# _preview_file 与 _rules_help 属 Tkinter 界面组件，已归档至 archive/legacy_tk/legacy_gui.py
-
-
-def write_report(mf, base_dir=None):
-    """把这次整理的记录写成 markdown 报告，返回路径（失败返回 None）。
-
-    mf 是 apply() 返回的历史 json；base_dir 用于报告落盘位置和「分类」推断。
-    """
-    if not mf or not os.path.exists(mf):
-        return None
-    try:
-        data = json.load(open(mf, encoding="utf-8"))
-    except Exception:
-        return None
-    moves = data.get("moves") or []
-    if not moves:
-        return None
-    base = base_dir or data.get("folder") or ""
-    stamp = data.get("time") or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = base if (base and os.path.isdir(base)) else data_dir()
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except OSError:
-        out_dir = data_dir()
-    path = os.path.join(out_dir, "整理报告_%s.md" % stamp)
-
-    lines = ["# 整理报告", "",
-             "- 时间：%s" % datetime.datetime.strptime(stamp, "%Y%m%d_%H%M%S")
-             .strftime("%Y-%m-%d %H:%M:%S") if len(stamp) == 15 else "- 时间：%s" % stamp,
-             "- 源目录：`%s`" % (data.get("folder") or ""),
-             "- 文件数：**%d**" % len(moves), ""]
-    if data.get("created_dirs"):
-        lines.append("- 新建目录：%d 个" % len(data["created_dirs"]))
-        lines.append("")
-
-    groups = {}
-    for mv in moves:
-        src, dst = mv.get("from", ""), mv.get("to", "")
-        rel = os.path.relpath(dst, base) if base else dst
-        cat = rel.split(os.sep)[0] if os.sep in rel else "."
-        groups.setdefault(cat, []).append((src, rel))
-    for cat in sorted(groups):
-        lines.append("## %s（%d 个）" % (cat, len(groups[cat])))
-        lines.append("")
-        lines.append("| 文件名 | 来自 | 去向 |")
-        lines.append("| --- | --- | --- |")
-        for src, rel in groups[cat][:500]:
-            lines.append("| %s | `%s` | `%s` |"
-                         % (os.path.basename(src), os.path.dirname(src), rel))
-        lines.append("")
-    if len(moves) > 500:
-        lines.append("> 只列出前 500 条，完整记录见 `%s`" % mf)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-    except OSError:
-        return None
-    return path
-
-
-# ─────────────────────────── 开机自启 ───────────────────────────
-AUTORUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-AUTORUN_NAME = "整理助手"
-AUTOSTART_TASK = "整理助手_开机自启"
-
-
-def autostart_cmd():
-    """自启时用的命令行：直接进托盘，不弹主窗口。"""
-    return _task_runner() + " --tray"
-
-
-def _reg_get_autostart():
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTORUN_KEY) as k:
-            v, _ = winreg.QueryValueEx(k, AUTORUN_NAME)
-            return v or ""
-    except OSError:
-        return ""
-
-
-def _reg_set_autostart(on):
-    import winreg
-    try:
-        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, AUTORUN_KEY, 0,
-                                winreg.KEY_SET_VALUE) as k:
-            if on:
-                winreg.SetValueEx(k, AUTORUN_NAME, 0, winreg.REG_SZ, autostart_cmd())
-            else:
-                try:
-                    winreg.DeleteValue(k, AUTORUN_NAME)
-                except FileNotFoundError:
-                    pass
-        return True, ""
-    except OSError as ex:
-        return False, str(ex)
-
-
-def _schtasks_elevated(args):
-    """用 UAC 提权跑一次 schtasks，成功返回 True。"""
-    import ctypes
-    try:
-        cmd = subprocess.list2cmdline([_schtasks()] + args)
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe",
-                                                 "/c " + cmd, None, 0)
-        return int(rc) > 32
-    except Exception:
-        return False
-
-
-def autostart_state():
-    """off / normal（注册表 Run）/ strong（计划任务·最高权限）。"""
-    ok_task, _, _ = task_query(AUTOSTART_TASK)
-    if ok_task:
-        return "strong"
-    if _reg_get_autostart():
-        return "normal"
-    return "off"
-
-
-def _task_delete_maybe_elevate():
-    """删自启计划任务；普通权限删不掉就提权再删。True=已不存在。"""
-    task_delete(AUTOSTART_TASK)
-    ok, _, _ = task_query(AUTOSTART_TASK)
-    if not ok:
-        return True
-    _schtasks_elevated(["/Delete", "/F", "/TN", AUTOSTART_TASK])
-    for _ in range(10):
-        time.sleep(0.4)
-        ok, _, _ = task_query(AUTOSTART_TASK)
-        if not ok:
-            return True
-    return False
-
-
-def autostart_set(mode):
-    """切换自启方式，返回 (ok, 说明)。"""
-    ok_task, _, _ = task_query(AUTOSTART_TASK)
-    if mode == "off":
-        _reg_set_autostart(False)
-        if ok_task and not _task_delete_maybe_elevate():
-            return False, ("已清掉注册表自启，但删不掉「强力自启」的计划任务\n"
-                           "（它是以管理员权限创建的，删除也要授权）。\n"
-                           "再试一次并同意 UAC 即可。")
-        return True, "已关闭开机自启"
-    if mode == "normal":
-        ok, err = _reg_set_autostart(True)
-        if not ok:
-            return False, "写注册表失败：" + err
-        if ok_task and not _task_delete_maybe_elevate():
-            return False, ("注册表自启已设好，但旧的「强力自启」任务没删掉，\n"
-                           "两者会同时生效。请再试一次并同意 UAC。")
-        return True, "已设为普通自启：登录后自动在托盘运行（普通权限）"
-    if mode == "strong":
-        _reg_set_autostart(False)
-        args = ["/Create", "/F", "/TN", AUTOSTART_TASK,
-                "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", autostart_cmd()]
-        # 已经是管理员就直接建；不是就走一次 UAC 提权去建
-        if is_admin():
-            rc, txt = _run_hidden([_schtasks()] + args)
-            if rc != 0:
-                return False, (txt or ("返回码 %d" % rc))[:300]
-        else:
-            r = _schtasks_elevated(args)
-            if not r:
-                return False, ("创建强力自启需要一次管理员授权，刚才被取消了。\n"
-                               "可以再试一次，或者先用「普通」自启。")
-        # 提权后要等系统把任务登记完
-        ok2 = False
-        for _ in range(12):
-            time.sleep(0.4)
-            ok2, _, _ = task_query(AUTOSTART_TASK)
-            if ok2:
-                break
-        if not ok2:
-            return False, ("已请求提权，但查不到这个计划任务。\n"
-                           "可能被安全软件拦截，请重试或改用「普通」自启。")
-        return True, "已设为强力自启：登录后以管理员权限在托盘运行"
-    return False, "未知的自启模式"
-
-
-# ─────────────────────────── 系统托盘 ───────────────────────────
-_tray = {"icon": None, "ok": False, "err": ""}
-
-
-def tray_available():
-    try:
-        import pystray          # noqa: F401
-        from PIL import Image   # noqa: F401
-        return True, ""
-    except Exception as ex:
-        return False, str(ex)
-
-
-def tray_start(title, icon_path, menu_spec):
-    """把图标挂到托盘。menu_spec 是 [(类型, 标签, 回调)] 结构：
-
-         ("item", "打开主窗口", fn)
-         ("sep", None, None)
-         ("auto", None, None)      ← 自动插入「开机自启」子菜单
-
-    回调在托盘线程里执行，调用方要自己 root.after 切回主线程。
-    """
-    okp, err = tray_available()
-    if not okp:
-        _tray["err"] = "托盘组件不可用：" + err
-        return False
-    try:
-        import pystray
-        from PIL import Image
-    except Exception as ex:
-        _tray["err"] = str(ex)
-        return False
-
-    img = None
-    try:
-        if icon_path and os.path.exists(icon_path):
-            img = Image.open(icon_path).convert("RGBA").resize((64, 64))
-    except Exception:
-        img = None
-    if img is None:
-        img = Image.new("RGBA", (64, 64), (47, 111, 221, 255))
-
-    def _auto_menu():
-        # 打开菜单时查一次就行；原来三项各查一遍，每开一次菜单起 3 次 schtasks
-        st = autostart_state()
-        return pystray.Menu(
-            pystray.MenuItem("关闭", lambda i, it: menu_spec_auto("off"),
-                             checked=lambda it, s=st: s == "off",
-                             radio=True),
-            pystray.MenuItem("普通（登录后在托盘运行）",
-                             lambda i, it: menu_spec_auto("normal"),
-                             checked=lambda it, s=st: s == "normal",
-                             radio=True),
-            pystray.MenuItem("强力（管理员权限运行）",
-                             lambda i, it: menu_spec_auto("strong"),
-                             checked=lambda it, s=st: s == "strong",
-                             radio=True),
-        )
-
-    def menu_spec_auto(mode):
-        for kind, label, fn in menu_spec:
-            if kind == "auto_set":
-                fn(mode)
-                return
-
-    items = []
-    for kind, label, fn in menu_spec:
-        if kind == "item":
-            items.append(pystray.MenuItem(label, (lambda f: lambda i, it: f())(fn),
-                                          default=(label == menu_spec[0][1])))
-        elif kind == "sep":
-            items.append(pystray.Menu.SEPARATOR)
-        elif kind == "auto":
-            items.append(pystray.MenuItem("开机自启", _auto_menu()))
-
-    try:
-        icon = pystray.Icon("tidy_helper", img, title, pystray.Menu(*items))
-        _tray["icon"] = icon
-        _tray["ok"] = True
-        import threading
-        threading.Thread(target=icon.run, daemon=True).start()
-        return True
-    except Exception as ex:
-        _tray["err"] = str(ex)
-        _tray["ok"] = False
-        return False
-
-
-def bind_wheel_deep(widget, handler):
-    """给控件和它所有子孙绑滚轮。
-
-    Tk 的事件不冒泡，鼠标停在哪个子控件上就只发给它，
-    所以想「整块区域都能滚」只能逐个绑。
-    """
-    try:
-        widget.bind("<MouseWheel>", handler, add="+")
-        widget.bind("<Button-4>", handler, add="+")
-        widget.bind("<Button-5>", handler, add="+")
-    except Exception:
-        pass
-    try:
-        kids = widget.winfo_children()
-    except Exception:
-        kids = []
-    for k in kids:
-        bind_wheel_deep(k, handler)
-
-
-def fit_wraplength(container, label, min_width=240, pad=20,
-                   delay=140, scheduler=None):
-    """让 label 的 wraplength 跟着 container 宽度走，带防抖。
-
-    返回可直接 bind 到 <Configure> 的回调。
-    以前这逻辑在截图页/缓存页/搜索页各写了一份（三份几乎一样，各自
-    还差一点：有的带防抖、有的没有、有的少变化判断）。
-    """
-    job = [None]
-    host = scheduler or container
-
-    def _do():
-        job[0] = None
-        try:
-            want = max(min_width, container.winfo_width() - pad)
-            if abs(int(label.cget("wraplength")) - want) > 8:
-                label.configure(wraplength=want)
-        except Exception:
-            pass
-
-    def handler(event=None):
-        if job[0]:
-            try:
-                host.after_cancel(job[0])
-            except Exception:
-                pass
-        job[0] = host.after(delay, _do)
-
-    return handler
-
-
-def tray_notify(msg, title=""):
-    """弹一条气泡通知（走托盘图标）。没有托盘就静默返回 False。"""
-    ic = _tray.get("icon")
-    if not ic:
-        return False
-    try:
-        ic.notify(msg, title or "整理助手")
-        return True
-    except Exception:
-        return False
-
-
 def _tray_icon_keys():
     """列出 NotifyIconSettings 里属于本程序的子键名（Win10 没这键就返回 []）。"""
     import winreg
@@ -8911,6 +7771,7 @@ def _engine_startup_toggle(params):
         raise EngineError("参数 name 不能为空")
     source_type = _engine_get(params, "source_type", "registry", str)
     enabled = _engine_get(params, "enabled", True, bool)
+    new_file_path = ""
 
     if source_type == "registry":
         hive_name = _engine_get(params, "hive", "HKCU", str)
@@ -8932,20 +7793,45 @@ def _engine_startup_toggle(params):
         if not file_path or not os.path.exists(file_path):
             raise EngineError("快捷方式文件不存在：%s" % file_path)
         try:
+            import stat
+            new_file_path = file_path
             if enabled:
                 if file_path.lower().endswith(".disabled"):
-                    new_path = file_path[:-9]
-                    os.rename(file_path, new_path)
+                    new_file_path = file_path[:-9]
+                    if os.path.exists(new_file_path) and os.path.abspath(new_file_path) != os.path.abspath(file_path):
+                        try:
+                            os.chmod(new_file_path, stat.S_IWRITE)
+                            os.remove(new_file_path)
+                        except OSError:
+                            pass
+                    try:
+                        os.chmod(file_path, stat.S_IWRITE)
+                    except OSError:
+                        pass
+                    os.replace(file_path, new_file_path)
             else:
                 if not file_path.lower().endswith(".disabled"):
-                    new_path = file_path + ".disabled"
-                    os.rename(file_path, new_path)
+                    new_file_path = file_path + ".disabled"
+                    if os.path.exists(new_file_path) and os.path.abspath(new_file_path) != os.path.abspath(file_path):
+                        try:
+                            os.chmod(new_file_path, stat.S_IWRITE)
+                            os.remove(new_file_path)
+                        except OSError:
+                            pass
+                    try:
+                        os.chmod(file_path, stat.S_IWRITE)
+                    except OSError:
+                        pass
+                    os.replace(file_path, new_file_path)
         except OSError as ex:
             raise EngineError("重命名启动项失败：%s" % ex)
     else:
         raise EngineError("未知的启动项类型：%s" % source_type)
 
-    return {"ok": True, "name": name, "enabled": enabled}
+    res = {"ok": True, "name": name, "enabled": enabled}
+    if source_type == "folder":
+        res["new_file_path"] = new_file_path
+    return res
 
 
 def _engine_startup_delete(params):
@@ -8972,10 +7858,23 @@ def _engine_startup_delete(params):
             pass
     elif source_type == "folder":
         file_path = _engine_get(params, "file_path", "", str)
-        if not file_path or not os.path.exists(file_path):
+        if not file_path:
+            raise EngineError("缺少启动项快捷方式文件路径")
+        target_path = file_path
+        if not os.path.exists(target_path):
+            if not target_path.lower().endswith(".disabled") and os.path.exists(target_path + ".disabled"):
+                target_path = target_path + ".disabled"
+            elif target_path.lower().endswith(".disabled") and os.path.exists(target_path[:-9]):
+                target_path = target_path[:-9]
+        if not os.path.exists(target_path):
             raise EngineError("快捷方式文件不存在：%s" % file_path)
         try:
-            os.remove(file_path)
+            import stat
+            try:
+                os.chmod(target_path, stat.S_IWRITE)
+            except OSError:
+                pass
+            os.remove(target_path)
         except OSError as ex:
             raise EngineError("删除启动项快捷方式失败：%s" % ex)
     else:
@@ -8984,18 +7883,84 @@ def _engine_startup_delete(params):
     return {"ok": True, "name": name, "deleted": True}
 
 
+def _engine_process_is_running(proc_name):
+    """判断指定名称的进程当前是否正在运行（纯 ctypes 工具快照，微秒级极速，不占主线程）。"""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class _PE32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260)
+        ]
+
+    target = proc_name.lower()
+    if not target.endswith(".exe"):
+        target += ".exe"
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PE32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PE32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+
+        h_snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not h_snap or h_snap == -1 or h_snap == (1 << (8 * ctypes.sizeof(wintypes.HANDLE))) - 1:
+            return False
+        pe = _PE32W()
+        pe.dwSize = ctypes.sizeof(_PE32W)
+        found = False
+        try:
+            if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+                while True:
+                    if pe.szExeFile.lower() == target:
+                        found = True
+                        break
+                    if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                        break
+        finally:
+            kernel32.CloseHandle(h_snap)
+        return found
+    except Exception:
+        return False
+
+
 def _engine_process_close(params):
     """process.close：安全协同释放占用文件的进程（优雅通知 + 系统核心白名单保护）。"""
     name = _engine_get(params, "name", "", str)
-    if not name.strip():
+    raw_name = name.strip()
+    if not raw_name:
         raise EngineError("参数 name 不能为空")
+
+    import re
+    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", raw_name):
+        raise EngineError("非法进程名，只允许包含字母、数字、下划线、连字符和点")
+
     force = _engine_get(params, "force", False, bool)
     confirm_sensitive = _engine_get(params, "confirm_sensitive", False, bool)
-    
-    clean = name.strip().lower()
+
+    clean = raw_name.lower()
     if clean.endswith(".exe"):
         clean = clean[:-4]
-    
+    if not clean:
+        raise EngineError("进程名不能为空")
+
     # 绝对系统关键进程白名单（红线）
     _SYS_PROTECTED = {
         "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
@@ -9004,7 +7969,7 @@ def _engine_process_close(params):
     }
     if clean in _SYS_PROTECTED:
         raise EngineError("【%s】是 Windows 核心受保护组件，禁止关闭以防桌面崩溃" % name)
-    
+
     # 敏感数据应用（如微信）
     _SENSITIVE_APPS = {"xwechat", "wechat", "qq"}
     if clean in _SENSITIVE_APPS and not confirm_sensitive:
@@ -9014,23 +7979,40 @@ def _engine_process_close(params):
             "warning": "【%s】包含本地数据库文件，强行关闭可能导致未保存聊天记录损坏，建议在软件内退出" % name
         }
 
+    # 检查进程当前是否正在运行
+    was_running = _engine_process_is_running(clean + ".exe")
+    if not was_running:
+        return {"ok": True, "name": clean, "was_running": False, "closed": False}
+
     import subprocess, time
     # 1. 尝试优雅通知退出（taskkill 不加 /F 发送 WM_CLOSE）
     try:
         subprocess.run(["taskkill", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
     except Exception:
         pass
-    
-    time.sleep(1.2)
-    
+
+    # 非阻塞短轮询等待退出（最多 300ms，每次 50ms）
+    still_running = True
+    for _ in range(6):
+        time.sleep(0.05)
+        if not _engine_process_is_running(clean + ".exe"):
+            still_running = False
+            break
+
     # 2. 若配置了 force 且仍在运行，再尝试强制终止
-    if force:
+    if still_running and force:
         try:
             subprocess.run(["taskkill", "/F", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
         except Exception:
             pass
+        for _ in range(2):
+            time.sleep(0.05)
+            if not _engine_process_is_running(clean + ".exe"):
+                still_running = False
+                break
 
-    return {"ok": True, "name": clean, "closed": True}
+    closed = not _engine_process_is_running(clean + ".exe")
+    return {"ok": True, "name": clean, "was_running": was_running, "closed": closed}
 
 
 def _engine_index_meta_path():

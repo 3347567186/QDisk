@@ -86,7 +86,16 @@ pub fn list(path: &Path, kind: Kind, _password: Option<&str>) -> Result<ArchiveI
 
 pub fn list_single(path: &Path, kind: Kind) -> Result<ArchiveInfo> {
     let name = single_name(path);
-    let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let meta = fs::metadata(path).ok();
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| {
+            let dur = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+            unix_to_local_parts(dur.as_secs())
+        })
+        .map(|(y, mo, d, h, mi, s)| format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}"))
+        .unwrap_or_else(|| "—".to_string());
     Ok(ArchiveInfo {
         path: path.display().to_string(),
         format: kind.label().into(),
@@ -96,7 +105,7 @@ pub fn list_single(path: &Path, kind: Kind) -> Result<ArchiveInfo> {
             is_dir: false,
             size,
             packed: size,
-            modified: "—".into(),
+            modified,
             encrypted: false,
             crc: 0,
         }],

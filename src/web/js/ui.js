@@ -7,16 +7,19 @@
     return PAGE_SIZES.includes(Number(state.pageSize)) ? Number(state.pageSize) : 15;
   }
 
-  /* 列表页通用的「每页条数」选择器：只负责取值，状态与重渲染交给 App.setPageSize */
+  /* 列表页通用的「每页条数」选择器：使用自定义胶囊下拉组件，保持界面精致一致 */
   function pageSizePick(onChange) {
-    const sel = h('select', {
-      class: 'input sm',
+    const sel = customSelect({
+      options: PAGE_SIZES.map((n) => ({ value: String(n), label: T(n + ' 条', n + ' rows') })),
+      value: String(pageSize()),
+      alignUp: true,
+      className: 'sm',
       title: T('每页条数', 'Rows per page'),
-      onchange: () => {
-        const n = Number(sel.value) || 15;
+      onChange: (val) => {
+        const n = Number(val) || 15;
         try { onChange && onChange(n); } catch { /* ignore */ }
       }
-    }, PAGE_SIZES.map((n) => h('option', { value: String(n), selected: n === pageSize() }, T(n + ' 条', n + ' rows'))));
+    });
     return sel;
   }
 
@@ -789,8 +792,8 @@
     }, true);
 
     document.addEventListener('pointerout', (e) => {
-      const t = e.target;
-      if (activeEl && (!t || !activeEl.contains(t))) {
+      const rel = e.relatedTarget;
+      if (activeEl && (!rel || !activeEl.contains(rel))) {
         hide();
       }
     }, true);

@@ -227,9 +227,11 @@
     }
 
     function selectEl(options, value, onchange) {
-      const el = h('select', { class: 'select', onchange: (e) => onchange(e.target.value) });
-      options.forEach((o) => el.appendChild(h('option', { value: o.v, selected: o.v === value }, o.label)));
-      el.value = value;
+      const el = UI.customSelect({
+        options: options.map((o) => ({ value: o.v, label: o.label })),
+        value: value,
+        onChange: (v) => onchange(v)
+      });
       return el;
     }
 

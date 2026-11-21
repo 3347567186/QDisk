@@ -357,13 +357,25 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
         }
         encrypted |= flags & RHDF_ENCRYPTED != 0;
         solid |= flags & RHDF_SOLID != 0;
+        let ftime = unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_time)) };
+        let modified = if ftime > 0 {
+            let s = ((ftime & 0x1f) * 2) as u8;
+            let mi = ((ftime >> 5) & 0x3f) as u8;
+            let h = ((ftime >> 11) & 0x1f) as u8;
+            let d = ((ftime >> 16) & 0x1f) as u8;
+            let mo = ((ftime >> 21) & 0x0f) as u8;
+            let y = (((ftime >> 25) & 0x7f) + 1980) as u16;
+            super::modified_string(Some((y, mo, d, h, mi, s)))
+        } else {
+            "—".to_string()
+        };
         entries.push(EntryInfo {
             index,
             name: name.replace('\\', "/"),
             is_dir,
             size: unp,
             packed: pack,
-            modified: "—".into(),
+            modified,
             encrypted: flags & RHDF_ENCRYPTED != 0,
             crc: unsafe { ptr::read_unaligned(ptr::addr_of!(h.file_crc)) },
         });

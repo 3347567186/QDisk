@@ -88,7 +88,7 @@ const ok = (name, cond, extra) => out.push((cond ? 'PASS ' : 'FAIL ') + name + (
 const clearQueue = async () => { for (const q of props.list()) await props.deny(q.id, 'test'); };
 
 /* 1 目录与目录文本 */
-ok('registry 动作数 ' + actions.ids.length, actions.ids.length === 19);
+ok('registry 动作数 ' + actions.ids.length, actions.ids.length === 21);
 ok('catalog 可生成', String(actions.catalog()).length > 200);
 
 /* 2 正常提议 */

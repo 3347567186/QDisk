@@ -235,12 +235,11 @@
           )
         ));
 
-        const conflictSelect = h('select', {
-          class: 'select',
-          onchange: (e) => { state.conflict = e.target.value; state.plan = null; paint(); }
-        }, CONFLICTS.map((c) =>
-          h('option', { value: c.value, selected: state.conflict === c.value, text: T(c.zh, c.en) })
-        ));
+        const conflictSelect = UI.customSelect({
+          options: CONFLICTS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
+          value: state.conflict,
+          onChange: (v) => { state.conflict = v; state.plan = null; paint(); }
+        });
 
         return card(
           titleRow(T('迁移选项', 'Options'), null),

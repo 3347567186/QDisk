@@ -358,16 +358,12 @@
       }
 
       function secBehavior(holder) {
-        const closeSelect = h('select', {
-          class: 'select',
-          id: 'set-close',
-          /* 行标签是普通 div，不是 <label for>：这里显式给无障碍名字，
-             否则读屏软件只念「组合框」 */
-          'aria-label': T('关闭窗口时', 'When closing the window'),
-          onchange: (e) => onCloseAction(e.target.value)
-        }, CLOSE_ACTIONS.map((c) =>
-          h('option', { value: c.value, selected: state.closeAction === c.value, text: T(c.zh, c.en) })
-        ));
+        const closeSelect = UI.customSelect({
+          options: CLOSE_ACTIONS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
+          value: state.closeAction,
+          title: T('关闭窗口时', 'When closing the window'),
+          onChange: (v) => onCloseAction(v)
+        });
 
         const body = h('div', { class: 'stack' },
           h('div', { class: 'set-card' },
@@ -480,26 +476,26 @@
             value: String(s.log_keep_days),
             oninput: (e) => { s.log_keep_days = Number(e.target.value); paintHint(); }
           });
-          const conflictSelect = h('select', {
-            class: 'select',
-            'aria-label': T('同名冲突', 'Name clashes'),
-            onchange: (e) => { s.conflict_policy = e.target.value; paintHint(); }
-          }, CONFLICTS.map((c) =>
-            h('option', { value: c.value, selected: s.conflict_policy === c.value, text: T(c.zh, c.en) })
-          ));
+          const conflictSelect = UI.customSelect({
+            options: CONFLICTS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
+            value: s.conflict_policy,
+            title: T('同名冲突', 'Name clashes'),
+            onChange: (v) => { s.conflict_policy = v; paintHint(); }
+          });
 
           /* 索引新鲜度：三个档位对应「多久扫一次热目录」。
              用户原话是「最好可以可控不然扫磁盘次数多会伤磁盘」——
              所以这里给的不是一个开关，而是三档明确的扫盘频率。 */
-          const freshSel = h('select', {
-            class: 'select',
-            'aria-label': T('索引新鲜度', 'Index freshness'),
-            onchange: (e) => { s.index_freshness = e.target.value; paintHint(); }
-          }, [
-            ['live', T('实时（每分钟扫一次热目录）', 'Live (rescan hot folders every minute)')],
-            ['check', T('按需（每 10 分钟，默认）', 'On demand (every 10 min, default)')],
-            ['manual', T('只手动（不自动扫盘）', 'Manual only (never scans by itself)')]
-          ].map(([v, label]) => h('option', { value: v, selected: s.index_freshness === v }, label)));
+          const freshSel = UI.customSelect({
+            options: [
+              { value: 'live', label: T('实时（每分钟扫一次热目录）', 'Live (rescan hot folders every minute)') },
+              { value: 'check', label: T('按需（每 10 分钟，默认）', 'On demand (every 10 min, default)') },
+              { value: 'manual', label: T('只手动（不自动扫盘）', 'Manual only (never scans by itself)') }
+            ],
+            value: s.index_freshness,
+            title: T('索引新鲜度', 'Index freshness'),
+            onChange: (v) => { s.index_freshness = v; paintHint(); }
+          });
 
           const capInput = h('input', {
             class: 'input', type: 'number', min: '0', max: '65536', step: '128',
@@ -708,11 +704,17 @@
           }
         }, h('span', { text: m.name })));
 
-        const motionSel = h('select', {
-          class: 'input sm',
-          onchange: () => { state.motion = motionSel.value; App.setMotion(motionSel.value); }
-        }, [['full', T('完整', 'Full')], ['lite', T('精简', 'Lite')], ['off', T('关闭', 'Off')]]
-          .map(([v, label]) => h('option', { value: v, selected: state.motion === v }, label)));
+        const motionSel = UI.customSelect({
+          options: [
+            { value: 'full', label: T('完整', 'Full') },
+            { value: 'lite', label: T('精简', 'Lite') },
+            { value: 'off', label: T('关闭', 'Off') }
+          ],
+          value: state.motion,
+          className: 'sm',
+          title: T('动效强度', 'Motion'),
+          onChange: (v) => { state.motion = v; App.setMotion(v); }
+        });
 
         const gpuCb = h('input', {
           type: 'checkbox',
@@ -959,11 +961,13 @@
         }
 
         const prov = state.aiProv || 'deepseek';
-        const provSelect = h('select', {
-          class: 'input',
-          onchange: (e) => {
-            state.aiProv = e.target.value;
-            const p = AIStore.PROVIDERS.find((x) => x.id === e.target.value);
+        const provSelect = UI.customSelect({
+          options: AIStore.PROVIDERS.map((p) => ({ value: p.id, label: T(p.zh, p.id) })),
+          value: prov,
+          title: T('服务商', 'Provider'),
+          onChange: (val) => {
+            state.aiProv = val;
+            const p = AIStore.PROVIDERS.find((x) => x.id === val);
             if (p && p.id !== 'custom') {
               /* 换厂商就换默认地址与模型。
                  密钥这里有个坑：以前是「一律不动已填的密钥」，
@@ -982,9 +986,7 @@
               paint();
             }
           }
-        }, ...AIStore.PROVIDERS.map((p) => h('option', {
-          value: p.id, text: T(p.zh, p.id), selected: p.id === prov
-        })));
+        });
 
         /* 模型池：从 dsh-xdpool 的厂商清单里挑一家，直接把地址与模型名填好。
            只做选择器，不接管请求——请求仍走下面这套端点与 Key。

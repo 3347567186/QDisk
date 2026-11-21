@@ -24,6 +24,25 @@ import unittest
 from queue import Empty, Queue
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# 当系统 TEMP 位于 AppData（Windows 默认）时，tempfile 会把测试目录建在 AppData 下，
+# 导致 tidy.py 的安全护栏报「路径位于受保护区域：appdata」而拦截测试。
+# 自动切换到纯 ASCII 且避开 AppData 的临时目录（优先使用 D:\Builds\temp）。
+_cur_tmp = tempfile.gettempdir().lower()
+if "appdata" in _cur_tmp or "application data" in _cur_tmp:
+    _candidates = [
+        r"D:\Builds\temp\sub1\sub2",
+        r"D:\Builds\temp",
+        os.path.join(os.path.splitdrive(HERE)[0] + os.sep, "tidy_test_tmp"),
+    ]
+    for _cand in _candidates:
+        try:
+            os.makedirs(_cand, exist_ok=True)
+            tempfile.tempdir = _cand
+            os.environ["TEMP"] = _cand
+            os.environ["TMP"] = _cand
+            break
+        except Exception:
+            continue
 TIDY = os.path.join(HERE, "tidy.py")
 RULES = os.path.join(HERE, "rules.json")
 MIGRATE_ENGINE = os.path.join(HERE, "migrate_engine.py")
@@ -3079,6 +3098,93 @@ class TestStartup(EngineCase):
             except OSError:
                 pass
 
+    def test_startup_folder_toggle_and_delete(self):
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="tidy_test_startup_")
+        try:
+            lnk_path = os.path.join(tmp_dir, "test_app.lnk")
+            with open(lnk_path, "w", encoding="utf-8") as f:
+                f.write("mock lnk content")
+
+            # 1. 禁用该项（重命名为 .disabled），验证返回 new_file_path
+            r_dis = self.rpc_ok("startup.toggle", {
+                "name": "test_app",
+                "source_type": "folder",
+                "file_path": lnk_path,
+                "enabled": False
+            })
+            self.assertTrue(r_dis["ok"])
+            self.assertFalse(r_dis["enabled"])
+            self.assertTrue(r_dis["new_file_path"].endswith(".disabled"))
+            self.assertFalse(os.path.exists(lnk_path))
+            dis_path = r_dis["new_file_path"]
+            self.assertTrue(os.path.exists(dis_path))
+
+            # 2. 模拟冲突场景：若原 lnk_path 重新出现，再次启用时安全覆盖而不崩溃 (WinError 183 防御)
+            with open(lnk_path, "w", encoding="utf-8") as f:
+                f.write("conflicting target file")
+            r_en = self.rpc_ok("startup.toggle", {
+                "name": "test_app",
+                "source_type": "folder",
+                "file_path": dis_path,
+                "enabled": True
+            })
+            self.assertTrue(r_en["ok"])
+            self.assertTrue(r_en["enabled"])
+            self.assertEqual(r_en["new_file_path"], lnk_path)
+            self.assertTrue(os.path.exists(lnk_path))
+            self.assertFalse(os.path.exists(dis_path))
+
+            # 3. 再次禁用
+            r_dis2 = self.rpc_ok("startup.toggle", {
+                "name": "test_app",
+                "source_type": "folder",
+                "file_path": lnk_path,
+                "enabled": False
+            })
+            curr_dis_path = r_dis2["new_file_path"]
+
+            # 4. 验证 startup.delete 对已处于 .disabled 状态的项执行安全删除
+            # 无论传 disabled 路径还是原路径，均应安全删掉
+            r_del = self.rpc_ok("startup.delete", {
+                "name": "test_app",
+                "source_type": "folder",
+                "file_path": lnk_path
+            })
+            self.assertTrue(r_del["ok"])
+            self.assertFalse(os.path.exists(curr_dis_path))
+            self.assertFalse(os.path.exists(lnk_path))
+
+            # 5. 验证只读快捷方式的 toggle 与 delete (stat.S_IREAD 权限防御)
+            import stat
+            ro_path = os.path.join(tmp_dir, "readonly_app.lnk")
+            with open(ro_path, "w", encoding="utf-8") as f:
+                f.write("readonly lnk")
+            os.chmod(ro_path, stat.S_IREAD)
+
+            r_ro_dis = self.rpc_ok("startup.toggle", {
+                "name": "readonly_app",
+                "source_type": "folder",
+                "file_path": ro_path,
+                "enabled": False
+            })
+            self.assertTrue(r_ro_dis["ok"])
+            ro_dis_path = r_ro_dis["new_file_path"]
+            self.assertTrue(os.path.exists(ro_dis_path))
+
+            # 再次将目标设为只读后执行 delete
+            os.chmod(ro_dis_path, stat.S_IREAD)
+            r_ro_del = self.rpc_ok("startup.delete", {
+                "name": "readonly_app",
+                "source_type": "folder",
+                "file_path": ro_dis_path
+            })
+            self.assertTrue(r_ro_del["ok"])
+            self.assertFalse(os.path.exists(ro_dis_path))
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 class TestProcess(EngineCase):
     def test_sys_protected_blacklist(self):
@@ -3100,6 +3206,17 @@ class TestProcess(EngineCase):
         r = self.rpc_ok("process.close", {"name": "tidy_dummy_proc_not_running"})
         self.assertTrue(r["ok"])
         self.assertEqual(r["name"], "tidy_dummy_proc_not_running")
+        self.assertFalse(r["was_running"])
+        self.assertFalse(r["closed"])
+
+    def test_process_regex_rejection(self):
+        r1 = self.rpc("process.close", {"name": "*"})
+        self.assertFalse(r1["ok"])
+        self.assertIn("非法进程名", r1["error"])
+
+        r2 = self.rpc("process.close", {"name": "calc.exe; notepad"})
+        self.assertFalse(r2["ok"])
+        self.assertIn("非法进程名", r2["error"])
 
 
 if __name__ == "__main__":

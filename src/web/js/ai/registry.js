@@ -660,6 +660,147 @@
       }
     };
 
+    /* ------------------------------------------------------------ 自启动项 */
+    const findStartup = async (name) => {
+      const r = await E('startup.list', {});
+      const all = (r && r.items) || [];
+      const q = String(name || '').trim().toLowerCase();
+      if (!q) throw new Error('缺少自启动项名称');
+      let hit = all.filter((it) => String(it.name || '').toLowerCase() === q);
+      if (hit.length !== 1) {
+        const like = all.filter((it) => String(it.name || '').toLowerCase().indexOf(q) >= 0);
+        if (like.length === 1) hit = like;
+        else if (like.length > 1) {
+          throw new Error('「' + name + '」匹配到多个自启动项，请给更完整的名字：' +
+            like.slice(0, 6).map((x) => x.name).join('、'));
+        } else {
+          throw new Error('没找到叫「' + name + '」的自启动项');
+        }
+      }
+      return hit[0];
+    };
+
+    const startupToggle = {
+      id: 'startup.toggle',
+      cat: 'apps',
+      label: '自启动开关',
+      desc: '安全启用或禁用开机自启动项（注册表或启动文件夹快捷方式，可逆）',
+      risk: 1,
+      reversible: true,
+      undoKind: 'none',
+      schema: {
+        name: { type: 'string', req: true, maxLen: 120, hint: '自启动项名称' },
+        enabled: { type: 'bool', req: false, def: false }
+      },
+      async plan(p) {
+        const item = await findStartup(p.name);
+        const targetEnabled = p.enabled !== undefined ? !!p.enabled : !item.enabled;
+        const actZh = targetEnabled ? '启用' : '禁用';
+        return {
+          title: `${actZh}自启动项「${item.name}」`,
+          summary: `${actZh}开机自动启动：${item.command || item.location || ''}`,
+          items: [{ t: item.name, s: item.location || (item.source_type === 'folder' ? item.file_path : item.hive) }],
+          count: 1,
+          bytes: 0,
+          warnings: targetEnabled ? ['启用后该程序将在每次开机登录时自动启动'] : ['禁用后程序不再随开机自启，但可随时重新开启'],
+          params: {
+            name: item.name,
+            enabled: targetEnabled,
+            source_type: item.source_type,
+            hive: item.hive,
+            file_path: item.file_path
+          },
+          note: '修改自启动配置，不影响软件正常使用'
+        };
+      },
+      async run(p) {
+        let name = p && p.name;
+        let sourceType = p && p.source_type;
+        let hive = p && p.hive;
+        let filePath = p && p.file_path;
+        let enabled = p && p.enabled;
+        if (!sourceType) {
+          const item = await findStartup(name);
+          name = item.name;
+          sourceType = item.source_type;
+          hive = item.hive;
+          filePath = item.file_path;
+          if (enabled === undefined) enabled = !item.enabled;
+        }
+        const r = await E('startup.toggle', {
+          name: name,
+          enabled: !!enabled,
+          source_type: sourceType,
+          hive: hive,
+          file_path: filePath
+        });
+        return {
+          result: { name: r.name, enabled: r.enabled, new_file_path: r.new_file_path },
+          undo: null,
+          message: `已${r.enabled ? '启用' : '禁用'}自启动项「${r.name}」`
+        };
+      }
+    };
+
+    const startupDelete = {
+      id: 'startup.delete',
+      cat: 'apps',
+      label: '删除自启动项',
+      desc: '彻底从开机启动配置中移除指定项（注册表或启动快捷方式，不删软件本体）',
+      risk: 2,
+      reversible: false,
+      undoKind: 'none',
+      schema: {
+        name: { type: 'string', req: true, maxLen: 120, hint: '自启动项名称' }
+      },
+      async plan(p) {
+        const item = await findStartup(p.name);
+        return {
+          title: `删除自启动项「${item.name}」`,
+          summary: `从系统启动配置中彻底移除【${item.name}】`,
+          items: [{ t: item.name, s: item.command || item.location || item.file_path || '' }],
+          count: 1,
+          bytes: 0,
+          warnings: ['仅删除开机自启动配置与快捷方式，不会卸载或删除软件本身'],
+          params: {
+            name: item.name,
+            source_type: item.source_type,
+            hive: item.hive,
+            key: item.key,
+            file_path: item.file_path
+          },
+          note: '适合清理失效的启动残留或彻底移除不希望开机运行的项'
+        };
+      },
+      async run(p) {
+        let name = p && p.name;
+        let sourceType = p && p.source_type;
+        let hive = p && p.hive;
+        let key = p && p.key;
+        let filePath = p && p.file_path;
+        if (!sourceType) {
+          const item = await findStartup(name);
+          name = item.name;
+          sourceType = item.source_type;
+          hive = item.hive;
+          key = item.key;
+          filePath = item.file_path;
+        }
+        const r = await E('startup.delete', {
+          name: name,
+          source_type: sourceType,
+          hive: hive,
+          key: key,
+          file_path: filePath
+        });
+        return {
+          result: { name: r.name, deleted: r.deleted },
+          undo: null,
+          message: `已删除自启动配置「${r.name}」`
+        };
+      }
+    };
+
     /* -------------------------------------------------------------- 搜索索引 */
     const searchRebuild = {
       id: 'search.rebuild',
@@ -960,6 +1101,8 @@
       'apps.force_remove': appsForceRemove,
       'apps.cleanup': appsCleanup,
       'apps.remove_store': appsRemoveStore,
+      'startup.toggle': startupToggle,
+      'startup.delete': startupDelete,
       'search.rebuild': searchRebuild,
       'rules.run': rulesRun,
       'migrate.run': migrateRun,

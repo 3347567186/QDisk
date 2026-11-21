@@ -69,6 +69,11 @@
       params: { filter: 'string', offset: 'number≤5000' },
       args: []
     },
+    startup_list: {
+      desc: '查询系统开机自启动项列表（注册表与启动文件夹），可按状态（all/enabled/disabled/broken）或名称关键词过滤',
+      params: { status: 'string all|enabled|disabled|broken', filter: 'string 关键词', offset: 'number≤5000', limit: 'number≤50' },
+      args: []
+    },
     search_files: {
       desc: '按文件名在全盘索引里搜索（需要用户已建索引）',
       params: { q: 'string', limit: 'number≤20', offset: 'number≤5000' },
@@ -279,12 +284,12 @@
 
   const PAGE_TOOLS = {
     ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs',
-      'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize',
+      'file_signals', 'installed_apps', 'startup_list', 'search_files', 'organize_preview', 'explain_rules', 'last_organize',
       'archive_entries', 'clean_candidates', 'settings_read', 'search_roots']),
     tools: PROPOSE.concat(['top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
     organize: PROPOSE.concat(['list_dir', 'read_file', 'organize_preview', 'explain_rules', 'last_organize', 'installed_apps']),
     search: PROPOSE.concat(['search_files', 'top_folders', 'top_indexed', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
-    apps: PROPOSE.concat(['installed_apps', 'list_dir', 'read_file']),
+    apps: PROPOSE.concat(['installed_apps', 'startup_list', 'list_dir', 'read_file']),
     archive: PROPOSE.concat(['list_dir', 'read_file', 'top_folders', 'top_files', 'top_indexed', 'archive_entries'])
   };
 
@@ -322,7 +327,7 @@
       .concat(has(names, 'explain_rules') ? RULES_EXPLAIN : [])
       .concat(canWrite ? RULES_WRITE : RULES_READONLY).join('\n');
     const parts = [
-      '你是整理助手的内置 AI 助手「小助」。',
+      '你是「整理助手」客户端的内置 AI 助手「小助」。本软件「整理助手」是由当前用户（开发者）独立设计开发的本地桌面工具，你作为内置助手是由后端大模型驱动协助用户的。绝对不能把软件的开发归属说成是智谱、OpenAI 等外部模型厂商。',
       '',
       '【边界】',
       rules,

@@ -119,9 +119,9 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 | `apps.leftovers` | `{name, version?}` | 深度扫描软件卸载残留的磁盘目录与注册表项 `{name, dirs, regs, blocked}` |
 | `apps.cleanup` | `{paths: [...]}` | 清理选中的残留目录与注册表 `{freed, failed}` |
 | `startup.list` | `{refresh?}` | 扫描系统自启动项（注册表与启动目录），标记启用/失效状态 `{total, enabled_count, disabled_count, broken_count, items}` |
-| `startup.toggle` | `{name, source_type, hive?, file_path?, enabled}` | 安全切换自启动启用/禁用（写入 StartupApproved 或软重命名） |
-| `startup.delete` | `{name, source_type, hive?, key?, file_path?}` | 清理自启动配置项或失效快捷方式 `{ok, name, deleted}` |
-| `process.close` | `{name, force?, confirm_sensitive?}` | 协同释放占用文件的进程（优雅 WM_CLOSE 通知，受系统核心白名单保护与敏感数据警告） `{ok, name, closed}` |
+| `startup.toggle` | `{name, kind?, location?, file_path?, enable?}` | 安全切换自启动启用/禁用（写入 StartupApproved 或软重命名） `{ok, enabled, name, kind, location, file_path, new_file_path?}` |
+| `startup.delete` | `{name, kind?, location?, file_path?}` | 清理自启动配置项或失效快捷方式（自动兼容 `.disabled` 快捷方式） `{ok, name, deleted}` |
+| `process.close` | `{name}` | 协同释放占用文件的进程（严格正则校验杜绝通配符全杀） `{ok, was_running, closed, name, detail}` |
 | `search.status` | `{}` | 查询索引服务整体状态、索引数量、覆盖目录及数据库信息 |
 | `search.index` | `{roots?, ids?, reuse?, full?}` | 触发一次索引建立或增量扫描（基于 indexwalk 或 Python 遍历） |
 | `search.query` | `{q, limit?, offset?}` | 关键词实时搜索匹配的文件与目录 `{items: [...], total}` |
@@ -161,7 +161,7 @@ $py='E:\AI\DeepSeekHarness多插件版\home\dsh-runtimes\dsh-primary-runtime\dep
 - **cache**：缓存分组、勾选、按等级标注 safe/caution/advanced、预计释放空间、清理、结果汇总。
 - **search**：索引状态、选择索引根目录、建立/重建索引、关键词搜索、结果分页、定位文件。
 - **rules**：规则文件（JSON）编辑、校验、预览、执行、执行报告。
-- **apps**：已安装程序列表、搜索过滤、卸载、残留扫描、残留清理。
+- **apps**：已安装程序列表、空间画像（分类环形图与空间大户排行）、自启动项管理（已启用/已禁用/失效项过滤与状态切换/删除）、搜索过滤、卸载、残留扫描与清理；接入顶栏 SteveAvatar 问助手入口与 Tab 感知上下文；支持 `Pages.apps.jump({ tab, status })` 深度联动跳转。
 - **migrate**：源目录多选、目标目录、冲突策略、预演计划、执行、结果汇总。
 - **log**：日志文件列表（Rust 侧 `app-*.log`）、内容查看、刷新、清空、打开日志目录。
 - **settings**：主题、语言、关闭行为、数据目录、递归深度、冲突策略、日志保留、开机自启、定时整理、关于。

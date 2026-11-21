@@ -591,18 +591,21 @@
         const skipped = Number(res.skipped) || 0;
         const failed = Array.isArray(res.failed) ? res.failed : [];
 
-        toast(T(
-          '已清理 ' + fmtCount(cleaned) + ' 项，释放 ' + fmtBytes(freed) +
-            (pruned ? '，删除空目录 ' + fmtCount(pruned) + ' 个' : '') +
-            (skipped ? '，跳过 ' + fmtCount(skipped) + ' 项' : '') +
-            (failed.length ? '，' + fmtCount(failed.length) + ' 项失败' : ''),
-          'Cleaned ' + fmtCount(cleaned) + ' items, freed ' + fmtBytes(freed) +
-            (pruned ? ', removed ' + fmtCount(pruned) + ' empty folders' : '') +
-            (skipped ? ', skipped ' + fmtCount(skipped) : '') +
-            (failed.length ? ', ' + fmtCount(failed.length) + ' failed' : '')
-        ), failed.length ? 'warn' : 'ok');
-
-        if (failed.length) showFailures(failed);
+        if (!failed.length) {
+          toast(T(
+            '已清理 ' + fmtCount(cleaned) + ' 项，释放 ' + fmtBytes(freed) +
+              (pruned ? '，删除空目录 ' + fmtCount(pruned) + ' 个' : '') +
+              (skipped ? '，跳过 ' + fmtCount(skipped) + ' 项' : ''),
+            'Cleaned ' + fmtCount(cleaned) + ' items, freed ' + fmtBytes(freed) +
+              (pruned ? ', removed ' + fmtCount(pruned) + ' empty folders' : '') +
+              (skipped ? ', skipped ' + fmtCount(skipped) : '')
+          ), 'ok');
+        } else {
+          // 清空底角 toast 浮层，彻底杜绝通知卡片与弹窗操作按钮在右下角重叠遮挡
+          const toastBox = document.getElementById('toasts');
+          if (toastBox) toastBox.innerHTML = '';
+          showFailures(failed, { cleaned, freed, pruned, skipped });
+        }
         return true;
       }
 
@@ -635,7 +638,7 @@
       }
 
       /* 失败清单弹窗（最多 300 条，智能归类占用源并给出清晰引导） */
-      function showFailures(failed) {
+      function showFailures(failed, summary) {
         if (!failed || !failed.length) return;
 
         // 识别占用源与可协同释放的应用
@@ -779,7 +782,24 @@
           ))
         );
 
-        const body = h('div', { class: 'stack', style: { gap: '0' } }, noticeBox, listWrap);
+        const summaryBar = summary ? h('div', {
+          style: {
+            padding: '9px 12px',
+            marginBottom: '10px',
+            borderRadius: 'var(--radius)',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--line)',
+            fontSize: 'var(--fs-small)',
+            color: 'var(--text-1)'
+          }
+        }, T(
+          '已清理 ' + fmtCount(summary.cleaned || 0) + ' 项，释放 ' + fmtBytes(summary.freed || 0) +
+            '（' + fmtCount(failed.length) + ' 项因程序占用或系统保护跳过）',
+          'Cleaned ' + fmtCount(summary.cleaned || 0) + ' items, freed ' + fmtBytes(summary.freed || 0) +
+            ' (' + fmtCount(failed.length) + ' items locked by active apps)'
+        )) : null;
+
+        const body = h('div', { class: 'stack', style: { gap: '0' } }, summaryBar, noticeBox, listWrap);
 
         dlg = modal({
           title: T('有 ' + fmtCount(failed.length) + ' 项没有清理成功', fmtCount(failed.length) + ' items were not cleaned'),

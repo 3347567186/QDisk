@@ -99,6 +99,15 @@
   --warn-weak: rgba(138, 83, 0, .10);
   --on-solid: #ffffff;
 
+  /* 图表色板（用于环形图、空间画像等可视化组件，深浅自适应） */
+  --chart-1: #3b82f6; /* 蓝 */
+  --chart-2: #10b981; /* 绿 */
+  --chart-3: #f59e0b; /* 琥珀黄 */
+  --chart-4: #ef4444; /* 红 */
+  --chart-5: #8b5cf6; /* 紫 */
+  --chart-6: #06b6d4; /* 青 */
+  --chart-7: #64748b; /* 灰蓝 */
+
   /* 应用字母图标：全中性，不再轮换六色 */
   --icon-tile: #efece7;
   --icon-fg: #5f5957;
@@ -165,6 +174,15 @@ html[data-theme="dark"] {
   --warn: #e0a458;
   --warn-weak: rgba(224, 164, 88, .12);
   --on-solid: #191919;
+
+  /* 图表色板（深色模式：提升对比度与饱和度，防暗沉） */
+  --chart-1: #60a5fa;
+  --chart-2: #34d399;
+  --chart-3: #fbbf24;
+  --chart-4: #f87171;
+  --chart-5: #a78bfa;
+  --chart-6: #22d3ee;
+  --chart-7: #94a3b8;
 
   --icon-tile: rgba(255, 255, 255, .09);
   --icon-fg: #beb6b8;
@@ -1311,7 +1329,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 200;
   background: var(--scrim-strong);
   backdrop-filter: var(--scrim-blur);
   display: grid;
@@ -1344,8 +1362,9 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   .modal { max-height: calc(100vh - 16px); padding: var(--space-4); gap: var(--space-3); }
 }
 
-.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 90; display: flex; flex-direction: column; gap: 6px; }
-.toast {
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 90; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+body:has(.modal-mask:not(.closing)) .toasts { opacity: 0; pointer-events: none; transition: opacity 120ms var(--ease); }
+.toast { pointer-events: auto;
   position: relative;
   overflow: hidden;
   min-width: 180px;
@@ -1508,14 +1527,16 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   position: fixed;
   pointer-events: none;
   z-index: 110;
-  padding: 4px 9px;
-  font-size: 11.5px;
   line-height: 1.4;
   color: #f1f3f5;
   background: rgba(22, 24, 28, 0.94);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border-radius: 6px;
+    border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .01em;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
   border: 1px solid rgba(255, 255, 255, 0.08);
   white-space: nowrap;
