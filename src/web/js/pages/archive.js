@@ -234,12 +234,17 @@
     const tableWrap = h('div', { class: 'arc-table-wrap' }, table, emptyBox);
 
     const footLeft = h('div', { class: 'arc-foot-left small muted' }, '');
-    const overwrite = h('select', { class: 'input sm arc-overwrite', title: T('同名文件处理', 'Existing files') },
-      h('option', { value: 'rename' }, T('重名时自动改名', 'Rename duplicates')),
-      h('option', { value: 'overwrite' }, T('覆盖同名文件', 'Overwrite')),
-      h('option', { value: 'skip' }, T('跳过同名文件', 'Skip')));
-    overwrite.value = S.overwrite;
-    overwrite.onchange = () => { S.overwrite = overwrite.value; };
+    const overwrite = UI.customSelect({
+      options: [
+        { value: 'rename', label: T('重名时自动改名', 'Rename duplicates') },
+        { value: 'overwrite', label: T('覆盖同名文件', 'Overwrite') },
+        { value: 'skip', label: T('跳过同名文件', 'Skip') }
+      ],
+      value: S.overwrite,
+      alignUp: true,
+      title: T('同名文件处理', 'Existing files'),
+      onChange: (v) => { S.overwrite = v; }
+    });
     const extractSel = h('button', { class: 'btn primary sm' }, icon('export', 14), T('解压选中', 'Extract selected'));
     extractSel.onclick = () => extractSelected();
     const extractAll = h('button', { class: 'btn sm' }, T('解压全部', 'Extract all'));
@@ -247,15 +252,17 @@
     const cancel = h('button', { class: 'btn danger sm', hidden: true }, T('取消任务', 'Cancel'));
     cancel.onclick = cancelOp;
 
-    const modeSel = h('select', {
-      class: 'input sm arc-mode-select',
+    const modeSel = UI.customSelect({
+      options: MODES.map((m) => ({ value: m.id, label: T(m.zh, m.en) })),
+      value: S.create.mode,
+      alignUp: true,
       title: T('解压性能模式', 'Extract performance mode'),
-      onchange: () => {
-        S.create.mode = modeSel.value;
-        API.configSet({ archive_mode: modeSel.value }).catch(() => {});
+      onChange: (v) => {
+        S.create.mode = v;
+        API.configSet({ archive_mode: v }).catch(() => {});
         renderCreateChoices();
       }
-    }, MODES.map((m) => h('option', { value: m.id }, T(m.zh, m.en))));
+    });
     const side = h('aside', { class: 'arc-side card', hidden: true });
     const listTools = h('div', { class: 'arc-list-tools' }, filter, all, count);
     const listHead = h('div', { class: 'arc-list-head' }, crumbs, listTools);
@@ -274,7 +281,7 @@
     );
 
     const progress = h('div', { class: 'arc-progress card', hidden: true });
-    const view = h('div', { class: 'arc-view', id: 'arc-open' }, grid, progress);
+    const view = h('div', { class: 'arc-view', id: 'arc-open' }, grid);
 
     els.open = view; els.path = path; els.meta = meta; els.rar = rar;
     els.pathRow = h('div', { class: 'arc-path-row arc-path-row-head' }, path, pick, refresh, close);
@@ -436,7 +443,7 @@
         const key = cwd + seg + '/';
         if (!map.has(key)) map.set(key, {
           key, name: seg, isDir: true, index: null,
-          size: 0, packed: 0, modified: '', encrypted: false, synthetic: true
+          size: 0, packed: 0, fileCount: 0, modified: '', encrypted: false, synthetic: true
         });
         continue;
       }
@@ -446,10 +453,37 @@
       const key = cwd + clean + (isDir ? '/' : '');
       if (!map.has(key)) map.set(key, {
         key, name: clean, isDir, index: e.index,
-        size: e.size || 0, packed: e.packed || 0,
+        size: e.size || 0, packed: e.packed || 0, fileCount: isDir ? 0 : 1,
         modified: e.modified || '', encrypted: !!e.encrypted, synthetic: false
       });
     }
+
+    // 聚合统计目录项的子条目总大小、压缩后大小、文件数和最新修改时间
+    const dirRows = [];
+    map.forEach((row) => { if (row.isDir) dirRows.push(row); });
+    if (dirRows.length > 0) {
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        const ename = norm(e.name);
+        if (!ename) continue;
+        const isEntryDir = !!e.isDir || ename.endsWith('/');
+        for (let j = 0; j < dirRows.length; j++) {
+          const d = dirRows[j];
+          if (ename.startsWith(d.key)) {
+            if (!isEntryDir) {
+              d.size += (Number(e.size) || 0);
+              d.packed += (Number(e.packed) || 0);
+              d.fileCount = (d.fileCount || 0) + 1;
+            }
+            if (e.modified && (!d.modified || String(e.modified) > String(d.modified))) {
+              d.modified = String(e.modified);
+            }
+            if (e.encrypted) d.encrypted = true;
+          }
+        }
+      }
+    }
+
     return [...map.values()];
   }
 
@@ -685,8 +719,8 @@
       h('td', { class: 'arc-name' }, h('span', { class: 'arc-name-in' },
         h('span', { class: 'arc-file-ic' }, icon(r.isDir ? 'folder' : 'file', 15)),
         h('span', { class: 'ellipsis' }, r.name))),
-      h('td', { class: 'num' }, r.isDir ? '—' : fmtBytes(r.size)),
-      h('td', { class: 'num muted' }, r.isDir ? '—' : fmtBytes(r.packed)),
+      h('td', { class: 'num' }, r.isDir ? (r.size ? fmtBytes(r.size) + (r.fileCount ? ' (' + r.fileCount + T('项', ' items') + ')' : '') : (r.fileCount ? r.fileCount + T('项', ' items') : '—')) : fmtBytes(r.size)),
+      h('td', { class: 'num muted' }, r.isDir ? (r.packed ? fmtBytes(r.packed) : '—') : fmtBytes(r.packed)),
       h('td', { class: 'muted small' }, r.modified || '—'),
       h('td', { class: 'small' }, r.encrypted ? T('是', 'Yes') : '—')
     );
@@ -701,8 +735,8 @@
       e.preventDefault();
       UI.menu(e, [
         r.isDir
-          ? { label: T('进入文件夹', 'Open folder'), icon: 'folder', run: () => goCwd(r.key) }
-          : { label: T('预览', 'Preview'), icon: 'external', run: () => openPreview(r) },
+          ? { label: T('进入文件夹', 'Open folder'), icon: 'folder', action: () => goCwd(r.key) }
+          : { label: T('预览', 'Preview'), icon: 'external', action: () => openPreview(r) },
         { sep: true },
         { label: T('解压选中', 'Extract selected'), icon: 'export', action: () => extractSelected() },
         { label: T('复制名称', 'Copy name'), icon: 'copy', action: () => { try { navigator.clipboard.writeText(r.name); } catch { /* ignore */ } } }
@@ -1701,6 +1735,7 @@
        滚动交给 .arc-table-wrap（虚拟列表按它自己的 scrollTop 取窗口）。 */
     const body = h('div', { class: 'stack page-fill arc-body' }, head, open, create);
     root.appendChild(body);
+    if (els.progress) root.appendChild(els.progress);
     renderTabs();
     renderViews();
 

@@ -634,21 +634,83 @@
         if (ok) await doLoad(false);
       }
 
-      /* 失败清单弹窗（最多 300 条，避免弹窗过高） */
+      /* 失败清单弹窗（最多 300 条，智能归类占用源并给出清晰引导） */
       function showFailures(failed) {
-        const body = h('div', { class: 'list' },
+        if (!failed || !failed.length) return;
+
+        // 识别占用源
+        const appSet = new Set();
+        let lockedCount = 0;
+        failed.forEach((f) => {
+          const p = String(f.path || '').toLowerCase();
+          const w = String(f.why || '');
+          const isLock = /winerror 32|占用|开着|lock/i.test(w);
+          if (isLock) {
+            lockedCount += 1;
+            if (p.includes('\\microsoft\\edge\\') || p.includes('msedge')) appSet.add(T('Edge 浏览器', 'Microsoft Edge'));
+            else if (p.includes('\\google\\chrome\\') || p.includes('chrome')) appSet.add(T('Chrome 浏览器', 'Google Chrome'));
+            else if (p.includes('\\tencent\\xwechat\\') || p.includes('\\wechat\\')) appSet.add(T('微信', 'WeChat'));
+            else if (p.includes('\\nvidia\\dxcache\\') || p.includes('d3dscache')) appSet.add(T('NVIDIA 显卡驱动', 'NVIDIA Driver'));
+            else if (p.includes('startmenuexperiencehost') || p.includes('startmenu')) appSet.add(T('Windows 开始菜单', 'Start Menu'));
+            else appSet.add(T('系统或后台软件', 'Background app'));
+          }
+        });
+
+        const appNames = Array.from(appSet);
+        const tipText = lockedCount > 0
+          ? T(
+              '检测到 ' + fmtCount(lockedCount) + ' 项缓存正被正在运行的程序使用（' +
+                (appNames.length ? '如 ' + appNames.slice(0, 3).join('、') + (appNames.length > 3 ? ' 等' : '') : '系统后台') +
+                '）。这是系统正常的文件保护，您可以先退出对应程序再清理，或直接忽略日常占用的缓存。',
+              fmtCount(lockedCount) + ' item(s) are locked by active apps (' +
+                (appNames.length ? appNames.slice(0, 3).join(', ') : 'system') +
+                '). Close the apps to clean, or leave them safely.'
+            )
+          : '';
+
+        function cleanWhy(why) {
+          if (!why) return '';
+          let s = String(why);
+          if (/winerror 32/i.test(s)) {
+            s = T('程序正在运行并使用该文件 (WinError 32)', 'In use by running process (WinError 32)');
+          } else if (/winerror 5/i.test(s)) {
+            s = T('需要管理员权限 (WinError 5)', 'Access denied (WinError 5)');
+          }
+          return s;
+        }
+
+        const noticeBox = tipText ? h('div', {
+          class: 'card',
+          style: {
+            padding: '10px 12px',
+            marginBottom: '10px',
+            background: 'var(--surface-2)',
+            border: '1px solid var(--line)',
+            fontSize: 'var(--fs-small)',
+            color: 'var(--text-2)',
+            lineHeight: '1.5'
+          }
+        }, h('strong', { style: { color: 'var(--text-1)' } }, T('💡 处理建议：', '💡 Note: ')), tipText) : null;
+
+        const listWrap = h('div', {
+          class: 'list',
+          style: { maxHeight: '48vh', overflowY: 'auto', paddingRight: '4px' }
+        },
           ...failed.slice(0, 300).map((f) => h('div', { class: 'list-item' },
-            h('div', { class: 'stack', style: { gap: '0', minWidth: '0' } },
+            h('div', { class: 'stack', style: { gap: '2px', minWidth: '0' } },
               h('div', { class: 'mono small ellipsis', title: f.path || '' }, f.path || '—'),
-              f.why ? h('div', { class: 'small muted' }, f.why) : null
+              f.why ? h('div', { class: 'small muted' }, cleanWhy(f.why)) : null
             )
           ))
         );
+
+        const body = h('div', { class: 'stack', style: { gap: '0' } }, noticeBox, listWrap);
+
         modal({
           title: T('有 ' + fmtCount(failed.length) + ' 项没有清理成功', fmtCount(failed.length) + ' items were not cleaned'),
           body: body,
           wide: true,
-          buttons: [{ id: 'ok', label: T('关闭', 'Close'), kind: 'primary' }]
+          buttons: [{ id: 'ok', label: T('我知道了', 'Got it'), kind: 'primary' }]
         });
       }
 

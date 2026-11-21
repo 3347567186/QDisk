@@ -45,6 +45,7 @@
       applySidebar(!!this.cfg.sidebar_collapsed);
       buildNav(this);
       initNavTip();
+      if (UI.initGlobalTooltip) UI.initGlobalTooltip();
       window.addEventListener('hashchange', () => {
         const id = location.hash.replace('#', '');
         if (id && id !== this.current) navigate(id, false);

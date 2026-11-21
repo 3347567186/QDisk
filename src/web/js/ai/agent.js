@@ -125,14 +125,27 @@
     return { error: 'JSON 没有闭合' };
   }
 
-  /** 弱模型（glm-4-flash 这类）会把回答直接写成散文，怎么要求都不给 JSON。
-   *  这时别硬失败：把整段文字当 answer 兜住，用户至少能看到答案。
-   *  只在「完全没有 { 的纯文本」时启用，避免把半截 JSON 猜错。 */
+  /** 弱模型（glm-4-flash 这类）会把回答直接写成散文，或者用户明确要求输出代码块/YAML时
+   *  模型直接给出代码块。这时把整段文字当 answer 兜住，用户能直接看到答案与代码。
+   *  支持包含大括号的规则/代码，支持最多 32000 字符的大段回答。 */
   function salvageProse(text) {
-    const s = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
-    if (!s || s.indexOf('{') >= 0) return null;
-    if (s.length < 4 || s.length > 1600) return null;
-    return { answer: s.slice(0, 1200), evidence: [], suggest: [] };
+    const s = String(text || '').trim();
+    if (!s || s.length < 2) return null;
+    // 如果纯粹是以单个未闭合的残破 JSON 键值对开头且没有任何代码块围栏，留给 JSON 修复
+    if (s.startsWith('{"') && !s.includes('```') && s.length < 300) return null;
+    return { answer: s.slice(0, 32000), evidence: [], suggest: [] };
+  }
+
+  /** 检测用户是否要求了原生代码/规则/YAML，或者模型直接输出了 Markdown 代码块 */
+  function extractDirectCode(content, userPrompt) {
+    const s = String(content || '').trim();
+    if (!s) return null;
+    const hasCodeFence = /```(?:[a-zA-Z0-9_-]+)?\s*[\s\S]+?```/.test(s);
+    const promptWantsCode = userPrompt && /(?:代码块|```|yaml|json|只输出|不要解释|写一份|起草|规则)/i.test(String(userPrompt));
+    if (hasCodeFence || (promptWantsCode && s.length >= 10)) {
+      return { answer: s.slice(0, 32000), evidence: [], suggest: [] };
+    }
+    return null;
   }
 
   /* 参数类型/范围校验（方案 §7 第 3 条） */
@@ -234,7 +247,8 @@
 
     const answer = String(obj.answer || '').trim();
     if (!answer) return { ok: false, error: 'answer 不能为空' };
-    if (answer.length > REPLY_MAX_CHARS * 2) return { ok: false, error: 'answer 太长（超过 1200 字）' };
+    if (answer.length > 32000) return { ok: false, error: 'answer 太长（超过 32000 字）' };
+    if (!answer.includes('```') && answer.length > REPLY_MAX_CHARS * 2) return { ok: false, error: 'answer 太长（超过 1200 字）' };
 
     const called = new Set(calledTools || []);
     const evidence = [];
@@ -1200,6 +1214,18 @@
         }
         const parsed = extractJson(content);
         if (parsed.error) {
+          /* 用户明确要求代码块/YAML/不要解释，或者模型直接回了完整 Markdown 代码块：
+             直接兜住展示，绝不再死板地要求模型改写成 JSON，彻底避免 186 秒截断重试死循环 */
+          const lastUser = [...messages].reverse().find((m) => m && m.role === 'user');
+          const userPrompt = lastUser ? lastUser.content : '';
+          const direct = extractDirectCode(content, userPrompt);
+          if (direct) {
+            const sv = validateStep(direct, ctxTools, calledTools);
+            if (sv.ok) {
+              return Object.assign({ usage, raw: direct, salvaged: true }, sv);
+            }
+          }
+
           /* 只回了思考、正文被挤空：加预算重来，不消耗「格式修一次」的配额 */
           if (/空内容/.test(parsed.error) && grewTokens < 2 && tokenCap < MAX_REPLY_TOKENS) {
             grewTokens += 1;

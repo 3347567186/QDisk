@@ -566,11 +566,197 @@
     }
   }
 
+  /* ---------- 自定义圆角胶囊下拉框（替换原生 select，自适应防溢出翻转） ---------- */
+  function customSelect({ options = [], value = '', onChange, alignUp, className = '', title = '' }) {
+    let opts = options.map((it) => (typeof it === 'object' && it !== null ? it : { value: String(it), label: String(it) }));
+    let curVal = value !== undefined && value !== null ? String(value) : (opts[0] ? opts[0].value : '');
+
+    const labelSpan = h('span', { class: 'custom-select-label' });
+    const arrowSpan = h('span', { class: 'custom-select-arrow', html: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>' });
+    const trigger = h('button', {
+      type: 'button',
+      class: 'custom-select-trigger',
+      'aria-haspopup': 'listbox',
+      'aria-expanded': 'false',
+      title: title || ''
+    }, labelSpan, arrowSpan);
+
+    const menuEl = h('div', { class: 'custom-select-menu', role: 'listbox' });
+    const wrap = h('div', { class: 'custom-select ' + className }, trigger, menuEl);
+
+    function updateLabel() {
+      const match = opts.find((o) => String(o.value) === String(curVal));
+      labelSpan.textContent = match ? match.label : curVal;
+      Array.from(menuEl.children).forEach((child) => {
+        child.classList.toggle('selected', child.dataset.value === String(curVal));
+      });
+    }
+
+    function renderMenu() {
+      menuEl.innerHTML = '';
+      opts.forEach((o) => {
+        const item = h('div', {
+          class: 'custom-select-item' + (String(o.value) === String(curVal) ? ' selected' : ''),
+          dataset: { value: String(o.value) },
+          role: 'option',
+          onclick: (e) => {
+            e.stopPropagation();
+            setValue(o.value, true);
+            closeMenu();
+          }
+        }, h('span', null, o.label));
+        menuEl.appendChild(item);
+      });
+      updateLabel();
+    }
+
+    function setValue(val, emitChange) {
+      const s = String(val);
+      if (s === curVal && !emitChange) return;
+      curVal = s;
+      updateLabel();
+      if (emitChange && onChange) {
+        try { onChange(curVal); } catch (err) { console.error(err); }
+      }
+    }
+
+    function openMenu() {
+      // 判定向上弹出还是向下弹出
+      const rect = trigger.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const needUp = alignUp === true || (alignUp !== false && spaceBelow < 210 && rect.top > 210);
+      wrap.classList.toggle('open-up', !!needUp);
+      wrap.classList.add('open');
+      trigger.setAttribute('aria-expanded', 'true');
+    }
+
+    function closeMenu() {
+      wrap.classList.remove('open');
+      trigger.setAttribute('aria-expanded', 'false');
+    }
+
+    trigger.onclick = (e) => {
+      e.stopPropagation();
+      if (wrap.classList.contains('open')) closeMenu();
+      else {
+        // 先关掉页面其它自定义下拉
+        document.querySelectorAll('.custom-select.open').forEach((el) => { if (el !== wrap) el.classList.remove('open'); });
+        openMenu();
+      }
+    };
+
+    wrap.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { closeMenu(); }
+    });
+
+    renderMenu();
+
+    Object.defineProperty(wrap, 'value', {
+      get() { return curVal; },
+      set(v) { setValue(v, false); }
+    });
+    wrap.setOptions = (newOpts) => {
+      opts = newOpts.map((it) => (typeof it === 'object' && it !== null ? it : { value: String(it), label: String(it) }));
+      renderMenu();
+    };
+    wrap.setValue = (v) => setValue(v, false);
+
+    return wrap;
+  }
+
+  // 全局点击收起自定义 select
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.custom-select.open').forEach((el) => el.classList.remove('open'));
+  });
+
+  /* ---------- 全局深色精致胶囊 Tooltip ---------- */
+  let tooltipInited = false;
+  function initGlobalTooltip() {
+    if (tooltipInited) return;
+    tooltipInited = true;
+
+    const tip = h('div', { id: 'global-tooltip', class: 'global-tooltip-pill', 'aria-hidden': 'true' });
+    document.body.appendChild(tip);
+
+    let activeEl = null;
+    let timer = null;
+
+    function hide() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      activeEl = null;
+      tip.classList.remove('on');
+    }
+
+    function show(el, text) {
+      if (!text || !el || !document.body.contains(el)) { hide(); return; }
+      activeEl = el;
+      tip.textContent = text;
+      tip.classList.remove('on');
+
+      // 计算位置：居中对齐，优先在上方，上方放不下放下方
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+
+      const tipW = tip.offsetWidth || 120;
+      const tipH = tip.offsetHeight || 26;
+
+      let left = rect.left + rect.width / 2 - tipW / 2;
+      left = Math.max(8, Math.min(window.innerWidth - tipW - 8, left));
+
+      let top = rect.top - tipH - 6;
+      if (top < 6) {
+        top = rect.bottom + 6; // 翻到下方
+      }
+
+      tip.style.left = Math.round(left) + 'px';
+      tip.style.top = Math.round(top) + 'px';
+      tip.classList.add('on');
+    }
+
+    document.addEventListener('pointerover', (e) => {
+      const t = e.target;
+      if (!t || !(t instanceof Element)) return;
+      // 排除输入框、富文本以及 tooltip 自身
+      if (t.id === 'global-tooltip' || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return;
+
+      const host = t.closest('[title], [data-tip], [data-global-tip]');
+      if (!host) { hide(); return; }
+
+      // 提取文字并抹除原生 title（防止操作系统黑色方块遮挡）
+      if (host.hasAttribute('title')) {
+        const raw = host.getAttribute('title');
+        if (raw) host.dataset.globalTip = raw;
+        host.removeAttribute('title');
+      }
+
+      const text = host.dataset.globalTip || host.dataset.tip;
+      if (!text) { hide(); return; }
+
+      if (activeEl === host) return;
+      if (timer) clearTimeout(timer);
+
+      // 轻微延时 100ms 进场，避免快速滑过整排按钮时闪烁
+      timer = setTimeout(() => show(host, text), 110);
+    }, true);
+
+    document.addEventListener('pointerout', (e) => {
+      const t = e.target;
+      if (activeEl && (!t || !activeEl.contains(t))) {
+        hide();
+      }
+    }, true);
+
+    document.addEventListener('click', hide, true);
+    document.addEventListener('scroll', hide, true);
+    window.addEventListener('blur', hide);
+  }
+
   window.UI = {
     h, T, fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
     skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, setLang, onLangChange,
     menu, attachMenu, closeMenu, modal, preview, closePreview,
     pageSize, pageSizePick, PAGE_SIZES,
-    errText, copy
+    errText, copy,
+    customSelect, initGlobalTooltip
   };
 })();

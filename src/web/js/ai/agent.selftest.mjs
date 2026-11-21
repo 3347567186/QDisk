@@ -1548,6 +1548,29 @@ for (const c of CASES) {
   results.push({ id: 'G56', group: '体积', pass: bad.length === 0, why: bad.join('；'), tools: 'top_folders', steps: res.usage ? res.usage.steps : 0 });
 }
 
+/* G57 用户要求只输出代码块/YAML时，模型返回纯 ```yaml 块能直接展示，不触发重试/截断报错 */
+{
+  const bad = [];
+  const yamlOut = '```yaml\nrules:\n  - ext: [zip, rar, 7z]\n    dest: 02_压缩包\n  - ext: [exe, msi]\n    dest: 01_安装包\n```';
+  let calls = 0;
+  const agent = createAgent({
+    transport: async () => {
+      calls += 1;
+      return { status: 200, body: JSON.stringify({ choices: [{ message: { content: yamlOut } }], usage: {} }) };
+    },
+    tools, prompt, settings
+  });
+  const res = await agent.run({
+    userText: '帮我起草一份 organize YAML 规则：只输出一个 ```yaml 代码块，不要解释。',
+    ctx: { page: 'ai' }
+  });
+  if (!res.ok) bad.push('运行失败：' + (res.error || '未知'));
+  if (calls > 1) bad.push('模型输出了纯代码块却触发了多余的重试（调用了 ' + calls + ' 次）');
+  const ans = String(res.answer || '');
+  if (!ans.includes('02_压缩包')) bad.push('没有正确提取出代码块内容：' + ans);
+  results.push({ id: 'G57', group: '代码', pass: bad.length === 0, why: bad.join('；'), tools: 'none', steps: res.usage ? res.usage.steps : 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 
