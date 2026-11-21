@@ -237,12 +237,6 @@
       ? T('重名跳过', 'Skip duplicates')
       : opts.conflict === 'overwrite' ? T('重名覆盖', 'Overwrite') : T('重名重命名', 'Rename duplicates'));
 
-    const contentLabel = () => (opts.use_content === true
-      ? T('按内容识别', 'By content')
-      : opts.use_content === false ? T('仅按扩展名', 'Extension only') : T('自动识别', 'Auto'));
-
-    const recursiveLabel = () => (opts.recursive ? T('递归子目录', 'Recursive') : T('仅当前目录', 'Top level only'));
-
     const optionSummary = () => [presetLabel(), conflictLabel()].join(' · ');
 
     const presetLabel = () => (opts.preset === 'all' ? T('全部文件', 'Everything')

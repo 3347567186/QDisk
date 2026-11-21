@@ -289,8 +289,6 @@
         }
       }
 
-      const openOpt = (id) => ({ open: state.openId === id, id, accordion: null });
-
       function secAppearance(holder) {
         /* 两行就够：主题一组单选、语言一组单选。原来用 .grid-2 + .field，
            每组各占半屏宽、说明各占一行，读起来像两篇文章。 */
@@ -616,6 +614,33 @@
                       h('span', { text: T('空闲时校验并重建', 'Verify and rebuild when idle') })
                     )
                   )
+                ),
+                h('div', { class: 'row', style: 'gap:8px;align-items:center;margin-top:6px' },
+                  h('button', {
+                    class: 'btn ghost sm', type: 'button',
+                    onclick: async () => {
+                      toast(T('正在自检索引…', 'Checking index…'), 'info');
+                      try {
+                        const r = await API.engine('search.selfcheck', { rebuild: true });
+                        const n = (r && r.rebuilt && r.rebuilt.length) || 0;
+                        toast(T('自检完成，重建 ' + n + ' 项', 'Selfcheck done, rebuilt ' + n + ' items'), 'ok');
+                      } catch (e) {
+                        toast(T('自检失败：', 'Selfcheck failed: ') + UI.errText(e), 'warn');
+                      }
+                    }
+                  }, icon('shield', 13), h('span', { text: T('索引自检与修复', 'Index selfcheck') })),
+                  h('button', {
+                    class: 'btn ghost sm', type: 'button',
+                    onclick: async () => {
+                      toast(T('正在刷新热目录索引…', 'Refreshing hot index…'), 'info');
+                      try {
+                        await API.engine('search.hot', { force: true });
+                        toast(T('热目录已刷新', 'Hot folders refreshed'), 'ok');
+                      } catch (e) {
+                        toast(T('刷新失败：', 'Refresh failed: ') + UI.errText(e), 'warn');
+                      }
+                    }
+                  }, icon('refresh', 13), h('span', { text: T('刷新热目录', 'Refresh hot folders') }))
                 ),
                 T('热目录（桌面/文档/下载等）重扫一次约 0.3 秒 · 上限填 0 表示不限制 · 软件自己整理或删除的文件会立即同步，不靠这里的扫描',
                   'Hot folders take about 0.3 s to rescan · 0 means no cap · files the app moves or deletes sync instantly without waiting for a scan')),

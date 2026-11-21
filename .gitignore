@@ -9,6 +9,11 @@
 # 本地构建管理状态（锁、日志、快照索引）
 /.build/
 
+# Python 运行时与缓存
+__pycache__/
+*.pyc
+/src/engine/数据/
+
 # 杂项
 *.pdb
 *.log

@@ -1815,7 +1815,10 @@ body[data-motion="lite"] .nav-item::before,
 body[data-motion="lite"] .nav-progress::after { animation: none !important; }
 body[data-motion="off"] *,
 body[data-motion="off"] *::before,
-body[data-motion="off"] *::after {
+body[data-motion="off"] *::after,
+body[data-idle="1"] *,
+body[data-idle="1"] *::before,
+body[data-idle="1"] *::after {
   animation: none !important;
   transition: none !important;
 }

@@ -93,35 +93,47 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 
 - 全局 `user-select:none`，只有 `input/textarea/[contenteditable]` 可选中；需要可复制的展示文本用 `<code class="selectable">` 或内容用 `UI.modal`（其 body 允许选中）。
 
-### 引擎方法速查
+## 引擎方法速查（完整 37 个 RPC 方法）
 
-| method | 参数 | 返回 |
+| method | 参数 | 返回 / 说明 |
 |---|---|---|
-| `ping` | {} | `{ok:true,pong:...}` |
-| `settings.get` | {} | `{data_dir,cache_dir,conflict_policy,recursive_depth,default_recursive,default_content,log_keep_days,close_action,tray_pin,settings_path}` |
-| `settings.set` | part of above | 保存后的 settings |
-| `scan` | `{path, recursive?, content?, by_date?, exclude_exts?, exclude_dirs?}` | `{plans:[{folder,groups:[{name,files:[{name,size,mtime}]}],blocked?}],blocked:[...],total,total_size,applied}` |
-| `organize` | `{path, dry_run?, conflict?, by_date?, recursive?}` | `{moved,failed:[],total,history,blocked}` |
-| `undo` | `{path}` | `{restored,failed:[],history}` |
-| `files.delete` | `{paths:[...]}` | `{deleted,failed:[]}` |
-| `shots.scan` | `{dry_run?, dirs?}` | `{items:[{path,name,size,mtime,thumb?}],total,total_size,dirs,missing}` |
-| `shots.clean` | `{paths?/items?}` | 清理结果 |
-| `cache.list` | `{}` | `{groups:[{name,level,items:[{path,label,size,exists,level,item_id,note}]}]}` |
-| `cache.clean` | `{ids:[...]}` | `{freed,failed:[]}` |
-| `apps.list` | `{}` | `{items:[{name,version,publisher,install_path,icon,uninstall}]}` |
-| `apps.uninstall` | `{name}` | 结果 |
-| `apps.leftovers` | `{names?}` | 残留列表 |
-| `apps.cleanup` | `{paths:[...]}` | 清理结果 |
-| `search.status` | {} | `{index_path,indexed,roots,built_at,backend}` |
-| `search.index` | `{roots:[...],rebuild?}` | 索引结果 |
-| `search.query` | `{q,limit?,offset?}` | `{items:[...],total}` |
-| `search.top` | `{limit?,min_size?}` | `{items:[{name,path,size,mtime}],total,source:"index",roots,indexed,elapsed_ms,hint?}` |
-| `search.folders` | `{depth?,limit?,min_size?,parent?,auto?,ids?}` | `{items:[{path,name,size,files,pct}],total,bytes,source:"index",roots,indexed,depth,built,elapsed_ms,hint?}` |
-| `rules.validate` | `{path}` | 校验结果 |
-| `rules.preview` | `{path, dest?}` | 预览结果 |
-| `rules.run` | `{path, dest?, dry_run?}` | 执行结果 |
-| `migrate.plan` | `{sources:[...], target}` | 计划 |
-| `migrate.apply` | `{sources,target,conflict?}` | 执行结果 |
+| `ping` | `{}` | `{ok: true, pong: ...}` 心跳检测 |
+| `settings.get` | `{}` | 完整 settings 对象与路径 |
+| `settings.set` | `{patch...}` | 局部更新 settings 并落盘 |
+| `scan` | `{path, recursive?, content?, by_date?, exclude_exts?, exclude_dirs?}` | 扫描目录整理计划 `{plans, blocked, total, total_size, applied}` |
+| `organize` | `{path, dry_run?, conflict?, by_date?, recursive?}` | 执行整理操作 `{moved, failed: [], total, history, blocked}` |
+| `undo` | `{path?}` | 撤销上一次整理 `{restored, failed: [], history}` |
+| `files.delete` | `{paths: [...]}` | 批量安全删除文件（送回收站）`{deleted, failed: []}` |
+| `shots.scan` | `{dirs?, keep_days?, min_kb?}` | 截图目录扫描 `{items, total, total_size, dirs, missing}` |
+| `shots.thumb` | `{path, size?, force?}` | 获取单张截图的高性能 PNG 缩略图（Base64 或缓存路径） |
+| `shots.clean` | `{paths?: [...], items?: [...]}` | 清理选中的截图到回收站 |
+| `cache.list` | `{}` | 扫描各类系统及应用缓存目录分组 `{groups: [...]}` |
+| `cache.clean` | `{ids: [...]}` | 清理选中的缓存条目 `{freed, failed: []}` |
+| `clean.auto` | `{}` | 一键安全自动清理（系统临时文件 + 过期缓存）`{freed, deleted_count, details}` |
+| `apps.list` | `{refresh?}` | 枚举已安装应用程序列表 `{items: [...], total}` |
+| `apps.icons` | `{sources: [...]}` | 批量提取/生成应用图标缓存 `{icons: {src: png_path}}` |
+| `apps.uninstall` | `{name, version?, mode?}` | 调用应用卸载命令并返回执行状态 |
+| `apps.registry` | `{name}` | 查询应用在注册表 Uninstall 中的原始键值信息 |
+| `apps.delete_entry` | `{key}` | 删除无效/残留的卸载注册表项 |
+| `apps.force_remove` | `{name}` | 强制移除软件记录与残留目录 |
+| `apps.leftovers` | `{name, version?}` | 深度扫描软件卸载残留的磁盘目录与注册表项 `{name, dirs, regs, blocked}` |
+| `apps.cleanup` | `{paths: [...]}` | 清理选中的残留目录与注册表 `{freed, failed}` |
+| `search.status` | `{}` | 查询索引服务整体状态、索引数量、覆盖目录及数据库信息 |
+| `search.index` | `{roots?, ids?, reuse?, full?}` | 触发一次索引建立或增量扫描（基于 indexwalk 或 Python 遍历） |
+| `search.query` | `{q, limit?, offset?}` | 关键词实时搜索匹配的文件与目录 `{items: [...], total}` |
+| `search.top` | `{limit?, min_size?}` | 基于 SQLite 索引查询超大文件排行榜 `{items, total, source, roots}` |
+| `search.folders` | `{depth?, limit?, min_size?, parent?, auto?, ids?}` | 目录空间占用聚合统计分析 `{items, total, bytes, source}` |
+| `search.add` | `{paths: [...]}` | 向搜索索引库中添加监控根目录 |
+| `search.remove` | `{ids: [...]}` | 从搜索索引库中移除指定根目录 |
+| `search.selfcheck` | `{rebuild?}` | 索引数据库自检、坏块检测与自动修复重建 |
+| `search.hot` | `{force?}` | 快速扫描热点目录（下载、桌面等）刷新增量索引 |
+| `prune.run` | `{force?}` | 维护引擎本地历史、日志及缩略图缓存磁盘占用 |
+| `rules.validate` | `{text? / path?}` | 校验整理规则 YAML/JSON 语法与安全性 |
+| `rules.preview` | `{text? / path?, folder?, simulate?}` | 预演规则在目标目录上的匹配与归类动作 |
+| `rules.run` | `{text? / path?, folder?, simulate?}` | 执行规则整理并返回执行报告 |
+| `rules.explain` | `{path, folder?}` | 解释某个文件命中或被拦截的具体规则链路及原因 |
+| `migrate.plan` | `{sources: [...], destination, mode?, conflict?}` | 分析搬家任务，构建迁移任务计划与冲突预检 |
+| `migrate.apply` | `{sources, destination, mode?, conflict?, confirm, id?}` | 执行迁移或搬家操作，支持跨盘移动与进度记录 |
 
 参数名必须与上表一致（引擎对缺失参数会报「参数 xxx 必须是非空字符串」）。不确定返回结构时，
 先用管道直接问引擎：
