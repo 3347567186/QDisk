@@ -249,7 +249,7 @@
       type: 'text',
       autocomplete: 'off',
       spellcheck: 'false',
-      placeholder: T('也可以直接粘文件夹或文件的完整路径', 'Or paste a full folder / file path')
+      placeholder: T('也可以直接粘贴文件夹或文件的完整路径', 'Or paste a full folder / file path')
     });
     pathInput.value = state.folder;
     // 只把输入框当「待加入的来源」，不直接改写 state.folder：
@@ -258,8 +258,8 @@
       if (e.key === 'Enter') { addTypedSource(); doScan(); }
     });
 
-    const btnBrowse = actBtn('加文件夹', 'Add folder', 'ghost', 'folder', doBrowse);
-    const btnPickFiles = actBtn('加文件', 'Add files', 'ghost', 'file', doPickFiles);
+    const btnBrowse = actBtn('添加文件夹', 'Add folder', 'ghost', 'folder', doBrowse);
+    const btnPickFiles = actBtn('添加文件', 'Add files', 'ghost', 'file', doPickFiles);
     const btnScan = actBtn('扫描', 'Scan', 'primary', 'scan', () => doScan());
     const btnOrganize = actBtn('开始整理', 'Start tidying', 'primary', 'play', doOrganize);
     btnOrganize.disabled = true;

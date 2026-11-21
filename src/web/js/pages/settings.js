@@ -667,7 +667,7 @@
                 h('button', {
                   class: 'btn ghost sm', type: 'button',
                   onclick: previewPrune
-                }, icon('search', 14), h('span', { text: T('先看能清多少', 'Preview') }))
+                }, icon('search', 14), h('span', { text: T('清理预演', 'Preview') }))
               )
             )
             ),
@@ -1534,7 +1534,7 @@
                 d.fallbacks = fbList().concat([{ endpoint: '', model: '' }]);
                 paint();
               }
-            }, icon('plus', 14), h('span', { text: T('加一个备用模型', 'Add a fallback') }))
+            }, icon('plus', 14), h('span', { text: T('添加备用模型', 'Add fallback model') }))
             : h('div', { class: 'small muted', text: T('最多 5 个', 'Up to 5') })
         );
 
