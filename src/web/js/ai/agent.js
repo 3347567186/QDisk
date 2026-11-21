@@ -158,12 +158,14 @@
     if (!text || typeof text !== 'string') return text;
     let s = text;
     const patterns = [
-      /(?:整理助手|本软件|本程序|本应用)(?:是由|是|为)?\s*(?:智谱\s*AI(?:\s*公司)?|智谱|OpenAI|微软|百度|阿里|腾讯)\s*(?:公司)?\s*(?:独立)?(?:开发|研发|制作|创建)(?:的)?/g,
-      /(?:智谱\s*AI(?:\s*公司)?|智谱|OpenAI|微软|百度|阿里|腾讯)\s*(?:公司)?\s*(?:开发|研发|制作|创建)(?:了)?\s*(?:整理助手|本软件|本程序|本应用)/g
+      /(?:整理助手|本软件|本程序|本应用|我|小助|内置助手)(?:是由|是|为)?\s*(?:智谱\s*AI(?:\s*公司)?|智谱|OpenAI|微软|百度|阿里|腾讯)\s*(?:公司)?\s*(?:独立)?(?:开发|研发|制作|创建|训练)(?:的)?/i,
+      /(?:智谱\s*AI(?:\s*公司)?|智谱|OpenAI|微软|百度|阿里|腾讯)\s*(?:公司)?\s*(?:开发|研发|制作|创建|训练)(?:了)?\s*(?:整理助手|本软件|本程序|本应用|我|小助)/i,
+      /(?:我是|我作为)\s*(?:智谱\s*AI(?:\s*公司)?|智谱)\s*(?:研发|开发|训练)?(?:的大语言模型|的?AI|的?人工智能助手)?/i
     ];
-    for (const pat of patterns) {
+    for (let i = 0; i < patterns.length; i += 1) {
+      const pat = patterns[i];
       if (pat.test(s)) {
-        s = s.replace(pat, '「整理助手」是由您（开发者）独立设计开发的本地桌面软件，我作为内置助手小助，是由后端语言模型驱动协助您的');
+        s = s.replace(new RegExp(pat.source, 'gi'), '「整理助手」是由您（开发者）独立设计开发的本地桌面软件，我作为内置助手小助，是由后端语言模型驱动协助您的');
       }
     }
     return s;
@@ -434,14 +436,19 @@
      模型既不知道刚才查过哪儿，也不知道哪几个数字是真查到的 —— 只能重新瞎猜。
      现在每个历史回合都带一行「上一轮记录」，把工具摘要和失败原因一起给它。 */
 
-  /** 一个历史回合的自述：查了什么、拿到了什么、成没成 */
   function turnDigest(m) {
     const parts = [];
     const trace = Array.isArray(m.trace) ? m.trace : [];
     const ok = trace.filter((t) => t && t.ok);
     const bad = trace.filter((t) => t && !t.ok);
     if (ok.length) {
-      parts.push('查过：' + ok.slice(0, 6).map((t) => t.summary || t.label || t.tool).join('；'));
+      parts.push('查过：' + ok.slice(0, 6).map((t) => {
+        let label = t.summary || t.label || t.tool;
+        if (t.args && (t.args.dir || t.args.path)) {
+          label += ' [' + (t.args.dir || t.args.path) + ']';
+        }
+        return label;
+      }).join('；'));
     }
     if (bad.length) {
       parts.push('没查成：' + bad.slice(0, 4).map((t) => {

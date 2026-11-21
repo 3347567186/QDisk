@@ -3209,6 +3209,27 @@ class TestProcess(EngineCase):
         self.assertFalse(r["was_running"])
         self.assertFalse(r["closed"])
 
+    def test_process_list_and_pid(self):
+        r = self.rpc_ok("process.list", {"aggregate": True})
+        items = r["items"]
+        self.assertIsInstance(items, list)
+        self.assertGreater(len(items), 0)
+        # 验证有内存与进程统计
+        first = items[0]
+        self.assertIn("name", first)
+        self.assertIn("memory", first)
+        self.assertIn("process_count", first)
+        self.assertIn("threads", first)
+
+        # 尝试查询包含 python 的进程
+        r_py = self.rpc_ok("process.list", {"search": "python"})
+        self.assertIsInstance(r_py["items"], list)
+
+        # 测试关闭系统特权 PID 4 必须被拦截保护
+        r_sys = self.rpc("process.close", {"pid": 4})
+        self.assertFalse(r_sys["ok"])
+        self.assertIn("系统保留特权进程", r_sys["error"])
+
     def test_process_regex_rejection(self):
         r1 = self.rpc("process.close", {"name": "*"})
         self.assertFalse(r1["ok"])

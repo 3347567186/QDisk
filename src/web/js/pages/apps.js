@@ -350,10 +350,11 @@
 
     const tabAppsBtn = makeTabBtn('apps', 'apps', '已安装程序', 'Installed Apps');
     const tabStartupBtn = makeTabBtn('startup', 'spark', '开机自启', 'Startup Apps');
+    const tabProcsBtn = makeTabBtn('procs', 'scan', '后台进程', 'Running Procs');
     const tabFootprintBtn = makeTabBtn('footprint', 'chart', '空间画像', 'Space Footprint');
 
     const topTabBar = h('div', { class: 'toolbar', style: { marginBottom: '4px' } },
-      h('div', { class: 'seg' }, tabAppsBtn, tabStartupBtn, tabFootprintBtn),
+      h('div', { class: 'seg' }, tabAppsBtn, tabStartupBtn, tabProcsBtn, tabFootprintBtn),
       h('span', { class: 'spacer' })
     );
 
@@ -379,6 +380,17 @@
             tab: 'startup',
             count: StartupState.items.length,
             note: `共 ${StartupState.items.length} 个自启动项（已启用 ${StartupState.items.filter((i) => i.enabled).length}，失效 ${StartupState.items.filter((i) => !i.exists).length}）`
+          })
+        });
+      } else if (currentTab === 'procs') {
+        window.AIDrawer.open({
+          title: T('问助手 · 后台进程', 'Ask AI · Running Processes'),
+          ctx: () => ({
+            page: '应用与自启',
+            tool: '后台进程管理',
+            tab: 'procs',
+            count: ProcState.items.length,
+            note: `共 ${ProcState.items.length} 个后台应用 (${ProcState.rawCount} 进程)，物理内存总计 ${fmtSize(ProcState.totalMemory)}`
           })
         });
       } else if (currentTab === 'footprint') {
@@ -858,7 +870,420 @@
     }
 
     /* ================================================================
-       TAB 3: 静态空间画像透视 (Static Space Footprint)
+       TAB 3: 后台进程动态管理 (Running Processes Management)
+       ================================================================ */
+    const ProcState = {
+      items: [],
+      filtered: [],
+      visible: [],
+      view: 'all', // 'all' | 'apps' | 'system'
+      filter: '',
+      page: 1,
+      loading: false,
+      totalMemory: 0,
+      rawCount: 0
+    };
+
+    const procFilterInput = h('input', {
+      class: 'input grow',
+      type: 'search',
+      spellcheck: 'false',
+      placeholder: T('搜索进程名、路径或应用…', 'Search process name, path or app…')
+    });
+    procFilterInput.addEventListener('input', () => {
+      ProcState.filter = procFilterInput.value.trim().toLowerCase();
+      ProcState.page = 1;
+      applyProcFilter();
+    });
+
+    const btnRefreshProc = btn('刷新快照', 'Refresh', 'ghost sm', 'refresh', () => loadProcs(true));
+
+    const procViewBtns = {};
+    function procViewBtn(kind, zh, en) {
+      const b = h('button', {
+        class: 'chip' + (ProcState.view === kind ? ' active' : ''),
+        type: 'button',
+        onclick: () => {
+          if (ProcState.view === kind) return;
+          ProcState.view = kind;
+          Object.entries(procViewBtns).forEach(([k, el]) => el.classList.toggle('active', k === kind));
+          ProcState.page = 1;
+          applyProcFilter();
+        }
+      }, T(zh, en));
+      procViewBtns[kind] = b;
+      return b;
+    }
+
+    const procPageInput = h('input', {
+      class: 'input sm pg-input',
+      type: 'text',
+      value: '1',
+      title: T('输入页码回车跳转', 'Type page and Enter')
+    });
+    procPageInput.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        const p = parseInt(procPageInput.value, 10);
+        if (!isNaN(p)) gotoProcPage(p);
+      }
+    };
+    const procPageTotal = h('span', { class: 'pg-total' }, '1');
+    const btnProcPrev = pagerBtn('prev', () => gotoProcPage(ProcState.page - 1));
+    const btnProcNext = pagerBtn('next', () => gotoProcPage(ProcState.page + 1));
+    const procPagerBar = h('div', { class: 'row pg-bar', style: { gap: '4px', alignItems: 'center' } },
+      btnProcPrev, procPageInput, h('span', { style: { color: 'var(--text-3)', fontSize: '11px' } }, '/'), procPageTotal, btnProcNext
+    );
+
+    function gotoProcPage(p) {
+      const total = ProcState.filtered.length;
+      const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      ProcState.page = Math.min(Math.max(1, p), pages);
+      applyProcFilter();
+    }
+
+    const statProcAll = h('span', { class: 'badge', title: T('当前快照所有进程', 'All processes') }, '共 0 个应用');
+    const statProcApps = h('span', { class: 'badge ok', title: T('用户与第三方应用后台', 'User applications') }, '后台应用 0');
+    const statProcSys = h('span', { class: 'badge neutral', title: T('Windows 系统保留关键组件', 'System protected') }, '系统保护 0');
+    const statProcMem = h('span', { class: 'badge accent', title: T('当前进程总物理内存工作集', 'Total RAM') }, '内存 0 B');
+
+    const procPagePicker = UI.pageSizePick(PAGE_SIZE, [15, 30, 60, 100, 200], (n) => {
+      PAGE_SIZE = n;
+      ProcState.page = 1;
+      applyProcFilter();
+    });
+
+    const procToolbar1 = h('div', { class: 'toolbar row wrap', style: { gap: '8px', alignItems: 'center' } },
+      procFilterInput,
+      h('div', { class: 'seg' },
+        procViewBtn('all', '全部', 'All'),
+        procViewBtn('apps', '后台应用', 'Apps'),
+        procViewBtn('system', '系统保护', 'System')
+      ),
+      btnRefreshProc,
+      h('span', { class: 'spacer' }),
+      procPagerBar
+    );
+
+    const procToolbar2 = h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center', marginTop: '6px' } },
+      statProcAll, statProcApps, statProcSys, statProcMem,
+      h('span', { class: 'spacer' }),
+      procPagePicker
+    );
+
+    const procVisualBox = h('div', { class: 'proc-visual', style: { marginBottom: '12px' } });
+    const procTableBox = h('div', { class: 'table-wrap' });
+
+    const procsCard = card(
+      h('div', { class: 'card-title' },
+        h('h2', null, T('后台进程管理', 'Running Processes')),
+        h('span', { class: 'hint' }, T('实时快照 · 优雅通知释放 · 严禁系统误杀 · 0% 闲置后台负载', 'Instant snapshot, safe shutdown, zero idle CPU'))
+      ),
+      procVisualBox,
+      procToolbar1,
+      procToolbar2,
+      procTableBox
+    );
+    procsCard.style.display = 'none';
+
+    async function loadProcs(force) {
+      if (ProcState.loading) return;
+      ProcState.loading = true;
+      procTableBox.innerHTML = '';
+      const spinner = h('div', { class: 'center text-muted', style: { padding: '32px' } }, icon('refresh', 20), h('span', { style: { marginLeft: '8px' } }, T('正在生成进程快照…', 'Snapshotting processes…')));
+      procTableBox.appendChild(spinner);
+      try {
+        const res = await API.engineCall('process.list', { aggregate: true });
+        ProcState.items = Array.isArray(res && res.items) ? res.items : [];
+        ProcState.totalMemory = Number(res && res.total_memory) || 0;
+        ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
+        ProcState.page = 1;
+        applyProcFilter();
+        renderProcVisual();
+      } catch (err) {
+        procTableBox.innerHTML = '';
+        procTableBox.appendChild(empty(T('读取进程列表失败', 'Failed to read processes'), (err && err.message) || String(err)));
+      } finally {
+        ProcState.loading = false;
+      }
+    }
+
+    function applyProcFilter() {
+      const q = String(ProcState.filter || '').trim().toLowerCase();
+      let list = ProcState.items.slice();
+      if (ProcState.view === 'apps') {
+        list = list.filter((it) => !it.is_system);
+      } else if (ProcState.view === 'system') {
+        list = list.filter((it) => it.is_system);
+      }
+      if (q) {
+        list = list.filter((it) => {
+          return it.name.toLowerCase().includes(q)
+            || (it.exe_path && it.exe_path.toLowerCase().includes(q))
+            || it.clean_name.toLowerCase().includes(q);
+        });
+      }
+      ProcState.filtered = list;
+      const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+      ProcState.page = Math.min(Math.max(1, ProcState.page), pages);
+      const start = (ProcState.page - 1) * PAGE_SIZE;
+      ProcState.visible = list.slice(start, start + PAGE_SIZE);
+
+      renderProcStats();
+      renderProcTable();
+    }
+
+    function renderProcStats() {
+      const total = ProcState.items.length;
+      const apps = ProcState.items.filter((it) => !it.is_system).length;
+      const sys = ProcState.items.filter((it) => it.is_system).length;
+      statProcAll.textContent = `共 ${fmtCount(total)} 个应用 (${ProcState.rawCount} 进程)`;
+      statProcApps.textContent = `后台应用 ${fmtCount(apps)}`;
+      statProcSys.textContent = `系统保护 ${fmtCount(sys)}`;
+      statProcMem.textContent = `总内存 ${fmtSize(ProcState.totalMemory)}`;
+
+      const pages = Math.max(1, Math.ceil(ProcState.filtered.length / PAGE_SIZE));
+      procPageInput.value = String(ProcState.page);
+      procPageTotal.textContent = String(pages);
+      btnProcPrev.disabled = ProcState.page <= 1;
+      btnProcNext.disabled = ProcState.page >= pages;
+    }
+
+    function renderProcVisual() {
+      procVisualBox.innerHTML = '';
+      if (!ProcState.items.length) return;
+      const topProcs = ProcState.items.slice(0, 5);
+      const topSum = topProcs.reduce((sum, p) => sum + (p.memory || 0), 0);
+      const otherMem = Math.max(0, ProcState.totalMemory - topSum);
+
+      const slices = topProcs.map((p) => ({
+        name: p.name,
+        mem: p.memory || 0,
+        pct: ProcState.totalMemory ? (p.memory || 0) / ProcState.totalMemory : 0
+      }));
+      if (otherMem > 0) {
+        slices.push({
+          name: T('其他进程', 'Other processes'),
+          mem: otherMem,
+          pct: ProcState.totalMemory ? otherMem / ProcState.totalMemory : 0
+        });
+      }
+
+      const palette = [
+        'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)',
+        'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'
+      ];
+
+      const r = 50;
+      const circ = 2 * Math.PI * r;
+      let offset = 0;
+      const paths = slices.map((s, idx) => {
+        const strokeLen = s.pct * circ;
+        const color = palette[idx % palette.length];
+        const circle = `<circle cx="65" cy="65" r="${r}" fill="none" stroke="${color}" stroke-width="16" stroke-dasharray="${strokeLen} ${circ - strokeLen}" stroke-dashoffset="${-offset}" />`;
+        offset += strokeLen;
+        return circle;
+      }).join('');
+
+      const svgHtml = `
+        <svg viewBox="0 0 130 130" width="100" height="100" style="transform: rotate(-90deg); display: block; flex-shrink: 0;">
+          <circle cx="65" cy="65" r="${r}" fill="none" stroke="var(--line)" stroke-width="16" />
+          ${paths}
+        </svg>
+      `;
+
+      const chartWrap = h('div', {
+        class: 'row wrap',
+        style: {
+          alignItems: 'center',
+          gap: '20px',
+          padding: '12px 16px',
+          background: 'var(--surface-2)',
+          borderRadius: 'var(--radius)',
+          border: '1px solid var(--line)',
+          marginBottom: '8px'
+        }
+      });
+      const svgContainer = h('div', { style: { position: 'relative', width: '100px', height: '100px', flexShrink: 0 } });
+      svgContainer.innerHTML = svgHtml;
+
+      const legend = h('div', { class: 'row wrap grow', style: { gap: '10px 20px', alignItems: 'center' } });
+      slices.forEach((s, idx) => {
+        const color = palette[idx % palette.length];
+        const item = h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', fontSize: '12px', minWidth: '140px' } },
+          h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: color, flexShrink: 0 } }),
+          h('span', { class: 'ellipsis', style: { maxWidth: '120px', color: 'var(--text-1)' }, title: s.name }, s.name),
+          h('span', { style: { color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums' } }, fmtSize(s.mem))
+        );
+        legend.appendChild(item);
+      });
+
+      chartWrap.appendChild(svgContainer);
+      chartWrap.appendChild(legend);
+      procVisualBox.appendChild(chartWrap);
+    }
+
+    async function closeProcOne(it, force) {
+      if (!it) return;
+      if (it.is_system) {
+        toast(T('系统核心组件受保护，禁止关闭', 'System component is protected'), 'warn');
+        return;
+      }
+      try {
+        const r = await API.engineCall('process.close', {
+          name: it.clean_name,
+          force: !!force,
+          confirm_sensitive: false
+        });
+        if (r && r.need_confirm) {
+          const ok = await UI.confirm(
+            T('敏感数据应用提示', 'Sensitive App Warning'),
+            r.warning + '\n\n' + T('确定要强制关闭该进程吗？', 'Are you sure you want to close it?')
+          );
+          if (!ok) return;
+          await API.engineCall('process.close', {
+            name: it.clean_name,
+            force: true,
+            confirm_sensitive: true
+          });
+        }
+        toast(T(`已关闭进程【${it.name}】`, `Closed process [${it.name}]`), 'ok');
+        loadProcs(true);
+      } catch (err) {
+        toast(T('关闭进程失败：', 'Failed to close process: ') + ((err && err.message) || String(err)), 'error');
+      }
+    }
+
+    function renderProcTable() {
+      procTableBox.innerHTML = '';
+      if (!ProcState.filtered.length) {
+        procTableBox.appendChild(empty(T('未找到匹配的后台进程', 'No matching processes found'), T('可调整搜索关键字或切换分类筛选', 'Try clearing filter or switching categories')));
+        return;
+      }
+
+      const columns = [
+        {
+          key: 'name',
+          title: T('应用与进程', 'App & Process'),
+          render: (it) => {
+            const iconEl = it.exe_path ? appIcon(it.exe_path, it.name) : letterBlock(it);
+            const countTag = it.process_count > 1
+              ? h('span', { class: 'badge', style: { marginLeft: '6px' } }, `${it.process_count} 进程`)
+              : (it.pids && it.pids.length ? h('span', { class: 'badge neutral', style: { marginLeft: '6px' } }, `PID ${it.pids[0]}`) : null);
+
+            return h('div', { class: 'name' },
+              iconEl,
+              h('div', { class: 'txt' },
+                h('div', { class: 'ellipsis', title: it.exe_path || it.name, style: { fontWeight: '500' } }, it.name),
+                it.exe_path ? h('div', { class: 'hint ellipsis', style: { fontSize: '11px' }, title: it.exe_path }, it.exe_path) : null
+              ),
+              countTag
+            );
+          }
+        },
+        {
+          key: 'memory',
+          title: T('占用内存', 'Memory'),
+          width: '140px',
+          render: (it) => {
+            const memText = fmtSize(it.memory);
+            const maxMem = 500 * 1024 * 1024; // 500MB scale
+            const pct = Math.min(100, Math.max(3, Math.round((it.memory / maxMem) * 100)));
+            const isHigh = it.memory > 400 * 1024 * 1024;
+            return h('div', { style: { minWidth: '100px' } },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontVariantNumeric: 'tabular-nums' } },
+                h('span', { style: { fontWeight: isHigh ? '600' : 'normal', color: isHigh ? 'var(--warn)' : 'inherit' } }, memText)
+              ),
+              h('div', { style: { height: '4px', background: 'var(--line)', borderRadius: '2px', overflow: 'hidden', marginTop: '3px' } },
+                h('div', { style: { width: `${pct}%`, height: '100%', background: isHigh ? 'var(--warn)' : 'var(--accent)' } })
+              )
+            );
+          }
+        },
+        {
+          key: 'threads',
+          title: T('线程', 'Threads'),
+          width: '70px',
+          render: (it) => h('span', { class: 'num' }, String(it.threads || 1))
+        },
+        {
+          key: 'type',
+          title: T('属性', 'Type'),
+          width: '90px',
+          render: (it) => {
+            if (it.is_system) {
+              return h('span', { class: 'badge neutral' }, T('系统保护', 'System'));
+            }
+            return h('span', { class: 'badge ok' }, T('后台应用', 'App'));
+          }
+        },
+        {
+          key: 'actions',
+          title: T('操作', 'Actions'),
+          width: '130px',
+          render: (it) => {
+            const bClose = btn('结束', 'Kill', 'danger sm', 'power', () => closeProcOne(it, false));
+            if (it.is_system) {
+              bClose.disabled = true;
+              bClose.title = T('系统核心保护进程不可关闭', 'System process is protected');
+            }
+            const bFolder = iconBtn('folder', '打开文件位置', () => {
+              if (it.exe_path) openPath(it.exe_path);
+            });
+            if (!it.exe_path) bFolder.disabled = true;
+
+            return h('div', { class: 'row', style: { gap: '4px' } }, bClose, bFolder);
+          }
+        }
+      ];
+
+      const tbl = UI.table({
+        columns,
+        rows: ProcState.visible,
+        rowKey: (row, i) => String(i)
+      });
+      procTableBox.appendChild(tbl);
+    }
+
+    /* 后台进程右键菜单 */
+    attachMenu(procTableBox, (e) => {
+      const tr = e.target.closest('tbody tr[data-key]');
+      if (tr) {
+        const it = ProcState.visible[Number(tr.dataset.key)];
+        if (!it) return [];
+        return [
+          { header: it.name },
+          { label: T('结束任务 (优雅关闭)', 'Close task'), icon: 'power',
+            danger: true, disabled: it.is_system, action: () => closeProcOne(it, false) },
+          { label: T('强制结束进程', 'Force kill'), icon: 'trash',
+            danger: true, disabled: it.is_system, action: () => closeProcOne(it, true) },
+          { sep: true },
+          { label: T('打开文件所在位置', 'Open file location'), icon: 'folder',
+            disabled: !it.exe_path, action: () => openPath(it.exe_path) },
+          { label: T('复制完整路径', 'Copy full path'), icon: 'copy',
+            disabled: !it.exe_path, action: () => copyText(it.exe_path) },
+          { label: T('复制进程名称', 'Copy name'), icon: 'copy', action: () => copyText(it.name) },
+          { sep: true },
+          { label: T('在「已安装程序」中查找', 'Find in installed apps'), icon: 'apps', action: () => {
+            switchTab('apps');
+            const kw = it.clean_name;
+            searchInput.value = kw;
+            S.filter = kw.trim().toLowerCase();
+            applyFilter();
+          }},
+          { label: T('在「开机自启」中查找', 'Find in startup items'), icon: 'spark', action: () => {
+            switchTab('startup');
+            const kw = it.clean_name;
+            startupFilterInput.value = kw;
+            StartupState.filter = kw.trim().toLowerCase();
+            applyStartupFilter();
+          }}
+        ];
+      }
+      return [];
+    });
+
+    /* ================================================================
+       TAB 4: 静态空间画像透视 (Static Space Footprint)
        ================================================================ */
     const footprintCard = card(
       h('div', { class: 'card-title' },
@@ -1010,16 +1435,20 @@
       currentTab = tab;
       tabAppsBtn.className = 'chip' + (tab === 'apps' ? ' active' : '');
       tabStartupBtn.className = 'chip' + (tab === 'startup' ? ' active' : '');
+      tabProcsBtn.className = 'chip' + (tab === 'procs' ? ' active' : '');
       tabFootprintBtn.className = 'chip' + (tab === 'footprint' ? ' active' : '');
 
       adminBar.style.display = tab === 'apps' ? '' : 'none';
       mainCard.style.display = tab === 'apps' ? '' : 'none';
       loSection.style.display = tab === 'apps' ? '' : 'none';
       startupCard.style.display = tab === 'startup' ? '' : 'none';
+      procsCard.style.display = tab === 'procs' ? '' : 'none';
       footprintCard.style.display = tab === 'footprint' ? '' : 'none';
 
       if (tab === 'startup' && !StartupState.items.length) {
         loadStartup(false);
+      } else if (tab === 'procs' && !ProcState.items.length) {
+        loadProcs(false);
       } else if (tab === 'footprint') {
         renderFootprint();
       }
@@ -1027,6 +1456,7 @@
 
     tabAppsBtn.onclick = () => switchTab('apps');
     tabStartupBtn.onclick = () => switchTab('startup');
+    tabProcsBtn.onclick = () => switchTab('procs');
     tabFootprintBtn.onclick = () => switchTab('footprint');
 
     root.appendChild(topTabBar);
@@ -1034,6 +1464,7 @@
     root.appendChild(mainCard);
     root.appendChild(loSection);
     root.appendChild(startupCard);
+    root.appendChild(procsCard);
     root.appendChild(footprintCard);
 
     /* 右键菜单：对齐 Geek Uninstaller 的完整动作集 */

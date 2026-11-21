@@ -461,7 +461,10 @@
     const r = await API.aiStore('read', name + (name.endsWith('.json') ? '' : '.json'), null);
     try {
       const obj = JSON.parse(r.content);
-      if (obj && Array.isArray(obj.messages)) return obj;
+      if (obj && Array.isArray(obj.messages)) {
+        if (!Array.isArray(obj.facts)) obj.facts = [];
+        return obj;
+      }
     } catch { /* 坏文件当作空会话 */ }
     return null;
   }
@@ -642,6 +645,7 @@
       created: session.created || Date.now(),
       updated: Date.now(),
       version: 3,
+      facts: Array.isArray(session.facts) ? session.facts.slice(0, 30) : [],
       messages: (session.messages || []).slice(-LIMITS.messages).map(slimMsg)
     };
     const acts = (session.acts || []).slice(-LIMITS.acts).map(slimAct).filter(Boolean);

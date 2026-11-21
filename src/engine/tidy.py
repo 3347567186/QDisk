@@ -7943,31 +7943,34 @@ def _engine_process_is_running(proc_name):
 
 def _engine_process_close(params):
     """process.close：安全协同释放占用文件的进程（优雅通知 + 系统核心白名单保护）。"""
-    name = _engine_get(params, "name", "", str)
-    raw_name = name.strip()
-    if not raw_name:
-        raise EngineError("参数 name 不能为空")
+    pid = _engine_get(params, "pid", 0, int)
+    name = _engine_get(params, "name", "", str).strip()
+
+    if not pid and not name:
+        raise EngineError("参数 pid 或 name 至少需要提供一个")
 
     import re
-    if not re.match(r"^[a-zA-Z0-9_\-\.]+$", raw_name):
+    if name and not re.match(r"^[a-zA-Z0-9_\-\.]+$", name):
         raise EngineError("非法进程名，只允许包含字母、数字、下划线、连字符和点")
 
     force = _engine_get(params, "force", False, bool)
     confirm_sensitive = _engine_get(params, "confirm_sensitive", False, bool)
 
-    clean = raw_name.lower()
+    clean = name.lower()
     if clean.endswith(".exe"):
         clean = clean[:-4]
-    if not clean:
-        raise EngineError("进程名不能为空")
 
     # 绝对系统关键进程白名单（红线）
     _SYS_PROTECTED = {
         "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
         "startmenuexperiencehost", "tidyassistant", "整理助手", "python", "conhost",
-        "runtimebroker", "taskmgr", "system", "idle"
+        "runtimebroker", "taskmgr", "system", "idle", "winlogon", "sihost", "fontdrvhost"
     }
-    if clean in _SYS_PROTECTED:
+
+    if pid and pid <= 4:
+        raise EngineError("【PID %d】是系统保留特权进程，禁止关闭" % pid)
+
+    if clean and clean in _SYS_PROTECTED:
         raise EngineError("【%s】是 Windows 核心受保护组件，禁止关闭以防桌面崩溃" % name)
 
     # 敏感数据应用（如微信）
@@ -7979,12 +7982,27 @@ def _engine_process_close(params):
             "warning": "【%s】包含本地数据库文件，强行关闭可能导致未保存聊天记录损坏，建议在软件内退出" % name
         }
 
-    # 检查进程当前是否正在运行
+    import subprocess, time
+
+    if pid:
+        # 按 PID 关闭单进程
+        try:
+            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True, text=True, timeout=5)
+        except Exception:
+            pass
+
+        if force:
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, text=True, timeout=5)
+            except Exception:
+                pass
+        return {"ok": True, "pid": pid, "name": name or str(pid), "closed": True}
+
+    # 按名称关闭
     was_running = _engine_process_is_running(clean + ".exe")
     if not was_running:
         return {"ok": True, "name": clean, "was_running": False, "closed": False}
 
-    import subprocess, time
     # 1. 尝试优雅通知退出（taskkill 不加 /F 发送 WM_CLOSE）
     try:
         subprocess.run(["taskkill", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
@@ -8013,6 +8031,161 @@ def _engine_process_close(params):
 
     closed = not _engine_process_is_running(clean + ".exe")
     return {"ok": True, "name": clean, "was_running": was_running, "closed": closed}
+
+
+def _engine_process_list(params=None):
+    """process.list：毫秒级快照系统当前运行进程（通过 Win32 Toolhelp32Snapshot + psapi，不产生静默轮询）。"""
+    if params is None:
+        params = {}
+    aggregate = _engine_get(params, "aggregate", True, bool)
+    search = _engine_get(params, "search", "", str).strip().lower()
+
+    if os.name != "nt":
+        return {"items": [], "total_count": 0, "total_memory": 0, "running": False}
+
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+
+    class _PE32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260)
+        ]
+
+    class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    _SYS_PROTECTED = {
+        "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
+        "startmenuexperiencehost", "tidyassistant", "整理助手", "python", "conhost",
+        "runtimebroker", "taskmgr", "system", "idle", "winlogon", "sihost", "fontdrvhost"
+    }
+
+    hSnap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not hSnap or hSnap == -1:
+        return {"items": [], "total_count": 0, "total_memory": 0}
+
+    pe = _PE32W()
+    pe.dwSize = ctypes.sizeof(_PE32W)
+    ok = ctypes.windll.kernel32.Process32FirstW(hSnap, ctypes.byref(pe))
+
+    raw_procs = []
+    total_memory = 0
+
+    while ok:
+        pid = int(pe.th32ProcessID)
+        name = str(pe.szExeFile)
+        threads = int(pe.cntThreads)
+        mem_size = 0
+        exe_path = ""
+
+        # 获取物理内存工作集
+        hProcMem = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+        if hProcMem:
+            try:
+                mem = _PROCESS_MEMORY_COUNTERS()
+                mem.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
+                if ctypes.windll.psapi.GetProcessMemoryInfo(hProcMem, ctypes.byref(mem), mem.cb):
+                    mem_size = int(mem.WorkingSetSize)
+            except Exception:
+                pass
+            finally:
+                ctypes.windll.kernel32.CloseHandle(hProcMem)
+
+        # 获取可执行文件路径
+        hProcPath = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if hProcPath:
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if ctypes.windll.kernel32.QueryFullProcessImageNameW(hProcPath, 0, buf, ctypes.byref(size)):
+                    exe_path = str(buf.value)
+            except Exception:
+                pass
+            finally:
+                ctypes.windll.kernel32.CloseHandle(hProcPath)
+
+        clean = name.lower()
+        if clean.endswith(".exe"):
+            clean = clean[:-4]
+        is_system = clean in _SYS_PROTECTED or pid <= 4
+
+        total_memory += mem_size
+        raw_procs.append({
+            "pid": pid,
+            "name": name,
+            "clean_name": clean,
+            "threads": threads,
+            "memory": mem_size,
+            "exe_path": exe_path,
+            "is_system": is_system
+        })
+        ok = ctypes.windll.kernel32.Process32NextW(hSnap, ctypes.byref(pe))
+
+    ctypes.windll.kernel32.CloseHandle(hSnap)
+
+    if aggregate:
+        grouped = {}
+        for p in raw_procs:
+            key = p["clean_name"]
+            if key not in grouped:
+                grouped[key] = {
+                    "name": p["name"],
+                    "clean_name": p["clean_name"],
+                    "pids": [p["pid"]],
+                    "process_count": 1,
+                    "threads": p["threads"],
+                    "memory": p["memory"],
+                    "exe_path": p["exe_path"],
+                    "is_system": p["is_system"]
+                }
+            else:
+                g = grouped[key]
+                g["pids"].append(p["pid"])
+                g["process_count"] += 1
+                g["threads"] += p["threads"]
+                g["memory"] += p["memory"]
+                if not g["exe_path"] and p["exe_path"]:
+                    g["exe_path"] = p["exe_path"]
+        items = list(grouped.values())
+    else:
+        items = raw_procs
+
+    if search:
+        items = [it for it in items if search in it["name"].lower() or search in (it.get("exe_path") or "").lower()]
+
+    items.sort(key=lambda x: x["memory"], reverse=True)
+
+    return {
+        "items": items,
+        "total_count": len(items),
+        "raw_count": len(raw_procs),
+        "total_memory": total_memory
+    }
 
 
 def _engine_index_meta_path():
@@ -8876,6 +9049,7 @@ _ENGINE_METHODS = {
     "startup.toggle": _engine_startup_toggle,
     "startup.delete": _engine_startup_delete,
     "process.close": _engine_process_close,
+    "process.list": _engine_process_list,
     "search.status": _engine_search_status,
     "search.index": _engine_search_index,
     "search.query": _engine_search_query,
