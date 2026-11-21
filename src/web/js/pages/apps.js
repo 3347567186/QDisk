@@ -3,6 +3,7 @@
   'use strict';
   const { h, T, icon, fmtCount, fmtBytes, toast, busy, confirm, card, section, table,
     skeleton, empty, attachMenu, modal, softIn, setActions } = UI;
+  const fmtSize = fmtBytes;
 
   let liveJump = null;
 

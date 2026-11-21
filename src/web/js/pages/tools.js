@@ -120,8 +120,6 @@
     let lastActiveSection = 'big';
     bigInput.addEventListener('focus', () => { lastActiveSection = 'big'; });
     bigBtn.addEventListener('click', () => { lastActiveSection = 'big'; });
-    emptyInput.addEventListener('focus', () => { lastActiveSection = 'empty'; });
-    emptyBtn.addEventListener('click', () => { lastActiveSection = 'empty'; });
 
     /* 页面级常驻【问助手】入口（置顶于窗口右上角，永不随卡片折叠而消失） */
     const askMark = window.SteveAvatar
@@ -213,6 +211,8 @@
       const d = await API.pickFolder();
       if (d) { emptyInput.value = d; emptyInput.focus(); }
     };
+    emptyInput.addEventListener('focus', () => { lastActiveSection = 'empty'; });
+    emptyBtn.addEventListener('click', () => { lastActiveSection = 'empty'; });
     const depthSeg = h('div', { class: 'seg' });
     const emptySel = h('button', { class: 'btn sm', disabled: true }, T('全选可删', 'Select all'));
     const emptyDel = h('button', { class: 'btn danger', disabled: true }, T('删除选中', 'Delete selected'));

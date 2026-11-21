@@ -63,6 +63,7 @@
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
     return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
   }
+  const fmtSize = fmtBytes;
   const fmtCount = (n) => (Number(n) || 0).toLocaleString(state.lang === 'en-US' ? 'en-US' : 'zh-CN');
   function fmtTime(sec) {
     if (!sec) return '—';
@@ -804,7 +805,7 @@
   }
 
   window.UI = {
-    h, T, fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
+    h, T, fmtBytes, fmtSize: fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
     skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, setLang, onLangChange,
     menu, attachMenu, closeMenu, modal, preview, closePreview,
     pageSize, pageSizePick, PAGE_SIZES,

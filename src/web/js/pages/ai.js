@@ -295,12 +295,14 @@
          boot 内部只跑一次（chatui 里立了 booted 牌子）：抽屉先开过时
          现场已经 boot 过了，这里再跑会把当前会话重放一遍。 */
       chat.boot().then(() => {
+        if (!chat) return;
         activeId = chat.session ? chat.session.id : null;
         paintActive();
         /* 首屏补一次运行态：boot 之前的那些通知没有订阅者，
            这里主动拉一遍，免得上一次会话还在跑却看不见 */
         try { if (chat.activity) renderBusy(chat.activity()); } catch (e) { /* 拉不到就不画 */ }
       }).catch(() => {
+        if (!chat) return;
         activeId = chat.session ? chat.session.id : null;
         paintActive();
       });
