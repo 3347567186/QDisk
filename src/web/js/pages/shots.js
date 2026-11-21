@@ -130,7 +130,6 @@
         ['all', 'shot', 'image', 'video'].map((k) => {
           const b = h('button', {
             class: 'btn sm ' + (S.kind === k ? 'primary' : 'ghost'),
-            title: T('只看' + kindLabels[k], 'Show ' + kindLabels[k].toLowerCase()),
             onclick: () => { S.kind = k; S.page = 1; syncKind(); render(); }
           }, h('span', { text: kindLabels[k] }));
           kindBtns[k] = b;

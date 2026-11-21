@@ -4384,6 +4384,7 @@ html[data-theme="dark"] .ai-tnav-pop {
 .pool-btn { flex: none; gap: 6px; }
 .pool-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .pool-search { flex: 1 1 auto; min-width: 0; }
+.pool-filter-btn { flex: none; white-space: nowrap; font-size: 11px; padding: 4px 10px; }
 .pool-list {
   max-height: min(52vh, 440px); overflow: auto;
   border: 1px solid var(--line); border-radius: var(--radius);

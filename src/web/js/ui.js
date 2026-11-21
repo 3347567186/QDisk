@@ -713,30 +713,75 @@
       tip.classList.add('on');
     }
 
+    const NOISE_PREFIX = /^(只看|切换到|切换|查看|点击|显示|选择|打开|show\s+|switch\s+to\s+|view\s+|select\s+|click\s+to\s+)/i;
+
+    function shouldDisplayTip(host, text) {
+      if (!text) return false;
+      if (host.hasAttribute('data-no-tip')) return false;
+      if (host.hasAttribute('data-tip')) return true;
+
+      const inner = (host.innerText || host.textContent || '').trim();
+      if (!inner) {
+        return true; // 纯图标或无文本：展示以消除不确定性
+      }
+
+      // 物理截断检查：长路径或文本被省略号截断时，必须完整展示
+      if (host.scrollWidth > host.clientWidth + 1) {
+        return true;
+      }
+
+      const cleanTip = text.replace(NOISE_PREFIX, '').trim().toLowerCase();
+      const cleanInner = inner.toLowerCase();
+
+      // 零信息增量判定：剔除动词噪音后与控件文字相同，坚决不显示
+      if (cleanTip === cleanInner || text.trim().toLowerCase() === cleanInner) {
+        return false;
+      }
+
+      // 增量文本显著较长（附带业务约束、不可逆后果或操作说明）：放行
+      if (text.length > inner.length + 4) {
+        return true;
+      }
+
+      return true;
+    }
+
     document.addEventListener('pointerover', (e) => {
       const t = e.target;
       if (!t || !(t instanceof Element)) return;
-      // 排除输入框、富文本以及 tooltip 自身
-      if (t.id === 'global-tooltip' || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return;
+      // 排除输入框、富文本、下拉框以及 tooltip 自身
+      if (t.id === 'global-tooltip' || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
 
       const host = t.closest('[title], [data-tip], [data-global-tip]');
       if (!host) { hide(); return; }
 
       // 提取文字并抹除原生 title（防止操作系统黑色方块遮挡）
+      // 同时保全无障碍：若无显式 aria-label，则自动镜像注入，保证屏幕阅读器正常播报
       if (host.hasAttribute('title')) {
         const raw = host.getAttribute('title');
-        if (raw) host.dataset.globalTip = raw;
+        if (raw) {
+          host.dataset.globalTip = raw;
+          if (!host.hasAttribute('aria-label')) {
+            host.setAttribute('aria-label', raw);
+          }
+        }
         host.removeAttribute('title');
       }
 
       const text = host.dataset.globalTip || host.dataset.tip;
       if (!text) { hide(); return; }
 
+      // 第一性原理信息增量过滤
+      if (!shouldDisplayTip(host, text)) {
+        hide();
+        return;
+      }
+
       if (activeEl === host) return;
       if (timer) clearTimeout(timer);
 
-      // 轻微延时 100ms 进场，避免快速滑过整排按钮时闪烁
-      timer = setTimeout(() => show(host, text), 110);
+      // 人机工程延时 220ms，与 --dur-3 动效节奏一致，避免快速划过时视觉闪烁
+      timer = setTimeout(() => show(host, text), 220);
     }, true);
 
     document.addEventListener('pointerout', (e) => {

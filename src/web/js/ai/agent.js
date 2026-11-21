@@ -277,10 +277,55 @@
 
   /* ---------------- 历史压缩（方案 §6） ---------------- */
 
+  /** 从历史对话与当前提问中提取会话事实（双层工作记忆）：
+   *  1. 软件归属：用户声明自己是开发者 / 借用模型协助
+   *  2. 保护路径：用户明确说不能动/不能删的目录
+   *  3. 用户偏好：输出格式/代码块偏好
+   */
+  function extractSessionFacts(history, currentFacts) {
+    const facts = Array.isArray(currentFacts) ? currentFacts.slice() : [];
+    const addFact = (f) => {
+      if (f && !facts.includes(f)) facts.push(f);
+    };
+
+    const scanText = (text) => {
+      const s = String(text || '').trim();
+      if (!s) return;
+      // 1. 软件归属与开发者身份
+      if ((/(?:我(?:是|自己)?开发|我写|我做|独立开发|我的项目|我独立完成|借用(?:了)?你)/.test(s) && /(?:整理助手|软件|程序|客户端|工具)/.test(s))
+          || /(?:我是开发|软件是我开发|整理助手是我开发)/.test(s)) {
+        addFact('【软件归属】当前用户是「整理助手」桌面客户端的唯一独立开发者；AI 助手只是接入的模型驱动的内置助手「小助」。当被问及开发者或归属时，必须明确说明软件是用户独立开发的，严禁回答成智谱或其它外部厂商。');
+      }
+      // 2. 受保护路径
+      const protRe = /(?:不能|不要|别|禁止|切勿)(?:删除|动|碰|清理)\s*([A-Za-z]:\\[^\s，。；：、）)」"'<>|?*]+)/g;
+      let pm = protRe.exec(s);
+      while (pm) {
+        addFact('【受保护路径】用户明确要求不得删除或改动：' + pm[1]);
+        pm = protRe.exec(s);
+      }
+      const protRe2 = /([A-Za-z]:\\[^\s，。；：、）)」"'<>|?*]+)\s*(?:不能|不要|别|禁止|切勿)(?:删|动|碰|清理)/g;
+      let pm2 = protRe2.exec(s);
+      while (pm2) {
+        addFact('【受保护路径】用户明确要求不得删除或改动：' + pm2[1]);
+        pm2 = protRe2.exec(s);
+      }
+      // 3. 输出偏好
+      if (/(?:只输出|只需要|仅输出)\s*(?:yaml|json|代码块|代码)/i.test(s)) {
+        addFact('【输出偏好】用户偏好直接输出代码/格式块，不要冗余客套话。');
+      }
+    };
+
+    (Array.isArray(history) ? history : []).forEach((m) => {
+      if (m && m.role === 'user') scanText(m.content);
+    });
+    return facts;
+  }
+
   /* 上下文压缩：阈值按「模型窗口」的百分比算，不按写死的 token 数。
-     50% 以下不动；50–70% 软裁剪（工具结果留头尾）；
-     70–85% 硬裁剪（更早的工具结果压成一行）；
-     ≥85% 摘要压缩（更早的对话压成一行速记，保留路径与否定结论）。
+     50% 以下不动；50–70% 软裁剪（工具结果留头尾，非代码长回复适度瘦身）；
+     70–85% 硬裁剪（工具结果压成一行，早期非代码回复压成摘要）；
+     ≥85% 语义摘要压缩（提取早期议题、路径、否定结论与共识事实，合成为结构化记忆卡）。
+     代码块（```...```）全程严格保护，绝不破坏。
      窗口来自端点上报（没报就按模型名推断，默认 1M），所以同一套代码在 32K
      和 1M 的模型上都不会「明明装得下却先掐掉」。 */
   function compressHistory(msgs, window) {
@@ -289,41 +334,74 @@
     if (total() <= win * 0.5) return { msgs, level: 'none' };
     const keepIdx = Math.max(1, msgs.length - KEEP_TURNS * 2);
     let level = 'soft';
-    // 50–70%：软裁剪，工具结果留头 8 行 + 尾 2 行
+
+    // 50–70%：软裁剪
+    // 1) 工具结果留头 8 行 + 尾 2 行
+    // 2) 早期助手的纯文字长回答（无代码块、>400 字）软裁剪首尾
     for (let i = 1; i < keepIdx; i += 1) {
       const m = msgs[i];
-      if (m.role !== 'user' || !/^工具结果/.test(m.content)) continue;
-      const lines = m.content.split('\n');
-      if (lines.length > 11) {
-        msgs[i] = { role: 'user', content: lines.slice(0, 8).concat(['…（已截断）'], lines.slice(-2)).join('\n') };
+      if (!m || !m.content) continue;
+      if (m.role === 'user' && /^工具结果/.test(m.content)) {
+        const lines = m.content.split('\n');
+        if (lines.length > 11) {
+          msgs[i] = { role: 'user', content: lines.slice(0, 8).concat(['…（已截断）'], lines.slice(-2)).join('\n') };
+        }
+      } else if (m.role === 'assistant' && !m.content.includes('```') && m.content.length > 400) {
+        msgs[i] = {
+          role: 'assistant',
+          content: m.content.slice(0, 200) + '\n…（部分解释已省略）\n' + m.content.slice(-100)
+        };
       }
     }
     if (total() <= win * 0.7) return { msgs, level };
-    // 70–85%：硬裁剪，更早的工具结果压成一行
+
+    // 70–85%：硬裁剪
     level = 'hard';
     for (let i = 1; i < keepIdx; i += 1) {
       const m = msgs[i];
-      if (m.role !== 'user' || !/^工具结果/.test(m.content)) continue;
-      const head = m.content.split('\n')[0].slice(0, 60);
-      msgs[i] = { role: 'user', content: head + ' …（早期结果已省略）' };
+      if (!m || !m.content) continue;
+      if (m.role === 'user' && /^工具结果/.test(m.content)) {
+        const head = m.content.split('\n')[0].slice(0, 60);
+        msgs[i] = { role: 'user', content: head + ' …（早期结果已省略）' };
+      } else if (m.role === 'assistant' && !m.content.includes('```') && m.content.length > 150) {
+        msgs[i] = {
+          role: 'assistant',
+          content: m.content.slice(0, 120) + ' …（早期回答已简略）'
+        };
+      }
     }
     if (total() <= win * 0.85) return { msgs, level };
-    // ≥85%：摘要压缩，把 keepIdx 之前压成一行速记（保留路径与否定结论）
+
+    // ≥85%：语义摘要压缩，把 keepIdx 之前压成结构化速记卡（保留议题、路径、共识与否定结论）
     level = 'summary';
     const dropped = msgs.slice(1, keepIdx);
     const paths = [];
     const negatives = [];
+    const topics = [];
+
     dropped.forEach((m) => {
-      const found = m.content.match(/[A-Za-z]:\\[^\s"',）)]+/g);
-      if (found) found.forEach((p) => { if (paths.length < 6 && !paths.includes(p)) paths.push(p); });
-      if (/不能删|不要删|已安装|受保护|不要动/.test(m.content)) {
-        const line = m.content.split('\n').find((l) => /不能删|不要删|已安装|受保护|不要动/.test(l));
-        if (line && negatives.length < 4) negatives.push(line.trim().slice(0, 60));
+      if (!m || !m.content) return;
+      const c = String(m.content);
+      // 提取路径
+      const found = c.match(/[A-Za-z]:\\[^\s"',）)]+/g);
+      if (found) found.forEach((p) => { if (paths.length < 8 && !paths.includes(p)) paths.push(p); });
+      // 提取否定结论 / 保护
+      if (/不能删|不要删|已安装|受保护|不要动|切勿/.test(c)) {
+        const line = c.split('\n').find((l) => /不能删|不要删|已安装|受保护|不要动|切勿/.test(l));
+        if (line && negatives.length < 5) negatives.push(line.trim().slice(0, 60));
+      }
+      // 提取用户议题（非工具结果）
+      if (m.role === 'user' && !/^工具结果/.test(c) && !/^【/.test(c)) {
+        const firstLine = c.split('\n')[0].replace(/\s+/g, ' ').trim().slice(0, 40);
+        if (firstLine && topics.length < 4 && !topics.includes(firstLine)) topics.push(firstLine);
       }
     });
-    const note = ['【更早对话已压缩】'];
+
+    const note = ['【早期对话摘要与共识记忆】'];
+    if (topics.length) note.push('讨论过的问题：' + topics.join('；'));
     if (paths.length) note.push('提到过的路径：' + paths.join('、'));
     if (negatives.length) note.push('已确认结论：' + negatives.join('；'));
+
     msgs.splice(1, keepIdx - 1, { role: 'user', content: note.join('\n') });
     return { msgs, level };
   }
@@ -854,6 +932,13 @@
               + '才恢复。可以换一个模型，或在设置里换成自己的密钥。'
           };
         }
+        if (/daily limit|rate[- ]?limit.*exceeded|free[- ]?tier limit|exceeded your current quota/i.test(why)) {
+          return {
+            code: 'quota',
+            quota: true,
+            message: '免费额度已达并发或限流上限' + tail + '。建议稍后重试、切换至本地 Ollama，或在设置中换用其他免费源（如智谱 GLM-4-Flash）。'
+          };
+        }
         return {
           code: 'rate',
           message: '接口现在太忙了' + tail + '，等一会儿再问一次就行。'
@@ -1377,9 +1462,16 @@
         followUps,
         trace,
         compressed,
+        facts: sessionFacts,
         checkpoint: checkpoint(),
         usage: { steps, elapsed_ms: Date.now() - started, ...usageTotal }
       });
+
+      const sessionFacts = extractSessionFacts(opts && opts.history, opts && opts.facts);
+      if (opts && opts.userText) {
+        const uFacts = extractSessionFacts([{ role: 'user', content: opts.userText }], sessionFacts);
+        uFacts.forEach((f) => { if (!sessionFacts.includes(f)) sessionFacts.push(f); });
+      }
 
       const resume = (opts && opts.resume) || null;
       if (resume && Array.isArray(resume.messages) && resume.messages.length) {
@@ -1418,11 +1510,11 @@
         messages = [{ role: 'system', content: system }];
         /* 历史：按「回合」注入，每轮带上它自己查过什么。
            以前只塞答案正文，模型看不到自己做过什么，用户一追问就得重新猜。
-           轮数跟着窗口走：窗口越大会话越长，别拿固定 3 轮把大窗口浪费掉。 */
+           轮数跟着窗口走：窗口越大会话越长，支持最多 50 轮，超限由 compressHistory 自动摘要压缩。 */
         const history = Array.isArray(opts && opts.history) ? opts.history : [];
         const maxTurns = Math.max(
           KEEP_TURNS,
-          Math.min(12, Math.floor((budget > 0 ? budget : DEFAULT_WINDOW) / 6000))
+          Math.min(50, Math.floor((budget > 0 ? budget : DEFAULT_WINDOW) / 2500))
         );
         buildHistory(history, maxTurns).forEach((t) => {
           if (!t.q && !t.a) return;
@@ -1444,7 +1536,14 @@
         const tail = nativeNow
           ? '\n\n（要查就调用工具；能答就只输出一个 JSON 对象，不要代码块、不要解释）'
           : (prompt.OUTPUT_REMINDER || '');
-        messages.push({ role: 'user', content: (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '') + tail });
+        let userContent = (ctxLine ? ctxLine + '\n' : '') + String((opts && opts.userText) || '');
+        if (sessionFacts.length) {
+          userContent = '【会话共识与用户事实】（最高优先级，必须无条件遵守）：\n'
+            + sessionFacts.map((f, i) => `${i + 1}. ${f}`).join('\n')
+            + '\n\n' + userContent;
+        }
+        userContent += tail;
+        messages.push({ role: 'user', content: userContent });
       }
 
       let degraded = false;
@@ -1481,6 +1580,7 @@
             followUps,
             trace,
             compressed,
+            facts: sessionFacts,
             /* 调用失败也要留断点：503 / 网络抖动是最常见的失败，
                以前这里不给 checkpoint，「继续」按钮根本不出现，
                用户只能把问题重打一遍 —— 那就是他说的「没有上下文记忆」。 */
@@ -1609,6 +1709,7 @@
             followUps: follow,
             trace,
             compressed,
+            facts: sessionFacts,
             interrupted: false,
             /* 这一轮是谁答的：换过端点就写换到哪儿，没换就是主端点。
                日志里以前只有 ok/steps，出问题根本看不出是哪家模型干的。 */
@@ -1711,6 +1812,7 @@
         followUps,
         trace,
         compressed,
+        facts: sessionFacts,
         model: curModel,
         endpoint: curEndpoint,
         protocol: nativeNow ? 'tools' : 'json',
@@ -1757,6 +1859,7 @@
     validateStep,
     extractJson,
     compressHistory,
+    extractSessionFacts,
     fallbackAnswer,
     suggestFollowUps,
     capKeyOf,

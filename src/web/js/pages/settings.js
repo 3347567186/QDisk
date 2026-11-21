@@ -989,7 +989,7 @@
         /* 模型池：从 dsh-xdpool 的厂商清单里挑一家，直接把地址与模型名填好。
            只做选择器，不接管请求——请求仍走下面这套端点与 Key。
 
-           这里同时把「这家的 Key」带出来：池子里的 64 家厂商，用户往往是
+           这里同时把「这家的 Key」带出来：池子里的 60+ 家厂商，用户往往是
            先看中模型再回头找 Key，来回切几次就得重粘几次。
            有记忆就顺手填上，没有就只清空（不清空的话会拿上一家的 Key 去打新地址）。 */
         function applyPool(p, m) {
@@ -1007,10 +1007,12 @@
           if (mem && mem.key) d.key = mem.key;
           else if (!mem) d.key = '';
           paint();
-          /* 已经有 Key：直接落盘，选完就能用；没 Key 则只填表单，提示补 Key 后保存 */
+          /* 已经有 Key：直接落盘，选完就能用；没 Key 则只填表单，提示补 Key 后保存；本地模型无需 Key */
           if (d.key) {
             /* 让弹窗先关完再落盘：立刻重绘会把关闭动画和校验挤在一起 */
             setTimeout(() => { saveAi(); }, 0);
+          } else if (p.local) {
+            toast(T('已填入 ' + p.name + ' · ' + m[0] + '（本地端点无需 Key，确保本机已运行服务）', 'Filled ' + p.name + ' · ' + m[0] + ' (No key needed; ensure service is running)'), 'ok');
           } else {
             toast(T('已填入 ' + p.name + ' · ' + m[0] + '；填好 Key 再点保存', 'Filled ' + p.name + ' · ' + m[0] + '; add a key, then save'), 'ok');
           }
@@ -1023,6 +1025,7 @@
           }
           let m0 = null;
           let expandedId = '';
+          let freeOnly = false;
           const list = h('div', { class: 'pool-list' });
           const meta = h('span', { class: 'small muted' });
           const search = h('input', {
@@ -1031,7 +1034,7 @@
             oninput: () => render(search.value),
             onkeydown: (e) => {
               if (e.key === 'Enter') {
-                const first = AIPool.find(search.value)[0];
+                const first = AIPool.find(search.value, { freeOnly })[0];
                 if (!first || !first.models.length) return;
                 if (first.models.length === 1) { m0.close(); applyPool(first, first.models[0]); }
                 else { expandedId = first.id; render(search.value); }
@@ -1043,10 +1046,22 @@
             }
           });
 
+          const freeFilterBtn = h('button', {
+            class: 'btn sm ghost pool-filter-btn', type: 'button',
+            title: T('只看有免费额度或本地的模型厂商', 'Show only providers with free tier or local endpoints'),
+            onclick: () => {
+              freeOnly = !freeOnly;
+              freeFilterBtn.className = 'btn sm ' + (freeOnly ? 'primary' : 'ghost') + ' pool-filter-btn';
+              freeFilterBtn.textContent = freeOnly ? T('★ 仅免费/本地', '★ Free/Local') : T('☆ 免费/本地筛选', '☆ Free/Local');
+              render(search.value);
+            }
+          }, T('☆ 免费/本地筛选', '☆ Free/Local'));
+
           function render(q) {
-            const shown = AIPool.find(q);
+            const shown = AIPool.find(q, { freeOnly });
             list.textContent = '';
-            meta.textContent = T('匹配 ' + shown.length + ' 家', shown.length + ' providers');
+            const freeSuffix = freeOnly ? T('（免费/本地）', ' (Free/Local)') : '';
+            meta.textContent = T('匹配 ' + shown.length + ' 家' + freeSuffix, shown.length + ' providers' + freeSuffix);
             if (!shown.length) {
               list.appendChild(h('div', { class: 'pool-empty', text: T('没有匹配的厂商或模型', 'No provider or model matches') }));
               return;
@@ -1099,11 +1114,11 @@
             title: T('从模型池选择', 'Choose from the model pool'),
             wide: true,
             body: h('div', { class: 'pool' },
-              h('div', { class: 'pool-head' }, search, meta),
+              h('div', { class: 'pool-head' }, search, freeFilterBtn, meta),
               list,
               h('div', { class: 'pool-source small muted', text: T(
-                '清单来自 dsh-xdpool 2.7.5：' + AIPool.providers.length + ' 家厂商、' + AIPool.count() + ' 个模型；地址与模型名会直接填好，Key 仍需自己申请',
-                'Catalog from dsh-xdpool 2.7.5: ' + AIPool.providers.length + ' providers, ' + AIPool.count() + ' models; endpoint and model are filled in, the key is still yours') })),
+                '清单收录 ' + AIPool.providers.length + ' 家厂商、' + AIPool.count() + ' 个模型（含 ' + AIPool.freeCount() + ' 家免费/本地源）；首选 OpenRouter 自动路由、智谱免费版或本地 Ollama',
+                'Catalog contains ' + AIPool.providers.length + ' providers, ' + AIPool.count() + ' models (' + AIPool.freeCount() + ' free/local); OpenRouter auto-router, Zhipu free tier, or local Ollama recommended') })),
             buttons: [{ id: 'close', label: T('关闭', 'Close') }]
           });
           render('');

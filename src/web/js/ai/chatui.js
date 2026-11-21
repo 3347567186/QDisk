@@ -573,6 +573,7 @@
         token: { stopped: false },
         session: null,
         history: [],
+        facts: [],
         lastResult: null,
         /* 老版本存的是 simple / medium / deep，迁到 off/low/medium/high，
            别让一次升级把用户选好的档位清成默认 */
