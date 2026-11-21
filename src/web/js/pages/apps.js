@@ -1,7 +1,7 @@
 /* 卸载程序页：管理员状态条 + 图标列表 + 紧凑表格 + 行内操作 + 右键菜单 + 残留清理 */
 (function () {
   'use strict';
-  const { h, T, icon, fmtCount, toast, busy, confirm, card, section, table,
+  const { h, T, icon, fmtCount, fmtBytes, toast, busy, confirm, card, section, table,
     skeleton, empty, attachMenu, modal, softIn } = UI;
 
   /* 每页 50 条；表头粘性由 .table th 的 position:sticky 提供，外层用 .table-wrap */
@@ -332,9 +332,441 @@
       { open: false, hint: T('注册表项清理前会先导出备份', 'Registry keys are backed up before removal') }
     );
 
+    /* ================================================================
+       顶级领域分类 Tab 切换器：严格物理隔离【软件本体】/【开机自启动】/【空间画像】
+       ================================================================ */
+    let currentTab = 'apps';
+    const tabAppsBtn = h('button', { class: 'btn sm primary', type: 'button' },
+      icon('apps', 14), h('span', null, T('已安装程序', 'Installed Apps')));
+    const tabStartupBtn = h('button', { class: 'btn sm ghost', type: 'button' },
+      icon('spark', 14), h('span', null, T('开机自启动', 'Startup Items')));
+    const tabFootprintBtn = h('button', { class: 'btn sm ghost', type: 'button' },
+      icon('chart', 14), h('span', null, T('空间透视画像', 'Space Footprint')));
+
+    const topTabBar = h('div', {
+      class: 'row wrap',
+      style: {
+        gap: '8px',
+        padding: '6px 10px',
+        background: 'var(--surface-2)',
+        borderRadius: 'var(--radius)',
+        border: '1px solid var(--line)',
+        marginBottom: '6px'
+      }
+    },
+      h('span', { class: 'muted small', style: { alignSelf: 'center', fontWeight: 'bold' } }, T('分类治理：', 'Category: ')),
+      tabAppsBtn, tabStartupBtn, tabFootprintBtn
+    );
+
+    /* ================================================================
+       TAB 2: 开机自启动管理 (Startup Items Governance)
+       ================================================================ */
+    const StartupState = {
+      items: [],
+      filtered: [],
+      filter: '',
+      view: 'all', // 'all' | 'enabled' | 'disabled' | 'broken'
+      loading: false
+    };
+
+    const startupStatLine = h('div', { class: 'stat-line muted small' });
+    const startupTableBox = h('div', { class: 'table-wrap' });
+
+    const startupFilterInput = h('input', {
+      class: 'input sm',
+      placeholder: T('搜索自启动项…', 'Search startup items…'),
+      oninput: (e) => {
+        StartupState.filter = e.target.value.trim().toLowerCase();
+        applyStartupFilter();
+      }
+    });
+
+    function startupViewBtn(kind, zh, en) {
+      const b = h('button', {
+        class: 'seg-btn' + (StartupState.view === kind ? ' active' : ''),
+        type: 'button',
+        onclick: () => {
+          StartupState.view = kind;
+          startupCard.querySelectorAll('.startup-view-btn').forEach((el) => {
+            el.classList.toggle('active', el._kind === kind);
+          });
+          applyStartupFilter();
+        }
+      }, T(zh, en));
+      b._kind = kind;
+      b.classList.add('startup-view-btn');
+      return b;
+    }
+
+    const btnRefreshStartup = btn('刷新', 'Refresh', 'ghost sm', 'refresh', () => loadStartup(true));
+    const btnCleanBroken = btn('清理失效项', 'Clean Broken', 'ghost sm danger', 'trash', cleanAllBroken);
+    btnCleanBroken.style.display = 'none';
+
+    const startupCard = card(
+      h('div', { class: 'card-title' },
+        h('h2', null, T('开机自启动项治理', 'Startup Items Management')),
+        h('span', { class: 'hint' }, T('管理系统启动配置与清理失效残留', 'Manage boot autorun & clean broken entries'))
+      ),
+      h('div', { class: 'toolbar' },
+        startupFilterInput,
+        btnRefreshStartup,
+        btnCleanBroken,
+        h('span', { class: 'spacer' })
+      ),
+      h('div', { class: 'toolbar' },
+        h('div', { class: 'seg' },
+          startupViewBtn('all', '全部', 'All'),
+          startupViewBtn('enabled', '已启用', 'Enabled'),
+          startupViewBtn('disabled', '已禁用', 'Disabled'),
+          startupViewBtn('broken', '⚠️ 失效项', '⚠️ Broken')
+        )
+      ),
+      startupStatLine,
+      startupTableBox
+    );
+    startupCard.style.display = 'none';
+
+    async function loadStartup(force) {
+      if (StartupState.loading) return;
+      StartupState.loading = true;
+      startupTableBox.innerHTML = '';
+      startupTableBox.appendChild(skeleton(5, 5));
+      try {
+        const res = await API.engine('startup.list', { refresh: !!force });
+        StartupState.items = Array.isArray(res && res.items) ? res.items : [];
+        applyStartupFilter();
+      } catch (err) {
+        startupTableBox.innerHTML = '';
+        startupTableBox.appendChild(empty(T('读取自启动项失败：' + errText(err), 'Failed to load startup items: ' + errText(err))));
+      } finally {
+        StartupState.loading = false;
+      }
+    }
+
+    function applyStartupFilter() {
+      const q = String(StartupState.filter || '').trim().toLowerCase();
+      let list = StartupState.items.slice();
+      if (StartupState.view === 'enabled') {
+        list = list.filter((it) => it.enabled && it.exists);
+      } else if (StartupState.view === 'disabled') {
+        list = list.filter((it) => !it.enabled && it.exists);
+      } else if (StartupState.view === 'broken') {
+        list = list.filter((it) => !it.exists);
+      }
+
+      if (q) {
+        list = list.filter((it) =>
+          String(it.name || '').toLowerCase().includes(q) ||
+          String(it.command || '').toLowerCase().includes(q) ||
+          String(it.location || '').toLowerCase().includes(q)
+        );
+      }
+      StartupState.filtered = list;
+      renderStartupStats();
+      renderStartupTable();
+    }
+
+    function renderStartupStats() {
+      const total = StartupState.items.length;
+      const enabled = StartupState.items.filter((it) => it.enabled && it.exists).length;
+      const disabled = StartupState.items.filter((it) => !it.enabled && it.exists).length;
+      const broken = StartupState.items.filter((it) => !it.exists).length;
+
+      startupStatLine.textContent = T(
+        `共 ${fmtCount(total)} 项 · 已启用 ${fmtCount(enabled)} · 已禁用 ${fmtCount(disabled)} · ⚠️ 失效项 ${fmtCount(broken)}`,
+        `Total ${fmtCount(total)} · Enabled ${fmtCount(enabled)} · Disabled ${fmtCount(disabled)} · Broken ${fmtCount(broken)}`
+      );
+      btnCleanBroken.style.display = broken > 0 ? '' : 'none';
+    }
+
+    function renderStartupTable() {
+      startupTableBox.innerHTML = '';
+      if (!StartupState.filtered.length) {
+        startupTableBox.appendChild(empty(T('没有符合条件的自启动项', 'No matching startup items')));
+        return;
+      }
+
+      const tbl = table({
+        columns: [
+          {
+            key: 'status',
+            label: T('状态', 'Status'),
+            width: '95px',
+            render: (it) => {
+              if (!it.exists) return h('span', { class: 'badge danger' }, T('⚠️ 文件丢失', '⚠️ Broken'));
+              if (it.enabled) return h('span', { class: 'badge ok' }, T('已启用', 'Enabled'));
+              return h('span', { class: 'badge neutral' }, T('已禁用', 'Disabled'));
+            }
+          },
+          {
+            key: 'name',
+            label: T('启动程序', 'Program'),
+            width: '26%',
+            render: (it) => h('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
+              h('strong', { class: 'ellipsis', title: it.name }, it.name || '—')
+            )
+          },
+          {
+            key: 'location',
+            label: T('位置 / 来源', 'Location'),
+            width: '18%',
+            render: (it) => h('span', { class: 'muted small mono ellipsis', title: it.location || '' }, it.location || '—')
+          },
+          {
+            key: 'command',
+            label: T('启动命令 / 执行路径', 'Command / Path'),
+            width: '32%',
+            render: (it) => h('span', { class: 'muted small mono ellipsis', title: it.command || '' }, it.command || '—')
+          },
+          {
+            key: 'actions',
+            label: T('操作', 'Actions'),
+            width: '150px',
+            render: (it) => {
+              const acts = [];
+              if (it.exists) {
+                const bToggle = btn(it.enabled ? '禁用' : '启用', it.enabled ? 'Disable' : 'Enable', 'ghost sm', it.enabled ? 'close' : 'check', async () => {
+                  bToggle.disabled = true;
+                  try {
+                    const r = await API.engine('startup.toggle', {
+                      name: it.name,
+                      source_type: it.source_type,
+                      hive: it.hive,
+                      file_path: it.file_path,
+                      enabled: !it.enabled
+                    });
+                    if (r && r.ok) {
+                      it.enabled = !it.enabled;
+                      toast(T(`已${it.enabled ? '启用' : '禁用'}自启动项：${it.name}`, `${it.enabled ? 'Enabled' : 'Disabled'} startup item`), 'ok');
+                      applyStartupFilter();
+                    }
+                  } catch (e) {
+                    toast(errText(e), 'error');
+                    bToggle.disabled = false;
+                  }
+                });
+                acts.push(bToggle);
+              }
+              if (it.exe_path && it.exists) {
+                acts.push(iconBtn('打开所在位置', 'Open location', 'folder', () => {
+                  API.reveal(it.exe_path).catch((e) => toast(errText(e), 'error'));
+                }));
+              }
+              acts.push(iconBtn('删除自启动项', 'Delete startup entry', 'trash', async () => {
+                const ok = await confirm({
+                  title: T('确认删除自启动项？', 'Delete startup entry?'),
+                  body: T(`确定要从系统启动配置中移除【${it.name}】吗？这仅删除启动配置，不会卸载软件文件。`,
+                    `Remove "${it.name}" from autorun configuration? This only removes boot config, keeping program files.`),
+                  danger: true
+                });
+                if (!ok) return;
+                try {
+                  await API.engine('startup.delete', {
+                    name: it.name,
+                    source_type: it.source_type,
+                    hive: it.hive,
+                    key: it.key,
+                    file_path: it.file_path
+                  });
+                  toast(T('已删除自启动配置', 'Startup entry removed'), 'ok');
+                  loadStartup(true);
+                } catch (e) {
+                  toast(errText(e), 'error');
+                }
+              }, true));
+              return h('div', { class: 'row', style: { gap: '4px' } }, ...acts);
+            }
+          }
+        ],
+        data: StartupState.filtered
+      });
+      startupTableBox.appendChild(tbl);
+    }
+
+    async function cleanAllBroken() {
+      const brokenList = StartupState.items.filter((it) => !it.exists);
+      if (!brokenList.length) {
+        toast(T('没有发现失效自启动项', 'No broken startup items found'), 'ok');
+        return;
+      }
+      const ok = await confirm({
+        title: T('一键清理失效自启动项', 'Clean Broken Startup Items'),
+        body: T(`检测到 ${brokenList.length} 项自启动的主程序已被删除，确定一次性清理这些残留的注册表项和快捷方式吗？`,
+          `Detected ${brokenList.length} startup items whose target files are missing. Clean all of them?`),
+        danger: true
+      });
+      if (!ok) return;
+
+      let cleaned = 0;
+      for (const it of brokenList) {
+        try {
+          await API.engine('startup.delete', {
+            name: it.name,
+            source_type: it.source_type,
+            hive: it.hive,
+            key: it.key,
+            file_path: it.file_path
+          });
+          cleaned += 1;
+        } catch (e) { /* ignore single error */ }
+      }
+      toast(T(`已清理 ${fmtCount(cleaned)} 项失效启动残留`, `Cleaned ${fmtCount(cleaned)} broken items`), 'ok');
+      loadStartup(true);
+    }
+
+    /* ================================================================
+       TAB 3: 静态空间画像透视 (Static Space Footprint)
+       ================================================================ */
+    const footprintCard = card(
+      h('div', { class: 'card-title' },
+        h('h2', null, T('已安装软件空间画像', 'Installed Software Space Footprint')),
+        h('span', { class: 'hint' }, T('单次静态测算 · 零后台持续负载 · 空间占用大户透视', 'One-shot static calculation, zero background CPU'))
+      ),
+      h('div', { class: 'footprint-body' })
+    );
+    footprintCard.style.display = 'none';
+
+    function renderFootprint() {
+      const container = footprintCard.querySelector('.footprint-body');
+      if (!container) return;
+      container.innerHTML = '';
+
+      // 提取有体积的已安装程序
+      const valid = S.items.filter((it) => (it.size || 0) > 0);
+      valid.sort((a, b) => (b.size || 0) - (a.size || 0));
+
+      if (!valid.length) {
+        container.appendChild(empty(T('暂无已测算大小的应用数据，请切到「已安装程序」稍候再试', 'No size data yet, please check Installed Apps first')));
+        return;
+      }
+
+      const totalSize = valid.reduce((sum, it) => sum + (it.size || 0), 0);
+      const topApps = valid.slice(0, 6);
+      const topSum = topApps.reduce((sum, it) => sum + (it.size || 0), 0);
+      const otherSize = Math.max(0, totalSize - topSum);
+
+      const slices = topApps.map((a) => ({
+        name: a.name,
+        size: a.size || 0,
+        pct: (a.size || 0) / totalSize,
+        app: a
+      }));
+      if (otherSize > 0) {
+        slices.push({
+          name: T('其他已安装应用', 'Other installed apps'),
+          size: otherSize,
+          pct: otherSize / totalSize,
+          app: null
+        });
+      }
+
+      const palette = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#64748b'];
+
+      // 构建轻量纯 SVG 环形图 (viewBox 0 0 200 200, r = 70, C = 2 * PI * 70 ≈ 439.82)
+      const r = 70;
+      const circ = 2 * Math.PI * r;
+      let offset = 0;
+      const paths = slices.map((s, idx) => {
+        const strokeLen = s.pct * circ;
+        const color = palette[idx % palette.length];
+        const circle = `<circle cx="100" cy="100" r="${r}" fill="none" stroke="${color}" stroke-width="24" stroke-dasharray="${strokeLen} ${circ - strokeLen}" stroke-dashoffset="${-offset}" />`;
+        offset += strokeLen;
+        return circle;
+      }).join('');
+
+      const svgHtml = `
+        <svg viewBox="0 0 200 200" width="180" height="180" style="transform: rotate(-90deg); display: block; flex-shrink: 0;">
+          <circle cx="100" cy="100" r="${r}" fill="none" stroke="var(--line)" stroke-width="24" />
+          ${paths}
+        </svg>
+      `;
+
+      const chartWrap = h('div', {
+        class: 'row wrap',
+        style: { alignItems: 'center', gap: '24px', padding: '16px 0', borderBottom: '1px solid var(--line)', marginBottom: '16px' }
+      });
+      const svgContainer = h('div', { style: { position: 'relative', width: '180px', height: '180px' } });
+      svgContainer.innerHTML = svgHtml;
+
+      const centerLabel = h('div', {
+        style: {
+          position: 'absolute', top: '0', left: '0', width: '100%', height: '100%',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          pointerEvents: 'none'
+        }
+      },
+        h('span', { class: 'muted small' }, T('总占用', 'Total')),
+        h('strong', { style: { fontSize: '18px', color: 'var(--text-1)' } }, fmtBytes(totalSize))
+      );
+      svgContainer.appendChild(centerLabel);
+
+      const legendWrap = h('div', { class: 'stack', style: { gap: '6px', flex: '1', minWidth: '220px' } },
+        ...slices.map((s, idx) => h('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
+          h('span', { style: { width: '10px', height: '10px', borderRadius: '50%', background: palette[idx % palette.length], flexShrink: '0' } }),
+          h('span', { class: 'ellipsis small', style: { flex: '1' }, title: s.name }, s.name),
+          h('span', { class: 'mono small muted' }, fmtBytes(s.size)),
+          h('span', { class: 'mono small', style: { minWidth: '42px', textAlign: 'right', fontWeight: 'bold' } }, (s.pct * 100).toFixed(1) + '%')
+        ))
+      );
+
+      chartWrap.appendChild(svgContainer);
+      chartWrap.appendChild(legendWrap);
+
+      // 下方大户清单与直达动作
+      const rankList = h('div', { class: 'stack', style: { gap: '8px' } },
+        h('h3', { style: { margin: '0 0 6px 0', fontSize: 'var(--fs-body)' } }, T('空间大户排行与治理', 'Top Space Consumers')),
+        ...topApps.map((a, i) => h('div', {
+          class: 'row card',
+          style: { padding: '8px 12px', alignItems: 'center', gap: '12px', margin: '0' }
+        },
+          h('strong', { class: 'mono muted', style: { width: '20px' } }, '#' + (i + 1)),
+          h('div', { class: 'stack', style: { gap: '2px', flex: '1', minWidth: '0' } },
+            h('span', { class: 'ellipsis', style: { fontWeight: 'bold' }, title: a.name }, a.name),
+            h('span', { class: 'muted small mono ellipsis' }, a.install_path || a.publisher || '—')
+          ),
+          h('span', { class: 'badge primary mono' }, fmtBytes(a.size || 0)),
+          btn('定位详情', 'Inspect', 'ghost sm', 'external', () => {
+            switchTab('apps');
+            filterInput.value = a.name;
+            S.filter = a.name.toLowerCase();
+            applyFilter();
+          })
+        ))
+      );
+
+      container.appendChild(chartWrap);
+      container.appendChild(rankList);
+    }
+
+    function switchTab(tab) {
+      currentTab = tab;
+      tabAppsBtn.className = 'btn sm ' + (tab === 'apps' ? 'primary' : 'ghost');
+      tabStartupBtn.className = 'btn sm ' + (tab === 'startup' ? 'primary' : 'ghost');
+      tabFootprintBtn.className = 'btn sm ' + (tab === 'footprint' ? 'primary' : 'ghost');
+
+      adminBar.style.display = tab === 'apps' ? '' : 'none';
+      mainCard.style.display = tab === 'apps' ? '' : 'none';
+      loSection.style.display = tab === 'apps' ? '' : 'none';
+      startupCard.style.display = tab === 'startup' ? '' : 'none';
+      footprintCard.style.display = tab === 'footprint' ? '' : 'none';
+
+      if (tab === 'startup' && !StartupState.items.length) {
+        loadStartup(false);
+      } else if (tab === 'footprint') {
+        renderFootprint();
+      }
+    }
+
+    tabAppsBtn.onclick = () => switchTab('apps');
+    tabStartupBtn.onclick = () => switchTab('startup');
+    tabFootprintBtn.onclick = () => switchTab('footprint');
+
+    root.appendChild(topTabBar);
     root.appendChild(adminBar);
     root.appendChild(mainCard);
     root.appendChild(loSection);
+    root.appendChild(startupCard);
+    root.appendChild(footprintCard);
 
     /* 右键菜单：对齐 Geek Uninstaller 的完整动作集 */
     attachMenu(tableBox, (e) => {
@@ -1135,9 +1567,9 @@
 
   window.Pages = window.Pages || {};
   window.Pages.apps = {
-    title: ['卸载程序', 'Uninstall'],
-    subtitle: ['卸载已安装程序并清理残留目录与注册表项',
-      'Uninstall programs and clean leftover folders and registry keys'],
+    title: ['应用与自启', 'Apps & Startup'],
+    subtitle: ['全面管理已安装程序、开机自启动项与磁盘空间画像',
+      'Manage installed software, startup items, and disk space footprint'],
     mount: mount
   };
 })();
