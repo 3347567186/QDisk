@@ -11,6 +11,7 @@
   const errText = UI.errText;
 
   let active = null;
+  let liveJump = null;
 
   UI.onLangChange(() => {
     if (active && active.root.isConnected) active.paint();
@@ -606,9 +607,20 @@
         if (Array.isArray(saved)) state.scope = saved.filter((x) => typeof x === 'string');
       } catch (e) { state.scope = []; }
 
+      liveJump = async function (payload) {
+        const q = String((payload && (payload.q || payload.query || payload.keyword)) || '').trim();
+        if (q) {
+          state.query = q;
+          paint();
+          await runSearch();
+        }
+      };
+
       bindBlankMenu();
       paint();
       await refreshStatus();
-    }
+    },
+
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

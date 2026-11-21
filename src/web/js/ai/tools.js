@@ -787,7 +787,9 @@
           const page = String((args && args.page) || '').trim();
           const okPages = ['organize', 'tools', 'search', 'apps', 'archive', 'clean', 'settings', 'ai'];
           if (okPages.indexOf(page) < 0) throw new Error('page 只能是 ' + okPages.join(' / '));
-          if (typeof deps.navigate === 'function') deps.navigate(page);
+          const payload = (args && args.payload) || args || {};
+          if (typeof deps.navigate === 'function') deps.navigate(page, payload);
+          else if (root.App && typeof root.App.jump === 'function') root.App.jump(page, payload);
           else location.hash = '#' + page;
           return { page, opened: true };
         },

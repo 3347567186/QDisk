@@ -204,11 +204,11 @@
     '三选一，不允许出现第四种形状：',
     '要查一样：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
     '要同时查几样（最多 3 个，必须互不依赖）：{"thought":"一句话","tools":[{"tool":"工具名","args":{...}},{"tool":"工具名","args":{...}}]}',
-    '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
+    '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
     '要改一样东西（只在提示词里列出了 propose_action 时可用）：{"thought":"一句话","tool":"propose_action","args":{"action":"动作名","args":{...},"reason":"给用户看的一句话"}}',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
-    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清的目录（groups.safe 或 groups.careful 非空），suggest 就必须非空，把最值得清的那几个路径放进去，action 用 delete（safe 的）或 check（careful 的），why 一句话说清删了什么会怎样。确实没有可清的东西才给空数组 —— 用户原话是「什么都感觉用不上」，空 suggest 就是他说的那种感觉。',
+    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清的目录（groups.safe 或 groups.careful 非空），suggest 就必须非空，把最值得清的那几个路径放进去，action 用 organize（要先整理分类的）、delete（safe 的）或 check（careful 的），why 一句话说清删了什么会怎样。确实没有可清的东西才给空数组 —— 用户原话是「什么都感觉用不上」，空 suggest 就是他说的那种感觉。',
     '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
 
@@ -262,11 +262,11 @@
     '【输出格式·最高优先级】',
     '需要查东西时，直接调用提供的工具（function calling），不要用 JSON 文字描述工具调用。',
     '能回答时，只输出一个 JSON 对象，第一个字符必须是 {，最后一个字符必须是 }：',
-    '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
+    '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
     '不要代码块围栏，不要解释，JSON 前后不要有任何文字。',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
-    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清的目录（groups.safe 或 groups.careful 非空），suggest 就必须非空，把最值得清的那几个路径放进去，action 用 delete（safe 的）或 check（careful 的），why 一句话说清删了什么会怎样。确实没有可清的东西才给空数组 —— 用户原话是「什么都感觉用不上」，空 suggest 就是他说的那种感觉。',
+    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清的目录（groups.safe 或 groups.careful 非空），suggest 就必须非空，把最值得清的那几个路径放进去，action 用 organize（要先整理分类的）、delete（safe 的）或 check（careful 的），why 一句话说清删了什么会怎样。确实没有可清的东西才给空数组 —— 用户原话是「什么都感觉用不上」，空 suggest 就是他说的那种感觉。',
     '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
 

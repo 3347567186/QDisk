@@ -140,6 +140,9 @@
     UIx.toast(msg.indexOf(path) >= 0 ? msg : msg + '\n' + path, 'warn', 4200);
   }
 
+  /* 1.42.9 起：目录在应用内浏览（Space Tools → DirView），不再默认打开 Explorer。
+     这解决了「AI 给的路径一点就跳出软件」的核心体验问题。
+     文件仍然用系统默认程序打开——应用内没有编辑器。 */
   async function open(p, opts) {
     const path = stripSlash(expand(p));
     if (!path) return { ok: false };
@@ -150,6 +153,16 @@
       UIx.toast(T('这是可执行文件，已定位但没有运行它', 'It is an executable: revealed, not run'), 'info', 2600);
       return { ok: true, revealed: true };
     }
+    /* 目录：优先在应用内 DirView 里打开，让用户能上下浏览 */
+    const k = kindOf(path, o.kind);
+    if (k === 'dir' && !o.external) {
+      const app = root.App;
+      if (app && typeof app.jump === 'function') {
+        app.jump('tools', { dir: path, paths: [path], action: 'browse' });
+        return { ok: true, inApp: true };
+      }
+    }
+    /* 文件：走系统默认程序 */
     try {
       await API.openPath(path);
       return { ok: true };
@@ -180,17 +193,28 @@
     const path = stripSlash(expand(p));
     if (!path) return;
     const o = opts || {};
+    const k = kindOf(path, o.kind);
     const items = [{ header: leafOf(path) || path }];
-    items.push({ label: T('打开', 'Open'), icon: 'external', action: () => { open(path); } });
-    items.push({ label: T('在资源管理器中显示', 'Show in Explorer'), icon: 'folder', action: () => { reveal(path); } });
+    /* 目录的主操作是应用内浏览；文件的主操作是系统打开 */
+    if (k === 'dir') {
+      items.push({ label: T('在应用内浏览', 'Browse in app'), icon: 'scan',
+        action: () => {
+          const app = root.App;
+          if (app && typeof app.jump === 'function') app.jump('tools', { dir: path, paths: [path], action: 'browse' });
+          else location.hash = '#tools';
+        } });
+      items.push({ label: T('在整理页处理', 'Organize this folder'), icon: 'organize',
+        action: () => {
+          const app = root.App;
+          if (app && typeof app.jump === 'function') app.jump('organize', { paths: [path] });
+          else location.hash = '#organize';
+        } });
+      items.push({ label: T('在资源管理器中打开', 'Open in Explorer'), icon: 'external', action: () => { open(path, { external: true }); } });
+    } else {
+      items.push({ label: T('打开', 'Open'), icon: 'external', action: () => { open(path); } });
+      items.push({ label: T('在资源管理器中显示', 'Show in Explorer'), icon: 'folder', action: () => { reveal(path); } });
+    }
     items.push({ label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copy(path) });
-    /* 从这里也能把这批文件带到工具页去看：跳转要带路径，空着切页没用 */
-    items.push({ label: T('在空间工具里查看', 'Show in space tools'), icon: 'scan',
-      action: () => {
-        const app = root.App;
-        if (app && typeof app.jump === 'function') app.jump('tools', { paths: [path], action: 'check' });
-        else location.hash = '#tools';
-      } });
     if (typeof o.onAsk === 'function') {
       items.push({ sep: true });
       items.push({ label: T('让助手看看这里', 'Ask the assistant about it'), icon: 'search', action: () => o.onAsk(path) });

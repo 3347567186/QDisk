@@ -233,6 +233,9 @@
       if (s.open) row.setAttribute('aria-expanded', 'true');
       counts.tools += 1;
       paintTitle();
+      /* 工具行来了就展开过程组：非推理模型（glm-4-flash）不会走 addThought，
+         过程组可能仍然折叠着——用户必须看到每一步工具在干什么。 */
+      if (running && !open) setOpen(true);
       if (running && open) onAppend();
       /* 思考折在行下的容器：先把思考行与新行之间的顺序摆正 */
       return box;
@@ -247,6 +250,12 @@
       /* 第一段思考还没到的时候，组头也得有字：只画一个 chevron 上去，
          用户会以为这一组已经空了 */
       paintTitle();
+      /* 1.42.9 起：一旦开始跑就展开过程组，不论模型是否产出推理。
+         非推理模型（如 glm-4-flash）只走工具调用、没有 thought 事件，
+         以前 setOpen(true) 只在 addThought 里，导致整轮过程组都是折叠的，
+         用户根本看不到脉动点和工具行——等于对着一个无响应的界面干等。
+         展开的开销为零（空组会在 settle 时 hidden），所以无条件展开。 */
+      if (running && !open) setOpen(true);
     }
 
     function setRecordCount(n) {

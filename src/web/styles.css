@@ -2568,6 +2568,18 @@ html[data-theme="dark"] .ai-page {
   color: var(--cl-ink-1);
 }
 .ai-answer.degraded { font-size: 14px; line-height: 1.72; color: var(--cl-ink-2); }
+.ai-answer.ai-streaming::after {
+  content: '▍';
+  display: inline-block;
+  vertical-align: baseline;
+  color: var(--accent);
+  animation: ai-cursor-blink .75s infinite;
+  margin-left: 2px;
+}
+@keyframes ai-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
 
 /* 依据 */
 .ai-ev-wrap { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }

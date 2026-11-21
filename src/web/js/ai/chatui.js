@@ -34,6 +34,7 @@
     delete: ['去清理', 'Clean up'],
     archive: ['去压缩', 'Archive'],
     check: ['去看看', 'Inspect'],
+    organize: ['去整理', 'Organize'],
     none: ['知道了', 'OK']
   };
 
@@ -41,6 +42,7 @@
     delete: 'tools',
     archive: 'archive',
     check: 'tools',
+    organize: 'organize',
     none: 'tools'
   };
 
@@ -200,16 +202,18 @@
         body.appendChild(h('div', { class: 'ai-card-more' }, T('还有 ', 'and ') + (s.paths.length - 5) + T(' 项', ' more')));
       }
       const first = s.paths[0];
+      /* 1.42.9 起：主按钮直接跳到对应页面（in-app），不再 AIEntries.open 打开 Explorer。
+         次要按钮是「在资源管理器中打开」，彻底反转了优先级——
+         用户的主要动作是在软件内处理，不是跳到软件外面去。 */
       const btns = h('div', { class: 'ai-card-bar' },
         h('button', {
           class: 'btn sm',
-          onclick: () => { AIEntries.open(first); }
-        }, UIx.icon('folder', 14), T(label[0], label[1])),
+          onclick: () => { jumpToPage(page, s); }
+        }, UIx.icon(page === 'organize' ? 'organize' : 'scan', 14), T(label[0], label[1])),
         h('button', {
           class: 'btn sm ghost',
-          onclick: () => { jumpToPage(page, s); }
-        }, T('在' + (PAGE_LABEL[page] || PAGE_LABEL.tools)[0] + '里查看',
-             'Open in ' + (PAGE_LABEL[page] || PAGE_LABEL.tools)[1])),
+          onclick: () => { AIEntries.open(first, { external: true }); }
+        }, T('在资源管理器中打开', 'Open in Explorer')),
         h('button', {
           class: 'btn sm ghost',
           onclick: () => { UIx.copy(s.paths.join('\r\n')); }
@@ -669,11 +673,15 @@
 
     paintFoot();
 
-    /* navigate 工具只做一件事：切页面。走 hash 路由，跟点侧栏是同一条路，
-       不会绕过页面自己的初始化，也不会把当前页面弄成半截状态。 */
-    function navigateTo(page) {
+    /* navigate 工具：切页面并携带载荷。优先走 App.jump，带载荷到目标页面（如路径、查询条件）；
+       退回 hash 路由，跟点侧栏是同一条路。 */
+    function navigateTo(page, payload) {
       const p = String(page || '').trim();
       if (!p) return { ok: false, error: '没给页面名' };
+      if (root.App && typeof root.App.jump === 'function') {
+        root.App.jump(p, payload || {});
+        return { ok: true, page: p };
+      }
       try { location.hash = '#' + p; } catch (e) { return { ok: false, error: '切不过去' }; }
       return { ok: true, page: p };
     }
@@ -1250,6 +1258,50 @@
       }
     }
 
+    /* 流式打字动画：让实时回答像呼吸一样自然流淌，带光标 ▍。
+       历史回放或极短回答不走动画，直接显示。点击回答可立即跳过动画。 */
+    function streamAnswer(body, text, pane, onDone) {
+      const str = String(text || '');
+      if (!str || str.length <= 15) {
+        paintAnswer(body, str);
+        if (onDone) onDone();
+        return;
+      }
+      let idx = 0;
+      const total = str.length;
+      /* 动态步长：30 帧左右打完（约 400-500ms），无论长短都不拖沓 */
+      const chunk = Math.max(3, Math.ceil(total / 30));
+      body.classList.add('ai-streaming');
+
+      let timer = null;
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (timer) { cancelAnimationFrame(timer); timer = null; }
+        body.classList.remove('ai-streaming');
+        body.removeEventListener('click', finish);
+        paintAnswer(body, str);
+        scrollEnd(false, pane);
+        if (onDone) onDone();
+      };
+
+      body.addEventListener('click', finish);
+
+      function step() {
+        if (finished) return;
+        idx = Math.min(total, idx + chunk);
+        paintAnswer(body, str.slice(0, idx));
+        scrollEnd(false, pane);
+        if (idx < total) {
+          timer = requestAnimationFrame(step);
+        } else {
+          finish();
+        }
+      }
+      timer = requestAnimationFrame(step);
+    }
+
     /* 从回答里抠出 YAML 草稿：优先 ```yaml 围栏，其次唯一一个 ``` 围栏。
        只认「整段就是规则」的形状——多个围栏里挑含 rules: 的那个，
        挑不出来就返回空，宁可不给按钮也不塞半截规则进编辑器。 */
@@ -1416,130 +1468,138 @@
         /* 状态词也要跟着落盘：回放时「· 已停止 / · 查证未完成」得能从文件里读回来 */
         res.status = res.stopped ? 'stopped' : (!res.ok ? 'unfinished' : '');
       }
-      paintAnswer(c.body, res.answer || '');
       /* 右键「复制这段」「引用这段」拿的是这条消息的正文，落定后补上 */
       c.node.dataset.text = String(res.answer || '');
       if (res.degraded && !res.ok) c.body.classList.add('degraded');
       if (res.stopped) c.body.classList.add('degraded');
 
-      const ev = evidenceRow(res.evidence, res.trace);
-      if (ev) c.extra.appendChild(ev);
-      /* 压缩过就在界面上说一声：用户有权知道「助手这一轮看到的是删节版」，
-         而不是事后疑惑「明明说过的它怎么不记得」 */
-      if (res.compressed && res.compressed !== 'none') {
-        c.extra.appendChild(h('div', { class: 'ai-compressed' },
-          UIx.icon('layers', 12),
-          h('span', {}, T('更早的对话已自动压缩，保留路径与结论', 'Earlier turns were compressed to fit the window'))));
-      }
-      const cards = suggestCards(res.suggest);
-      if (cards) c.extra.appendChild(cards);
+      const appendExtras = () => {
+        const ev = evidenceRow(res.evidence, res.trace);
+        if (ev) c.extra.appendChild(ev);
+        /* 压缩过就在界面上说一声：用户有权知道「助手这一轮看到的是删节版」，
+           而不是事后疑惑「明明说过的它怎么不记得」 */
+        if (res.compressed && res.compressed !== 'none') {
+          c.extra.appendChild(h('div', { class: 'ai-compressed' },
+            UIx.icon('layers', 12),
+            h('span', {}, T('更早的对话已自动压缩，保留路径与结论', 'Earlier turns were compressed to fit the window'))));
+        }
+        const cards = suggestCards(res.suggest);
+        if (cards) c.extra.appendChild(cards);
 
-      /* 回答里带了规则草稿就给一个「填入规则编辑器」：
-         草稿只进编辑器，不落盘、不执行——写盘这件事留给人按保存。
-         规则页没开过时 AIRulesDraft 不存在，那就不给按钮，免得点了没反应。 */
-      const yaml = draftYaml(res.answer || '');
-      if (yaml && root.AIRulesDraft && root.AIRulesDraft.fill) {
-        const draftBar = h('div', { class: 'ai-msg-bar' });
-        draftBar.appendChild(h('button', {
-          class: 'btn sm ghost',
-          onclick: () => {
-            if (!root.AIRulesDraft.fill(yaml)) return;
-            /* 抽屉里点的：填完就把抽屉收掉，让用户直接看到编辑器；
-               整页里点的：直接切到规则页。两条路都落不到「点了像没反应」。 */
-            if (root.AIDrawer && root.AIDrawer.isOpen && root.AIDrawer.isOpen()) {
-              root.AIDrawer.close();
+        /* 回答里带了规则草稿就给一个「填入规则编辑器」：
+           草稿只进编辑器，不落盘、不执行——写盘这件事留给人按保存。
+           规则页没开过时 AIRulesDraft 不存在，那就不给按钮，免得点了没反应。 */
+        const yaml = draftYaml(res.answer || '');
+        if (yaml && root.AIRulesDraft && root.AIRulesDraft.fill) {
+          const draftBar = h('div', { class: 'ai-msg-bar' });
+          draftBar.appendChild(h('button', {
+            class: 'btn sm ghost',
+            onclick: () => {
+              if (!root.AIRulesDraft.fill(yaml)) return;
+              /* 抽屉里点的：填完就把抽屉收掉，让用户直接看到编辑器；
+                 整页里点的：直接切到规则页。两条路都落不到「点了像没反应」。 */
+              if (root.AIDrawer && root.AIDrawer.isOpen && root.AIDrawer.isOpen()) {
+                root.AIDrawer.close();
+              }
+              navigateTo('rules');
             }
-            navigateTo('rules');
-          }
-        }, UIx.icon('spark', 12), T('填入规则编辑器', 'Send to rule editor')));
-        draftBar.appendChild(h('span', { class: 'small muted' },
-          T('只填入，不保存、不执行', 'Loads only — no save, no run')));
-        c.extra.appendChild(draftBar);
-      }
+          }, UIx.icon('spark', 12), T('填入规则编辑器', 'Send to rule editor')));
+          draftBar.appendChild(h('span', { class: 'small muted' },
+            T('只填入，不保存、不执行', 'Loads only — no save, no run')));
+          c.extra.appendChild(draftBar);
+        }
 
-      /* 这一轮真正碰过的位置：整条答完就能直接点到那个目录，
-         而不是读完一句「打开 D:\Downloads 看看」然后自己去翻。 */
-      res.entries = (res.entries && res.entries.length)
-        ? res.entries
-        : AIEntries.collect(res.trace, res.suggest);
-      const loc = AIEntries.bar(res.entries, { onAsk: askAboutPath });
-      if (loc) c.extra.appendChild(loc);
+        /* 这一轮真正碰过的位置：整条答完就能直接点到那个目录，
+           而不是读完一句「打开 D:\Downloads 看看」然后自己去翻。 */
+        res.entries = (res.entries && res.entries.length)
+          ? res.entries
+          : AIEntries.collect(res.trace, res.suggest);
+        const loc = AIEntries.bar(res.entries, { onAsk: askAboutPath });
+        if (loc) c.extra.appendChild(loc);
 
-      const bar = h('div', { class: 'ai-msg-bar' });
-      bar.appendChild(h('button', {
-        class: 'btn sm ghost',
-        onclick: () => { UIx.copy(res.answer || ''); }
-      }, T('复制', 'Copy')));
-      /* 停了不是废掉：断点已经在手，接着查比重新问一遍省一整轮。
-         503 / 网络抖动的失败同样有断点（agent 现在一定给 checkpoint），
-         不给「继续」的话用户只能把问题重打一遍，那就是「没有上下文记忆」。 */
-      if (res.checkpoint && !res.replay) {
+        const bar = h('div', { class: 'ai-msg-bar' });
         bar.appendChild(h('button', {
           class: 'btn sm ghost',
-          onclick: () => { continueTurn(tgt); }
-        }, T('继续', 'Continue')));
-      }
-      /* 历史回放没有 lastAsk，「重试」会是个点不动的按钮——那种不如不给。
-         额度用完（quota）也一样：点了必然失败，给按钮等于骗人。 */
-      if (!res.replay && !res.quota) {
-        bar.appendChild(h('button', {
-          class: 'btn sm ghost',
-          onclick: () => { retryLast(tgt); }
-        }, T('重试', 'Retry')));
-      }
-      if (res.usage) {
-        /* 这一轮实际用的强度与温度：放在正文外面（界面里），
-           不写进回答正文——正文里塞元信息只会让答案变脏 */
-        if (res.policy) {
-          bar.appendChild(h('span', {
-            class: 'ai-policy',
-            title: T('强度管努力（思考预算 / 查证轮数），温度管随机性（由任务决定）', 'Level controls effort; temperature controls variety (chosen by task)')
-          }, Strength.line(res.policy)));
+          onclick: () => { UIx.copy(res.answer || ''); }
+        }, T('复制', 'Copy')));
+        /* 停了不是废掉：断点已经在手，接着查比重新问一遍省一整轮。
+           503 / 网络抖动的失败同样有断点（agent 现在一定给 checkpoint），
+           不给「继续」的话用户只能把问题重打一遍，那就是「没有上下文记忆」。 */
+        if (res.checkpoint && !res.replay) {
+          bar.appendChild(h('button', {
+            class: 'btn sm ghost',
+            onclick: () => { continueTurn(tgt); }
+          }, T('继续', 'Continue')));
         }
-        /* 右下角只留几样：思考时长、这轮 token、缓存命中率、思考预算用量。
-           命中率只给百分比，写「命中率」三个字反而要多读一遍。 */
-        const u = res.usage;
-        const parts = [];
-        if (u.elapsed_ms) parts.push((u.elapsed_ms / 1000).toFixed(1) + 's');
-        const tokens = (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0);
-        if (tokens) parts.push(tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k token' : tokens + ' token');
-        /* 服务端没给这个字段就整段省略：显示 0% 等于替它宣称「没命中」 */
-        if (u.prompt_cache_hit_tokens !== undefined && Number(u.prompt_tokens) > 0) {
-          const hit = Number(u.prompt_cache_hit_tokens) || 0;
-          parts.push(Math.round((hit / Number(u.prompt_tokens)) * 100) + '%');
+        /* 历史回放没有 lastAsk，「重试」会是个点不动的按钮——那种不如不给。
+           额度用完（quota）也一样：点了必然失败，给按钮等于骗人。 */
+        if (!res.replay && !res.quota) {
+          bar.appendChild(h('button', {
+            class: 'btn sm ghost',
+            onclick: () => { retryLast(tgt); }
+          }, T('重试', 'Retry')));
         }
-        /* 思考预算：真值标「思考」，服务端没上报就标「约」，绝不用 0 冒充精确 */
-        const st = Strength.thinkEstimate(res.policy, u);
-        if (st && st.tokens) {
-          const text = (st.estimated ? T('约', '~') : '') + st.tokens + T(' 思考', ' thinking');
-          parts.push(st.budget ? text + '/' + st.budget : text);
-        }
-        if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: usageTitle(st) }, parts.join(' · ')));
-      }
-      /* 刻度条的悬停预览要读这一轮的答案和用量：答案本来只进 DOM，
-         这里回存到回合对象上，预览就不必去扒正文节点。
-         回合对象在这一轮开始时就已经绑在 c 上，不再反查「最后一个回合」
-         ——后台会话收尾时，那边的最后一个回合可能已经是别的了。 */
-      const closed = c.turn;
-      if (closed) {
-        closed.answer = res.answer || '';
         if (res.usage) {
-          const bits = [];
-          if (res.usage.elapsed_ms) bits.push((res.usage.elapsed_ms / 1000).toFixed(1) + 's');
-          const used = (Number(res.usage.prompt_tokens) || 0) + (Number(res.usage.completion_tokens) || 0);
-          if (used) bits.push(used >= 1000 ? (used / 1000).toFixed(1) + 'k' : String(used));
-          closed.meta = bits.join(' · ');
+          /* 这一轮实际用的强度与温度：放在正文外面（界面里），
+             不写进回答正文——正文里塞元信息只会让答案变脏 */
+          if (res.policy) {
+            bar.appendChild(h('span', {
+              class: 'ai-policy',
+              title: T('强度管努力（思考预算 / 查证轮数），温度管随机性（由任务决定）', 'Level controls effort; temperature controls variety (chosen by task)')
+            }, Strength.line(res.policy)));
+          }
+          /* 右下角只留几样：思考时长、这轮 token、缓存命中率、思考预算用量。
+             命中率只给百分比，写「命中率」三个字反而要多读一遍。 */
+          const u = res.usage;
+          const parts = [];
+          if (u.elapsed_ms) parts.push((u.elapsed_ms / 1000).toFixed(1) + 's');
+          const tokens = (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0);
+          if (tokens) parts.push(tokens >= 1000 ? (tokens / 1000).toFixed(1) + 'k token' : tokens + ' token');
+          /* 服务端没给这个字段就整段省略：显示 0% 等于替它宣称「没命中」 */
+          if (u.prompt_cache_hit_tokens !== undefined && Number(u.prompt_tokens) > 0) {
+            const hit = Number(u.prompt_cache_hit_tokens) || 0;
+            parts.push(Math.round((hit / Number(u.prompt_tokens)) * 100) + '%');
+          }
+          /* 思考预算：真值标「思考」，服务端没上报就标「约」，绝不用 0 冒充精确 */
+          const st = Strength.thinkEstimate(res.policy, u);
+          if (st && st.tokens) {
+            const text = (st.estimated ? T('约', '~') : '') + st.tokens + T(' 思考', ' thinking');
+            parts.push(st.budget ? text + '/' + st.budget : text);
+          }
+          if (parts.length) bar.appendChild(h('span', { class: 'ai-usage', title: usageTitle(st) }, parts.join(' · ')));
         }
-        if (rail && isVisible(tgt)) rail.setTurns(tgt.turns);
-      }
-      c.extra.appendChild(bar);
+        /* 刻度条的悬停预览要读这一轮的答案和用量：答案本来只进 DOM，
+           这里回存到回合对象上，预览就不必去扒正文节点。
+           回合对象在这一轮开始时就已经绑在 c 上，不再反查「最后一个回合」
+           ——后台会话收尾时，那边的最后一个回合可能已经是别的了。 */
+        const closed = c.turn;
+        if (closed) {
+          closed.answer = res.answer || '';
+          if (res.usage) {
+            const bits = [];
+            if (res.usage.elapsed_ms) bits.push((res.usage.elapsed_ms / 1000).toFixed(1) + 's');
+            const used = (Number(res.usage.prompt_tokens) || 0) + (Number(res.usage.completion_tokens) || 0);
+            if (used) bits.push(used >= 1000 ? (used / 1000).toFixed(1) + 'k' : String(used));
+            closed.meta = bits.join(' · ');
+          }
+          if (rail && isVisible(tgt)) rail.setTurns(tgt.turns);
+        }
+        c.extra.appendChild(bar);
 
-      const chips = followChips(res.followUps, (q) => ask({ text: q }, tgt));
-      if (chips) c.extra.appendChild(chips);
-      /* 执行记录永远待在会话最末：新回答进来后把它挪下来，不然读起来像
-         「先记了账、才发生的事」。 */
-      refreshActs(tgt);
-      scrollEnd(false, tgt);
+        const chips = followChips(res.followUps, (q) => ask({ text: q }, tgt));
+        if (chips) c.extra.appendChild(chips);
+        /* 执行记录永远待在会话最末：新回答进来后把它挪下来，不然读起来像
+           「先记了账、才发生的事」。 */
+        refreshActs(tgt);
+        scrollEnd(false, tgt);
+      };
+
+      if (!c.replay && res.ok && res.answer && res.answer.length > 15) {
+        streamAnswer(c.body, res.answer, tgt, appendExtras);
+      } else {
+        paintAnswer(c.body, res.answer || '');
+        appendExtras();
+      }
       tgt.current = null;
       if (current === c) current = null;
     }

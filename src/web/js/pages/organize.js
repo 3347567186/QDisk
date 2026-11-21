@@ -1663,14 +1663,34 @@
     refreshSummary();
     renderStats();
     refreshButtons();
+
+    /* jump 接收器：AI / 右键菜单通过 App.jump('organize', { paths: [...] }) 进来，
+       自动填入来源并触发扫描，用户不用再手动选文件夹。 */
+    liveJump = async function (data) {
+      const paths = ((data && data.paths) || []).filter(Boolean).map(String);
+      if (!paths.length) return;
+      /* 清掉之前的来源和预览，以这批路径为准 */
+      state.sources = [];
+      renderSources();
+      const items = paths.map(function (p) { return { path: p, kind: guessKind(p) }; });
+      addSources(items);
+      await doScan();
+    };
   }
 
   /* 右下角保留挂载点：滚动交给外层 #scroll，页面自身不创建滚动容器 */
+  /* 1.42.9 起：liveJump 是当前挂载实例的 jump 接收器。
+     AI 建议卡片和右键菜单都能通过 App.jump('organize', payload) 把路径带过来，
+     organize 页拿到后自动填入来源并触发扫描——不再需要用户手动选文件夹。 */
+  let liveJump = null;
+
   window.Pages = window.Pages || {};
   window.Pages.organize = {
     title: ['整理文件', 'Organize files'],
     subtitle: ['按分类整理文件夹，先预览再执行，可撤销',
       'Tidy folders by category: preview first, then run, and undo if needed'],
-    mount: mount
+    mount: mount,
+    /* AI 回答里的「在整理页处理」落到这里：带路径进来就自动加来源并扫描 */
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

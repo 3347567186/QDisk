@@ -283,6 +283,15 @@
         list,
         h('div', { class: 'ai-jump-bar' },
           dir ? h('span', { class: 'ai-jump-dir mono', title: dir }, dir) : null,
+          dir ? h('button', {
+            class: 'btn sm ghost',
+            onclick: () => {
+              openSection(browseSection);
+              const view = ensureDv();
+              if (view) view.showPath(dir, paths[0] || '');
+              if (browseSection.scrollIntoView) browseSection.scrollIntoView({ block: 'nearest' });
+            }
+          }, icon('scan', 13), h('span', {}, T('在目录树中浏览', 'Browse in tree'))) : null,
           h('button', {
             class: 'btn sm ghost',
             onclick: () => { jumpBox.hidden = true; }
