@@ -22,7 +22,17 @@
 }
 .dv-crumb:hover { background: var(--hover); color: var(--text-1); }
 .dv-crumb.is-here { color: var(--text-1); font-weight: 500; }
-.dv-crumb-sep { display: inline-flex; color: var(--text-3); transform: rotate(-90deg); }
+.dv-crumb-sep { display: inline-flex; color: var(--text-3); align-items: center; }
+.dv-crumb-sep svg { width: 11px; height: 11px; }
+
+/* 返回上一层与刷新：SVG 交互微动效 */
+.dv-up-btn svg { transition: transform var(--dur-2) var(--ease-spring); }
+.dv-up-btn:hover svg { transform: translateY(-2px); }
+.dv-up-btn:active svg { transform: translateY(-4px) scale(.92); }
+
+.dv-refresh-btn svg { transition: transform var(--dur-2) var(--ease-out); }
+.dv-refresh-btn:hover svg { transform: rotate(60deg); }
+.dv-refresh-btn:active svg { transform: rotate(180deg) scale(.9); }
 
 .dv-meta { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 

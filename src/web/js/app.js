@@ -11,7 +11,7 @@
     { id: 'archive', zh: '压缩包', en: 'Archives', icon: 'archive' },
     { id: 'search', zh: '搜索文件', en: 'Search', icon: 'search' },
     { id: 'rules', zh: '高级规则', en: 'Rules', icon: 'rules' },
-    { id: 'apps', zh: '卸载程序', en: 'Uninstall', icon: 'apps' },
+    { id: 'apps', zh: '应用与自启', en: 'Apps & Startup', icon: 'apps' },
     { id: 'migrate', zh: '数据迁移', en: 'Migrate', icon: 'migrate' },
     { id: 'log', zh: '日志', en: 'Logs', icon: 'log' },
     { id: 'settings', zh: '设置', en: 'Settings', icon: 'settings' }

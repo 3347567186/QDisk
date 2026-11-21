@@ -1770,6 +1770,43 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   100% { transform: scale(1); }
 }
 
+/* ---------- 统一 SVG 动画图标交互体系 ---------- */
+.ic-svg {
+  display: block;
+  transition: transform var(--dur-2) var(--ease-spring), opacity var(--dur-1) var(--ease);
+  transform-origin: center center;
+}
+/* 返回上一层：hover 向上轻跃微动效 */
+.btn:hover .ic-level-up, .btn:hover .ic-arrow-up, .dv-up-btn:hover .ic-svg {
+  transform: translateY(-2.5px);
+}
+.btn:active .ic-level-up, .btn:active .ic-arrow-up, .dv-up-btn:active .ic-svg {
+  transform: translateY(-4px) scale(.92);
+}
+/* 刷新图标：hover 顺时针蓄力，点击转动 */
+.btn:hover .ic-refresh, .dv-refresh-btn:hover .ic-svg {
+  transform: rotate(60deg);
+}
+.btn:active .ic-refresh, .btn.busy .ic-refresh, .dv-refresh-btn:active .ic-svg {
+  animation: gear-turn .8s linear infinite;
+}
+/* 危险删除：hover 告警微抖动 */
+.btn.danger:hover .ic-trash {
+  animation: trash-shake .36s var(--ease) infinite alternate;
+}
+@keyframes trash-shake {
+  0% { transform: rotate(-3deg); }
+  100% { transform: rotate(3deg); }
+}
+/* 搜索放大镜：hover 轻微缩放探查 */
+.btn:hover .ic-search {
+  transform: scale(1.1) rotate(-6deg);
+}
+/* 播放/执行主按钮：hover 前推 */
+.btn.primary:hover .ic-play {
+  transform: scale(1.12) translateX(1px);
+}
+
 /* 侧栏选中条只做淡入，不弹不缩——导航是常驻元素，它不该抢戏 */
 .nav-item.active::before { animation: fade-in var(--dur-2) var(--ease); }
 

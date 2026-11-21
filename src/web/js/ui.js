@@ -503,6 +503,10 @@
     send: '<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
+    'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+    'chevron-up': '<path d="m18 15-6-6-6 6"/>',
+    'arrow-up': '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+    'level-up': '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>',
     feather: '<path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><path d="M16 8 2 22"/><path d="M17.5 15H9"/>',
     bulb: '<path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/>',
     brain: '<path d="M12 5a3 3 0 0 0-3 3v1a3 3 0 0 0 0 6v1a3 3 0 0 0 3 3"/><path d="M12 5a3 3 0 0 1 3 3v1a3 3 0 0 1 0 6v1a3 3 0 0 1-3 3"/><path d="M12 5v15"/>'
@@ -510,9 +514,9 @@
   function icon(name, size = 16) {
     const path = ICONS[name] || ICONS.file;
     const wrap = document.createElement('span');
-    wrap.className = 'ic';
+    wrap.className = 'ic ic-box';
     wrap.style.display = 'inline-flex';
-    wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+    wrap.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="ic-svg ic-${name}" aria-hidden="true">${path}</svg>`;
     return wrap.firstChild;
   }
 

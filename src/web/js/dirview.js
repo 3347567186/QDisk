@@ -101,8 +101,8 @@
     const rowOf = new Map();       // path(小写) → 行节点，highlight 用
 
     /* ---------- 骨架 ---------- */
-    const upBtn = h('button', { class: 'btn ghost sm dv-icon', type: 'button', title: T('上一层', 'Up one level'), 'aria-label': T('上一层', 'Up one level') }, icon('chevron', 14));
-    const refreshBtn = h('button', { class: 'btn ghost sm dv-icon', type: 'button', title: T('刷新', 'Refresh'), 'aria-label': T('刷新', 'Refresh') }, icon('refresh', 14));
+    const upBtn = h('button', { class: 'btn ghost sm dv-icon dv-up-btn', type: 'button', title: T('上一层', 'Up one level'), 'aria-label': T('上一层', 'Up one level') }, icon('level-up', 14));
+    const refreshBtn = h('button', { class: 'btn ghost sm dv-icon dv-refresh-btn', type: 'button', title: T('刷新', 'Refresh'), 'aria-label': T('刷新', 'Refresh') }, icon('refresh', 14));
     const pathIn = h('input', { class: 'input dv-path', type: 'text', spellcheck: 'false', placeholder: T('输入或粘贴一个文件夹路径', 'Type or paste a folder path') });
     const pickBtn = h('button', { class: 'btn sm', type: 'button' }, icon('folder', 14), T('选择', 'Browse'));
     const crumbBox = h('div', { class: 'dv-crumbs' });
@@ -284,7 +284,7 @@
       const list = crumbsOf(dir);
       if (!list.length) return;
       list.forEach((c, i) => {
-        if (i) crumbBox.appendChild(h('span', { class: 'dv-crumb-sep' }, icon('chevron', 11)));
+        if (i) crumbBox.appendChild(h('span', { class: 'dv-crumb-sep' }, icon('chevron-right', 11)));
         crumbBox.appendChild(h('button', {
           class: 'dv-crumb' + (i === list.length - 1 ? ' is-here' : ''),
           type: 'button',

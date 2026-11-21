@@ -118,6 +118,10 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 | `apps.force_remove` | `{name}` | 强制移除软件记录与残留目录 |
 | `apps.leftovers` | `{name, version?}` | 深度扫描软件卸载残留的磁盘目录与注册表项 `{name, dirs, regs, blocked}` |
 | `apps.cleanup` | `{paths: [...]}` | 清理选中的残留目录与注册表 `{freed, failed}` |
+| `startup.list` | `{refresh?}` | 扫描系统自启动项（注册表与启动目录），标记启用/失效状态 `{total, enabled_count, disabled_count, broken_count, items}` |
+| `startup.toggle` | `{name, source_type, hive?, file_path?, enabled}` | 安全切换自启动启用/禁用（写入 StartupApproved 或软重命名） |
+| `startup.delete` | `{name, source_type, hive?, key?, file_path?}` | 清理自启动配置项或失效快捷方式 `{ok, name, deleted}` |
+| `process.close` | `{name, force?, confirm_sensitive?}` | 协同释放占用文件的进程（优雅 WM_CLOSE 通知，受系统核心白名单保护与敏感数据警告） `{ok, name, closed}` |
 | `search.status` | `{}` | 查询索引服务整体状态、索引数量、覆盖目录及数据库信息 |
 | `search.index` | `{roots?, ids?, reuse?, full?}` | 触发一次索引建立或增量扫描（基于 indexwalk 或 Python 遍历） |
 | `search.query` | `{q, limit?, offset?}` | 关键词实时搜索匹配的文件与目录 `{items: [...], total}` |

@@ -117,28 +117,69 @@
       icon('folder'), T('浏览', 'Browse'));
     const sigBtn = h('button', { class: 'btn', disabled: true, title: T('读取版本信息与数字签名，判断来源', 'Read version info and signatures') },
       T('深度分析', 'Analyze origin'));
+    let lastActiveSection = 'big';
+    bigInput.addEventListener('focus', () => { lastActiveSection = 'big'; });
+    bigBtn.addEventListener('click', () => { lastActiveSection = 'big'; });
+    emptyInput.addEventListener('focus', () => { lastActiveSection = 'empty'; });
+    emptyBtn.addEventListener('click', () => { lastActiveSection = 'empty'; });
+
+    /* 页面级常驻【问助手】入口（置顶于窗口右上角，永不随卡片折叠而消失） */
     const askMark = window.SteveAvatar
       ? window.SteveAvatar.el({ size: 24, variant: 'btn' })
       : icon('spark');
-    const askBtn = h('button', { class: 'btn ghost', title: T('让助手解释这批文件能不能删', 'Ask the assistant about these files') },
-      askMark, T('问助手', 'Ask AI'));
-    askBtn.onclick = () => {
+    const topAskBtn = h('button', {
+      class: 'btn ghost',
+      title: T('让助手分析空间占用、大文件与空文件夹', 'Ask AI about space, large files and empty folders')
+    }, askMark, T('问助手', 'Ask AI'));
+
+    function askAssistantGeneral() {
       if (window.SteveAvatar) {
         window.SteveAvatar.spin(askMark);
       }
-      const list = bigItems || [];
-      const total = list.reduce((s, x) => s + (x.size || 0), 0);
-      window.AIDrawer.open({
-        title: T('问助手 · 大文件', 'Ask AI · Large files'),
-        ctx: () => ({
-          page: '空间工具',
-          dir: bigInput.value.trim(),
-          count: list.length,
-          size: list.length ? fmtBytes(total) : '',
-          files: list.slice(0, 8).map((x) => x.name)
-        })
-      });
-    };
+      if (lastActiveSection === 'empty' && (emptyItems.length || emptyInput.value.trim())) {
+        window.AIDrawer.open({
+          title: T('问助手 · 空文件夹', 'Ask AI · Empty folders'),
+          ctx: () => ({
+            page: '空间工具',
+            tool: '空文件夹清理',
+            dir: emptyInput.value.trim(),
+            count: emptyItems.length,
+            note: emptyItems.length ? ('已扫描出 ' + emptyItems.length + ' 个空文件夹') : ''
+          })
+        });
+      } else if (dv && dv.getPath() && lastActiveSection === 'browse') {
+        const p = dv.getPath();
+        window.AIDrawer.open({
+          title: T('问助手 · 目录浏览', 'Ask AI · Folder view'),
+          ctx: () => ({
+            page: '空间工具',
+            tool: '文件夹浏览',
+            dir: p
+          })
+        });
+      } else {
+        const list = bigItems || [];
+        const total = list.reduce((s, x) => s + (x.size || 0), 0);
+        window.AIDrawer.open({
+          title: T('问助手 · 空间工具', 'Ask AI · Space tools'),
+          ctx: () => ({
+            page: '空间工具',
+            tool: '大文件排行',
+            dir: bigInput.value.trim() || emptyInput.value.trim(),
+            count: list.length,
+            size: list.length ? fmtBytes(total) : '',
+            files: list.slice(0, 8).map((x) => x.name)
+          })
+        });
+      }
+    }
+    topAskBtn.onclick = askAssistantGeneral;
+
+    const askBtn = h('button', {
+      class: 'btn ghost',
+      title: T('让助手解释这批文件能不能删', 'Ask the assistant about these files')
+    }, T('问助手', 'Ask AI'));
+    askBtn.onclick = askAssistantGeneral;
     bigBrowse.onclick = async () => {
       const d = await API.pickFolder();
       if (d) { bigInput.value = d; bigInput.focus(); }
@@ -233,7 +274,7 @@
     root.appendChild(browseSection);
     root.appendChild(bigSection);
     root.appendChild(emptySection);
-    setActions();
+    setActions(topAskBtn);
 
     /* ---------------- 来自助手的跳转 ----------------
        AI 的「去工具页」以前只切页，什么也不带，用户过来看到的是一张空表。
@@ -743,6 +784,7 @@
       liveJump = null;
       /* 目录浏览持有 DOM 与行索引，不拆会随切页次数累积 */
       if (dv) { try { dv.destroy(); } catch (e) { /* 拆不掉也让页面先走 */ } dv = null; }
+      setActions();
     };
   }
 

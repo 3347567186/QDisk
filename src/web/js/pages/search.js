@@ -460,13 +460,13 @@
             h('div', { class: 'spacer' }),
             h('button', {
               class: 'btn sm', disabled: state.page <= 0, onclick: () => { state.page -= 1; paint(); }
-            }, icon('undo', 12), h('span', { text: T('上一页', 'Prev') })),
+            }, icon('chevron-left', 12), h('span', { text: T('上一页', 'Prev') })),
             h('span', { class: 'small', text: (state.page + 1) + ' / ' + pageCount() }),
             h('button', {
               class: 'btn sm',
               disabled: state.searching || (state.page + 1 >= pageCount() && state.items.length < state.limit),
               onclick: nextPage
-            }, h('span', { text: T('下一页', 'Next') }), icon('play', 12)),
+            }, h('span', { text: T('下一页', 'Next') }), icon('chevron-right', 12)),
             state.items.length >= state.limit && state.limit < MAX_LIMIT
               ? h('button', { class: 'btn sm', onclick: loadMore, disabled: state.searching },
                 h('span', { text: T('加载更多', 'Load more') }))

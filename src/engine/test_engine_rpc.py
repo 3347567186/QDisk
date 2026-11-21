@@ -3008,5 +3008,99 @@ class TestScanParams(EngineCase):
         self.assertFalse(os.path.isfile(os.path.join(folder, "a.pdf")))
 
 
+class TestStartup(EngineCase):
+    def test_startup_list(self):
+        res = self.rpc_ok("startup.list")
+        self.assertIn("total", res)
+        self.assertIn("items", res)
+        self.assertIn("enabled_count", res)
+        self.assertIn("disabled_count", res)
+        self.assertIn("broken_count", res)
+        self.assertIsInstance(res["items"], list)
+        for it in res["items"]:
+            self.assertIn("name", it)
+            self.assertIn("command", it)
+            self.assertIn("status", it)
+            self.assertIn(it["status"], ("enabled", "disabled", "broken"))
+            self.assertIn("source_type", it)
+            self.assertIn(it["source_type"], ("registry", "folder"))
+
+    def test_startup_toggle_and_delete_in_hkcu(self):
+        import winreg
+        dummy_name = "TidyTest_MockAuto_99"
+        run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        # 1. 写入测试键
+        try:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, dummy_name, 0, winreg.REG_SZ, r"C:\Windows\notepad.exe")
+        except OSError:
+            self.skipTest("无法写入 HKCU Run 键，跳过自启动开关用例")
+
+        try:
+            # 2. 列表中应存在该项
+            res = self.rpc_ok("startup.list")
+            names = [it["name"] for it in res["items"]]
+            self.assertIn(dummy_name, names)
+
+            # 3. 禁用该项
+            r_toggle = self.rpc_ok("startup.toggle", {
+                "name": dummy_name,
+                "source_type": "registry",
+                "hive": "HKCU",
+                "enabled": False
+            })
+            self.assertTrue(r_toggle["ok"])
+            self.assertFalse(r_toggle["enabled"])
+
+            # 4. 再次获取列表，状态应为 disabled
+            res2 = self.rpc_ok("startup.list")
+            target = next((it for it in res2["items"] if it["name"] == dummy_name), None)
+            self.assertIsNotNone(target)
+            self.assertEqual(target["status"], "disabled")
+
+            # 5. 删除该项
+            r_del = self.rpc_ok("startup.delete", {
+                "name": dummy_name,
+                "source_type": "registry",
+                "hive": "HKCU",
+                "key": run_key
+            })
+            self.assertTrue(r_del["ok"])
+
+            # 6. 确认已从注册表移除
+            res3 = self.rpc_ok("startup.list")
+            names3 = [it["name"] for it in res3["items"]]
+            self.assertNotIn(dummy_name, names3)
+        finally:
+            # 清理残留
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, dummy_name)
+            except OSError:
+                pass
+
+
+class TestProcess(EngineCase):
+    def test_sys_protected_blacklist(self):
+        r1 = self.rpc("process.close", {"name": "explorer"})
+        self.assertFalse(r1["ok"])
+        self.assertIn("Windows 核心受保护组件", r1["error"])
+
+        r2 = self.rpc("process.close", {"name": "dwm.exe"})
+        self.assertFalse(r2["ok"])
+        self.assertIn("Windows 核心受保护组件", r2["error"])
+
+    def test_sensitive_app_warning(self):
+        r = self.rpc_ok("process.close", {"name": "xwechat", "confirm_sensitive": False})
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["need_confirm"])
+        self.assertIn("本地数据库", r["warning"])
+
+    def test_safe_dummy_process(self):
+        r = self.rpc_ok("process.close", {"name": "tidy_dummy_proc_not_running"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["name"], "tidy_dummy_proc_not_running")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -638,35 +638,59 @@
       function showFailures(failed) {
         if (!failed || !failed.length) return;
 
-        // 识别占用源
+        // 识别占用源与可协同释放的应用
         const appSet = new Set();
         let lockedCount = 0;
+        let hasEdge = false;
+        let hasChrome = false;
+        let hasWeChat = false;
+        let hasSystem = false;
+
         failed.forEach((f) => {
           const p = String(f.path || '').toLowerCase();
           const w = String(f.why || '');
           const isLock = /winerror 32|占用|开着|lock/i.test(w);
           if (isLock) {
             lockedCount += 1;
-            if (p.includes('\\microsoft\\edge\\') || p.includes('msedge')) appSet.add(T('Edge 浏览器', 'Microsoft Edge'));
-            else if (p.includes('\\google\\chrome\\') || p.includes('chrome')) appSet.add(T('Chrome 浏览器', 'Google Chrome'));
-            else if (p.includes('\\tencent\\xwechat\\') || p.includes('\\wechat\\')) appSet.add(T('微信', 'WeChat'));
-            else if (p.includes('\\nvidia\\dxcache\\') || p.includes('d3dscache')) appSet.add(T('NVIDIA 显卡驱动', 'NVIDIA Driver'));
-            else if (p.includes('startmenuexperiencehost') || p.includes('startmenu')) appSet.add(T('Windows 开始菜单', 'Start Menu'));
-            else appSet.add(T('系统或后台软件', 'Background app'));
+            if (p.includes('\\microsoft\\edge\\') || p.includes('msedge')) {
+              appSet.add(T('Edge 浏览器', 'Microsoft Edge'));
+              hasEdge = true;
+            } else if (p.includes('\\google\\chrome\\') || p.includes('chrome')) {
+              appSet.add(T('Chrome 浏览器', 'Google Chrome'));
+              hasChrome = true;
+            } else if (p.includes('\\tencent\\xwechat\\') || p.includes('\\wechat\\')) {
+              appSet.add(T('微信', 'WeChat'));
+              hasWeChat = true;
+            } else if (p.includes('\\nvidia\\dxcache\\') || p.includes('d3dscache')) {
+              appSet.add(T('NVIDIA 显卡驱动', 'NVIDIA Driver'));
+              hasSystem = true;
+            } else if (p.includes('startmenuexperiencehost') || p.includes('startmenu')) {
+              appSet.add(T('Windows 开始菜单', 'Start Menu'));
+              hasSystem = true;
+            } else {
+              appSet.add(T('系统或后台软件', 'Background app'));
+            }
           }
         });
 
         const appNames = Array.from(appSet);
-        const tipText = lockedCount > 0
-          ? T(
-              '检测到 ' + fmtCount(lockedCount) + ' 项缓存正被正在运行的程序使用（' +
-                (appNames.length ? '如 ' + appNames.slice(0, 3).join('、') + (appNames.length > 3 ? ' 等' : '') : '系统后台') +
-                '）。这是系统正常的文件保护，您可以先退出对应程序再清理，或直接忽略日常占用的缓存。',
-              fmtCount(lockedCount) + ' item(s) are locked by active apps (' +
-                (appNames.length ? appNames.slice(0, 3).join(', ') : 'system') +
-                '). Close the apps to clean, or leave them safely.'
-            )
-          : '';
+        let tipText = '';
+        if (lockedCount > 0) {
+          tipText = T(
+            '检测到 ' + fmtCount(lockedCount) + ' 项缓存正被正在运行的程序使用（' +
+              (appNames.length ? '如 ' + appNames.slice(0, 3).join('、') + (appNames.length > 3 ? ' 等' : '') : '系统后台') +
+              '）。这是 Windows 正常的文件保护机制。',
+            fmtCount(lockedCount) + ' item(s) are locked by active apps (' +
+              (appNames.length ? appNames.slice(0, 3).join(', ') : 'system') +
+              '). Windows file lock protection is active.'
+          );
+          if (hasWeChat) {
+            tipText += ' ' + T('微信包含本地数据库，建议在右下角托盘手动退出微信以防聊天数据损坏。', 'WeChat locks active databases; exit it manually in tray.');
+          }
+          if (hasSystem) {
+            tipText += ' ' + T('显卡驱动与开始菜单由系统内核锁定，系统重启或空闲时会自动释放，无需强行关闭。', 'Driver & Start Menu caches are safely managed by OS.');
+          }
+        }
 
         function cleanWhy(why) {
           if (!why) return '';
@@ -679,6 +703,54 @@
           return s;
         }
 
+        let dlg = null;
+
+        // 可协同退出的操作按钮列表
+        const closeActions = [];
+        if (hasEdge) {
+          closeActions.push({ proc: 'msedge', labelZh: '优雅退出 Edge 并重试清理', labelEn: 'Close Edge & Retry', pat: /msedge|microsoft\\edge/i });
+        }
+        if (hasChrome) {
+          closeActions.push({ proc: 'chrome', labelZh: '优雅退出 Chrome 并重试清理', labelEn: 'Close Chrome & Retry', pat: /chrome|google\\chrome/i });
+        }
+
+        const actionBtns = closeActions.length ? h('div', {
+          class: 'row wrap',
+          style: { gap: '8px', marginTop: '8px' }
+        }, ...closeActions.map((act) => {
+          const b = h('button', {
+            class: 'btn primary sm',
+            type: 'button',
+            onclick: async () => {
+              b.disabled = true;
+              b.textContent = T('正在优雅退出并重试…', 'Closing & Retrying…');
+              try {
+                const res = await API.engine('process.close', { name: act.proc });
+                if (res && res.warning) {
+                  toast(res.warning, 'warn');
+                  b.disabled = false;
+                  return;
+                }
+                toast(T('已通知退出，正在重新清理对应缓存…', 'Closed app, retrying cleanup…'), 'ok');
+                if (dlg && typeof dlg.close === 'function') dlg.close();
+                const toRetry = failed
+                  .filter((f) => act.pat.test(String(f.path || '')))
+                  .map((f) => f.path);
+                if (toRetry.length) {
+                  await cleanPaths(toRetry, true);
+                  await doLoad(false);
+                } else {
+                  await doLoad(false);
+                }
+              } catch (err) {
+                toast(errText(err), 'error');
+                b.disabled = false;
+              }
+            }
+          }, icon('check', 13), h('span', null, T(act.labelZh, act.labelEn)));
+          return b;
+        })) : null;
+
         const noticeBox = tipText ? h('div', {
           class: 'card',
           style: {
@@ -690,7 +762,10 @@
             color: 'var(--text-2)',
             lineHeight: '1.5'
           }
-        }, h('strong', { style: { color: 'var(--text-1)' } }, T('💡 处理建议：', '💡 Note: ')), tipText) : null;
+        },
+          h('div', null, h('strong', { style: { color: 'var(--text-1)' } }, T('💡 处理建议：', '💡 Note: ')), tipText),
+          actionBtns
+        ) : null;
 
         const listWrap = h('div', {
           class: 'list',
@@ -706,7 +781,7 @@
 
         const body = h('div', { class: 'stack', style: { gap: '0' } }, noticeBox, listWrap);
 
-        modal({
+        dlg = modal({
           title: T('有 ' + fmtCount(failed.length) + ' 项没有清理成功', fmtCount(failed.length) + ' items were not cleaned'),
           body: body,
           wide: true,

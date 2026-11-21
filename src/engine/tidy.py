@@ -8746,6 +8746,293 @@ def _engine_apps_cleanup(params):
             "failed": failed}
 
 
+# ---------- 自启动管理与进程释放助手 ----------
+
+def _parse_cmd_exe(cmd):
+    """从自启动命令行中解析出主执行文件绝对路径。"""
+    if not cmd or not isinstance(cmd, str):
+        return ""
+    s = cmd.strip()
+    if s.startswith('"'):
+        end = s.find('"', 1)
+        if end != -1:
+            p = s[1:end].strip()
+            return os.path.expandvars(p)
+        return os.path.expandvars(s.strip('"'))
+    if os.path.isfile(s):
+        return os.path.expandvars(s)
+    tokens = s.split()
+    cand = ""
+    for t in tokens:
+        cand = (cand + " " + t).strip() if cand else t
+        exp = os.path.expandvars(cand)
+        if os.path.isfile(exp):
+            return exp
+    return os.path.expandvars(tokens[0]) if tokens else s
+
+
+def _resolve_lnk_target(lnk_path):
+    """解析 .lnk 快捷方式目标文件路径。"""
+    try:
+        import win32com.client
+        sh = win32com.client.Dispatch("WScript.Shell")
+        sc = sh.CreateShortcut(lnk_path)
+        if sc.TargetPath:
+            return sc.TargetPath
+    except Exception:
+        pass
+    try:
+        with open(lnk_path, "rb") as f:
+            content = f.read()
+        import re
+        m = re.findall(rb"[a-zA-Z]:\\[a-zA-Z0-9_ \\.-]+\.[eE][xX][eE]", content)
+        if m:
+            return m[-1].decode("ascii", "ignore")
+    except Exception:
+        pass
+    return ""
+
+
+def _engine_startup_list(params):
+    """startup.list：扫描全系统自启动项（注册表 + 启动文件夹），标识启用状态与失效项。"""
+    import winreg
+    items = []
+    
+    # 1. 注册表自启动
+    reg_targets = [
+        ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run", "当前用户注册表"),
+        ("HKLM64", r"Software\Microsoft\Windows\CurrentVersion\Run", "系统注册表 (64位)"),
+        ("HKLM32", r"Software\Microsoft\Windows\CurrentVersion\Run", "系统注册表 (32位)"),
+    ]
+    for hive_name, sub, loc_desc in reg_targets:
+        try:
+            with _open_reg(hive_name, sub, write=False) as k:
+                # 读取 StartupApproved
+                approved_map = {}
+                try:
+                    with _open_reg(hive_name, r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", write=False) as ak:
+                        cnt = winreg.QueryInfoKey(ak)[1]
+                        for i in range(cnt):
+                            an, ad, _ = winreg.EnumValue(ak, i)
+                            approved_map[an] = ad
+                except OSError:
+                    pass
+
+                val_cnt = winreg.QueryInfoKey(k)[1]
+                for i in range(val_cnt):
+                    n, v, _ = winreg.EnumValue(k, i)
+                    v_str = str(v)
+                    exe_path = _parse_cmd_exe(v_str)
+                    exists = bool(exe_path and os.path.exists(exe_path))
+                    appr = approved_map.get(n)
+                    is_disabled = bool(appr and len(appr) > 0 and (appr[0] % 2 == 1))
+                    
+                    status = "broken" if not exists else ("disabled" if is_disabled else "enabled")
+                    items.append({
+                        "id": "%s_%s" % (hive_name, n),
+                        "name": n,
+                        "command": v_str,
+                        "exe_path": exe_path,
+                        "exists": exists,
+                        "enabled": not is_disabled,
+                        "status": status,
+                        "location": loc_desc,
+                        "source_type": "registry",
+                        "hive": hive_name,
+                        "key": sub,
+                        "file_path": "",
+                        "icon_src": exe_path if exists else ""
+                    })
+        except OSError:
+            pass
+
+    # 2. 启动文件夹自启动
+    folder_targets = [
+        (os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"), "用户启动目录"),
+        (os.path.expandvars(r"%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup"), "系统启动目录")
+    ]
+    for folder, loc_desc in folder_targets:
+        if not os.path.isdir(folder):
+            continue
+        try:
+            for fname in os.listdir(folder):
+                full = os.path.join(folder, fname)
+                if not os.path.isfile(full):
+                    continue
+                name, ext = os.path.splitext(fname)
+                is_disabled = False
+                if fname.lower().endswith(".disabled"):
+                    is_disabled = True
+                    name, _ = os.path.splitext(name)
+                
+                exe_target = full
+                if ext.lower() == ".lnk" or fname.lower().endswith(".lnk.disabled"):
+                    resolved = _resolve_lnk_target(full)
+                    if resolved:
+                        exe_target = resolved
+
+                exists = bool(exe_target and os.path.exists(exe_target))
+                status = "broken" if not exists else ("disabled" if is_disabled else "enabled")
+                items.append({
+                    "id": "folder_%s" % fname,
+                    "name": name,
+                    "command": full,
+                    "exe_path": exe_target,
+                    "exists": exists,
+                    "enabled": not is_disabled,
+                    "status": status,
+                    "location": loc_desc,
+                    "source_type": "folder",
+                    "hive": "",
+                    "key": "",
+                    "file_path": full,
+                    "icon_src": exe_target if exists else ""
+                })
+        except OSError:
+            pass
+
+    # 统计汇总
+    enabled_cnt = sum(1 for it in items if it["enabled"] and it["exists"])
+    disabled_cnt = sum(1 for it in items if not it["enabled"])
+    broken_cnt = sum(1 for it in items if not it["exists"])
+    return {
+        "total": len(items),
+        "enabled_count": enabled_cnt,
+        "disabled_count": disabled_cnt,
+        "broken_count": broken_cnt,
+        "items": items
+    }
+
+
+def _engine_startup_toggle(params):
+    """startup.toggle：安全切换自启动项的启用/禁用状态。"""
+    name = _engine_get(params, "name", "", str)
+    if not name.strip():
+        raise EngineError("参数 name 不能为空")
+    source_type = _engine_get(params, "source_type", "registry", str)
+    enabled = _engine_get(params, "enabled", True, bool)
+
+    if source_type == "registry":
+        hive_name = _engine_get(params, "hive", "HKCU", str)
+        if hive_name not in ("HKCU", "HKLM64", "HKLM32"):
+            hive_name = "HKCU"
+        import winreg
+        hive, flag = _reg_hive(hive_name)
+        approved_sub = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+        try:
+            with winreg.CreateKeyEx(hive, approved_sub, 0, winreg.KEY_SET_VALUE | flag) as k:
+                if enabled:
+                    winreg.SetValueEx(k, name, 0, winreg.REG_BINARY, b"\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+                else:
+                    winreg.SetValueEx(k, name, 0, winreg.REG_BINARY, b"\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+        except OSError as ex:
+            raise EngineError("修改自启动状态失败（可能需要管理员权限）：%s" % ex)
+    elif source_type == "folder":
+        file_path = _engine_get(params, "file_path", "", str)
+        if not file_path or not os.path.exists(file_path):
+            raise EngineError("快捷方式文件不存在：%s" % file_path)
+        try:
+            if enabled:
+                if file_path.lower().endswith(".disabled"):
+                    new_path = file_path[:-9]
+                    os.rename(file_path, new_path)
+            else:
+                if not file_path.lower().endswith(".disabled"):
+                    new_path = file_path + ".disabled"
+                    os.rename(file_path, new_path)
+        except OSError as ex:
+            raise EngineError("重命名启动项失败：%s" % ex)
+    else:
+        raise EngineError("未知的启动项类型：%s" % source_type)
+
+    return {"ok": True, "name": name, "enabled": enabled}
+
+
+def _engine_startup_delete(params):
+    """startup.delete：安全清理自启动项（注册表键或启动快捷方式）。"""
+    name = _engine_get(params, "name", "", str)
+    if not name.strip():
+        raise EngineError("参数 name 不能为空")
+    source_type = _engine_get(params, "source_type", "registry", str)
+
+    if source_type == "registry":
+        hive_name = _engine_get(params, "hive", "HKCU", str)
+        key_sub = _engine_get(params, "key", r"Software\Microsoft\Windows\CurrentVersion\Run", str)
+        import winreg
+        hive, flag = _reg_hive(hive_name)
+        try:
+            with winreg.OpenKey(hive, key_sub, 0, winreg.KEY_SET_VALUE | flag) as k:
+                winreg.DeleteValue(k, name)
+        except OSError as ex:
+            raise EngineError("删除自启动注册表项失败：%s" % ex)
+        try:
+            with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", 0, winreg.KEY_SET_VALUE | flag) as ak:
+                winreg.DeleteValue(ak, name)
+        except OSError:
+            pass
+    elif source_type == "folder":
+        file_path = _engine_get(params, "file_path", "", str)
+        if not file_path or not os.path.exists(file_path):
+            raise EngineError("快捷方式文件不存在：%s" % file_path)
+        try:
+            os.remove(file_path)
+        except OSError as ex:
+            raise EngineError("删除启动项快捷方式失败：%s" % ex)
+    else:
+        raise EngineError("未知的启动项类型：%s" % source_type)
+
+    return {"ok": True, "name": name, "deleted": True}
+
+
+def _engine_process_close(params):
+    """process.close：安全协同释放占用文件的进程（优雅通知 + 系统核心白名单保护）。"""
+    name = _engine_get(params, "name", "", str)
+    if not name.strip():
+        raise EngineError("参数 name 不能为空")
+    force = _engine_get(params, "force", False, bool)
+    confirm_sensitive = _engine_get(params, "confirm_sensitive", False, bool)
+    
+    clean = name.strip().lower()
+    if clean.endswith(".exe"):
+        clean = clean[:-4]
+    
+    # 绝对系统关键进程白名单（红线）
+    _SYS_PROTECTED = {
+        "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
+        "startmenuexperiencehost", "tidyassistant", "整理助手", "python", "conhost",
+        "runtimebroker", "taskmgr", "system", "idle"
+    }
+    if clean in _SYS_PROTECTED:
+        raise EngineError("【%s】是 Windows 核心受保护组件，禁止关闭以防桌面崩溃" % name)
+    
+    # 敏感数据应用（如微信）
+    _SENSITIVE_APPS = {"xwechat", "wechat", "qq"}
+    if clean in _SENSITIVE_APPS and not confirm_sensitive:
+        return {
+            "ok": False,
+            "need_confirm": True,
+            "warning": "【%s】包含本地数据库文件，强行关闭可能导致未保存聊天记录损坏，建议在软件内退出" % name
+        }
+
+    import subprocess, time
+    # 1. 尝试优雅通知退出（taskkill 不加 /F 发送 WM_CLOSE）
+    try:
+        subprocess.run(["taskkill", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
+    except Exception:
+        pass
+    
+    time.sleep(1.2)
+    
+    # 2. 若配置了 force 且仍在运行，再尝试强制终止
+    if force:
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
+        except Exception:
+            pass
+
+    return {"ok": True, "name": clean, "closed": True}
+
+
 def _engine_index_meta_path():
     return os.path.join(cache_dir(), "fileindex.json")
 
@@ -9603,6 +9890,10 @@ _ENGINE_METHODS = {
     "apps.force_remove": _engine_apps_force_remove,
     "apps.leftovers": _engine_apps_leftovers,
     "apps.cleanup": _engine_apps_cleanup,
+    "startup.list": _engine_startup_list,
+    "startup.toggle": _engine_startup_toggle,
+    "startup.delete": _engine_startup_delete,
+    "process.close": _engine_process_close,
     "search.status": _engine_search_status,
     "search.index": _engine_search_index,
     "search.query": _engine_search_query,
