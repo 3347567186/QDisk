@@ -28,7 +28,7 @@
     const sel = customSelect({
       options: sizes.map((n) => ({ value: String(n), label: T(n + ' 条', n + ' rows') })),
       value: String(cur),
-      alignUp: true,
+      alignUp: false,
       className: 'sm',
       title: T('每页条数', 'Rows per page'),
       onChange: (val) => {
@@ -647,11 +647,26 @@
     }
 
     function openMenu() {
-      // 判定向上弹出还是向下弹出
+      // 判定向上弹出还是向下弹出：默认向下展开；当下方空间不足且上方空间更宽敞时自适应翻转
       const rect = trigger.getBoundingClientRect();
+      const menuHeight = 180;
       const spaceBelow = window.innerHeight - rect.bottom;
-      const needUp = alignUp === true || (alignUp !== false && spaceBelow < 210 && rect.top > 210);
+      const spaceAbove = rect.top;
+      let needUp = false;
+      if (alignUp === true) {
+        needUp = true;
+      } else if (alignUp === false) {
+        needUp = false;
+      } else {
+        needUp = (spaceBelow < menuHeight && spaceAbove > spaceBelow);
+      }
       wrap.classList.toggle('open-up', !!needUp);
+
+      // 水平防裁切自适应：若靠近视口右侧边缘，靠右对齐展开
+      const spaceRight = window.innerWidth - rect.left;
+      const needRight = (spaceRight < 120 && rect.right > 120);
+      wrap.classList.toggle('align-right', !!needRight);
+
       wrap.classList.add('open');
       trigger.setAttribute('aria-expanded', 'true');
     }

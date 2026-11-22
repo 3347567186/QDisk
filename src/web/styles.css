@@ -1509,6 +1509,10 @@ body:has(.modal-mask:not(.closing)) .toasts { opacity: 0; pointer-events: none; 
 .custom-select.open-up .custom-select-menu {
   bottom: calc(100% + 4px);
 }
+.custom-select.align-right .custom-select-menu {
+  left: auto;
+  right: 0;
+}
 .custom-select-item {
   padding: 5px 10px;
   font-size: var(--fs-small);

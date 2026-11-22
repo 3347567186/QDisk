@@ -1233,13 +1233,13 @@
         'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'
       ];
 
-      // 响应式双栏：左 50% 环形透视图，右 50% 内存大户 Top 5 动态条形图
+      // 响应式双栏：左 50% 环形透视图，右 50% 内存大户 Top 5 动态条形图（等高伸展对齐）
       const visualGrid = h('div', {
-        class: 'row wrap',
         style: {
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
           gap: '12px',
+          alignItems: 'stretch',
           marginBottom: '8px'
         }
       });
@@ -1254,11 +1254,11 @@
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
-          gap: '10px'
+          minHeight: '238px'
         }
       });
 
-      const donutTitle = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center' } },
+      const donutTitle = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
         h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('内存空间分布透视', 'Memory Distribution')),
         h('span', { class: 'muted small' }, T('悬停查看 · 点击过滤', 'Hover slice / click to filter'))
       );
@@ -1331,18 +1331,33 @@
         });
       });
 
-      // 图例 Legend（点击直接触发过滤）
-      const legend = h('div', { class: 'row wrap', style: { gap: '6px 12px', alignItems: 'center', fontSize: '11px' } });
+      // 图例 Legend（多列自适应排布，点击直接触发过滤）
+      const legendGrid = h('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+          gap: '6px 10px',
+          flex: '1',
+          fontSize: '11px'
+        }
+      });
       slices.forEach((s, idx) => {
         const color = palette[idx % palette.length];
         const legItem = h('div', {
           class: 'row',
-          style: { alignItems: 'center', gap: '5px', cursor: s.clean_name ? 'pointer' : 'default', padding: '2px 4px', borderRadius: '3px' },
+          style: {
+            alignItems: 'center',
+            gap: '5px',
+            cursor: s.clean_name ? 'pointer' : 'default',
+            padding: '2px 4px',
+            borderRadius: 'var(--radius-sm)',
+            minWidth: '0'
+          },
           title: s.clean_name ? T(`点击过滤【${s.name}】`, `Click to filter [${s.name}]`) : ''
         },
-          h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: color, flexShrink: 0 } }),
-          h('span', { class: 'ellipsis', style: { maxWidth: '90px', color: 'var(--text-1)' } }, s.name),
-          h('span', { style: { color: 'var(--text-3)', fontFamily: 'var(--mono)' } }, fmtSize(s.mem))
+          h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: color, flexShrink: '0' } }),
+          h('span', { class: 'ellipsis', style: { flex: '1', minWidth: '0', color: 'var(--text-1)' } }, s.name),
+          h('span', { style: { color: 'var(--text-3)', fontFamily: 'var(--mono)', flexShrink: '0' } }, fmtSize(s.mem))
         );
         if (s.clean_name) {
           legItem.addEventListener('click', () => {
@@ -1351,12 +1366,38 @@
             applyProcFilter();
           });
         }
-        legend.appendChild(legItem);
+        legendGrid.appendChild(legItem);
       });
 
-      const donutContentRow = h('div', { class: 'row', style: { alignItems: 'center', gap: '16px' } }, donutSvgBox, legend);
+      const donutContentRow = h('div', {
+        class: 'row',
+        style: {
+          alignItems: 'center',
+          gap: '16px',
+          flex: '1',
+          minHeight: '130px'
+        }
+      }, donutSvgBox, legendGrid);
+
+      const donutFoot = h('div', {
+        class: 'row',
+        style: {
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          paddingTop: '8px',
+          marginTop: '6px',
+          borderTop: '1px solid var(--line)',
+          fontSize: '11px',
+          color: 'var(--text-3)'
+        }
+      },
+        h('span', null, T(`共 ${ProcState.items.length} 个应用 (${ProcState.allProcs.length} 进程)`, `Total ${ProcState.items.length} apps (${ProcState.allProcs.length} procs)`)),
+        h('span', { style: { color: 'var(--text-2)', fontFamily: 'var(--mono)', fontWeight: '600' } }, T('后台总计: ' + fmtSize(ProcState.totalMemory), 'Total: ' + fmtSize(ProcState.totalMemory)))
+      );
+
       leftCol.appendChild(donutTitle);
       leftCol.appendChild(donutContentRow);
+      leftCol.appendChild(donutFoot);
 
       // ---------------- 右栏：Top 5 内存大户条形图 (Bar Chart) ----------------
       const rightCol = h('div', {
@@ -1367,16 +1408,18 @@
           border: '1px solid var(--line)',
           display: 'flex',
           flexDirection: 'column',
-          gap: '8px'
+          justifyContent: 'space-between',
+          minHeight: '238px'
         }
       });
 
-      const barTitle = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center' } },
+      const barTitle = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
         h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('内存大户排行榜 Top 5', 'Top 5 Memory Consumers')),
         h('span', { class: 'muted small' }, T('点击条目快速定位', 'Click row to locate'))
       );
       rightCol.appendChild(barTitle);
 
+      const barListWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px', flex: '1', justifyContent: 'center' } });
       const top1Mem = (topProcs[0] && topProcs[0].memory) || 1;
       topProcs.forEach((p, idx) => {
         const mem = p.memory || 0;
@@ -1389,7 +1432,7 @@
           style: {
             alignItems: 'center',
             gap: '8px',
-            padding: '4px 6px',
+            padding: '3px 6px',
             borderRadius: 'var(--radius-sm)',
             cursor: 'pointer',
             transition: 'background 0.15s ease'
@@ -1446,8 +1489,26 @@
           applyProcFilter();
         });
 
-        rightCol.appendChild(pRow);
+        barListWrap.appendChild(pRow);
       });
+      rightCol.appendChild(barListWrap);
+
+      const barFoot = h('div', {
+        class: 'row',
+        style: {
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          paddingTop: '8px',
+          marginTop: '6px',
+          borderTop: '1px solid var(--line)',
+          fontSize: '11px',
+          color: 'var(--text-3)'
+        }
+      },
+        h('span', null, T(`Top 5 合计: ${fmtSize(topSum)}`, `Top 5 sum: ${fmtSize(topSum)}`)),
+        h('span', null, T(`占后台总计 ${ProcState.totalMemory ? Math.round((topSum / ProcState.totalMemory) * 100) : 0}%`, `${ProcState.totalMemory ? Math.round((topSum / ProcState.totalMemory) * 100) : 0}% of total`))
+      );
+      rightCol.appendChild(barFoot);
 
       visualGrid.appendChild(leftCol);
       visualGrid.appendChild(rightCol);
@@ -1800,18 +1861,22 @@
           <circle cx="${curX}" cy="${curYA}" r="3" fill="${colorA}" stroke="var(--surface)" stroke-width="1.5" />
           <circle cx="${curX}" cy="${curYB}" r="3" fill="${colorB}" stroke="var(--surface)" stroke-width="1.5" />
 
-          <!-- 交互悬停辅助标线与数据光点 -->
-          <g class="chart-crosshair" style="display:none;">
+          <!-- 交互悬停辅助标线、数据光点及浮动数据胶囊 -->
+          <g class="chart-crosshair" style="display:none; pointer-events:none;">
             <line class="crosshair-line" x1="0" y1="${padTop}" x2="0" y2="${baseH}" stroke="var(--text-2)" stroke-dasharray="2 2" stroke-width="1" opacity="0.8" />
             <circle class="crosshair-dot-a" cx="0" cy="0" r="4" fill="${colorA}" stroke="#fff" stroke-width="1.5" />
             <circle class="crosshair-dot-b" cx="0" cy="0" r="4" fill="${colorB}" stroke="#fff" stroke-width="1.5" />
+            <g class="crosshair-tip" transform="translate(0, 0)">
+              <rect class="crosshair-tip-bg" x="-62" y="2" width="124" height="18" rx="4" ry="4" fill="#0f172a" fill-opacity="0.92" stroke="rgba(255,255,255,0.2)" stroke-width="0.8" />
+              <text class="crosshair-tip-text" x="0" y="14" text-anchor="middle" font-size="9" font-family="var(--mono)" fill="#f8fafc" font-weight="600"></text>
+            </g>
           </g>
         </svg>
       `;
     }
 
-    // 绑定交互：鼠标滑过时动态展示光标、高亮样本点与悬浮数值
-    function attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt) {
+    // 绑定交互：鼠标滑过时动态展示光标、高亮样本点与悬浮数值（零布局位移 CLS 防护）
+    function attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt) {
       const svg = cardEl.querySelector('svg');
       const crosshair = cardEl.querySelector('.chart-crosshair');
       const valEl = cardEl.querySelector('.chart-cur-val');
@@ -1820,6 +1885,8 @@
       const line = crosshair.querySelector('.crosshair-line');
       const dotA = crosshair.querySelector('.crosshair-dot-a');
       const dotB = crosshair.querySelector('.crosshair-dot-b');
+      const tipGroup = crosshair.querySelector('.crosshair-tip');
+      const tipText = crosshair.querySelector('.crosshair-tip-text');
 
       const W = 360;
       const H = 76;
@@ -1860,8 +1927,16 @@
         dotB.setAttribute('cx', cx);
         dotB.setAttribute('cy', cyB);
 
+        // 浮动数据胶囊：限制在图表有效绘制边界 [65, W - 65]，防止边缘遮挡
+        if (tipGroup && tipText) {
+          const clampedX = Math.max(65, Math.min(W - 65, cx));
+          tipGroup.setAttribute('transform', `translate(${clampedX}, ${padTop})`);
+          tipText.textContent = `${s.time || ''} · ${compactFmt ? compactFmt(s) : defaultFmt(s)}`;
+        }
+
+        // 顶部文本保持精简，避免折行破坏卡片高度
         if (valEl) {
-          valEl.innerHTML = `<span style="color:var(--text-3); font-size:10px;">${s.time}</span> <span style="font-weight:600;">${defaultFmt(s)}</span>`;
+          valEl.textContent = defaultFmt(s);
         }
       };
 
@@ -1869,7 +1944,7 @@
         crosshair.style.display = 'none';
         if (valEl && samples.length) {
           const latest = samples[samples.length - 1];
-          valEl.innerHTML = defaultFmt(latest);
+          valEl.textContent = defaultFmt(latest);
         }
       };
     }
@@ -1904,19 +1979,28 @@
       if (cardCpuRam) {
         const svgBox = cardCpuRam.querySelector('.chart-svg-box');
         if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'memPct', 'cpuPct', 'var(--chart-1)', 'var(--chart-2)', 100, 'gradCpuRam');
-        attachChartCrosshair(cardCpuRam, samples, 'memPct', 'cpuPct', '%', (s) => `内存: ${s.memPct}% · CPU: ${s.cpuPct}%`);
+        attachChartCrosshair(cardCpuRam, samples, 'memPct', 'cpuPct', '%',
+          (s) => `内存: ${s.memPct || 0}% · CPU: ${s.cpuPct || 0}%`,
+          (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`
+        );
       }
 
       if (cardDisk) {
         const svgBox = cardDisk.querySelector('.chart-svg-box');
         if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'diskR', 'diskW', '#38bdf8', '#f43f5e', 0, 'gradDiskIO');
-        attachChartCrosshair(cardDisk, samples, 'diskR', 'diskW', 'MB/s', (s) => `读: ${s.diskR} MB/s · 写: ${s.diskW} MB/s`);
+        attachChartCrosshair(cardDisk, samples, 'diskR', 'diskW', 'MB/s',
+          (s) => `读: ${s.diskR || 0} MB/s · 写: ${s.diskW || 0} MB/s`,
+          (s) => `读 ${s.diskR || 0}M / 写 ${s.diskW || 0}M`
+        );
       }
 
       if (cardNet) {
         const svgBox = cardNet.querySelector('.chart-svg-box');
         if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'netIn', 'netOut', '#10b981', '#a855f7', 0, 'gradNetIO');
-        attachChartCrosshair(cardNet, samples, 'netIn', 'netOut', 'KB/s', (s) => `↓ ${s.netIn} KB/s · ↑ ${s.netOut} KB/s`);
+        attachChartCrosshair(cardNet, samples, 'netIn', 'netOut', 'KB/s',
+          (s) => `↓ ${s.netIn || 0} KB/s · ↑ ${s.netOut || 0} KB/s`,
+          (s) => `↓ ${s.netIn || 0}K / ↑ ${s.netOut || 0}K`
+        );
       }
     }
 
@@ -2074,25 +2158,50 @@
         }
       });
 
-      function createMonitorCard(id, title, legA, legB, colorA, colorB, keyA, keyB, unit, defaultFmt, gradId) {
+      function createMonitorCard(id, title, legA, legB, colorA, colorB, keyA, keyB, unit, defaultFmt, compactFmt, gradId) {
         const samples = PerfState.samples;
         const latest = samples.length ? samples[samples.length - 1] : { memPct: 0, cpuPct: 0, diskR: 0, diskW: 0, netIn: 0, netOut: 0 };
 
-        const cHeader = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
-          h('div', { class: 'row', style: { alignItems: 'center', gap: '6px' } },
-            h('strong', { style: { fontSize: '12px', color: 'var(--text-1)' } }, title),
-            h('div', { class: 'row', style: { gap: '8px', fontSize: '10px' } },
-              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px' } },
-                h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorA } }),
+        const cHeader = h('div', {
+          class: 'row',
+          style: {
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            height: '22px',
+            minHeight: '22px',
+            maxHeight: '22px',
+            lineHeight: '22px',
+            overflow: 'hidden',
+            whiteSpace: 'nowrap',
+            flexWrap: 'nowrap',
+            marginBottom: '6px'
+          }
+        },
+          h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', minWidth: '0', flexShrink: '0', whiteSpace: 'nowrap' } },
+            h('strong', { style: { fontSize: '12px', color: 'var(--text-1)', whiteSpace: 'nowrap', flexShrink: '0' } }, title),
+            h('div', { class: 'row', style: { gap: '6px', fontSize: '10px', whiteSpace: 'nowrap', flexShrink: '0' } },
+              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap' } },
+                h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorA, flexShrink: '0' } }),
                 h('span', { style: { color: 'var(--text-3)' } }, legA)
               ),
-              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px' } },
-                h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorB } }),
+              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap' } },
+                h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorB, flexShrink: '0' } }),
                 h('span', { style: { color: 'var(--text-3)' } }, legB)
               )
             )
           ),
-          h('span', { class: 'chart-cur-val', style: { fontSize: '11px', fontFamily: 'var(--mono)', color: 'var(--text-2)' } }, defaultFmt(latest))
+          h('span', {
+            class: 'chart-cur-val mono',
+            style: {
+              fontSize: '11px',
+              color: 'var(--text-2)',
+              whiteSpace: 'nowrap',
+              flexShrink: '1',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              textAlign: 'right'
+            }
+          }, defaultFmt(latest))
         );
 
         const svgBox = h('div', { class: 'chart-svg-box', style: { width: '100%', height: '76px' } });
@@ -2118,7 +2227,7 @@
           }
         }, cHeader, svgBox, timeAxis);
 
-        attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt);
+        attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt);
         return cardEl;
       }
 
@@ -2129,6 +2238,7 @@
         'var(--chart-1)', 'var(--chart-2)',
         'memPct', 'cpuPct', '%',
         (s) => `内存: ${s.memPct || 0}% · CPU: ${s.cpuPct || 0}%`,
+        (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`,
         'gradCpuRam'
       );
 
@@ -2139,6 +2249,7 @@
         '#38bdf8', '#f43f5e',
         'diskR', 'diskW', 'MB/s',
         (s) => `读: ${s.diskR || 0} MB/s · 写: ${s.diskW || 0} MB/s`,
+        (s) => `读 ${s.diskR || 0}M / 写 ${s.diskW || 0}M`,
         'gradDiskIO'
       );
 
@@ -2149,6 +2260,7 @@
         '#10b981', '#a855f7',
         'netIn', 'netOut', 'KB/s',
         (s) => `↓ ${s.netIn || 0} KB/s · ↑ ${s.netOut || 0} KB/s`,
+        (s) => `↓ ${s.netIn || 0}K / ↑ ${s.netOut || 0}K`,
         'gradNetIO'
       );
 
@@ -2230,7 +2342,8 @@
         style: {
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-          gap: '16px'
+          gap: '16px',
+          alignItems: 'stretch'
         }
       });
 
@@ -2243,6 +2356,7 @@
           borderRadius: 'var(--radius)',
           display: 'flex',
           flexDirection: 'column',
+          justifyContent: 'space-between',
           gap: '10px'
         }
       },
@@ -2345,6 +2459,7 @@
           borderRadius: 'var(--radius)',
           display: 'flex',
           flexDirection: 'column',
+          justifyContent: 'space-between',
           gap: '10px'
         }
       },
@@ -2367,6 +2482,59 @@
         ramCol.appendChild(emptyProcs);
       } else {
         const topProcs = runningApps.slice(0, 5);
+        const ramTopSum = topProcs.reduce((sum, p) => sum + (p.memory || 0), 0);
+        const ramOtherMem = Math.max(0, (ProcState.totalMemory || ramTopSum) - ramTopSum);
+        const ramSlices = topProcs.map((p) => ({
+          name: p.name,
+          size: p.memory || 0,
+          pct: ProcState.totalMemory ? (p.memory || 0) / ProcState.totalMemory : 0
+        }));
+        if (ramOtherMem > 0) {
+          ramSlices.push({
+            name: T('其他运行中进程', 'Other processes'),
+            size: ramOtherMem,
+            pct: ProcState.totalMemory ? ramOtherMem / ProcState.totalMemory : 0
+          });
+        }
+
+        const ramPalette = [
+          'var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)',
+          'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'
+        ];
+
+        const ramR = 50;
+        const ramCirc = 2 * Math.PI * ramR;
+        let ramOffset = 0;
+        const ramPaths = ramSlices.map((s, idx) => {
+          const strokeLen = s.pct * ramCirc;
+          const color = ramPalette[idx % ramPalette.length];
+          const circle = `<circle cx="65" cy="65" r="${ramR}" fill="none" stroke="${color}" stroke-width="16" stroke-dasharray="${strokeLen} ${ramCirc - strokeLen}" stroke-dashoffset="${-ramOffset}" />`;
+          ramOffset += strokeLen;
+          return circle;
+        }).join('');
+
+        const ramDonutSvg = `
+          <svg viewBox="0 0 130 130" width="90" height="90" style="transform: rotate(-90deg); display: block; flex-shrink: 0;">
+            <circle cx="65" cy="65" r="${ramR}" fill="none" stroke="var(--line)" stroke-width="16" />
+            ${ramPaths}
+          </svg>
+        `;
+
+        const ramDonutRow = h('div', { class: 'row wrap', style: { alignItems: 'center', gap: '16px', paddingBottom: '8px', borderBottom: '1px solid var(--line)' } });
+        const ramSvgWrap = h('div', { style: { position: 'relative', width: '90px', height: '90px', flexShrink: 0 } });
+        ramSvgWrap.innerHTML = ramDonutSvg;
+
+        const ramLegendWrap = h('div', { class: 'stack', style: { gap: '4px', flex: '1', minWidth: '160px' } },
+          ...ramSlices.slice(0, 4).map((s, idx) => h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', fontSize: '11px' } },
+            h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: ramPalette[idx % ramPalette.length], flexShrink: '0' } }),
+            h('span', { class: 'ellipsis', style: { flex: '1', color: 'var(--text-1)' }, title: s.name }, s.name),
+            h('span', { style: { fontFamily: 'var(--mono)', color: 'var(--text-3)' } }, fmtSize(s.size))
+          ))
+        );
+        ramDonutRow.appendChild(ramSvgWrap);
+        ramDonutRow.appendChild(ramLegendWrap);
+        ramCol.appendChild(ramDonutRow);
+
         const listProcWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } });
         topProcs.forEach((p, i) => {
           const row = h('div', {
