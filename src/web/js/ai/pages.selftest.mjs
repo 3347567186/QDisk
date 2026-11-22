@@ -55,6 +55,12 @@ class FakeElement extends FakeNode {
   }
   get parentNode() { return this.parent; }
   appendChild(child) {
+    if (child && child.tagName === '#FRAGMENT') {
+      const items = child.children.slice();
+      items.forEach((n) => this.appendChild(n));
+      child.children = [];
+      return child;
+    }
     if (child) {
       if (child.parent && child.parent !== this && typeof child.parent.removeChild === 'function') {
         child.parent.removeChild(child);
@@ -191,6 +197,7 @@ const sandbox = {
     _byId: { 'modal-root': new FakeElement('div') },
     createElement: (t) => new FakeElement(t),
     createElementNS: (ns, t) => new FakeElement(t),
+    createDocumentFragment: () => new FakeElement('#fragment'),
     createTextNode: (txt) => { const el = new FakeElement('#text'); el.textContent = txt; return el; },
     getElementById: (id) => (id && sandbox.document._byId[id]) ? sandbox.document._byId[id] : new FakeElement('div'),
     addEventListener: trackedDocAdd,
@@ -706,5 +713,181 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录校验通过）`);
+/* ==================== 回归 8：压缩包性能档位联动 & 暂停 / 继续 / 取消进度流 ==================== */
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const rootArc = new FakeElement('div');
+  const modalRoot = sandbox.document._byId['modal-root'];
+  modalRoot.children = [];
+
+  const origTauri = sandbox.__TAURI__;
+  const origCfgGet = sandbox.API.configGet;
+  const origCfgSet = sandbox.API.configSet;
+  const origOpen = sandbox.API.archiveOpen;
+  const origExtract = sandbox.API.archiveExtract;
+  const origPause = sandbox.API.archivePause;
+  const origResume = sandbox.API.archiveResume;
+  const origCancel = sandbox.API.archiveCancel;
+
+  const eventHandlers = new Map();
+  let cfgMode = 'hyper';
+  let pauseCalls = 0;
+  let resumeCalls = 0;
+  let cancelCalls = 0;
+  let rejectExtract = null;
+
+  sandbox.__TAURI__ = Object.assign({}, origTauri || {}, {
+    event: {
+      listen: async (name, fn) => {
+        eventHandlers.set(name, fn);
+        return () => eventHandlers.delete(name);
+      }
+    }
+  });
+  sandbox.API.configGet = async () => ({ archive_mode: cfgMode, archive_extract_dir: 'D:\\下载', archive_extract_open: false });
+  sandbox.API.configSet = async (patch) => { if (patch && patch.archive_mode) cfgMode = patch.archive_mode; };
+  sandbox.API.archiveOpen = async (p) => ({
+    path: p,
+    format: 'ZIP',
+    entries: [{ index: 0, name: 'big.tar', isDir: false, size: 1024 * 1024 * 100, packed: 512000, modified: '2026-11-22 10:00:00', encrypted: false, crc: 1 }],
+    totalSize: 1024 * 1024 * 100,
+    totalPacked: 512000,
+    encrypted: false,
+    solid: false,
+    comment: '',
+    needsRar: false,
+    rarReady: true
+  });
+  sandbox.API.archiveExtract = () => new Promise((_, rej) => { rejectExtract = rej; });
+  sandbox.API.archivePause = async () => { pauseCalls++; return true; };
+  sandbox.API.archiveResume = async () => { resumeCalls++; return true; };
+  sandbox.API.archiveCancel = async () => { cancelCalls++; return true; };
+
+  const beforeKey = (docListeners.get('keydown') || []).length;
+  const beforeInt = activeIntervals.size;
+  const ret = await sandbox.Pages.archive.mount(rootArc);
+  await new Promise((r) => setTimeout(r, 30));
+
+  // 验证 configGet 加载的超线程档位同时同步到解压下拉和创建卡片
+  const activeCreateMode = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-mode') && n.classList.contains('active'))[0];
+  const extractModeLabel = findNodes(rootArc, (n) => n.classList && n.classList.contains('custom-select-label'))[0];
+  if (!activeCreateMode || !txt(activeCreateMode).includes('超线程') || !extractModeLabel || txt(extractModeLabel) !== '超线程') {
+    console.error(`[压缩包性能回归] configGet 档位未能同步到两侧控件: card=${txt(activeCreateMode)}, select=${txt(extractModeLabel)}`);
+    process.exit(1);
+  }
+
+  // 点击创建区「性能模式」的「节约」卡片，验证解压侧 customSelect 联动同步
+  const saverCard = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-mode') && txt(n).includes('节约'))[0];
+  clickBtn(saverCard);
+  if (txt(extractModeLabel) !== '节约') {
+    console.error(`[压缩包性能回归] 创建页切换性能模式未联动解压选择器: select=${txt(extractModeLabel)}`);
+    process.exit(1);
+  }
+  const hyperCard = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-mode') && txt(n).includes('超线程'))[0];
+  clickBtn(hyperCard);
+
+  // 打开压缩包并触发一个长时间未决的解压任务
+  await sandbox.Pages.archive.jump({ paths: ['D:\\data.zip'] });
+  const extractAllBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('解压全部'))[0];
+  clickBtn(extractAllBtn);
+  const startBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始解压'))[0];
+  clickBtn(startBtn);
+  await new Promise((r) => setTimeout(r, 20));
+
+  // 推送进度事件并验证档位徽标、暂停/继续、取消提示横幅
+  const emitProgress = eventHandlers.get('archive-progress');
+  if (!emitProgress) {
+    console.error('[压缩包进度回归] 未注册 archive-progress 监听器');
+    process.exit(1);
+  }
+  emitProgress({
+    payload: {
+      op: 'extract',
+      phase: 'extract',
+      paused: false,
+      mode: 'hyper',
+      files: 120,
+      totalFiles: 500,
+      bytes: 40 * 1024 * 1024,
+      totalBytes: 100 * 1024 * 1024,
+      name: 'big.tar'
+    }
+  });
+  const modeTag = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-mode-tag'))[0];
+  const pauseBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '暂停')[0];
+  if (!modeTag || txt(modeTag) !== '超线程' || !pauseBtn) {
+    console.error(`[压缩包进度回归] 进度卡缺少档位徽标或暂停按钮: tag=${txt(modeTag)}, pause=${!!pauseBtn}`);
+    process.exit(1);
+  }
+
+  // 点击「暂停」：应立即显示暂停进度横幅，且按钮变为「继续」
+  clickBtn(pauseBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  const pauseBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
+  const resumeBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '继续')[0];
+  if (pauseCalls !== 1 || !pauseBanner || !txt(pauseBanner).includes('已暂停') || !txt(pauseBanner).includes('40%') || !resumeBtn) {
+    console.error(`[压缩包暂停回归] 暂停态界面状态异常: calls=${pauseCalls}, banner=${txt(pauseBanner)}, resume=${!!resumeBtn}`);
+    process.exit(1);
+  }
+
+  // 点击「继续」：恢复执行，移除暂停横幅
+  clickBtn(resumeBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  const pauseBannerAfterResume = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
+  if (resumeCalls !== 1 || pauseBannerAfterResume) {
+    console.error(`[压缩包恢复回归] 恢复后状态异常: resumeCalls=${resumeCalls}, banner=${!!pauseBannerAfterResume}`);
+    process.exit(1);
+  }
+
+  // 点击「取消」：即时切到「取消中…」状态并展示取消清理提示横幅
+  const cancelBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '取消')[0];
+  clickBtn(cancelBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  const cancellingBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner') && n.classList.contains('is-cancelling'))[0];
+  if (cancelCalls !== 1 || !cancellingBanner || !txt(cancellingBanner).includes('正在取消')) {
+    console.error(`[压缩包取消回归] 取消中提示缺失: cancelCalls=${cancelCalls}, banner=${txt(cancellingBanner)}`);
+    process.exit(1);
+  }
+
+  // 模拟后端返回取消错误并退出任务
+  if (rejectExtract) rejectExtract(new Error('操作已取消'));
+  await new Promise((r) => setTimeout(r, 30));
+  const progCard = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-progress'))[0];
+  if (progCard && !progCard.hidden) {
+    console.error('[压缩包取消回归] 任务取消结束后进度卡未隐藏');
+    process.exit(1);
+  }
+
+  if (typeof ret === 'function') ret();
+  sandbox.__TAURI__ = origTauri;
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.configSet = origCfgSet;
+  sandbox.API.archiveOpen = origOpen;
+  sandbox.API.archiveExtract = origExtract;
+  sandbox.API.archivePause = origPause;
+  sandbox.API.archiveResume = origResume;
+  sandbox.API.archiveCancel = origCancel;
+  await new Promise((r) => setTimeout(r, 220));
+  const afterKey = (docListeners.get('keydown') || []).length;
+  const afterInt = activeIntervals.size;
+  if (afterKey !== beforeKey || afterInt !== beforeInt) {
+    console.error(`[压缩包性能回归] unmount 后资源未回收: keydown=${afterKey - beforeKey}, intervals=${afterInt - beforeInt}`);
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录与性能暂停流校验通过）`);
 process.exit(0);

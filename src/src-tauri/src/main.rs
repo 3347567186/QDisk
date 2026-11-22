@@ -2355,6 +2355,8 @@ fn main() {
             archive::archive_open,
             archive::archive_extract,
             archive::archive_create,
+            archive::archive_pause,
+            archive::archive_resume,
             archive::archive_cancel,
             archive::archive_preview,
             archive::archive_preview_clear,

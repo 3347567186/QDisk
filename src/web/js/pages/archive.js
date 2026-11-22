@@ -8,10 +8,10 @@
   const errText = UI.errText;
 
   const MODES = [
-    { id: 'saver', zh: '节约', en: 'Saver', hint: T('1 线程 · 内存最低', '1 thread · lowest memory') },
-    { id: 'balanced', zh: '平衡', en: 'Balanced', hint: T('2 线程 · 推荐', '2 threads · recommended') },
-    { id: 'performance', zh: '高性能', en: 'Performance', hint: T('4 线程 · 更快', '4 threads · faster') },
-    { id: 'hyper', zh: '超线程', en: 'Hyper', hint: T('8 线程 · 最快，内存最高', '8 threads · fastest, most memory') }
+    { id: 'saver', zh: '节约', en: 'Saver', hint: T('1 线程 · 低占用，后台省电', '1 thread · low CPU/IO') },
+    { id: 'balanced', zh: '平衡', en: 'Balanced', hint: T('2 线程 · 速度与体积均衡', '2 threads · balanced') },
+    { id: 'performance', zh: '高性能', en: 'Performance', hint: T('4 线程 · 并行加速，媒体免重压', '4 threads · fast, smart store') },
+    { id: 'hyper', zh: '超线程', en: 'Hyper', hint: T('满核并行 · 极速压缩/解压', 'All cores · maximum speed') }
   ];
 
   const FORMATS = [
@@ -38,6 +38,10 @@
     rar: null,
     rarBusy: false,
     busy: false,
+    paused: false,
+    cancelling: false,
+    opKind: '',
+    activeMode: 'balanced',
     opLabel: '',
     progress: null,
     /* 实时速率：每来一条 archive-progress 采样一次，画成小窗里的折线 */
@@ -126,8 +130,17 @@
     return seg || null;
   }
 
-  function startOp(label) {
+  function modeLabel(id) {
+    const m = MODES.find((x) => x.id === id) || MODES[1];
+    return T(m.zh, m.en);
+  }
+
+  function startOp(label, kind) {
     S.busy = true;
+    S.paused = false;
+    S.cancelling = false;
+    S.opKind = kind || '';
+    S.activeMode = S.create.mode || 'balanced';
     S.opLabel = label || T('正在处理…', 'Working…');
     S.progress = null;
     S.speed = { t: 0, bytes: 0, ema: 0, samples: [] };
@@ -136,6 +149,9 @@
 
   function endOp() {
     S.busy = false;
+    S.paused = false;
+    S.cancelling = false;
+    S.opKind = '';
     S.opLabel = '';
     S.progress = null;
     renderProgress();
@@ -264,6 +280,7 @@
       }
     });
     const side = h('aside', { class: 'arc-side card', hidden: true });
+    els.modeSel = modeSel;
     const listTools = h('div', { class: 'arc-list-tools' }, filter, all, count);
     const listHead = h('div', { class: 'arc-list-head' }, crumbs, listTools);
     const footActions = h('div', { class: 'arc-foot-actions' },
@@ -1135,7 +1152,7 @@
       archive_extract_dir: picked.dir,
       archive_extract_open: picked.openAfter
     }).catch(() => {});
-    startOp(T('正在解压…', 'Extracting…'));
+    startOp(T('正在解压…', 'Extracting…'), 'extract');
     try {
       const report = await API.archiveExtract(S.path, out, indices, S.password || null, S.overwrite, S.create.mode);
       endOp();
@@ -1158,13 +1175,61 @@
       });
       if (picked.openAfter) API.openPath(report.outDir).catch(() => {});
     } catch (e) {
+      const wasCancelling = S.cancelling;
       endOp();
-      toast(errText(e), 'error');
+      const msg = errText(e);
+      if (wasCancelling || /操作已取消/.test(msg)) toast(T('任务已取消', 'Task cancelled'), 'info');
+      else toast(msg, 'error');
+    }
+  }
+
+  async function pauseOp() {
+    if (!S.busy || S.paused || S.cancelling) return;
+    S.paused = true;
+    S.speed.t = 0;
+    renderProgress();
+    try {
+      const ok = await API.archivePause();
+      if (destroyed || !S.busy || S.cancelling) return;
+      if (ok === false) {
+        S.paused = false;
+        renderProgress();
+      }
+    } catch {
+      if (!destroyed && S.busy && !S.cancelling) {
+        S.paused = false;
+        renderProgress();
+      }
+    }
+  }
+
+  async function resumeOp() {
+    if (!S.busy || !S.paused || S.cancelling) return;
+    S.paused = false;
+    S.speed.t = 0;
+    renderProgress();
+    try {
+      const ok = await API.archiveResume();
+      if (destroyed || !S.busy || S.cancelling) return;
+      if (ok === false) {
+        S.paused = true;
+        renderProgress();
+      }
+    } catch {
+      if (!destroyed && S.busy && !S.cancelling) {
+        S.paused = true;
+        renderProgress();
+      }
     }
   }
 
   async function cancelOp() {
-    try { await API.archiveCancel(); toast(T('已请求取消', 'Cancel requested'), 'warn'); } catch { /* ignore */ }
+    if (!S.busy || S.cancelling) return;
+    S.cancelling = true;
+    S.paused = false;
+    S.speed.t = 0;
+    renderProgress();
+    try { await API.archiveCancel(); } catch { /* ignore */ }
   }
 
   /* ---------------------------------------------------------------- 进度与速率 */
@@ -1241,14 +1306,18 @@
     const eta = (spd && remain > 0) ? T('剩余 ' + fmtDur(remain / st.ema), fmtDur(remain / st.ema) + ' left') : '';
 
     const box = h('div', {
-      class: 'arc-chart',
+      class: 'arc-chart' + (S.paused ? ' is-paused' : ''),
       role: 'img',
-      'aria-label': (spd ? T('当前速度 ', 'Speed ') + spd : T('速率图', 'Speed chart'))
+      'aria-label': (S.paused ? T('已暂停', 'Paused') : (spd ? T('当前速度 ', 'Speed ') + spd : T('速率图', 'Speed chart')))
     });
     box.innerHTML = svg;
+    const leftMeta = S.cancelling ? T('正在取消…', 'Cancelling…')
+      : S.paused ? T('已暂停 · 进度已保留', 'Paused · progress held')
+      : (eta || (vals.length ? T('速度', 'Speed') : T('正在准备…', 'Starting…')));
+    const rightMeta = S.paused ? (percent + '%') : (spd || '—');
     box.appendChild(h('div', { class: 'arc-chart-meta' },
-      h('span', null, eta || (vals.length ? T('速度', 'Speed') : T('正在准备…', 'Starting…'))),
-      h('span', { class: 'arc-chart-spd' }, spd || '—')));
+      h('span', null, leftMeta),
+      h('span', { class: 'arc-chart-spd' }, rightMeta)));
     return box;
   }
 
@@ -1265,16 +1334,22 @@
     const totalFiles = p ? Number(p.totalFiles) || 0 : 0;
     const percent = totalBytes ? pct(bytes, totalBytes) : (totalFiles ? pct(files, totalFiles) : 0);
 
-    const isCreate = S.tab === 'create' || (p && p.phase === 'compress');
+    const isCreate = (p && p.op) ? (p.op === 'create') : (S.opKind ? S.opKind === 'create' : (S.tab === 'create'));
     const titleName = isCreate
       ? (baseName(S.create.dest || (S.lastCreate && S.lastCreate.path) || '') || T('新建压缩包', 'New archive'))
       : (baseName(S.path) || T('解压任务', 'Extract'));
-    const phaseText = (p && p.phase === 'compress') ? T('正在压缩…', 'Compressing…')
+    const phaseText = S.cancelling ? T('正在取消并清理临时文件…', 'Cancelling…')
+      : S.paused ? T('已暂停', 'Paused')
+      : (p && p.phase === 'compress') ? T('正在压缩…', 'Compressing…')
       : (p && p.phase === 'extract') ? T('正在解压…', 'Extracting…')
       : (S.opLabel || T('正在处理…', 'Working…'));
+    const curMode = (p && p.mode) || S.activeMode || S.create.mode || 'balanced';
 
     els.progress.appendChild(h('div', { class: 'arc-progress-top' },
-      h('div', { class: 'arc-progress-label' }, icon('archive', 15), h('strong', { class: 'ellipsis', title: titleName }, titleName)),
+      h('div', { class: 'arc-progress-label' },
+        icon('archive', 15),
+        h('strong', { class: 'ellipsis', title: titleName }, titleName),
+        h('span', { class: 'arc-mode-tag' }, modeLabel(curMode))),
       h('div', { class: 'small muted' },
         (totalFiles ? fmtCount(files) + ' / ' + fmtCount(totalFiles) : fmtCount(files)) + ' · ' +
         fmtBytes(bytes) + (totalBytes ? ' / ' + fmtBytes(totalBytes) : ''))
@@ -1283,15 +1358,37 @@
     if (S.speed.samples.length >= 2) {
       els.progress.appendChild(buildSpeedChart(percent));
     } else {
-      els.progress.appendChild(h('div', { class: 'arc-bar' },
+      els.progress.appendChild(h('div', { class: 'arc-bar' + (S.paused ? ' is-paused' : '') },
         h('i', { style: { width: (totalBytes || totalFiles) ? percent + '%' : '34%' } })));
+    }
+    if (S.cancelling) {
+      els.progress.appendChild(h('div', { class: 'arc-pause-banner is-cancelling' },
+        T('正在取消任务并清理未完成文件…', 'Cancelling and cleaning up partial files…')));
+    } else if (S.paused) {
+      const bytePart = totalBytes ? (fmtBytes(bytes) + ' / ' + fmtBytes(totalBytes)) : fmtBytes(bytes);
+      const details = [
+        percent + '%',
+        totalFiles ? (fmtCount(files) + ' / ' + fmtCount(totalFiles) + T(' 个文件', ' files'))
+          : (files ? (fmtCount(files) + T(' 个文件', ' files')) : '')
+      ].filter(Boolean).join(T('，', ', '));
+      els.progress.appendChild(h('div', { class: 'arc-pause-banner' },
+        T('已暂停 · 已完成 ' + bytePart + '（' + details + '）· 点击「继续」恢复',
+          'Paused at ' + bytePart + ' (' + details + ') · Click Resume to continue')));
     }
     const currentName = (p && p.name) ? p.name : phaseText;
     els.progress.appendChild(h('div', { class: 'small muted ellipsis', title: currentName }, currentName));
     if (S.busy) {
-      const b = h('button', { class: 'btn ghost sm' }, T('取消', 'Cancel'));
-      b.onclick = cancelOp;
-      els.progress.appendChild(b);
+      const toggleBtn = h('button', {
+        class: S.paused ? 'btn primary sm' : 'btn ghost sm',
+        disabled: !!S.cancelling
+      }, S.paused ? T('继续', 'Resume') : T('暂停', 'Pause'));
+      toggleBtn.onclick = S.paused ? resumeOp : pauseOp;
+      const cancelBtn = h('button', {
+        class: 'btn ghost sm',
+        disabled: !!S.cancelling
+      }, S.cancelling ? T('取消中…', 'Cancelling…') : T('取消', 'Cancel'));
+      cancelBtn.onclick = cancelOp;
+      els.progress.appendChild(h('div', { class: 'arc-progress-acts' }, toggleBtn, cancelBtn));
     }
   }
 
@@ -1405,8 +1502,8 @@
         h('span', { class: 'arc-field-label' }, T('性能模式', 'Performance mode')),
         modeBox,
         h('div', { class: 'small muted arc-field-hint' },
-          T('7Z 按档位使用 1 / 2 / 4 / 8 线程；ZIP 用 Deflate 级别 6 / 6 / 3 / 1。',
-            '7Z uses 1 / 2 / 4 / 8 threads; ZIP uses Deflate level 6 / 6 / 3 / 1.'))),
+          T('ZIP / 7Z / TAR.GZ 均按档位启用多核并行（含大文件分块加速）与压缩级别 6 / 5 / 3 / 1；高性能与超线程对音视频/图片/压缩包免重压。',
+            'ZIP / 7Z / TAR.GZ scale across threads (including multi-block large files) with levels 6 / 5 / 3 / 1; Performance & Hyper store already-compressed media directly.'))),
       h('div', { class: 'arc-field' },
         h('span', { class: 'arc-field-label' }, T('密码', 'Password')),
         pw)
@@ -1535,6 +1632,9 @@
       }, h('strong', null, T(m.zh, m.en)), h('span', { class: 'small muted' }, m.hint));
       els.modeBox.appendChild(b);
     });
+    if (els.modeSel && typeof els.modeSel.setValue === 'function') {
+      els.modeSel.setValue(S.create.mode);
+    }
   }
 
   async function addFilesToCreate() {
@@ -1703,7 +1803,7 @@
     if (els.dest) els.dest.value = dest;
     API.configSet({ archive_create_dir: S.create.dir }).catch(() => {});
     const pw = (S.create.format === 'zip' || S.create.format === '7z') ? (S.create.password || null) : null;
-    startOp(T('正在创建压缩包…', 'Creating archive…'));
+    startOp(T('正在创建压缩包…', 'Creating archive…'), 'create');
     try {
       const report = await API.archiveCreate(sources, dest, S.create.format, S.create.mode, pw);
       endOp();
@@ -1737,8 +1837,11 @@
         }
       });
     } catch (e) {
+      const wasCancelling = S.cancelling;
       endOp();
-      toast(errText(e), 'error');
+      const msg = errText(e);
+      if (wasCancelling || /操作已取消/.test(msg)) toast(T('任务已取消', 'Task cancelled'), 'info');
+      else toast(msg, 'error');
     }
   }
 
@@ -1860,9 +1963,19 @@
     try {
       if (window.__TAURI__ && window.__TAURI__.event) {
         unlisten = await window.__TAURI__.event.listen('archive-progress', (ev) => {
-          if (destroyed) return;
-          S.progress = ev.payload || {};
-          sampleSpeed(S.progress);
+          if (destroyed || !S.busy) return;
+          const p = ev.payload || {};
+          S.progress = p;
+          if (p.mode) S.activeMode = p.mode;
+          if (p.phase === 'cancelling') {
+            S.cancelling = true;
+            S.paused = false;
+            S.speed.t = 0;
+          } else if (!S.cancelling) {
+            S.paused = !!(p.paused || p.phase === 'paused');
+            if (S.paused) S.speed.t = 0;
+            else sampleSpeed(p);
+          }
           renderProgress();
         });
       }
@@ -1904,6 +2017,9 @@
       // 离开页面会中断任务：把状态收干净，回到本页时不能停在「永远处理中」
       API.archiveCancel().catch(() => {});
       S.busy = false;
+      S.paused = false;
+      S.cancelling = false;
+      S.opKind = '';
       S.opLabel = '';
       S.progress = null;
     }

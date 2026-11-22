@@ -17,35 +17,9 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-pub use util::{Overwrite, Progress};
+pub use util::{Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard};
 
 use crate::data_dir;
-
-/// 归档任务的性能档：只调当前工作线程的优先级，不改全局进程优先级。
-/// saver 让出 CPU，hyper 抢在普通任务之前；balanced/performance 介于两者之间。
-pub(super) fn set_thread_priority(mode: &str) {
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetCurrentThread() -> isize;
-            fn SetThreadPriority(handle: isize, priority: i32) -> i32;
-        }
-        let level = match mode {
-            "saver" => -1,        // THREAD_PRIORITY_BELOW_NORMAL
-            "performance" => 1,   // THREAD_PRIORITY_ABOVE_NORMAL
-            "hyper" => 2,         // THREAD_PRIORITY_HIGHEST
-            _ => 0,               // THREAD_PRIORITY_NORMAL
-        };
-        unsafe {
-            SetThreadPriority(GetCurrentThread(), level);
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = mode;
-    }
-}
 
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -82,8 +56,9 @@ pub fn data_dir_for_rar() -> PathBuf {
 
 #[derive(Clone, Default)]
 pub struct ArchiveCtx {
-    cancel: Arc<AtomicBool>,
+    control: Arc<TaskControl>,
     busy: Arc<AtomicBool>,
+    active_progress: Arc<Mutex<Option<Arc<Progress>>>>,
     preview_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
@@ -93,16 +68,23 @@ pub struct OpGuard {
 
 impl Drop for OpGuard {
     fn drop(&mut self) {
+        if let Ok(mut slot) = self.ctx.active_progress.lock() {
+            *slot = None;
+        }
+        self.ctx.control.reset();
         self.ctx.busy.store(false, Ordering::SeqCst);
     }
 }
 
 impl ArchiveCtx {
-    fn begin(&self) -> Result<OpGuard> {
+    fn begin(&self, progress: Option<Arc<Progress>>) -> Result<OpGuard> {
         if self.busy.swap(true, Ordering::SeqCst) {
             bail!("已有压缩或解压任务在运行，请先等待或取消");
         }
-        self.cancel.store(false, Ordering::SeqCst);
+        self.control.reset();
+        if let Ok(mut slot) = self.active_progress.lock() {
+            *slot = progress;
+        }
         Ok(OpGuard { ctx: self.clone() })
     }
 }
@@ -387,10 +369,12 @@ pub fn extract_archive(
     password: Option<&str>,
     policy: Overwrite,
     mode: &str,
-    progress: &Progress,
-    cancel: &AtomicBool,
+    progress: &Arc<Progress>,
+    control: &Arc<TaskControl>,
 ) -> Result<ExtractReport> {
-    set_thread_priority(mode);
+    let profile = PerfProfile::from_mode(mode);
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
+    progress.set_mode(profile.mode);
     let kind = detect(path)?;
     let info = list_archive(path, password)?;
     if info.needs_rar {
@@ -442,19 +426,19 @@ pub fn extract_archive(
 
     match kind {
         Kind::Zip => zip_impl::extract(
-            path, out_dir, &selected, password, policy, mode, progress, cancel,
+            path, out_dir, &selected, password, policy, profile, progress, control,
         ),
         Kind::SevenZ => sevenz_impl::extract(
-            path, out_dir, &selected, password, policy, progress, cancel,
+            path, out_dir, &selected, password, policy, profile, progress, control,
         ),
         Kind::Tar | Kind::TarGz | Kind::TarBz2 | Kind::TarXz => tar_impl::extract(
-            path, out_dir, kind, &selected, password, policy, progress, cancel,
+            path, out_dir, kind, &selected, password, policy, profile, progress, control,
         ),
         Kind::Gz | Kind::Bz2 | Kind::Xz => {
-            tar_impl::extract_single(path, out_dir, kind, &selected, policy, progress, cancel)
+            tar_impl::extract_single(path, out_dir, kind, &selected, policy, profile, progress, control)
         }
         Kind::Rar => rar::extract(
-            path, out_dir, &selected, password, policy, progress, cancel,
+            path, out_dir, &selected, password, policy, profile, progress, control,
         ),
     }
 }
@@ -465,21 +449,15 @@ pub fn create_archive(
     format: &str,
     mode: &str,
     password: Option<&str>,
-    progress: &Progress,
-    cancel: &AtomicBool,
+    progress: &Arc<Progress>,
+    control: &Arc<TaskControl>,
 ) -> Result<CreateReport> {
     if sources.is_empty() {
         bail!("请先选择要压缩的文件或文件夹");
     }
-    let threads = match mode {
-        "saver" => 1usize,
-        "balanced" => 2,
-        "performance" => 4,
-        "hyper" => 8,
-        _ => 2,
-    };
-    let threads = threads.min(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
-    set_thread_priority(mode);
+    let profile = PerfProfile::from_mode(mode);
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
+    progress.set_mode(profile.mode);
     let started = Instant::now();
     let tmp = dest.with_extension(format!(
         "{}part",
@@ -490,18 +468,11 @@ pub fn create_archive(
     if tmp.exists() {
         let _ = fs::remove_file(&tmp);
     }
-    // ZIP 的 Deflate 是单线程格式，用压缩级别换速度：档位越高越快、体积略大。
-    let zip_level: i64 = match mode {
-        "saver" => 1,
-        "performance" => 3,
-        "hyper" => 1,
-        _ => 6,
-    };
     let result = match format {
-        "zip" => zip_impl::create(sources, &tmp, password, zip_level, progress, cancel),
-        "7z" | "sevenz" => sevenz_impl::create(sources, &tmp, password, threads, progress, cancel),
-        "tar" => tar_impl::create_tar(sources, &tmp, progress, cancel),
-        "tgz" | "tar.gz" => tar_impl::create_tgz(sources, &tmp, progress, cancel),
+        "zip" => zip_impl::create(sources, &tmp, password, profile, progress, control),
+        "7z" | "sevenz" => sevenz_impl::create(sources, &tmp, password, profile, progress, control),
+        "tar" => tar_impl::create_tar(sources, &tmp, profile, progress, control),
+        "tgz" | "tar.gz" => tar_impl::create_tgz(sources, &tmp, profile, progress, control),
         _ => bail!("不支持创建 {format} 格式；可选 ZIP / 7Z / TAR / TAR.GZ"),
     };
     if let Err(e) = result {
@@ -596,9 +567,9 @@ pub async fn archive_extract(
     mode: Option<String>,
 ) -> Result<ExtractReport, String> {
     let ctx = state.inner().clone();
-    let guard = ctx.begin().map_err(|e| format!("{e:#}"))?;
-    let progress = Progress::new(app, "extract");
-    let cancel = ctx.cancel.clone();
+    let progress = Arc::new(Progress::new(app, "extract"));
+    let guard = ctx.begin(Some(progress.clone())).map_err(|e| format!("{e:#}"))?;
+    let control = ctx.control.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let policy = Overwrite::parse(overwrite.as_deref().unwrap_or("rename"));
         let mode = mode.as_deref().unwrap_or("balanced");
@@ -610,7 +581,7 @@ pub async fn archive_extract(
             policy,
             mode,
             &progress,
-            &cancel,
+            &control,
         )
         .map_err(util::io_err)
     })
@@ -631,9 +602,9 @@ pub async fn archive_create(
     password: Option<String>,
 ) -> Result<CreateReport, String> {
     let ctx = state.inner().clone();
-    let guard = ctx.begin().map_err(|e| format!("{e:#}"))?;
-    let progress = Progress::new(app, "create");
-    let cancel = ctx.cancel.clone();
+    let progress = Arc::new(Progress::new(app, "create"));
+    let guard = ctx.begin(Some(progress.clone())).map_err(|e| format!("{e:#}"))?;
+    let control = ctx.control.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
         create_archive(
@@ -643,7 +614,7 @@ pub async fn archive_create(
             mode.as_deref().unwrap_or("balanced"),
             password.as_deref(),
             &progress,
-            &cancel,
+            &control,
         )
         .map_err(util::io_err)
     })
@@ -654,8 +625,45 @@ pub async fn archive_create(
 }
 
 #[tauri::command]
+pub fn archive_pause(state: State<'_, ArchiveCtx>) -> bool {
+    if !state.busy.load(Ordering::Acquire) {
+        return false;
+    }
+    if state.control.set_paused(true) {
+        if let Ok(slot) = state.active_progress.lock() {
+            if let Some(p) = slot.as_ref() {
+                p.set_paused(true);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+#[tauri::command]
+pub fn archive_resume(state: State<'_, ArchiveCtx>) -> bool {
+    if !state.busy.load(Ordering::Acquire) {
+        return false;
+    }
+    if state.control.set_paused(false) {
+        if let Ok(slot) = state.active_progress.lock() {
+            if let Some(p) = slot.as_ref() {
+                p.set_paused(false);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+#[tauri::command]
 pub fn archive_cancel(state: State<'_, ArchiveCtx>) -> bool {
-    state.cancel.store(true, Ordering::SeqCst);
+    state.control.request_cancel();
+    if let Ok(slot) = state.active_progress.lock() {
+        if let Some(p) = slot.as_ref() {
+            p.mark_cancelling();
+        }
+    }
     true
 }
 
@@ -701,10 +709,11 @@ pub async fn archive_rar_install(
     state: State<'_, ArchiveCtx>,
 ) -> Result<RarStatus, String> {
     let ctx = state.inner().clone();
-    let guard = ctx.begin().map_err(|e| format!("{e:#}"))?;
+    let guard = ctx.begin(None).map_err(|e| format!("{e:#}"))?;
     let app2 = app.clone();
+    let control = ctx.control.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        rar::install(&app2, &data_dir(), &ctx.cancel).map_err(util::io_err)
+        rar::install(&app2, &data_dir(), &control).map_err(util::io_err)
     })
     .await
     .map_err(|e| format!("任务失败: {e}"))?;

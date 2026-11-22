@@ -55,6 +55,8 @@
       invoke('archive_extract', { path, outDir, indices, password: password || null, overwrite, mode: mode || null }),
     archiveCreate: (sources, dest, format, mode, password) =>
       invoke('archive_create', { sources, dest, format, mode, password: password || null }),
+    archivePause: () => invoke('archive_pause'),
+    archiveResume: () => invoke('archive_resume'),
     archiveCancel: () => invoke('archive_cancel'),
     archivePreview: (path, index, password, name, size) => invoke('archive_preview', {
       path, index, password: password || null, name: name || null, size: size || null,

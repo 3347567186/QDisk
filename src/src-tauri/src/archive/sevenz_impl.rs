@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
@@ -14,8 +14,9 @@ use sevenz_rust2::{
 };
 
 use super::util::{
-    collect_sources, copy_cancellable, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join, Budget, Overwrite, Progress, SourceItem,
+    collect_sources, copy_controlled, ensure_parent, filetime_to_local_parts, resolve_dest,
+    safe_join, Budget, ControlledReader, Overwrite, PerfProfile, Progress, SourceItem, TaskControl,
+    ThreadPriorityGuard,
 };
 use super::{modified_string, ArchiveInfo, CreateReport, EntryInfo, ExtractReport};
 
@@ -29,6 +30,7 @@ fn password(pw: Option<&str>) -> Password {
 }
 
 fn methods(level: u32, threads: u32, pw: Option<&str>) -> Vec<EncoderConfiguration> {
+    let level = level.clamp(1, 9);
     let lzma = if threads > 1 {
         Lzma2Options::from_level_mt(level, threads, 8 * 1024 * 1024)
     } else {
@@ -88,10 +90,11 @@ pub fn create(
     sources: &[PathBuf],
     dest: &Path,
     pw: Option<&str>,
-    threads: usize,
-    progress: &Progress,
-    cancel: &AtomicBool,
+    profile: PerfProfile,
+    progress: &Arc<Progress>,
+    control: &Arc<TaskControl>,
 ) -> Result<CreateReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     let started = Instant::now();
     let (mut items, total) = collect_sources(sources, Some(dest))?;
     items.retain(|i| i.path != dest);
@@ -100,87 +103,114 @@ pub fn create(
     progress.phase("compress");
 
     let file = File::create(dest).with_context(|| format!("无法创建 {}", dest.display()))?;
-    let mut writer = ArchiveWriter::new(BufWriter::new(file)).context("无法初始化 7Z 写入器")?;
-    let methods = Arc::new(methods(3, threads as u32, pw));
-    writer.set_content_methods((*methods).clone());
+    let mut writer = ArchiveWriter::new(BufWriter::with_capacity(profile.buf_size, file))
+        .context("无法初始化 7Z 写入器")?;
 
     let chunks = split_chunks(&items, BLOCK_BYTES);
-    let chunk_meta: Vec<(u64, u64)> = chunks
+    let chunk_files: Vec<u64> = chunks
         .iter()
-        .map(|c| {
-            (
-                c.iter().filter(|i| !i.is_dir).count() as u64,
-                c.iter().map(|i| i.size).sum(),
-            )
-        })
+        .map(|c| c.iter().filter(|i| !i.is_dir).count() as u64)
         .collect();
 
-    if threads <= 1 {
+    // 避免 outer(8) × inner(8) = 64 线程过度竞争：总并发严格控制在 profile.threads 以内。
+    let (outer_threads, inner_threads) = if profile.threads <= 1 {
+        (1usize, 1u32)
+    } else if chunks.len() <= 1 {
+        (1usize, profile.threads as u32)
+    } else {
+        let outer = profile.threads.min(chunks.len());
+        let inner = (profile.threads / outer).max(1) as u32;
+        (outer, inner)
+    };
+
+    let methods = Arc::new(methods(profile.sevenz_level, inner_threads, pw));
+    writer.set_content_methods((*methods).clone());
+
+    if outer_threads <= 1 {
         for (ci, chunk) in chunks.iter().enumerate() {
-            if cancel.load(Ordering::Relaxed) {
-                bail!("操作已取消");
+            control.checkpoint(Some(progress))?;
+            let (entries, readers) = materialize(chunk, control, progress, profile.saver_pace)?;
+            if let Err(e) = writer.push_archive_entries(entries, readers) {
+                if control.is_cancelled() {
+                    bail!("操作已取消");
+                }
+                return Err(anyhow::anyhow!("7Z 压缩失败: {e}"));
             }
-            let (entries, readers) = materialize(chunk)?;
-            writer
-                .push_archive_entries(entries, readers)
-                .context("7Z 压缩失败")?;
-            progress.add_bytes(chunk_meta[ci].1);
-            for _ in 0..chunk_meta[ci].0 {
+            for _ in 0..chunk_files[ci] {
                 progress.file_done();
             }
         }
     } else {
         let next = AtomicUsize::new(0);
-        let (tx, rx) = mpsc::sync_channel::<(usize, Result<sevenz_rust2::PreparedBlock>)>(
-            threads * 2,
-        );
+        let abort = AtomicBool::new(false);
+        let (tx, rx) =
+            mpsc::sync_channel::<(usize, Result<sevenz_rust2::PreparedBlock>)>(outer_threads * 2);
         let mut failure: Option<anyhow::Error> = None;
+
         std::thread::scope(|scope| {
-            for _ in 0..threads {
+            for _ in 0..outer_threads {
                 let tx = tx.clone();
                 let next = &next;
                 let chunks = &chunks;
                 let methods = methods.clone();
-                let cancel = cancel;
-                scope.spawn(move || loop {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    if i >= chunks.len() {
-                        break;
-                    }
-                    if cancel.load(Ordering::Relaxed) {
-                        let _ = tx.send((i, Err(anyhow::anyhow!("操作已取消"))));
-                        break;
-                    }
-                    let result = materialize(&chunks[i])
-                        .and_then(|(entries, readers)| {
-                            sevenz_rust2::prepare_block(methods.clone(), entries, readers)
-                                .map_err(|e| anyhow::anyhow!("{e}"))
-                        });
-                    if tx.send((i, result)).is_err() {
-                        break;
+                let ctl = control.clone();
+                let prog = progress.clone();
+                let abort_ref = &abort;
+                scope.spawn(move || {
+                    let _prio = ThreadPriorityGuard::enter(profile.mode);
+                    loop {
+                        if abort_ref.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        if i >= chunks.len() {
+                            break;
+                        }
+                        if let Err(e) = ctl.checkpoint(Some(&prog)) {
+                            abort_ref.store(true, Ordering::SeqCst);
+                            let _ = tx.send((i, Err(e)));
+                            break;
+                        }
+                        let result = materialize(&chunks[i], &ctl, &prog, profile.saver_pace)
+                            .and_then(|(entries, readers)| {
+                                sevenz_rust2::prepare_block(methods.clone(), entries, readers)
+                                    .map_err(|e| anyhow::anyhow!("{e}"))
+                            });
+                        if result.is_err() {
+                            abort_ref.store(true, Ordering::SeqCst);
+                        }
+                        if tx.send((i, result)).is_err() {
+                            break;
+                        }
                     }
                 });
             }
             drop(tx);
             let mut pending: BTreeMap<usize, sevenz_rust2::PreparedBlock> = BTreeMap::new();
             let mut next_write = 0usize;
-            for (i, result) in rx {
+            for (i, result) in &rx {
                 match result {
                     Ok(block) => {
                         pending.insert(i, block);
                     }
                     Err(e) => {
+                        abort.store(true, Ordering::SeqCst);
                         failure = Some(e);
                         break;
                     }
                 }
                 while let Some(block) = pending.remove(&next_write) {
+                    if let Err(e) = control.checkpoint(Some(progress)) {
+                        abort.store(true, Ordering::SeqCst);
+                        failure = Some(e);
+                        break;
+                    }
                     if let Err(e) = writer.push_prepared_block(block) {
+                        abort.store(true, Ordering::SeqCst);
                         failure = Some(anyhow::anyhow!("{e}"));
                         break;
                     }
-                    progress.add_bytes(chunk_meta[next_write].1);
-                    for _ in 0..chunk_meta[next_write].0 {
+                    for _ in 0..chunk_files[next_write] {
                         progress.file_done();
                     }
                     next_write += 1;
@@ -189,19 +219,20 @@ pub fn create(
                     break;
                 }
             }
+            drop(rx);
         });
+        if control.is_cancelled() {
+            bail!("操作已取消");
+        }
         if let Some(e) = failure {
             return Err(e);
-        }
-        if cancel.load(Ordering::Relaxed) {
-            bail!("操作已取消");
         }
     }
 
     let out = writer.finish().context("无法完成 7Z 写入")?;
-    out.into_inner()
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .sync_all()?;
+    let mut inner = out.into_inner().map_err(|e| anyhow::anyhow!("{e}"))?;
+    inner.flush()?;
+    inner.sync_all()?;
     Ok(CreateReport {
         path: dest.display().to_string(),
         format: "7z".into(),
@@ -236,18 +267,27 @@ type AnyReader = Box<dyn Read + Send>;
 
 fn materialize(
     chunk: &[SourceItem],
+    control: &Arc<TaskControl>,
+    progress: &Arc<Progress>,
+    saver_pace: bool,
 ) -> Result<(Vec<ArchiveEntry>, Vec<SourceReader<AnyReader>>)> {
     let mut entries = Vec::with_capacity(chunk.len());
     let mut readers = Vec::with_capacity(chunk.len());
     for item in chunk {
+        control.checkpoint(Some(progress))?;
+        progress.set_current(&item.name);
         let entry = ArchiveEntry::from_path(&item.path, item.name.clone());
         let reader: AnyReader = if item.is_dir {
             Box::new(io::empty())
         } else {
-            Box::new(
-                File::open(&item.path)
-                    .with_context(|| format!("无法读取 {}", item.path.display()))?,
-            )
+            let f = File::open(&item.path)
+                .with_context(|| format!("无法读取 {}", item.path.display()))?;
+            Box::new(ControlledReader::new(
+                f,
+                control.clone(),
+                progress.clone(),
+                saver_pace,
+            ))
         };
         entries.push(entry);
         readers.push(SourceReader::new(reader));
@@ -261,12 +301,14 @@ pub fn extract(
     selected: &HashSet<usize>,
     pw: Option<&str>,
     policy: Overwrite,
+    profile: PerfProfile,
     progress: &Progress,
-    cancel: &AtomicBool,
+    control: &TaskControl,
 ) -> Result<ExtractReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     let mut reader = ArchiveReader::open(path, password(pw))
         .with_context(|| "7Z 压缩包损坏，或密码不正确")?;
-    reader.set_thread_count(2);
+    reader.set_thread_count(profile.threads as u32);
     let selected_names: HashSet<String> = {
         let names: Vec<String> = reader
             .archive()
@@ -278,8 +320,6 @@ pub fn extract(
             .collect();
         names.into_iter().collect()
     };
-    // 7Z 的头部同样带每个条目解压后的大小，和 ZIP 一样可以「一个字节都不写
-    // 就拒绝」。以前这个上限是逐条目算的，整包总量没有封顶。
     let budget = Budget::for_extraction();
     let declared: u64 = reader
         .archive()
@@ -301,89 +341,107 @@ pub fn extract(
     };
     let mut stopped = false;
 
-    reader
-        .for_each_entries_with_decision(|entry, data| {
-            if cancel.load(Ordering::Relaxed) {
-                stopped = true;
-                return Ok(EntryDecision::Stop);
-            }
-            let raw = entry.name.replace('\\', "/");
-            if entry.is_directory {
-                if selected_names.contains(&entry.name) {
-                    match safe_join(out_dir, &raw) {
-                        Ok(dir) => {
-                            if fs::create_dir_all(&dir).is_ok() {
-                                report.dirs += 1;
-                            }
+    let iter_res = reader.for_each_entries_with_decision(|entry, data| {
+        if control.checkpoint(Some(progress)).is_err() {
+            stopped = true;
+            return Ok(EntryDecision::Stop);
+        }
+        let raw = entry.name.replace('\\', "/");
+        if entry.is_directory {
+            if selected_names.contains(&entry.name) {
+                match safe_join(out_dir, &raw) {
+                    Ok(dir) => {
+                        if fs::create_dir_all(&dir).is_ok() {
+                            report.dirs += 1;
                         }
-                        Err(e) => report.warnings.push(format!("{e}")),
                     }
+                    Err(e) => report.warnings.push(format!("{e}")),
                 }
-                return Ok(EntryDecision::Continue);
             }
-            if !selected_names.contains(&entry.name) {
-                return Ok(EntryDecision::Continue);
-            }
-            progress.set_current(&raw);
-            if entry.windows_attributes & 0x400 != 0 {
-                report.skipped += 1;
-                report
-                    .warnings
-                    .push(format!("跳过重解析点/符号链接: {raw}"));
-                return Ok(EntryDecision::Continue);
-            }
-            let target = match safe_join(out_dir, &raw) {
-                Ok(p) => p,
-                Err(e) => {
-                    report.skipped += 1;
-                    report.warnings.push(format!("{e}"));
-                    return Ok(EntryDecision::Continue);
-                }
-            };
-            let target = match resolve_dest(target, false, policy) {
-                Ok(Some(p)) => p,
-                Ok(None) => {
-                    report.skipped += 1;
-                    return Ok(EntryDecision::Continue);
-                }
-                Err(e) => {
-                    report.skipped += 1;
-                    report.warnings.push(format!("{e}"));
-                    return Ok(EntryDecision::Continue);
-                }
-            };
-            if let Err(e) = ensure_parent(&target) {
+            return Ok(EntryDecision::Continue);
+        }
+        if !selected_names.contains(&entry.name) {
+            return Ok(EntryDecision::Continue);
+        }
+        progress.set_current(&raw);
+        if entry.windows_attributes & 0x400 != 0 {
+            report.skipped += 1;
+            report
+                .warnings
+                .push(format!("跳过重解析点/符号链接: {raw}"));
+            return Ok(EntryDecision::Continue);
+        }
+        let target = match safe_join(out_dir, &raw) {
+            Ok(p) => p,
+            Err(e) => {
                 report.skipped += 1;
                 report.warnings.push(format!("{e}"));
                 return Ok(EntryDecision::Continue);
             }
-            let mut out = match File::create(&target) {
-                Ok(f) => f,
-                Err(e) => {
-                    report.skipped += 1;
-                    report.warnings.push(format!("{raw}: {e}"));
-                    return Ok(EntryDecision::Continue);
-                }
-            };
-            match copy_cancellable(&mut *data, &mut out, cancel, &budget, |n| {
-                progress.add_bytes(n)
-            }) {
-                Ok(n) => {
-                    report.files += 1;
-                    report.bytes += n;
-                    progress.file_done();
-                    Ok(EntryDecision::Continue)
-                }
-                Err(e) => {
-                    report.warnings.push(format!("{raw}: {e}"));
-                    Ok(EntryDecision::Stop)
-                }
+        };
+        let target = match resolve_dest(target, false, policy) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                report.skipped += 1;
+                progress.add_bytes(entry.size);
+                progress.file_done();
+                return Ok(EntryDecision::Continue);
             }
-        })
-        .map_err(|e| anyhow::anyhow!("7Z 解压失败: {e}"))?;
-    if stopped || cancel.load(Ordering::Relaxed) {
+            Err(e) => {
+                report.skipped += 1;
+                report.warnings.push(format!("{e}"));
+                return Ok(EntryDecision::Continue);
+            }
+        };
+        if let Err(e) = ensure_parent(&target) {
+            report.skipped += 1;
+            report.warnings.push(format!("{e}"));
+            return Ok(EntryDecision::Continue);
+        }
+        let f = match File::create(&target) {
+            Ok(f) => f,
+            Err(e) => {
+                report.skipped += 1;
+                report.warnings.push(format!("{raw}: {e}"));
+                return Ok(EntryDecision::Continue);
+            }
+        };
+        let mut out = BufWriter::with_capacity(profile.buf_size, f);
+        match copy_controlled(
+            &mut *data,
+            &mut out,
+            control,
+            profile,
+            Some(&budget),
+            Some(progress),
+            |n| progress.add_bytes(n),
+        )
+        .and_then(|n| {
+            out.flush()?;
+            Ok(n)
+        }) {
+            Ok(n) => {
+                report.files += 1;
+                report.bytes += n;
+                progress.file_done();
+                Ok(EntryDecision::Continue)
+            }
+            Err(e) => {
+                drop(out);
+                let _ = fs::remove_file(&target);
+                if control.is_cancelled() {
+                    stopped = true;
+                } else {
+                    report.warnings.push(format!("{raw}: {e}"));
+                }
+                Ok(EntryDecision::Stop)
+            }
+        }
+    });
+    if stopped || control.is_cancelled() {
         bail!("操作已取消");
     }
+    iter_res.map_err(|e| anyhow::anyhow!("7Z 解压失败: {e}"))?;
     progress.finish();
     Ok(report)
 }

@@ -2743,21 +2743,30 @@ body[data-idle="1"] *::after {
 .arc-media { width: 100%; margin: 0 auto; display: block; border-radius: var(--radius); background: var(--surface-2); }
 
 .arc-progress {
-  position: fixed; right: 18px; bottom: 86px; width: 320px; max-width: calc(100vw - 24px);
+  position: fixed; right: 18px; bottom: 86px; width: 348px; max-width: calc(100vw - 24px);
   z-index: 65; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
   box-shadow: var(--shadow-2);
 }
 .arc-progress[hidden] { display: none; }
 .arc-progress-top { display: flex; align-items: center; gap: var(--space-3); font-size: var(--fs-small); }
 .arc-progress-label { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
-.arc-progress-label .ic { color: var(--accent-text); }
+.arc-progress-label .ic { color: var(--accent-text); flex-shrink: 0; }
+.arc-mode-tag {
+  flex-shrink: 0; padding: 1px 6px; border-radius: 999px;
+  font-size: var(--fs-tiny); line-height: 1.4;
+  background: var(--accent-weak); color: var(--accent-text);
+  border: 1px solid var(--accent-ring);
+}
 .arc-bar { height: 5px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
 .arc-bar i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--dur-3) var(--ease); }
-/* 速率折线：宽度跟着 320px 小窗走，只占 56px 高，不把卡片撑宽 */
+.arc-bar.is-paused { opacity: .65; }
+/* 速率折线：宽度跟着小窗走，只占 56px 高，不把卡片撑宽 */
 .arc-chart {
   position: relative; height: 56px; border-radius: var(--radius);
   background: var(--surface-2); border: 1px solid var(--line); overflow: hidden;
+  transition: opacity var(--dur-2) var(--ease), filter var(--dur-2) var(--ease);
 }
+.arc-chart.is-paused { opacity: .72; filter: saturate(.35); }
 .arc-chart svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .arc-chart-meta {
   position: absolute; left: var(--space-2); right: var(--space-2); bottom: 4px;
@@ -2766,7 +2775,19 @@ body[data-idle="1"] *::after {
   text-shadow: 0 1px 0 var(--surface);
 }
 .arc-chart-spd { color: var(--accent-text); font-variant-numeric: tabular-nums; }
-.arc-progress .btn { align-self: flex-end; }
+.arc-pause-banner {
+  padding: 5px 8px; border-radius: var(--radius);
+  font-size: var(--fs-tiny); line-height: 1.45; color: var(--text-2);
+  background: var(--warn-weak);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+}
+.arc-pause-banner.is-cancelling {
+  background: var(--danger-weak);
+  border-color: var(--line);
+  border-left-color: var(--danger);
+}
+.arc-progress-acts { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 2px; }
 
 .arc-create-grid {
   display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 10px;

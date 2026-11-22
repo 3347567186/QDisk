@@ -1,29 +1,34 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use bzip2::read::BzDecoder;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use lzma_rust2::XzReader;
 
 use super::util::{
-    collect_sources, copy_cancellable, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join, Budget, Overwrite, Progress,
+    collect_sources, copy_controlled, ensure_parent, filetime_to_local_parts, resolve_dest,
+    safe_join, Budget, ControlledReader, Overwrite, PerfProfile, Progress, TaskControl,
+    ThreadPriorityGuard,
 };
 use super::{ArchiveInfo, CreateReport, EntryInfo, ExtractReport, Kind};
+
+const GZ_BLOCK_SIZE: usize = 1024 * 1024;
 
 fn reader(path: &Path, kind: Kind) -> Result<Box<dyn Read>> {
     let f = File::open(path).with_context(|| format!("无法打开 {}", path.display()))?;
     let f = BufReader::new(f);
     Ok(match kind {
         Kind::Tar => Box::new(f),
-        Kind::TarGz => Box::new(GzDecoder::new(f)),
+        Kind::TarGz => Box::new(MultiGzDecoder::new(f)),
         Kind::TarBz2 => Box::new(BzDecoder::new(f)),
         Kind::TarXz => Box::new(XzReader::new(f, true)),
         _ => bail!("不是 TAR 格式"),
@@ -138,9 +143,11 @@ pub fn extract(
     selected: &HashSet<usize>,
     _password: Option<&str>,
     policy: Overwrite,
+    profile: PerfProfile,
     progress: &Progress,
-    cancel: &AtomicBool,
+    control: &TaskControl,
 ) -> Result<ExtractReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     let mut ar = tar::Archive::new(reader(path, kind)?);
     let mut report = ExtractReport {
         files: 0,
@@ -150,19 +157,12 @@ pub fn extract(
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
     };
-    // TAR 不做动手前的总量预检：它是流式格式，要「先说清整包有多大」就得
-    // 把压缩流解一遍、再从头解一遍写盘 —— gz/tar.gz 上等于双倍解压时间。
-    // 所以这里只靠写盘时的累计记账：一样封住整包总量，只是会在写出一部分
-    // 之后才停。ZIP 和 7Z 的头部里有现成的大小表，那两条路径仍然是「一个
-    // 字节都不写就拒绝」。
     let budget = Budget::for_extraction();
     for (idx, item) in ar.entries().context("TAR 读取失败")?.enumerate() {
         if !selected.contains(&idx) {
             continue;
         }
-        if cancel.load(Ordering::Relaxed) {
-            bail!("操作已取消");
-        }
+        control.checkpoint(Some(progress))?;
         let mut entry = match item {
             Ok(e) => e,
             Err(e) => {
@@ -179,6 +179,7 @@ pub fn extract(
         };
         progress.set_current(&raw);
         let ty = entry.header().entry_type();
+        // 目录不计入 total_files，不能调用 file_done()，避免总文件数溢出。
         if ty.is_dir() {
             match safe_join(out_dir, &raw) {
                 Ok(dir) => {
@@ -190,7 +191,6 @@ pub fn extract(
                     report.warnings.push(format!("{e}"));
                 }
             }
-            progress.file_done();
             continue;
         }
         if ty.is_symlink() || ty.is_hard_link() {
@@ -223,10 +223,28 @@ pub fn extract(
             }
         };
         ensure_parent(&target)?;
-        let mut out = File::create(&target)
-            .with_context(|| format!("无法写入 {}", target.display()))?;
-        let n = copy_cancellable(&mut entry, &mut out, cancel, &budget, |n| progress.add_bytes(n))?;
-        out.sync_all().ok();
+        let f = File::create(&target).with_context(|| format!("无法写入 {}", target.display()))?;
+        let mut out = BufWriter::with_capacity(profile.buf_size, f);
+        let n = match copy_controlled(
+            &mut entry,
+            &mut out,
+            control,
+            profile,
+            Some(&budget),
+            Some(progress),
+            |chunk| progress.add_bytes(chunk),
+        )
+        .and_then(|n| {
+            out.flush()?;
+            Ok(n)
+        }) {
+            Ok(n) => n,
+            Err(e) => {
+                drop(out);
+                let _ = fs::remove_file(&target);
+                return Err(e);
+            }
+        };
         report.files += 1;
         report.bytes += n;
         progress.file_done();
@@ -259,9 +277,11 @@ pub fn extract_single(
     kind: Kind,
     selected: &HashSet<usize>,
     policy: Overwrite,
+    profile: PerfProfile,
     progress: &Progress,
-    cancel: &AtomicBool,
+    control: &TaskControl,
 ) -> Result<ExtractReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     if !selected.is_empty() && !selected.contains(&0) {
         bail!("没有选中要解压的文件");
     }
@@ -279,11 +299,29 @@ pub fn extract_single(
     };
     ensure_parent(&target)?;
     let mut src = single_reader(path, kind)?;
-    let mut out = File::create(&target)?;
-    // 单个 .gz/.bz2/.xz 的总量就是它自己解出来的大小，同样走累计记账。
+    let f = File::create(&target)?;
+    let mut out = BufWriter::with_capacity(profile.buf_size, f);
     let budget = Budget::for_extraction();
-    let n = copy_cancellable(&mut src, &mut out, cancel, &budget, |n| progress.add_bytes(n))?;
-    out.sync_all().ok();
+    let n = match copy_controlled(
+        &mut src,
+        &mut out,
+        control,
+        profile,
+        Some(&budget),
+        Some(progress),
+        |chunk| progress.add_bytes(chunk),
+    )
+    .and_then(|n| {
+        out.flush()?;
+        Ok(n)
+    }) {
+        Ok(n) => n,
+        Err(e) => {
+            drop(out);
+            let _ = fs::remove_file(&target);
+            return Err(e);
+        }
+    };
     progress.file_done();
     progress.finish();
     Ok(ExtractReport {
@@ -303,7 +341,7 @@ pub fn single_reader_pub(path: &Path, kind: Kind) -> Result<Box<dyn Read>> {
 fn single_reader(path: &Path, kind: Kind) -> Result<Box<dyn Read>> {
     let f = BufReader::new(File::open(path)?);
     Ok(match kind {
-        Kind::Gz => Box::new(GzDecoder::new(f)),
+        Kind::Gz => Box::new(MultiGzDecoder::new(f)),
         Kind::Bz2 => Box::new(BzDecoder::new(f)),
         Kind::Xz => Box::new(XzReader::new(f, true)),
         _ => bail!("不是单文件压缩格式"),
@@ -313,14 +351,17 @@ fn single_reader(path: &Path, kind: Kind) -> Result<Box<dyn Read>> {
 pub fn create_tar(
     sources: &[PathBuf],
     dest: &Path,
-    progress: &Progress,
-    cancel: &AtomicBool,
+    profile: PerfProfile,
+    progress: &Arc<Progress>,
+    control: &Arc<TaskControl>,
 ) -> Result<CreateReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     let started = Instant::now();
     let f = File::create(dest)?;
-    let mut builder = tar::Builder::new(BufWriter::new(f));
-    let (files, bytes) = append_sources(&mut builder, sources, dest, progress, cancel)?;
-    let out = builder.into_inner().context("无法完成 TAR 写入")?;
+    let mut builder = tar::Builder::new(BufWriter::with_capacity(profile.buf_size, f));
+    let (files, bytes) = append_sources(&mut builder, sources, dest, profile, progress, control)?;
+    let mut out = builder.into_inner().context("无法完成 TAR 写入")?;
+    out.flush()?;
     out.into_inner()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .sync_all()?;
@@ -334,19 +375,282 @@ pub fn create_tar(
     })
 }
 
+/// 多成员并行 GZIP 写入器：将 TAR 流按 1 MiB 切块并行压缩成独立 GZIP 成员（RFC 1952），
+/// 再由顺序写入线程重排落盘，兼容标准 gunzip 与 `MultiGzDecoder`。
+struct ParallelGzWriter {
+    buf: Vec<u8>,
+    seq: usize,
+    in_tx: Option<mpsc::SyncSender<(usize, Vec<u8>)>>,
+    abort: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    control: Arc<TaskControl>,
+    progress: Arc<Progress>,
+    workers: Vec<JoinHandle<()>>,
+    writer_handle: Option<JoinHandle<Result<BufWriter<File>>>>,
+}
+
+impl ParallelGzWriter {
+    fn new(
+        out: BufWriter<File>,
+        profile: PerfProfile,
+        control: Arc<TaskControl>,
+        progress: Arc<Progress>,
+    ) -> Self {
+        let threads = profile.threads.max(2);
+        let qcap = (threads * 2).max(4);
+        let (in_tx, in_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(qcap);
+        let in_rx = Arc::new(Mutex::new(in_rx));
+        let (out_tx, out_rx) = mpsc::sync_channel::<(usize, Result<Vec<u8>>)>(qcap);
+        let abort = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
+
+        let mut workers = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let rx_shared = Arc::clone(&in_rx);
+            let tx = out_tx.clone();
+            let abort_w = Arc::clone(&abort);
+            let failed_w = Arc::clone(&failed);
+            let ctl = Arc::clone(&control);
+            let prog = Arc::clone(&progress);
+            let level = profile.gzip_level.clamp(1, 9);
+            let mode = profile.mode;
+            workers.push(std::thread::spawn(move || {
+                let _prio = ThreadPriorityGuard::enter(mode);
+                loop {
+                    if abort_w.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let item = {
+                        let g = rx_shared.lock().unwrap_or_else(|e| e.into_inner());
+                        g.recv()
+                    };
+                    let Ok((seq, raw)) = item else {
+                        break;
+                    };
+                    if abort_w.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if let Err(e) = ctl.checkpoint(Some(&prog)) {
+                        abort_w.store(true, Ordering::SeqCst);
+                        failed_w.store(true, Ordering::SeqCst);
+                        let _ = tx.send((seq, Err(e)));
+                        break;
+                    }
+                    let mut gz = GzEncoder::new(Vec::with_capacity(raw.len() / 2 + 64), Compression::new(level));
+                    let res = gz.write_all(&raw).and_then(|_| gz.finish()).map_err(Into::into);
+                    if res.is_err() {
+                        abort_w.store(true, Ordering::SeqCst);
+                        failed_w.store(true, Ordering::SeqCst);
+                    }
+                    if tx.send((seq, res)).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(in_rx);
+        drop(out_tx);
+
+        let abort_wr = Arc::clone(&abort);
+        let failed_wr = Arc::clone(&failed);
+        let ctl_wr = Arc::clone(&control);
+        let prog_wr = Arc::clone(&progress);
+        let writer_handle = std::thread::spawn(move || -> Result<BufWriter<File>> {
+            let _prio = ThreadPriorityGuard::enter(profile.mode);
+            let mut writer = out;
+            let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+            let mut expect = 0usize;
+            for (seq, res) in &out_rx {
+                match res {
+                    Ok(compressed) => {
+                        pending.insert(seq, compressed);
+                    }
+                    Err(e) => {
+                        abort_wr.store(true, Ordering::SeqCst);
+                        failed_wr.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                }
+                while let Some(chunk) = pending.remove(&expect) {
+                    if let Err(e) = ctl_wr.checkpoint(Some(&prog_wr)) {
+                        abort_wr.store(true, Ordering::SeqCst);
+                        failed_wr.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                    if let Err(e) = writer.write_all(&chunk) {
+                        abort_wr.store(true, Ordering::SeqCst);
+                        failed_wr.store(true, Ordering::SeqCst);
+                        return Err(e.into());
+                    }
+                    expect += 1;
+                }
+            }
+            writer.flush()?;
+            Ok(writer)
+        });
+
+        Self {
+            buf: Vec::with_capacity(GZ_BLOCK_SIZE),
+            seq: 0,
+            in_tx: Some(in_tx),
+            abort,
+            failed,
+            control,
+            progress,
+            workers,
+            writer_handle: Some(writer_handle),
+        }
+    }
+
+    fn flush_block(&mut self) -> io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        self.control
+            .checkpoint(Some(&self.progress))
+            .map_err(|_| io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+        if self.failed.load(Ordering::Acquire) {
+            return Err(io::Error::new(ErrorKind::BrokenPipe, "GZIP 写入线程已中止"));
+        }
+        let block = std::mem::replace(&mut self.buf, Vec::with_capacity(GZ_BLOCK_SIZE));
+        let seq = self.seq;
+        self.seq += 1;
+        let Some(tx) = self.in_tx.as_ref() else {
+            return Err(io::Error::new(ErrorKind::BrokenPipe, "GZIP 通道已关闭"));
+        };
+        tx.send((seq, block))
+            .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "GZIP 工作线程已结束"))
+    }
+
+    fn finish(mut self) -> Result<BufWriter<File>> {
+        if self.seq == 0 && self.buf.is_empty() {
+            if let Some(tx) = self.in_tx.as_ref() {
+                let _ = tx.send((0, Vec::new()));
+                self.seq = 1;
+            }
+        } else if !self.buf.is_empty() {
+            self.flush_block()?;
+        }
+        self.in_tx.take();
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+        if let Some(wh) = self.writer_handle.take() {
+            let res = wh.join().unwrap_or_else(|_| Err(anyhow::anyhow!("GZIP 写入线程异常")));
+            if self.control.is_cancelled() {
+                bail!("操作已取消");
+            }
+            return res;
+        }
+        bail!("GZIP 写入句柄缺失")
+    }
+}
+
+impl Write for ParallelGzWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.control
+            .checkpoint(Some(&self.progress))
+            .map_err(|_| io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+        if self.failed.load(Ordering::Acquire) {
+            return Err(io::Error::new(ErrorKind::BrokenPipe, "GZIP 并行压缩失败"));
+        }
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let take = (GZ_BLOCK_SIZE - self.buf.len()).min(data.len() - offset);
+            self.buf.extend_from_slice(&data[offset..offset + take]);
+            offset += take;
+            if self.buf.len() >= GZ_BLOCK_SIZE {
+                self.flush_block()?;
+            }
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for ParallelGzWriter {
+    fn drop(&mut self) {
+        if self.writer_handle.is_none() && self.workers.is_empty() {
+            return;
+        }
+        self.abort.store(true, Ordering::SeqCst);
+        // 非正常退出路径若与暂停竞态，主动唤醒可能停在 checkpoint 的写线程，杜绝析构死锁。
+        self.control.request_cancel();
+        self.in_tx.take();
+        for w in self.workers.drain(..) {
+            let _ = w.join();
+        }
+        if let Some(wh) = self.writer_handle.take() {
+            let _ = wh.join();
+        }
+    }
+}
+
 pub fn create_tgz(
     sources: &[PathBuf],
     dest: &Path,
-    progress: &Progress,
-    cancel: &AtomicBool,
+    profile: PerfProfile,
+    progress: &Arc<Progress>,
+    control: &Arc<TaskControl>,
 ) -> Result<CreateReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     let started = Instant::now();
     let f = File::create(dest)?;
-    let gz = GzEncoder::new(BufWriter::new(f), Compression::new(6));
-    let mut builder = tar::Builder::new(gz);
-    let (files, bytes) = append_sources(&mut builder, sources, dest, progress, cancel)?;
-    let gz = builder.into_inner().context("无法完成 TAR.GZ 写入")?;
-    let out = gz.finish().context("无法完成 GZIP 写入")?;
+    let out_buf = BufWriter::with_capacity(profile.buf_size, f);
+
+    if profile.threads <= 1 {
+        let gz = GzEncoder::new(out_buf, Compression::new(profile.gzip_level.clamp(1, 9)));
+        let mut builder = tar::Builder::new(gz);
+        let (files, bytes) = append_sources(&mut builder, sources, dest, profile, progress, control)?;
+        let gz = match builder.into_inner() {
+            Ok(g) => g,
+            Err(e) => {
+                if control.is_cancelled() {
+                    bail!("操作已取消");
+                }
+                return Err(anyhow::Error::new(e)).context("无法完成 TAR.GZ 写入");
+            }
+        };
+        let mut out = match gz.finish() {
+            Ok(o) => o,
+            Err(e) => {
+                if control.is_cancelled() {
+                    bail!("操作已取消");
+                }
+                return Err(anyhow::Error::new(e)).context("无法完成 GZIP 写入");
+            }
+        };
+        out.flush()?;
+        out.into_inner()
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .sync_all()?;
+        return Ok(CreateReport {
+            path: dest.display().to_string(),
+            format: "tgz".into(),
+            files,
+            bytes,
+            packed: fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+
+    let pgz = ParallelGzWriter::new(out_buf, profile, control.clone(), progress.clone());
+    let mut builder = tar::Builder::new(pgz);
+    let (files, bytes) = append_sources(&mut builder, sources, dest, profile, progress, control)?;
+    let pgz = match builder.into_inner() {
+        Ok(g) => g,
+        Err(e) => {
+            if control.is_cancelled() {
+                bail!("操作已取消");
+            }
+            return Err(anyhow::Error::new(e)).context("无法完成 TAR.GZ 写入");
+        }
+    };
+    let mut out = pgz.finish().context("无法完成并行 GZIP 写入")?;
+    out.flush()?;
     out.into_inner()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .sync_all()?;
@@ -364,8 +668,9 @@ fn append_sources<W: Write>(
     builder: &mut tar::Builder<W>,
     sources: &[PathBuf],
     dest: &Path,
-    progress: &Progress,
-    cancel: &AtomicBool,
+    profile: PerfProfile,
+    progress: &Arc<Progress>,
+    control: &Arc<TaskControl>,
 ) -> Result<(u64, u64)> {
     let (mut items, total) = collect_sources(sources, Some(dest))?;
     items.retain(|i| i.path != dest);
@@ -374,9 +679,7 @@ fn append_sources<W: Write>(
     let mut files = 0u64;
     let mut bytes = 0u64;
     for item in &items {
-        if cancel.load(Ordering::Relaxed) {
-            bail!("操作已取消");
-        }
+        control.checkpoint(Some(progress))?;
         progress.set_current(&item.name);
         if item.is_dir {
             let mut header = tar::Header::new_gnu();
@@ -389,13 +692,90 @@ fn append_sources<W: Write>(
                 .with_context(|| format!("无法写入 {}", item.name))?;
             continue;
         }
-        builder
-            .append_path_with_name(&item.path, &item.name)
-            .with_context(|| format!("无法写入 {}", item.name))?;
-        bytes += item.size;
+        let file = File::open(&item.path)
+            .with_context(|| format!("无法读取 {}", item.path.display()))?;
+        let meta = file.metadata()?;
+        let len = meta.len();
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&meta);
+        header.set_size(len);
+        header.set_cksum();
+        let reader = ControlledReader::new(
+            file.take(len),
+            control.clone(),
+            progress.clone(),
+            profile.saver_pace,
+        );
+        if let Err(e) = builder.append_data(&mut header, &item.name, reader) {
+            if control.is_cancelled() {
+                bail!("操作已取消");
+            }
+            return Err(anyhow::Error::new(e)).with_context(|| format!("无法写入 {}", item.name));
+        }
+        bytes += len;
         files += 1;
-        progress.add_bytes(item.size);
         progress.file_done();
     }
     Ok((files, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_tgz_multimember_roundtrip() {
+        let root = PathBuf::from("D:\\Builds\\tidy-tar-tests")
+            .join(format!("tgz_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src_dir = root.join("src");
+        fs::create_dir_all(src_dir.join("子目录")).unwrap();
+
+        let small = b"hello tar.gz multimember!".to_vec();
+        // 3 MiB 数据触发多成员（>= 3 个 1 MiB GZIP 成员）
+        let mut big = Vec::with_capacity(3 * 1024 * 1024);
+        for i in 0..(3 * 1024 * 1024 / 32) {
+            big.extend_from_slice(format!("tgz-block-{i:08}-aaaaaaaaaaaa\n").as_bytes());
+        }
+        fs::write(src_dir.join("子目录/hello.txt"), &small).unwrap();
+        fs::write(src_dir.join("stream.bin"), &big).unwrap();
+
+        let tgz = root.join("out.tar.gz");
+        let p_c = Arc::new(Progress::detached());
+        let ctl_c = Arc::new(TaskControl::default());
+        let prof = PerfProfile::from_mode("hyper");
+        let crep = create_tgz(&[src_dir.clone()], &tgz, prof, &p_c, &ctl_c).unwrap();
+        assert_eq!(crep.files, 2);
+
+        let info = list(&tgz, Kind::TarGz, None).unwrap();
+        let selected: HashSet<usize> = info
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.index)
+            .collect();
+        assert_eq!(selected.len(), 2);
+
+        let out = root.join("extracted");
+        fs::create_dir_all(&out).unwrap();
+        let p_e = Arc::new(Progress::detached());
+        let ctl_e = Arc::new(TaskControl::default());
+        let erep = extract(
+            &tgz,
+            &out,
+            Kind::TarGz,
+            &selected,
+            None,
+            Overwrite::Overwrite,
+            prof,
+            &p_e,
+            &ctl_e,
+        )
+        .unwrap();
+        assert_eq!(erep.files, 2);
+        assert_eq!(p_e.files_count(), erep.files);
+        assert_eq!(fs::read(out.join("src/子目录/hello.txt")).unwrap(), small);
+        assert_eq!(fs::read(out.join("src/stream.bin")).unwrap(), big);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

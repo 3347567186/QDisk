@@ -5,7 +5,8 @@ use std::io::Read;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use libloading::Library;
@@ -13,7 +14,7 @@ use libloading::Library;
 use super::download;
 use super::util::{
     ensure_parent, resolve_dest, safe_relative, sha256_file, utf16_to_string, wide_path, Overwrite,
-    Progress,
+    PerfProfile, Progress, TaskControl, ThreadPriorityGuard,
 };
 use super::{ArchiveInfo, EntryInfo, ExtractReport, RarStatus};
 
@@ -26,6 +27,7 @@ const RAR_OM_LIST: u32 = 0;
 const RAR_OM_EXTRACT: u32 = 1;
 const RAR_SKIP: i32 = 0;
 const RAR_EXTRACT: i32 = 2;
+const UCM_PROCESSDATA: u32 = 1;
 
 const RHDF_ENCRYPTED: u32 = 0x04;
 const RHDF_SOLID: u32 = 0x10;
@@ -97,6 +99,8 @@ type ProcessFn = unsafe extern "system" fn(*mut c_void, i32, *const u16, *const 
 type CloseFn = unsafe extern "system" fn(*mut c_void) -> i32;
 type PasswordFn = unsafe extern "system" fn(*mut c_void, *const c_char);
 type VersionFn = unsafe extern "system" fn() -> i32;
+type RarCallback = unsafe extern "system" fn(u32, isize, isize, isize) -> i32;
+type SetCallbackFn = unsafe extern "system" fn(*mut c_void, RarCallback, isize);
 
 struct RarApi {
     _lib: Library,
@@ -105,6 +109,7 @@ struct RarApi {
     process: ProcessFn,
     close: CloseFn,
     set_password: PasswordFn,
+    set_callback: Option<SetCallbackFn>,
     version: VersionFn,
 }
 
@@ -113,12 +118,17 @@ impl RarApi {
         unsafe {
             let lib = Library::new(dll)
                 .with_context(|| format!("无法加载 {}", dll.display()))?;
+            let set_callback = lib
+                .get::<SetCallbackFn>(b"RARSetCallback\0")
+                .ok()
+                .map(|s| *s);
             Ok(Self {
                 open: *lib.get(b"RAROpenArchiveEx\0")?,
                 read: *lib.get(b"RARReadHeaderEx\0")?,
                 process: *lib.get(b"RARProcessFileW\0")?,
                 close: *lib.get(b"RARCloseArchive\0")?,
                 set_password: *lib.get(b"RARSetPassword\0")?,
+                set_callback,
                 version: *lib.get(b"RARGetDllVersion\0")?,
                 _lib: lib,
             })
@@ -136,6 +146,12 @@ impl RarApi {
             bail!("RAR 打开失败: {}", rar_error(code as i32));
         }
         Ok(handle)
+    }
+
+    fn set_callback(&self, handle: *mut c_void, cb: RarCallback, user_data: isize) {
+        if let Some(f) = self.set_callback {
+            unsafe { f(handle, cb, user_data) };
+        }
     }
 
     fn header(&self, handle: *mut c_void) -> Result<(Option<HeaderDataEx>, i32)> {
@@ -176,6 +192,69 @@ impl RarApi {
     fn version(&self) -> i32 {
         unsafe { (self.version)() }
     }
+}
+
+struct RarCbState {
+    control: *const TaskControl,
+    progress: *const Progress,
+    extracting: AtomicBool,
+    entry_bytes: AtomicU64,
+    saver_pace: bool,
+    paced: AtomicU64,
+}
+
+struct HandleGuard<'a> {
+    api: &'a RarApi,
+    handle: *mut c_void,
+}
+
+impl Drop for HandleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            self.api.close(self.handle);
+        }
+    }
+}
+
+unsafe extern "system" fn rar_callback(
+    msg: u32,
+    user_data: isize,
+    _p1: isize,
+    p2: isize,
+) -> i32 {
+    std::panic::catch_unwind(|| {
+        if user_data == 0 {
+            return 1;
+        }
+        let state = &*(user_data as *const RarCbState);
+        let control = &*state.control;
+        let progress = &*state.progress;
+        if msg == UCM_PROCESSDATA {
+            if control.checkpoint(Some(progress)).is_err() {
+                return -1;
+            }
+            if state.extracting.load(Ordering::Relaxed) && p2 > 0 {
+                let n = p2 as u64;
+                state.entry_bytes.fetch_add(n, Ordering::Relaxed);
+                progress.add_bytes(n);
+                if state.saver_pace {
+                    let prev = state.paced.fetch_add(n, Ordering::Relaxed);
+                    if (prev + n) / (2 * 1024 * 1024) > prev / (2 * 1024 * 1024) {
+                        if control.checkpoint(Some(progress)).is_err() {
+                            return -1;
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            }
+            return 1;
+        }
+        if control.is_cancelled() {
+            return -1;
+        }
+        0
+    })
+    .unwrap_or(-1)
 }
 
 fn wide_string(s: &str) -> Vec<u16> {
@@ -228,7 +307,7 @@ pub fn status(data_dir: &Path) -> Result<RarStatus> {
     })
 }
 
-pub fn install(_app: &tauri::AppHandle, data_dir: &Path, cancel: &AtomicBool) -> Result<RarStatus> {
+pub fn install(_app: &tauri::AppHandle, data_dir: &Path, control: &TaskControl) -> Result<RarStatus> {
     let dll = dll_path(data_dir);
     if status(data_dir)?.ready {
         return status(data_dir);
@@ -244,9 +323,7 @@ pub fn install(_app: &tauri::AppHandle, data_dir: &Path, cancel: &AtomicBool) ->
             let _ = fs::remove_file(&sfx);
             let mut last_err: Option<String> = None;
             for _ in 0..3 {
-                if cancel.load(Ordering::Relaxed) {
-                    bail!("操作已取消");
-                }
+                control.checkpoint(None)?;
                 let _ = fs::remove_file(&part);
                 match download::download(RAR_URL, &part) {
                     Ok(()) => {}
@@ -407,16 +484,29 @@ pub fn extract(
     selected: &HashSet<usize>,
     password: Option<&str>,
     policy: Overwrite,
+    profile: PerfProfile,
     progress: &Progress,
-    cancel: &AtomicBool,
+    control: &TaskControl,
 ) -> Result<ExtractReport> {
+    let _prio = ThreadPriorityGuard::enter(profile.mode);
     let data_dir = super::data_dir_for_rar();
     let dll = dll_path(&data_dir);
     if !dll.exists() {
         bail!("RAR 组件尚未安装");
     }
     let api = RarApi::load(&dll)?;
+    // 声明顺序保证 HandleGuard 先于 cb_state Drop，避免 UnRAR 持有悬空回调上下文。
+    let cb_state = RarCbState {
+        control: control as *const TaskControl,
+        progress: progress as *const Progress,
+        extracting: AtomicBool::new(false),
+        entry_bytes: AtomicU64::new(0),
+        saver_pace: profile.saver_pace,
+        paced: AtomicU64::new(0),
+    };
     let handle = api.open_archive(path, RAR_OM_EXTRACT)?;
+    let _guard = HandleGuard { api: &api, handle };
+    api.set_callback(handle, rar_callback, &cb_state as *const RarCbState as isize);
     if let Some(pw) = password.filter(|p| !p.is_empty()) {
         api.set_password(handle, pw);
     }
@@ -430,16 +520,12 @@ pub fn extract(
     };
     let mut index = 0usize;
     loop {
-        if cancel.load(Ordering::Relaxed) {
-            api.close(handle);
-            bail!("操作已取消");
-        }
+        control.checkpoint(Some(progress))?;
         let (header, rc) = api.header(handle)?;
         if rc == 10 {
             break;
         }
         if rc != 0 {
-            api.close(handle);
             bail!("RAR 读取失败: {}", rar_error(rc));
         }
         let Some(h) = header else { break };
@@ -465,7 +551,6 @@ pub fn extract(
         if !wanted {
             let skip = api.process(handle, RAR_SKIP, None, None);
             if skip != 0 {
-                api.close(handle);
                 bail!("RAR 跳过条目失败: {}", rar_error(skip));
             }
             continue;
@@ -501,23 +586,35 @@ pub fn extract(
             Some(p) => p,
             None => {
                 report.skipped += 1;
+                progress.add_bytes(size);
+                progress.file_done();
                 let _ = api.process(handle, RAR_SKIP, None, None);
                 continue;
             }
         };
         ensure_parent(&target)?;
-        // 传目标文件的父目录 + 文件名，避免 DLL 忽略 DestPath 后按归档内
-        // 相对名写进进程当前目录（RAR5 下实测会发生）。
         let parent = target.parent().unwrap_or(out_dir);
-        // DestName 非空时 UnRAR 会把它当成相对当前目录的文件名，DestPath
-        // 反而被忽略；只传目标父目录，让 DLL 按归档内 basename 写入。
         let original_name = std::path::Path::new(&name)
             .file_name()
             .map(|s| s.to_os_string())
             .unwrap_or_else(|| std::ffi::OsString::from("file"));
         let extracted = parent.join(&original_name);
+
+        progress.set_current(&name);
+        cb_state.entry_bytes.store(0, Ordering::Relaxed);
+        cb_state.extracting.store(true, Ordering::Release);
         let rc = api.process(handle, RAR_EXTRACT, Some(parent), None);
+        cb_state.extracting.store(false, Ordering::Release);
+
+        if control.is_cancelled() {
+            let _ = fs::remove_file(&extracted);
+            if extracted != target {
+                let _ = fs::remove_file(&target);
+            }
+            bail!("操作已取消");
+        }
         if rc != 0 {
+            let _ = fs::remove_file(&extracted);
             report.skipped += 1;
             report.warnings.push(format!("{name}: {}", rar_error(rc)));
             let _ = api.process(handle, RAR_SKIP, None, None);
@@ -532,13 +629,14 @@ pub fn extract(
                 continue;
             }
         }
+        let reported = cb_state.entry_bytes.load(Ordering::Relaxed);
+        if size > reported {
+            progress.add_bytes(size - reported);
+        }
         report.files += 1;
         report.bytes += size;
-        progress.add_bytes(size);
-        progress.set_current(&name);
         progress.file_done();
     }
-    api.close(handle);
     progress.finish();
     Ok(report)
 }

@@ -1,8 +1,8 @@
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -12,11 +12,285 @@ use tauri::{AppHandle, Emitter};
 pub const MAX_TOTAL_UNPACKED: u64 = 32 * 1024 * 1024 * 1024;
 pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerfProfile {
+    pub mode: &'static str,
+    pub threads: usize,
+    pub buf_size: usize,
+    pub zip_level: u32,
+    pub sevenz_level: u32,
+    pub gzip_level: u32,
+    pub smart_store: bool,
+    pub saver_pace: bool,
+}
+
+impl PerfProfile {
+    pub fn from_mode(raw: &str) -> Self {
+        let avail = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1);
+        match raw {
+            "saver" => Self {
+                mode: "saver",
+                threads: 1,
+                buf_size: 64 * 1024,
+                zip_level: 6,
+                sevenz_level: 5,
+                gzip_level: 6,
+                smart_store: false,
+                saver_pace: true,
+            },
+            "performance" => Self {
+                mode: "performance",
+                threads: 4.min(avail).max(1),
+                buf_size: 512 * 1024,
+                zip_level: 3,
+                sevenz_level: 2,
+                gzip_level: 3,
+                smart_store: true,
+                saver_pace: false,
+            },
+            "hyper" => Self {
+                mode: "hyper",
+                threads: avail.clamp(1, 16),
+                buf_size: 1024 * 1024,
+                zip_level: 1,
+                sevenz_level: 1,
+                gzip_level: 1,
+                smart_store: true,
+                saver_pace: false,
+            },
+            _ => Self {
+                mode: "balanced",
+                threads: 2.min(avail).max(1),
+                buf_size: 256 * 1024,
+                zip_level: 5,
+                sevenz_level: 3,
+                gzip_level: 5,
+                smart_store: false,
+                saver_pace: false,
+            },
+        }
+    }
+}
+
+/// 已经高强度压缩过的媒体/文档/归档格式：高性能与超线程档位下在 ZIP 中直接存储，
+/// 避免白费 CPU 去重压毫无收益的 jpg/mp4/zip。严格排除 .tar/.sql/.txt/.json 等高可压文本与镜像。
+pub fn is_incompressible_ext(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "webp"
+            | "gif"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "mp4"
+            | "mkv"
+            | "avi"
+            | "mov"
+            | "webm"
+            | "wmv"
+            | "flv"
+            | "m4v"
+            | "mp3"
+            | "aac"
+            | "m4a"
+            | "ogg"
+            | "opus"
+            | "flac"
+            | "wma"
+            | "zip"
+            | "7z"
+            | "rar"
+            | "gz"
+            | "tgz"
+            | "bz2"
+            | "xz"
+            | "zst"
+            | "lz4"
+            | "br"
+            | "cab"
+            | "docx"
+            | "xlsx"
+            | "pptx"
+            | "epub"
+            | "apk"
+            | "ipa"
+            | "jar"
+            | "whl"
+            | "pdf"
+    )
+}
+
+/// RAII 线程优先级守卫：按性能档调整当前工作线程（包括 Windows 后台 I/O 模式），
+/// Drop 时恢复为 NORMAL，绝不污染 Tokio `spawn_blocking` 全局线程池。
+pub struct ThreadPriorityGuard {
+    #[cfg(windows)]
+    changed: bool,
+    #[cfg(windows)]
+    bg_mode: bool,
+}
+
+impl ThreadPriorityGuard {
+    pub fn enter(mode: &str) -> Self {
+        #[cfg(windows)]
+        {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentThread() -> isize;
+                fn SetThreadPriority(handle: isize, priority: i32) -> i32;
+            }
+            const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x00010000;
+            const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+            const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
+            const THREAD_PRIORITY_HIGHEST: i32 = 2;
+
+            let h = unsafe { GetCurrentThread() };
+            match mode {
+                "saver" => {
+                    let ok = unsafe { SetThreadPriority(h, THREAD_MODE_BACKGROUND_BEGIN) };
+                    if ok != 0 {
+                        Self {
+                            changed: true,
+                            bg_mode: true,
+                        }
+                    } else {
+                        let ok2 = unsafe { SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL) };
+                        Self {
+                            changed: ok2 != 0,
+                            bg_mode: false,
+                        }
+                    }
+                }
+                "performance" => {
+                    let ok = unsafe { SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL) };
+                    Self {
+                        changed: ok != 0,
+                        bg_mode: false,
+                    }
+                }
+                "hyper" => {
+                    let ok = unsafe { SetThreadPriority(h, THREAD_PRIORITY_HIGHEST) };
+                    Self {
+                        changed: ok != 0,
+                        bg_mode: false,
+                    }
+                }
+                _ => Self {
+                    changed: false,
+                    bg_mode: false,
+                },
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = mode;
+            Self {}
+        }
+    }
+}
+
+impl Drop for ThreadPriorityGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.changed {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentThread() -> isize;
+                fn SetThreadPriority(handle: isize, priority: i32) -> i32;
+            }
+            const THREAD_MODE_BACKGROUND_END: i32 = 0x00020000;
+            const THREAD_PRIORITY_NORMAL: i32 = 0;
+            let h = unsafe { GetCurrentThread() };
+            unsafe {
+                if self.bg_mode {
+                    let _ = SetThreadPriority(h, THREAD_MODE_BACKGROUND_END);
+                } else {
+                    let _ = SetThreadPriority(h, THREAD_PRIORITY_NORMAL);
+                }
+            }
+        }
+    }
+}
+
+/// 统一的归档任务运行控制：支持无锁快路径检查、阻塞式暂停/恢复与瞬时取消。
+/// 取消时无条件清除 paused 并唤醒全部等待线程，彻底杜绝暂停态下取消死锁。
+#[derive(Default)]
+pub struct TaskControl {
+    cancel: AtomicBool,
+    paused: AtomicBool,
+    gate: Mutex<()>,
+    cv: Condvar,
+}
+
+impl TaskControl {
+    pub fn reset(&self) {
+        let _g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        self.cancel.store(false, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    pub fn request_cancel(&self) {
+        let _g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        self.cancel.store(true, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+
+    pub fn set_paused(&self, paused: bool) -> bool {
+        let _g = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        self.paused.store(paused, Ordering::SeqCst);
+        self.cv.notify_all();
+        true
+    }
+
+    /// 核心检查点：正常运行态仅两次原子 Acquire 读（零锁开销）；暂停时在 Condvar 上挂起；
+    /// 取消时立刻返回 Err("操作已取消")。
+    pub fn checkpoint(&self, _progress: Option<&Progress>) -> Result<()> {
+        if !self.cancel.load(Ordering::Acquire) && !self.paused.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.cancel.load(Ordering::Acquire) {
+            bail!("操作已取消");
+        }
+        let mut guard = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        while self.paused.load(Ordering::Acquire) && !self.cancel.load(Ordering::Acquire) {
+            guard = self.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
+        if self.cancel.load(Ordering::Acquire) {
+            bail!("操作已取消");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProgressPayload {
     op: String,
     phase: String,
+    paused: bool,
+    mode: String,
     files: u64,
     total_files: u64,
     bytes: u64,
@@ -33,6 +307,9 @@ pub struct Progress {
     total_files: AtomicU64,
     bytes: AtomicU64,
     total_bytes: AtomicU64,
+    paused: AtomicBool,
+    cancelling: AtomicBool,
+    mode: Mutex<String>,
     name: Mutex<String>,
     last: Mutex<Instant>,
 }
@@ -46,6 +323,9 @@ impl Progress {
             total_files: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             total_bytes: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            cancelling: AtomicBool::new(false),
+            mode: Mutex::new("balanced".to_string()),
             name: Mutex::new(String::new()),
             last: Mutex::new(Instant::now() - Duration::from_secs(1)),
         }
@@ -61,9 +341,33 @@ impl Progress {
             total_files: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             total_bytes: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            cancelling: AtomicBool::new(false),
+            mode: Mutex::new("balanced".to_string()),
             name: Mutex::new(String::new()),
             last: Mutex::new(Instant::now() - Duration::from_secs(1)),
         }
+    }
+
+    pub fn set_mode(&self, mode: &str) {
+        if let Ok(mut m) = self.mode.lock() {
+            m.clear();
+            m.push_str(mode);
+        }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        if self.cancelling.load(Ordering::Acquire) {
+            return;
+        }
+        self.paused.store(paused, Ordering::SeqCst);
+        self.emit(true, if paused { "paused" } else { "run" });
+    }
+
+    pub fn mark_cancelling(&self) {
+        self.cancelling.store(true, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
+        self.emit(true, "cancelling");
     }
 
     pub fn set_totals(&self, files: u64, bytes: u64) {
@@ -94,6 +398,7 @@ impl Progress {
     }
 
     pub fn finish(&self) {
+        self.paused.store(false, Ordering::SeqCst);
         self.emit(true, "done");
     }
 
@@ -106,6 +411,12 @@ impl Progress {
     }
 
     fn emit(&self, force: bool, phase: &str) {
+        let paused = self.paused.load(Ordering::Acquire);
+        let cancelling = self.cancelling.load(Ordering::Acquire);
+        // 在暂停或取消状态下的非强制吞吐事件直接丢弃，避免覆盖「已暂停/取消中」状态。
+        if !force && (paused || cancelling) {
+            return;
+        }
         let now = Instant::now();
         if !force {
             if let Ok(last) = self.last.lock() {
@@ -118,9 +429,16 @@ impl Progress {
             *last = now;
         }
         let name = self.name.lock().map(|n| n.clone()).unwrap_or_default();
+        let mode = self
+            .mode
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_else(|_| "balanced".to_string());
         let payload = ProgressPayload {
             op: self.op.to_string(),
             phase: phase.to_string(),
+            paused,
+            mode,
             files: self.files.load(Ordering::Relaxed),
             total_files: self.total_files.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
@@ -198,8 +516,99 @@ impl Budget {
     }
 }
 
-/// Copy while honouring cancellation and a shared byte budget. The callback
-/// receives each chunk so the UI can show movement inside a large member.
+/// Copy while honouring TaskControl (pause/resume/cancel), PerfProfile buffer/pacing, and a shared byte budget.
+pub fn copy_controlled<R: Read + ?Sized, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    control: &TaskControl,
+    profile: PerfProfile,
+    budget: Option<&Budget>,
+    progress: Option<&Progress>,
+    mut on_bytes: impl FnMut(u64),
+) -> Result<u64> {
+    let chunk_size = profile.buf_size.clamp(64 * 1024, 1024 * 1024);
+    let mut buf = vec![0u8; chunk_size];
+    let mut total = 0u64;
+    let mut paced_bytes = 0u64;
+    loop {
+        control.checkpoint(progress)?;
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n])?;
+        let chunk = n as u64;
+        total += chunk;
+        if let Some(b) = budget {
+            b.charge(chunk)?;
+        }
+        on_bytes(chunk);
+        if profile.saver_pace {
+            paced_bytes += chunk;
+            if paced_bytes >= 2 * 1024 * 1024 {
+                paced_bytes = 0;
+                control.checkpoint(progress)?;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// 分块流式 ControlledReader：让逐文件读取（如 TAR/7Z 压缩大文件）在成员内部也能毫秒级响应暂停/取消并持续推送进度。
+pub struct ControlledReader<R: Read> {
+    inner: R,
+    control: Arc<TaskControl>,
+    progress: Arc<Progress>,
+    saver_pace: bool,
+    paced_bytes: u64,
+}
+
+impl<R: Read> ControlledReader<R> {
+    pub fn new(
+        inner: R,
+        control: Arc<TaskControl>,
+        progress: Arc<Progress>,
+        saver_pace: bool,
+    ) -> Self {
+        Self {
+            inner,
+            control,
+            progress,
+            saver_pace,
+            paced_bytes: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for ControlledReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.control
+            .checkpoint(Some(&self.progress))
+            .map_err(|_| std::io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+        let max_slice = if self.saver_pace { 256 * 1024 } else { 512 * 1024 };
+        let cap = buf.len().min(max_slice);
+        let n = self.inner.read(&mut buf[..cap])?;
+        if n > 0 {
+            let chunk = n as u64;
+            self.progress.add_bytes(chunk);
+            if self.saver_pace {
+                self.paced_bytes += chunk;
+                if self.paced_bytes >= 2 * 1024 * 1024 {
+                    self.paced_bytes = 0;
+                    self.control
+                        .checkpoint(Some(&self.progress))
+                        .map_err(|_| std::io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// Copy while honouring cancellation and a shared byte budget (retained for tests).
+#[cfg(test)]
 pub fn copy_cancellable<R: Read + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -654,6 +1063,21 @@ pub fn zip_datetime(path: &Path) -> Option<zip::DateTime> {
     zip::DateTime::from_date_and_time(y, mo, d, h, mi, s).ok()
 }
 
+/// 将文件本地修改时间打包为标准 MS-DOS `(time, date)` 16 位字段（供并行 ZIP64 写入器使用）。
+pub fn dos_datetime(path: &Path) -> (u16, u16) {
+    let parts = fs::metadata(path)
+        .ok()
+        .map(|m| metadata_filetime(&m))
+        .and_then(filetime_to_local_parts);
+    if let Some((y, mo, d, h, mi, s)) = parts {
+        let yr = y.clamp(1980, 2107) - 1980;
+        let date = (yr << 9) | (((mo as u16).clamp(1, 12)) << 5) | ((d as u16).clamp(1, 31));
+        let time = ((h as u16).min(23) << 11) | ((mi as u16).min(59) << 5) | ((s as u16).min(59) / 2);
+        return (time, date);
+    }
+    (0, (1 << 5) | 1)
+}
+
 // 已删除 read_limited：从进入版本库那天起就没被调用过。四个解压实现
 // （zip_impl / tar_impl / sevenz_impl / rar）各自内联了同样的
 // `entry.take(limit).read_to_end(&mut out)`，它只是一份没人用的第三副本。
@@ -790,5 +1214,37 @@ mod tests {
             has_alternative,
             "碰到链接应当改成相邻的新名字，而不是静默跳过这个文件"
         );
+    }
+
+    #[test]
+    fn perf_profile_modes_and_priority_guard() {
+        let saver = PerfProfile::from_mode("saver");
+        let balanced = PerfProfile::from_mode("balanced");
+        let perf = PerfProfile::from_mode("performance");
+        let hyper = PerfProfile::from_mode("hyper");
+
+        assert_eq!(saver.threads, 1);
+        assert!(saver.saver_pace);
+        assert!(!saver.smart_store);
+        assert_eq!(saver.zip_level, 6);
+        assert_eq!(balanced.zip_level, 5);
+        assert_eq!(perf.zip_level, 3);
+        assert!(perf.smart_store);
+        assert_eq!(hyper.zip_level, 1);
+        assert!(hyper.smart_store);
+        assert!(hyper.threads >= balanced.threads);
+
+        assert!(is_incompressible_ext(Path::new("photo.JPG")));
+        assert!(is_incompressible_ext(Path::new("clip.mp4")));
+        assert!(is_incompressible_ext(Path::new("inner.zip")));
+        assert!(!is_incompressible_ext(Path::new("backup.tar")));
+        assert!(!is_incompressible_ext(Path::new("dump.sql")));
+        assert!(!is_incompressible_ext(Path::new("notes.txt")));
+        assert!(!is_incompressible_ext(Path::new("data.json")));
+
+        for m in ["saver", "balanced", "performance", "hyper"] {
+            let g = ThreadPriorityGuard::enter(m);
+            drop(g);
+        }
     }
 }
