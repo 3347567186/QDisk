@@ -74,6 +74,21 @@
       params: { status: 'string all|enabled|disabled|broken', filter: 'string 关键词', offset: 'number≤5000', limit: 'number≤50' },
       args: []
     },
+    process_list: {
+      desc: '查看后台运行进程快照，可按名称关键词过滤、按内存/线程排序（只读）',
+      params: { filter: 'string 关键词', limit: 'number≤50', sort: 'string mem|threads', offset: 'number≤5000' },
+      args: []
+    },
+    system_status: {
+      desc: '获取本机实时 CPU、物理内存、磁盘容量与 I/O 负载快照（只读）',
+      params: {},
+      args: []
+    },
+    app_leftovers: {
+      desc: '按软件名或原安装路径扫描卸载后残留的目录与注册表项（只读，不删）',
+      params: { name: 'string 软件名称', path: 'string 原安装路径' },
+      args: ['name']
+    },
     search_files: {
       desc: '按文件名在全盘索引里搜索（需要用户已建索引）',
       params: { q: 'string', limit: 'number≤20', offset: 'number≤5000' },
@@ -114,9 +129,24 @@
       params: {},
       args: []
     },
+    migrate_preview: {
+      desc: '只读预演数据迁移计划：计算总文件数、大小、是否跨盘以及被阻断的来源',
+      params: { sources: 'string[]≤50', destination: 'string', mode: 'string move|copy', conflict: 'string rename|skip|overwrite' },
+      args: ['sources', 'destination']
+    },
+    rules_preview: {
+      desc: '校验 organize YAML 规则语法，并在给出 folder 时预演会移动的文件清单（只读不写盘）',
+      params: { text: 'string YAML规则文本', folder: 'string 目标目录' },
+      args: ['text']
+    },
+    read_logs: {
+      desc: '列出整理助手最近的日志文件，或读取指定日志文件末尾行（排错用）',
+      params: { name: 'string 日志文件名（省略则列清单）', tail: 'number≤120 行数' },
+      args: []
+    },
     navigate: {
-      desc: '把用户带到某个页面看结果（只切页面，不改任何东西）',
-      params: { page: 'organize|tools|search|apps|archive|clean|settings|ai' },
+      desc: '把用户带到对应功能页面看结果或操作（只切页面，不改任何文件）',
+      params: { page: 'organize|shots|cache|tools|archive|search|rules|apps|migrate|log|settings|ai', tab: 'string 子标签页', payload: 'object 附带参数' },
       args: ['page']
     },
     propose_action: {
@@ -236,6 +266,7 @@
     if (s.indexOf('string[]') === 0) return { type: 'array', items: { type: 'string' } };
     if (s.indexOf('number') === 0) return { type: 'number' };
     if (s.indexOf('boolean') === 0) return { type: 'boolean' };
+    if (s.indexOf('object') === 0) return { type: 'object', additionalProperties: true };
     return { type: 'string' };
   }
 
@@ -245,7 +276,8 @@
       const t = TOOLS[n];
       if (!t) return null;
       const props = {};
-      (t.args || []).forEach((k) => { props[k] = jsonType((t.params || {})[k]); });
+      const params = t.params || {};
+      Object.keys(params).forEach((k) => { props[k] = jsonType(params[k]); });
       return {
         type: 'function',
         function: {
@@ -254,7 +286,7 @@
           parameters: {
             type: 'object',
             properties: props,
-            /* 必填参数由 TOOLS.args 说了算；其余留给模型按需补 */
+            /* 必填参数由 TOOLS.args 说了算；其余可选参数也声明在 properties 里供模型选用 */
             required: (t.args || []).slice(),
             additionalProperties: true
           }
@@ -284,13 +316,20 @@
 
   const PAGE_TOOLS = {
     ai: PROPOSE.concat(['list_dir', 'read_file', 'disk_roots', 'open_path', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs',
-      'file_signals', 'installed_apps', 'startup_list', 'search_files', 'organize_preview', 'explain_rules', 'last_organize',
-      'archive_entries', 'clean_candidates', 'settings_read', 'search_roots']),
-    tools: PROPOSE.concat(['top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates']),
+      'file_signals', 'installed_apps', 'startup_list', 'process_list', 'system_status', 'app_leftovers',
+      'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates',
+      'migrate_preview', 'rules_preview', 'read_logs', 'settings_read', 'search_roots']),
+    tools: PROPOSE.concat(['top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'read_file', 'disk_roots', 'open_path', 'file_signals', 'installed_apps', 'clean_candidates', 'system_status']),
     organize: PROPOSE.concat(['list_dir', 'read_file', 'organize_preview', 'explain_rules', 'last_organize', 'installed_apps']),
+    shots: PROPOSE.concat(['clean_candidates', 'list_dir', 'disk_roots', 'open_path', 'settings_read']),
+    cache: PROPOSE.concat(['clean_candidates', 'list_dir', 'disk_roots', 'process_list', 'settings_read']),
     search: PROPOSE.concat(['search_files', 'top_folders', 'top_indexed', 'list_dir', 'read_file', 'installed_apps', 'search_roots']),
-    apps: PROPOSE.concat(['installed_apps', 'startup_list', 'list_dir', 'read_file']),
-    archive: PROPOSE.concat(['list_dir', 'read_file', 'top_folders', 'top_files', 'top_indexed', 'archive_entries'])
+    rules: PROPOSE.concat(['rules_preview', 'explain_rules', 'list_dir', 'read_file', 'organize_preview', 'last_organize']),
+    apps: PROPOSE.concat(['installed_apps', 'startup_list', 'process_list', 'app_leftovers', 'system_status', 'list_dir', 'read_file']),
+    archive: PROPOSE.concat(['list_dir', 'read_file', 'top_folders', 'top_files', 'top_indexed', 'archive_entries']),
+    migrate: PROPOSE.concat(['migrate_preview', 'list_dir', 'disk_roots', 'top_folders', 'system_status']),
+    log: PROPOSE.concat(['read_logs', 'last_organize', 'read_file', 'settings_read', 'system_status']),
+    settings: PROPOSE.concat(['settings_read', 'search_roots', 'system_status', 'read_logs'])
   };
 
   /* 动作目录由 registry 在启动时灌进来（内容只随版本变化，仍是稳定前缀） */

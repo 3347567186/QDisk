@@ -1088,6 +1088,185 @@
       }
     };
 
+    /* ---------------------------------------------------------------- 进程管理 */
+    const processClose = {
+      id: 'process.close',
+      cat: 'apps',
+      label: '结束进程',
+      desc: '关闭或终止指定后台进程以释放文件占用或系统资源',
+      risk: 2,
+      reversible: false,
+      undoKind: 'none',
+      schema: {
+        pid: { type: 'int', min: 1, hint: '进程 PID' },
+        name: { type: 'string', maxLen: 120, hint: '进程名称，例如 wechat.exe' },
+        force: { type: 'bool', def: false }
+      },
+      async plan(p) {
+        if (!p.pid && !p.name) throw new Error('pid 或 name 至少需要提供一个');
+        return {
+          title: (p.force ? '强制结束进程' : '关闭进程'),
+          summary: (p.name || ('PID ' + p.pid)) + (p.pid && p.name ? ' (PID ' + p.pid + ')' : ''),
+          items: [{ t: p.name || ('PID ' + p.pid), s: p.force ? '强制终止' : '优雅关闭' }],
+          count: 1,
+          bytes: 0,
+          warnings: ['未保存的文档可能丢失；受系统保护的核心进程会被拒绝'],
+          params: p,
+          note: '系统关键进程受底层白名单保护'
+        };
+      },
+      async run(p) {
+        const r = await E('process.close', { pid: p.pid || 0, name: p.name || '', force: !!p.force });
+        if (r && r.error) throw new Error(r.error);
+        return {
+          result: r || { closed: true },
+          undo: null,
+          message: '已请求关闭进程 ' + (p.name || p.pid)
+        };
+      }
+    };
+
+    /* ------------------------------------------------------------ 一键安全自动清理 */
+    const cleanAuto = {
+      id: 'clean.auto',
+      cat: 'clean',
+      label: '一键安全清理',
+      desc: '按设定自动清理安全级系统缓存与过期截图（不碰高级或谨慎目录）',
+      risk: 2,
+      reversible: false,
+      undoKind: 'none',
+      schema: {
+        cache: { type: 'bool', def: true },
+        screenshots: { type: 'bool', def: true },
+        days: { type: 'int', min: 1, max: 3650, def: 30 }
+      },
+      async plan(p) {
+        if (!p.cache && !p.screenshots) throw new Error('cache 与 screenshots 不能同时为 false');
+        let count = 0;
+        let bytes = 0;
+        const items = [];
+        if (p.cache) {
+          const r = await E('cache.list', { include_custom: true });
+          for (const g of (r && r.groups) || []) {
+            for (const it of g.items || []) {
+              const lv = String(it.level || '').toLowerCase();
+              if ((lv === 'safe' || lv === '1') && it.exists !== false) {
+                const sz = Number(it.size) || 0;
+                bytes += sz;
+                count += 1;
+                if (items.length < 4) items.push({ t: g.name || g.key || '安全缓存', s: fmtBytes(sz) });
+              }
+            }
+          }
+        }
+        if (p.screenshots) {
+          const s = await E('shots.scan', { days: p.days });
+          const sc = ((s && s.items) || []).length;
+          const sb = Number(s && s.size) || 0;
+          count += sc;
+          bytes += sb;
+          if (sc) items.push({ t: p.days + ' 天前旧截图 (' + sc + ' 项)', s: fmtBytes(sb) });
+        }
+        return {
+          title: '一键自动清理（安全级）',
+          summary: '共约 ' + count + ' 项，预计释放 ' + fmtBytes(bytes),
+          items,
+          count,
+          bytes,
+          warnings: p.screenshots ? ['旧截图将按设置移入回收站，安全缓存将被清空'] : ['安全级缓存目录内容将被清空'],
+          params: p,
+          note: '仅作用于安全级缓存与旧截图，系统路径受硬黑名单保护'
+        };
+      },
+      async run(p) {
+        const r = await E('clean.auto', { confirm: true, cache: !!p.cache, screenshots: !!p.screenshots, days: p.days });
+        if (r && r.error) throw new Error(r.error);
+        return {
+          result: r || { ok: true },
+          undo: null,
+          message: '安全自动清理已完成'
+        };
+      }
+    };
+
+    /* ------------------------------------------------------------ 搜索诊断与自检 */
+    const searchSelfcheck = {
+      id: 'search.selfcheck',
+      cat: 'search',
+      label: '搜索自检与修复',
+      desc: '抽查搜索索引与 Everything 状态，若过期则自动修复重建',
+      risk: 1,
+      reversible: true,
+      undoKind: 'none',
+      schema: { rebuild: { type: 'bool', def: true } },
+      async plan(p) {
+        const st = await E('search.status', {});
+        const entries = (st && st.entries) || [];
+        return {
+          title: '搜索索引自检',
+          summary: '检查 ' + entries.length + ' 个已索引目录（当前引擎：' + ((st && st.backend) || '本地索引') + '）',
+          items: entries.slice(0, 5).map((it) => ({ t: it.root || it.path || '', s: (it.files || 0) + ' 项' })),
+          count: Math.max(1, entries.length),
+          bytes: 0,
+          warnings: [],
+          params: p,
+          note: '仅更新本地搜索索引状态，不动磁盘文件'
+        };
+      },
+      async run(p) {
+        const r = await E('search.selfcheck', { rebuild: !!p.rebuild });
+        return {
+          result: r || { ok: true },
+          undo: null,
+          message: '搜索索引自检完成'
+        };
+      }
+    };
+
+    /* ------------------------------------------------------------ 规则草稿写入编辑器 */
+    const rulesDraft = {
+      id: 'rules.draft',
+      cat: 'organize',
+      label: '写入规则编辑器',
+      desc: '验证起草的 organize YAML 并写入「高级规则」编辑器（不自动写盘）',
+      risk: 1,
+      reversible: true,
+      undoKind: 'none',
+      schema: {
+        yaml: { type: 'string', req: true, maxLen: 20000, hint: '完整的 organize YAML 规则文本' },
+        folder: { type: 'string', maxLen: 260, hint: '可选目标目录' }
+      },
+      async plan(p) {
+        const val = await E('rules.validate', { text: p.yaml });
+        if (!val || !val.ok) {
+          throw new Error('规则语法未通过校验：' + ((val && val.message) || '请检查缩进与字段'));
+        }
+        return {
+          title: '写入高级规则编辑器',
+          summary: '通过校验（共 ' + (val.rule_count || 0) + ' 条规则），确认后跳转到规则页填入',
+          items: [{ t: (val.rule_count || 0) + ' 条 YAML 规则', s: p.folder || '需进入页面选择目标目录' }],
+          count: Math.max(1, val.rule_count || 1),
+          bytes: p.yaml.length,
+          warnings: [],
+          params: p,
+          note: '仅填入前端编辑器，需人工核对并手动保存或执行'
+        };
+      },
+      async run(p) {
+        if (root.AIRulesDraft && typeof root.AIRulesDraft.fill === 'function') {
+          root.AIRulesDraft.fill(p.yaml);
+        }
+        if (root.App && typeof root.App.jump === 'function') {
+          root.App.jump('rules', { yaml: p.yaml, folder: p.folder || '' });
+        }
+        return {
+          result: { filled: true, length: p.yaml.length },
+          undo: null,
+          message: '规则已写入「高级规则」编辑器并打开对应页面'
+        };
+      }
+    };
+
     const table = {
       'organize.apply': organizeApply,
       'files.delete': filesDelete,
@@ -1096,6 +1275,7 @@
       'archive.create': archiveCreate,
       'clean.cache': cleanCache,
       'clean.shots': cleanShots,
+      'clean.auto': cleanAuto,
       'apps.uninstall': appsUninstall,
       'apps.delete_entry': appsDeleteEntry,
       'apps.force_remove': appsForceRemove,
@@ -1103,8 +1283,11 @@
       'apps.remove_store': appsRemoveStore,
       'startup.toggle': startupToggle,
       'startup.delete': startupDelete,
+      'process.close': processClose,
       'search.rebuild': searchRebuild,
+      'search.selfcheck': searchSelfcheck,
       'rules.run': rulesRun,
+      'rules.draft': rulesDraft,
       'migrate.run': migrateRun,
       'settings.set': settingsSet,
       'autostart.set': autostartSet,

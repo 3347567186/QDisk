@@ -53,7 +53,7 @@
   /** 用户点「停止」时统一用这个错误穿出去：上层据此返回「已停止」而不是「调用失败」 */
   const abortError = () => Object.assign(new Error('已停止'), { code: 'aborted' });
 
-  const SUGGEST_ACTIONS = ['delete', 'archive', 'check', 'none'];
+  const SUGGEST_ACTIONS = ['organize', 'delete', 'archive', 'check', 'rules', 'migrate', 'apps', 'log', 'settings', 'none'];
 
   /* ---------------- 输出解析 ---------------- */
 
@@ -178,7 +178,9 @@
     top_files: { limit: 50 },
     top_indexed: { limit: 50 },
     empty_dirs: { depth: 3 },
-    search_files: { limit: 20 }
+    search_files: { limit: 20 },
+    process_list: { limit: 50 },
+    read_logs: { tail: 120 }
   };
 
   function checkArgs(tool, args) {
@@ -673,6 +675,42 @@
     return '';
   }
 
+  const HOST_FREE_SLUGS = {
+    'openrouter.ai': [
+      'openrouter/free',
+      'google/gemma-4-26b-a4b-it:free',
+      'google/gemma-4-31b-it:free',
+      'nvidia/nemotron-3.5-lightning:free',
+      'baidu/ernie-5.5-flash-preview:free'
+    ],
+    'open.bigmodel.cn': ['glm-4-flash', 'glm-4-flashx']
+  };
+
+  function poolSlugsForHost(host) {
+    const out = [];
+    const seen = new Set();
+    const push = (m) => {
+      const s = String(m || '').trim();
+      if (!s || seen.has(s)) return;
+      seen.add(s);
+      out.push(s);
+    };
+    (HOST_FREE_SLUGS[host] || []).forEach(push);
+    try {
+      const provs = (root.AIPool && Array.isArray(root.AIPool.providers)) ? root.AIPool.providers : [];
+      provs.forEach((p) => {
+        if (!p || !p.free || hostOf(p.endpoint) !== host) return;
+        (p.models || []).forEach((row) => {
+          const id = Array.isArray(row) ? row[0] : (row && row.id);
+          if (id && (/:free$/i.test(id) || /\/free$/i.test(id) || /-free$/i.test(id) || /^glm-4-flash/i.test(id))) {
+            push(id);
+          }
+        });
+      });
+    } catch (e) { /* 忽略池读取异常 */ }
+    return out.slice(0, 6);
+  }
+
   function buildCandidates(settings) {
     const out = [];
     const push = (endpoint, model, key) => {
@@ -684,15 +722,52 @@
       const host = hostOf(e) || e;
       out.push({ id, endpoint: e, model: m, key: key, host: host || e });
     };
-    push(settings.endpoint, settings.model,
-      keyFor(settings.endpoint, settings.apiKey, settings.endpoint, settings.apiKey));
+    const priKey = keyFor(settings.endpoint, settings.apiKey, settings.endpoint, settings.apiKey);
+    push(settings.endpoint, settings.model, priKey);
     (Array.isArray(settings.fallbacks) ? settings.fallbacks : []).forEach((f) => {
       if (f && typeof f === 'object') {
         push(f.endpoint, f.model,
           keyFor(f.endpoint, f.key, settings.endpoint, settings.apiKey));
       }
     });
-    return out;
+    /* V2 同源免费池自动扩充：只在已知多免费模型平台（openrouter.ai / open.bigmodel.cn）
+       且主 Key 存在时追加同源候选，不改动私服 / 测试端点的候选序列。 */
+    const priHost = hostOf(settings.endpoint);
+    if (priKey && priHost && settings.autoPool !== false) {
+      const extraSlugs = poolSlugsForHost(priHost);
+      let added = 0;
+      extraSlugs.forEach((slug) => {
+        if (added >= 4) return;
+        const before = out.length;
+        push(settings.endpoint, slug, priKey);
+        if (out.length > before) added += 1;
+      });
+    }
+    /* V3 本地 Ollama 确定性尾备：启用开关或显式填写了本地兜底模型时附加 */
+    const ollamaModel = String(settings.ollamaModel || '').trim();
+    if ((settings.ollamaFallback === true || ollamaModel) && priHost !== '127.0.0.1:11434' && priHost !== 'localhost:11434') {
+      push('http://127.0.0.1:11434/v1/chat/completions', ollamaModel || 'qwen2.5:7b', '');
+    }
+    if (out.length <= 1) return out;
+
+    /* V2 被动冷却排序：未冷却的模型排在冷却中的前面；其余按 lastOk 降序 / 原顺序稳定排列 */
+    const now = Date.now();
+    const capsAll = (settings.caps && typeof settings.caps === 'object') ? settings.caps : {};
+    const tagged = out.map((c, idx) => {
+      const cc = readCaps(capsAll, capKeyOf(c.endpoint, c.model));
+      const cooldownUntil = Number(cc.cooldownUntil) || 0;
+      const cooled = cooldownUntil > now;
+      const lastOk = Number(cc.lastOk) || 0;
+      return { c, idx, cooled, cooldownUntil, lastOk };
+    });
+    const healthy = tagged.filter((x) => !x.cooled).sort((a, b) => {
+      if (a.idx === 0 && !a.cooled) return -1;
+      if (b.idx === 0 && !b.cooled) return 1;
+      if (b.lastOk !== a.lastOk) return b.lastOk - a.lastOk;
+      return a.idx - b.idx;
+    });
+    const cooled = tagged.filter((x) => x.cooled).sort((a, b) => a.cooldownUntil - b.cooldownUntil);
+    return healthy.concat(cooled).map((x) => x.c);
   }
 
   /* ---------------- 环路 ---------------- */
@@ -717,11 +792,13 @@
        switched 记下「从哪来、为什么换」，答案顶部会写一行。 */
     const candidates = buildCandidates(settings);
     let candIdx = 0;
+    let switchLeft = Math.min(5, Math.max(0, candidates.length - 1));
     let curEndpoint = candidates.length ? candidates[0].endpoint : (settings.endpoint || '');
     let curModel = candidates.length ? candidates[0].model : (settings.model || '');
     let curKey = candidates.length ? candidates[0].key : (settings.apiKey || '');
     let capKey = capKeyOf(curEndpoint, curModel);
     let caps = readCaps(settings.caps, capKey);
+    let notedOk = false;
     /* 切换记录：{host, model, why, from} —— 只在真的换过之后才有值 */
     let switched = null;
 
@@ -745,19 +822,52 @@
        只在「这个端点明确不给服务」时调用：限流很久、欠费、密钥不认、
        模型不存在、5xx 退避用完。换过去之后能力记忆也要换成那一家的，
        否则会把上一个端点学到的「不认 response_format」错记到新的身上。 */
-    function switchCandidate(why) {
-      if (candIdx + 1 >= candidates.length) return false;
-      const from = { host: candidates[candIdx].host, model: curModel };
-      candIdx += 1;
+    /** V2 记录模型级指数冷却（60s -> 300s -> 1800s），401/403 密钥问题绝不触发模型冷却 */
+    function markFailedCandidate(reason, opts) {
+      if (opts && opts.noCooldown) return;
+      const fails = (Number(caps.consecutiveFail) || 0) + 1;
+      const baseMs = fails === 1 ? 60000 : (fails === 2 ? 300000 : 1800000);
+      const minMs = Number(opts && opts.minCooldownMs) || 0;
+      const cooldownMs = Math.max(baseMs, Math.min(3600000, minMs));
+      remember({
+        consecutiveFail: fails,
+        cooldownUntil: Date.now() + cooldownMs,
+        lastFailReason: String(reason || '').slice(0, 80)
+      });
+    }
+
+    function markSuccessCandidate() {
+      if (!notedOk || Number(caps.consecutiveFail) > 0 || Number(caps.cooldownUntil) > 0) {
+        notedOk = true;
+        remember({
+          consecutiveFail: 0,
+          cooldownUntil: 0,
+          lastOk: Date.now()
+        });
+      }
+    }
+
+    function switchCandidate(why, opts) {
+      if (switchLeft <= 0 || candIdx + 1 >= candidates.length) return false;
+      const curHost = (candidates[candIdx] && candidates[candIdx].host) || hostOf(curEndpoint);
+      const skipSameHost = !!(opts && opts.skipSameHost);
+      let nextIdx = -1;
+      for (let j = candIdx + 1; j < candidates.length; j += 1) {
+        if (skipSameHost && candidates[j].host === curHost) continue;
+        nextIdx = j;
+        break;
+      }
+      if (nextIdx < 0) return false;
+      const from = { host: curHost, model: curModel };
+      switchLeft -= 1;
+      candIdx = nextIdx;
       const c = candidates[candIdx];
       curEndpoint = c.endpoint;
       curModel = c.model;
-      /* Key 在 buildCandidates 里已经按「显式 → 已记住 → 同域名才继承主端点」定好，
-         这里不再回退 settings.apiKey：换了厂商还用上一家的 Key 只会 401，
-         而且那把密钥会真的发到另一家的服务器上 */
       curKey = c.key || '';
       capKey = capKeyOf(curEndpoint, curModel);
       caps = readCaps(settings.caps, capKey);
+      notedOk = false;
       switched = { host: c.host, model: c.model, why: why, from: from };
       return true;
     }
@@ -1104,6 +1214,21 @@
             }
             continue;
           }
+          markFailedCandidate('network_error');
+          if (switchCandidate('超时或网络故障', { skipSameHost: false })) {
+            downLeft = 4;
+            busyLeft = 2;
+            slowLeft = 2;
+            applySystem(messages, ctxTools);
+            if (onEvent) {
+              onEvent({
+                type: 'notice',
+                level: 'warn',
+                message: '当前模型连接异常，已自动切换到 ' + switched.host + ' / ' + switched.model
+              });
+            }
+            continue;
+          }
           throw e;
         }
         const spentMs = Date.now() - sentAt;
@@ -1135,10 +1260,11 @@
             const secs = /retry[ -]?after[\s:]*(\d+)/i.exec(detail);
             if (secs) retryAfter = Number(secs[1]) || 0;
           }
+          const quotaText = /daily limit|free[- ]?tier limit|exceeded your current quota/i.test(detail);
           /* ≥60 秒基本就是「今天用完了」或长时段限流，别让用户盯着假转圈。
              没给等待时间的 429 才是真拥塞——那正是该退避的情况，
              原来的判断写成「必须给了时间才重试」，和上面的意图反了。 */
-          const worthWaiting = rateLimited ? retryAfter <= 60 : true;
+          const worthWaiting = rateLimited ? (retryAfter <= 60 && !quotaText) : true;
           if ((transient || (rateLimited && worthWaiting)) && busyLeft > 0) {
             busyLeft -= 1;
             const wait = retryAfter > 0
@@ -1158,12 +1284,20 @@
           /* 换端点的判定：这几种「不是参数问题、而是这家不给服务」的，
              退避重试也救不回来，直接往后切一个备用端点。
              参数不认（400/422）不走这里 —— 那是可以降级修好的。 */
+          const isAuth = res.status === 401 || res.status === 403;
+          const isAccountQuota = (res.status === 402) || (rateLimited && (quotaText || retryAfter > 300));
           const giveUp = res.status === 402
-            || res.status === 401 || res.status === 403
+            || isAuth
             || res.status === 404
             || (rateLimited && !worthWaiting)
             || (transient && busyLeft <= 0);
-          if (giveUp && switchCandidate('HTTP ' + res.status)) {
+          if (giveUp) {
+            markFailedCandidate('http_' + res.status, {
+              noCooldown: isAuth,
+              minCooldownMs: retryAfter > 0 ? retryAfter * 1000 : 0
+            });
+          }
+          if (giveUp && switchCandidate('HTTP ' + res.status, { skipSameHost: isAuth || isAccountQuota })) {
             /* 换了一家就要重新学：上一家的参数习惯不能带过来。
                协议也可能不一样（一家认 tools、一家不认），system 必须跟着改。 */
             downLeft = 4;
@@ -1174,7 +1308,7 @@
               onEvent({
                 type: 'notice',
                 level: 'warn',
-                message: '主端点不可用（HTTP ' + res.status + '），已自动切换到 '
+                message: '当前端点不可用（HTTP ' + res.status + '），已自动切换到 '
                   + switched.host + ' / ' + switched.model
               });
             }
@@ -1211,9 +1345,26 @@
              Content-Type 不对、模型名下线、余额不足）整个吞掉。 */
           if (payload && payload.error && !(payload.choices && payload.choices.length)) {
             const em = payload.error.message || payload.error.msg || payload.error.code || '';
+            const emStr = String(em || '');
+            const authErr = /invalid.*key|unauthorized|auth|api[_ ]?key/i.test(emStr);
+            markFailedCandidate('fake_200_error', { noCooldown: authErr });
+            if (switchCandidate('接口返回错误: ' + (emStr || '200 error'), { skipSameHost: authErr })) {
+              downLeft = 4;
+              busyLeft = 2;
+              slowLeft = 2;
+              applySystem(messages, ctxTools);
+              if (onEvent) {
+                onEvent({
+                  type: 'notice',
+                  level: 'warn',
+                  message: '接口返回异常，已自动切换到 ' + switched.host + ' / ' + switched.model
+                });
+              }
+              continue;
+            }
             const err = Object.assign(
               new Error('接口返回错误：' + (em || '没有说明')),
-              { code: 'api_error', detail: String(em || '') }
+              { code: 'api_error', detail: emStr }
             );
             throw err;
           }
@@ -1311,6 +1462,7 @@
             throw Object.assign(new Error('模型调用的工具都不可用'), { code: 'bad_output' });
           }
           /* 只调了一个工具时用单工具形状：回灌历史更短，也和后面对齐 */
+          markSuccessCandidate();
           const stepOut = kept.length === 1
             ? { kind: 'tool', tool: kept[0].tool, args: kept[0].args, usage }
             : { kind: 'tools', tools: kept, usage };
@@ -1335,6 +1487,7 @@
           if (direct) {
             const sv = validateStep(direct, ctxTools, calledTools);
             if (sv.ok) {
+              markSuccessCandidate();
               return Object.assign({ usage, raw: direct, salvaged: true }, sv);
             }
           }
@@ -1346,6 +1499,25 @@
             remember({ maxTokens: tokenCap });
             if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型这次没回正文（可能把预算全花在思考上），已加大长度重试' });
             continue;
+          }
+          /* 空响应兜底：免费 slug 有时 HTTP 200 返回空正文且无 tool_calls，冷却并切换备用模型 */
+          if (!String(content || '').trim() && !nativeCalls.length) {
+            markFailedCandidate('empty_200');
+            if (switchCandidate('模型返回空响应')) {
+              downLeft = 4;
+              busyLeft = 2;
+              slowLeft = 2;
+              grewTokens = 0;
+              applySystem(messages, ctxTools);
+              if (onEvent) {
+                onEvent({
+                  type: 'notice',
+                  level: 'warn',
+                  message: '当前模型返回空内容，已自动切换到 ' + switched.host + ' / ' + switched.model
+                });
+              }
+              continue;
+            }
           }
           /* 被 max_tokens 截断：放宽长度重来，别算进「格式修一次」的配额 */
           if (finish === 'length' && tokenCap < MAX_REPLY_TOKENS) {
@@ -1384,6 +1556,7 @@
           if (prose) {
             const sv = validateStep(prose, ctxTools, calledTools);
             if (sv.ok) {
+              markSuccessCandidate();
               /* 记下来：这个模型不认 JSON，下一轮直接按散文兜，省一次调用 */
               remember({ noJson: true });
               if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型没按 JSON 输出，已按普通回答显示' });
@@ -1396,6 +1569,7 @@
         if (!v.ok) {
           if (v.kind === 'forbidden') {
             // 越权不走修复重试：把「工具不存在」回给模型，让它自己换工具
+            markSuccessCandidate();
             return { kind: 'forbidden', tool: String(parsed.obj.tool || ''), error: v.error, usage };
           }
           if (repairLeft > 0) {
@@ -1407,6 +1581,7 @@
           }
           /* 修了一次仍不合约定：能提取出回答就照常给，别让整轮作废 */
           if (typeof parsed.obj.answer === 'string' && parsed.obj.answer.trim()) {
+            markSuccessCandidate();
             return {
               kind: 'answer',
               answer: parsed.obj.answer.trim().slice(0, 1200),
@@ -1418,6 +1593,7 @@
           }
           throw Object.assign(new Error('模型输出不符合约定：' + v.error), { code: 'bad_output' });
         }
+        markSuccessCandidate();
         return Object.assign({ usage, raw: parsed.obj }, v);
       }
     }
@@ -1894,6 +2070,7 @@
 
   const API = {
     createAgent,
+    buildCandidates,
     validateStep,
     extractJson,
     compressHistory,

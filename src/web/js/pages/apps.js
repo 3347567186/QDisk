@@ -562,72 +562,54 @@
       fusedAdminBtn
     );
 
-    /* 顶栏常驻【问助手】入口（Tab 感知上下文与 SteveAvatar 微动效） */
-    const askMark = window.SteveAvatar
-      ? window.SteveAvatar.el({ size: 24, variant: 'btn' })
-      : icon('spark');
-    const topAskBtn = h('button', {
-      class: 'btn ghost',
-      title: T('让助手分析已安装软件、开机自启与磁盘空间画像', 'Ask AI about apps, startup items, and space footprint')
-    }, askMark, T('问助手', 'Ask AI'));
-    topAskBtn.onclick = () => {
-      if (window.SteveAvatar) {
-        window.SteveAvatar.spin(askMark);
-      }
-      if (!window.AIDrawer) return;
-      if (currentTab === 'startup') {
-        window.AIDrawer.open({
-          title: T('问助手 · 开机自启', 'Ask AI · Startup items'),
-          ctx: () => ({
+    /* 顶栏常驻【问助手】入口（Tab 感知上下文） */
+    let isMounted = true;
+    const topAskBtn = UI.askBtn({
+      title: T('让助手分析已安装软件、开机自启与磁盘空间画像', 'Ask AI about apps, startup items, and space footprint'),
+      ctx: () => {
+        if (currentTab === 'startup') {
+          return {
             page: '应用与自启',
             tool: '开机自启动',
             tab: 'startup',
             count: StartupState.items.length,
             note: `共 ${StartupState.items.length} 个自启动项（已启用 ${StartupState.items.filter((i) => i.enabled).length}，失效 ${StartupState.items.filter((i) => !i.exists).length}）`
-          })
-        });
-      } else if (currentTab === 'procs') {
-        window.AIDrawer.open({
-          title: T('问助手 · 后台进程', 'Ask AI · Running Processes'),
-          ctx: () => ({
+          };
+        }
+        if (currentTab === 'procs') {
+          return {
             page: '应用与自启',
             tool: '后台进程管理',
             tab: 'procs',
             count: ProcState.items.length,
             note: `共 ${ProcState.items.length} 个后台应用 (${ProcState.rawCount} 进程)，物理内存总计 ${fmtSize(ProcState.totalMemory)}`
-          })
-        });
-      } else if (currentTab === 'footprint') {
-        const valid = S.items.map((it) => {
-          const sz = Number(it.size) || (Number(it.size_kb) ? Number(it.size_kb) * 1024 : 0);
-          return Object.assign({}, it, { size: sz });
-        }).filter((it) => (it.size || 0) > 0);
-        const total = valid.reduce((sum, it) => sum + (it.size || 0), 0);
-        window.AIDrawer.open({
-          title: T('问助手 · 空间画像', 'Ask AI · Space footprint'),
-          ctx: () => ({
+          };
+        }
+        if (currentTab === 'footprint') {
+          const valid = S.items.map((it) => {
+            const sz = Number(it.size) || (Number(it.size_kb) ? Number(it.size_kb) * 1024 : 0);
+            return Object.assign({}, it, { size: sz });
+          }).filter((it) => (it.size || 0) > 0);
+          const total = valid.reduce((sum, it) => sum + (it.size || 0), 0);
+          return {
             page: '应用与自启',
             tool: '磁盘空间画像',
             tab: 'footprint',
             count: S.items.length,
             size: fmtBytes(total),
             note: `已测算 ${valid.length} 款软件的磁盘空间占用`
-          })
-        });
-      } else {
-        window.AIDrawer.open({
-          title: T('问助手 · 软件管理', 'Ask AI · Installed apps'),
-          ctx: () => ({
-            page: '应用与自启',
-            tool: '已安装程序',
-            tab: 'apps',
-            count: S.items.length,
-            filter: S.filter,
-            note: `共发现 ${S.items.length} 个已安装程序`
-          })
-        });
+          };
+        }
+        return {
+          page: '应用与自启',
+          tool: '已安装程序',
+          tab: 'apps',
+          count: S.items.length,
+          filter: S.filter,
+          note: `共发现 ${S.items.length} 个已安装程序`
+        };
       }
-    };
+    });
     setActions(topAskBtn);
 
     /* ================================================================
@@ -1879,11 +1861,11 @@
     footprintCard.style.display = 'none';
 
     async function fetchPerfSample(force) {
-      if ((!PerfState.isLive && !force) || currentTab !== 'footprint') return;
+      if (!isMounted || (!PerfState.isLive && !force) || currentTab !== 'footprint') return;
       try {
         const isFirst = !PerfState.perfData;
         const data = await API.engine('system.performance', {});
-        if (!data) return;
+        if (!isMounted || !data) return;
         PerfState.perfData = data;
         const now = new Date();
         const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
@@ -1920,7 +1902,7 @@
     }
 
     function startLiveMonitoring() {
-      if (PerfState.liveTimer) return;
+      if (!isMounted || PerfState.liveTimer) return;
       PerfState.isLive = true;
       fetchPerfSample(true);
       PerfState.liveTimer = setInterval(() => fetchPerfSample(false), 1500);
@@ -1935,13 +1917,15 @@
       updateLiveBadge();
     }
 
-    document.addEventListener('visibilitychange', () => {
+    function onVisChange() {
+      if (!isMounted) return;
       if (document.hidden) {
         stopLiveMonitoring();
       } else if (currentTab === 'footprint' && PerfState.isLive) {
         startLiveMonitoring();
       }
-    });
+    }
+    document.addEventListener('visibilitychange', onVisChange);
 
     // 渲染通用单张交互式 SVG 速率/负载折线图
     function buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, maxValFixed, gradId) {
@@ -2212,13 +2196,7 @@
       const disk = p.disk_summary || {};
 
       /* ================= SECTION 1: 四大指标核心卡片 ================= */
-      const kpiRow = h('div', {
-        style: {
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
-          gap: '12px'
-        }
-      });
+      const kpiRow = h('div', { class: 'app-kpi-grid' });
 
       function createKpiCard(iconName, title, valId, valText, barId, barPct, barColor, subId, subText, footId, footText) {
         const barFill = h('div', {
@@ -2237,36 +2215,20 @@
             background: 'var(--line)',
             borderRadius: '2px',
             overflow: 'hidden',
-            margin: '6px 0'
+            margin: '4px 0'
           }
         }, barFill);
 
-        return h('div', {
-          style: {
-            padding: '12px 14px',
-            background: 'var(--surface-2)',
-            border: '1px solid var(--line)',
-            borderRadius: 'var(--radius)'
-          }
-        },
-          h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', color: 'var(--text-3)', fontSize: '12px' } },
+        return h('div', { class: 'app-kpi-card' },
+          h('div', { class: 'row app-kpi-label', style: { alignItems: 'center', gap: '6px' } },
             icon(iconName, 14),
             h('span', null, title)
           ),
-          h('div', {
-            id: valId,
-            style: {
-              fontSize: '22px',
-              fontWeight: '700',
-              fontFamily: 'var(--mono)',
-              color: 'var(--text-1)',
-              margin: '4px 0 2px 0'
-            }
-          }, valText),
+          h('div', { id: valId, class: 'app-kpi-val' }, valText),
           barTrack,
-          h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-3)' } },
+          h('div', { class: 'row app-kpi-sub', style: { justifyContent: 'space-between' } },
             h('span', { id: subId }, subText),
-            h('span', { id: footId, style: { fontFamily: 'var(--mono)' } }, footText)
+            h('span', { id: footId, class: 'mono' }, footText)
           )
         );
       }
@@ -4039,8 +4001,11 @@
     };
 
     return function unmount() {
+      isMounted = false;
       liveJump = null;
+      PerfState.isLive = false;
       stopLiveMonitoring();
+      document.removeEventListener('visibilitychange', onVisChange);
       GlobalAppsCache.activeTab = currentTab;
       GlobalAppsCache.appsFilter = S.filter;
       GlobalAppsCache.appsView = S.view;
@@ -4068,10 +4033,6 @@
     subtitle: ['全面管理已安装程序、开机自启动项与磁盘空间画像',
       'Manage installed software, startup items, and disk space footprint'],
     mount: mount,
-    unmount: () => {
-      setActions();
-      liveJump = null;
-    },
     jump(payload) {
       return liveJump ? liveJump(payload || {}) : undefined;
     }

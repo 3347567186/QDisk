@@ -2,10 +2,11 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, card, table, toast, empty, busy, confirm, fmtBytes, fmtCount, attachMenu } = UI;
+  const { h, T, icon, card, table, toast, empty, busy, confirm, fmtBytes, fmtCount, attachMenu, setActions } = UI;
 
   // 右键菜单用：复制文本到剪贴板。
   const copyText = UI.copy;
+  let liveJump = null;
 
   const CONFLICTS = [
     { value: 'rename', zh: '重命名', en: 'Rename' },
@@ -66,32 +67,62 @@
         h('div', { class: 'k', text: key })
       );
 
+      const planSlot = h('div', { class: 'stack' });
+      const resultSlot = h('div', { class: 'stack' });
+
+      function renderOutputs() {
+        planSlot.replaceChildren(state.plan ? planCard() : '');
+        resultSlot.replaceChildren(state.result ? resultCard() : '');
+      }
+
       function paint() {
         root.textContent = '';
         root.appendChild(actionCard());
         root.appendChild(h('div', { class: 'migrate-grid' },
           h('div', { class: 'migrate-col' }, sourcesCard()),
-          h('div', { class: 'migrate-col' }, targetCard(), optionsCard())
+          h('div', { class: 'migrate-col' }, optionsCard())
         ));
-        if (state.plan) root.appendChild(planCard());
-        if (state.result) root.appendChild(resultCard());
+        renderOutputs();
+        root.appendChild(planSlot);
+        root.appendChild(resultSlot);
       }
 
-      /* ---------- 顶部动作：先预演，再执行 ---------- */
+      /* ---------- 顶部动作 + 目标目录 ---------- */
       function actionCard() {
-        return card(h('div', { class: 'toolbar' },
-          h('div', { class: 'migrate-hint' },
-            h('strong', { text: T('先预演，再执行', 'Plan, then run') }),
-            h('span', { class: 'small muted', text: T('预演只读，不会移动任何文件', 'Planning is read-only and moves nothing') })
+        return card(
+          h('div', { class: 'toolbar' },
+            h('div', { class: 'migrate-hint' },
+              h('strong', { text: T('先预演，再执行', 'Plan, then run') }),
+              h('span', { class: 'small muted', text: T('预演只读不改磁盘；目标不存在会自动创建', 'Planning is read-only; missing destination is created') })
+            ),
+            h('span', { class: 'spacer' }),
+            h('button', {
+              class: 'btn', disabled: state.running, onclick: doPlan
+            }, icon('scan'), h('span', { text: T('预演计划', 'Plan') })),
+            h('button', {
+              class: 'btn primary', disabled: state.running, onclick: doApply
+            }, icon('play'), h('span', { text: T('执行迁移', 'Run') }))
           ),
-          h('span', { class: 'spacer' }),
-          h('button', {
-            class: 'btn', disabled: state.running, onclick: doPlan
-          }, icon('scan'), h('span', { text: T('预演计划', 'Plan') })),
-          h('button', {
-            class: 'btn primary', disabled: state.running, onclick: doApply
-          }, icon('play'), h('span', { text: T('执行迁移', 'Run') }))
-        ));
+          h('div', { class: 'row' },
+            h('span', { class: 'small muted', style: { minWidth: '58px' }, text: T('目标目录', 'Destination') }),
+            h('input', {
+              class: 'input grow mono',
+              spellcheck: 'false',
+              value: state.destination,
+              placeholder: T('例如 D:\\资料（不能是盘符根目录）', 'e.g. D:\\Data (drive roots not allowed)'),
+              oninput: (e) => {
+                state.destination = e.target.value;
+                // 目标变了，上一份预演就作废：只更新底部预演卡，不重绘整页丢焦点
+                if (state.plan) { state.plan = null; renderOutputs(); }
+              }
+            }),
+            h('button', {
+              class: 'btn',
+              disabled: state.running,
+              onclick: browseTarget
+            }, icon('folder'), h('span', { text: T('浏览…', 'Browse…') }))
+          )
+        );
       }
 
       /* ---------- 来源列表 ---------- */
@@ -181,32 +212,6 @@
         }
         state.plan = null;
         paint();
-      }
-
-      /* ---------- 目标目录 ---------- */
-      function targetCard() {
-        return card(
-          titleRow(T('目标目录', 'Destination'), null),
-          h('div', { class: 'row' },
-            h('input', {
-              class: 'input grow',
-              spellcheck: 'false',
-              value: state.destination,
-              placeholder: T('例如 D:\\资料', 'e.g. D:\\Data'),
-              oninput: (e) => {
-                state.destination = e.target.value;
-                // 目标变了，上一份预演就作废：否则表格里的冲突/数量是旧目标的
-                if (state.plan) { state.plan = null; renderPlan(); }
-              }
-            }),
-            h('button', {
-              class: 'btn',
-              disabled: state.running,
-              onclick: browseTarget
-            }, icon('folder'), h('span', { text: T('浏览…', 'Browse…') }))
-          ),
-          h('div', { class: 'desc small muted', text: T('目标目录不存在时会自动创建；不能选择盘符根目录', 'A missing destination is created automatically; a drive root is not allowed') })
-        );
       }
 
       async function browseTarget() {
@@ -471,7 +476,36 @@
         try { await API.openPath(dir); } catch (e) { toast(e && e.message ? e.message : String(e), 'error'); }
       }
 
+      setActions(UI.askBtn({
+        title: T('问助手 · 数据迁移', 'Ask AI · Migrate'),
+        question: T('帮我检查这批迁移来源和目标目录，预演看有没有冲突或跨盘风险。', 'Review these migration sources and destination and preview conflicts or cross-volume risks.'),
+        ctx: () => ({
+          page: '数据迁移',
+          sources: state.sources.slice(0, 8),
+          destination: state.destination.trim(),
+          note: T(state.sources.length + ' 个来源 · ' + state.mode, state.sources.length + ' sources · ' + state.mode)
+        })
+      }));
+
+      liveJump = function (payload) {
+        const p = payload || {};
+        const srcs = Array.isArray(p.sources) ? p.sources : (Array.isArray(p.paths) ? p.paths : []);
+        srcs.filter(Boolean).map(String).forEach((s) => {
+          if (!state.sources.includes(s)) state.sources.push(s);
+        });
+        if (p.destination || p.target) state.destination = String(p.destination || p.target).trim();
+        state.plan = null;
+        paint();
+      };
+
       paint();
-    }
+
+      return function unmount() {
+        liveJump = null;
+        setActions();
+      };
+    },
+
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

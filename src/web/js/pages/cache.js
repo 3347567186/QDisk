@@ -9,7 +9,7 @@
   'use strict';
   const {
     h, T, icon, fmtBytes, fmtCount,
-    toast, confirm, busy, skeleton, empty, section, modal, attachMenu, softIn
+    toast, confirm, busy, skeleton, empty, section, modal, attachMenu, softIn, setActions
   } = UI;
 
   let PAGE_SIZE = 15;      // 每个分组每页条数（跟随设置里的全局每页条数）
@@ -40,6 +40,8 @@
     includeCustom: true,
     pruneEmpty: false
   };
+
+  let liveJump = null;
 
   window.Pages = window.Pages || {};
 
@@ -83,10 +85,10 @@
       }, icon('chevrons-down', 13), collapseLabel);
 
       const topCard = h('div', { class: 'card' },
-        h('div', { class: 'toolbar' },
-          reloadBtn, recBtn, cleanBtn,
+        h('div', { class: 'card-title' },
+          h('h2', null, T('缓存概览', 'Cache overview')),
           h('span', { class: 'spacer' }),
-          collapseBtn
+          reloadBtn, recBtn, cleanBtn, collapseBtn
         ),
         h('div', { class: 'stats inline' },
           h('div', { class: 'stat' }, statGroups, h('div', { class: 'k' }, T('分组', 'Groups'))),
@@ -861,6 +863,19 @@
         PAGE_SIZE = UI.pageSize();
         render();
       };
+      setActions(UI.askBtn({
+        title: T('问助手 · 清理缓存', 'Ask AI · Caches'),
+        question: T('帮我看看当前扫描到的缓存分组，哪些可以安全清理？', 'Review the scanned cache groups and tell me which ones are safe to clean.'),
+        ctx: () => ({ page: '清理缓存', groups: S.groups.length, selected: S.selected.size })
+      }));
+
+      liveJump = function (payload) {
+        const p = payload || {};
+        if (p.action === 'safe') selectSafe();
+        else if (p.action === 'recommended') doCleanRecommended();
+        else if (p.action === 'scan' || p.reload) doLoad(true);
+      };
+
       render();
       const timeSinceLast = Date.now() - GlobalCachePageCache.lastScanTime;
       // 关键优化：有缓存时 0ms 瞬间还原；只有冷启动或距离上次读取超 60 秒才在后台静默探查
@@ -869,6 +884,14 @@
       } else if (timeSinceLast >= 60000) {
         doLoad(false, true).catch(() => {});
       }
-    }
+
+      return function unmount() {
+        liveJump = null;
+        if (window.App) window.App._onPageSize = null;
+        setActions();
+      };
+    },
+
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

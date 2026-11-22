@@ -292,14 +292,16 @@ function Invoke-TidyTestGate {
   if (-not (Test-Path $testTemp)) { New-Item -ItemType Directory -Path $testTemp -Force | Out-Null }
   $prevEnvTemp = $env:TEMP
   $prevEnvTmp = $env:TMP
+  $prevPyBytecode = $env:PYTHONDONTWRITEBYTECODE
   $env:TEMP = $testTemp
   $env:TMP = $testTemp
+  $env:PYTHONDONTWRITEBYTECODE = '1'
 
   $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
   Push-Location $engineSrc
   try {
     foreach ($m in $modules) {
-      $out = & $py -m unittest $m 2>&1
+      $out = & $py -B -m unittest $m 2>&1
       $code = $LASTEXITCODE
       $tail = ($out | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
       if ($code -ne 0) {
@@ -313,6 +315,7 @@ function Invoke-TidyTestGate {
     Pop-Location
     $env:TEMP = $prevEnvTemp
     $env:TMP = $prevEnvTmp
+    $env:PYTHONDONTWRITEBYTECODE = $prevPyBytecode
   }
 
   # 前端自测：6 个 *.selftest.mjs 各自 process.exit(非0) 表示失败
@@ -427,11 +430,29 @@ function Remove-OldReleases([string]$pattern) {
   }
 }
 
+function Clear-TidyWorkspaceResidue {
+  $residue = @(
+    (Join-Path $root 'src\engine\__pycache__'),
+    (Join-Path $root 'src\engine\数据'),
+    (Join-Path $root 'src\src-tauri\target')
+  )
+  foreach ($p in $residue) {
+    if (Test-Path -LiteralPath $p) {
+      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+      Write-Host ("  清理残留缓存：{0}" -f $p.Substring($root.Length + 1)) -ForegroundColor DarkGray
+    }
+  }
+}
+
 # ---------------------------------------------------------------- 主流程（全程持锁）
 
 # 只跑测试门禁：不取构建锁、不改版本号、不产生产物。
 # 改完一处想快速知道有没有碰坏东西时用这个，比全量构建快得多。
-if ($TestsOnly) { Invoke-TidyTestGate; return }
+if ($TestsOnly) {
+  Clear-TidyWorkspaceResidue
+  Invoke-TidyTestGate
+  return
+}
 
 # 默认就把「装得上、发得出」的整套产物一起做：根目录 exe + NSIS 安装包 + 便携 zip。
 # 历史教训（1.36.8 记录的坑）：1.35.x–1.36.x 一直用默认参数构建，只重编了根目录
@@ -479,8 +500,8 @@ try {
   $record.version = $current
   Update-TidyBuildLock -Version $current
 
-  # 构建前快照：把当前工作树（含别人的未提交改动）固定成一个 git 提交。
-  # 之后不管谁再改、谁再构建，这一次产物的源码都追得回来。
+  # 构建前先清扫违规缓存，再做快照
+  Clear-TidyWorkspaceResidue
   Write-Host '记录源码快照…' -ForegroundColor DarkGray
   $snapshot = Save-TidySourceSnapshot -Root $root -Version $current -Reason $mode
   $record.git = $snapshot

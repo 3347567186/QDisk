@@ -10,7 +10,7 @@
   'use strict';
   const {
     h, T, icon, fmtBytes, fmtCount, fmtTime,
-    toast, confirm, busy, skeleton, empty, section, modal, attachMenu, softIn
+    toast, confirm, busy, skeleton, empty, section, modal, attachMenu, softIn, setActions
   } = UI;
 
   let PAGE_SIZE = 15;      // 每页条数：靠分页控制 DOM 规模，不再用 max-height
@@ -55,6 +55,8 @@
     sort: 'size',
     kind: 'all'
   };
+
+  let liveJump = null;
 
   window.Pages = window.Pages || {};
 
@@ -1294,6 +1296,30 @@
       renderDirs();
       render();
 
+      setActions(UI.askBtn({
+        title: T('问助手 · 清理截图', 'Ask AI · Screenshots'),
+        question: T('帮我筛选或清理旧截图与大体积录屏。', 'Help me filter or clean old screenshots and large recordings.'),
+        ctx: () => ({ page: '清理截图', items: S.items.length, days: S.days, selected: S.selected.size })
+      }));
+
+      liveJump = function (payload) {
+        const p = payload || {};
+        if (p.days !== undefined) {
+          S.days = clampInt(p.days, 0, MAX_DAYS);
+          daysInput.value = String(S.days);
+        }
+        if (p.minKb !== undefined) {
+          S.minKb = clampInt(p.minKb, 0, MAX_KB);
+          kbInput.value = String(S.minKb);
+        }
+        if (p.kind && kindBtns[p.kind]) {
+          S.kind = p.kind;
+          syncKind();
+        }
+        if (p.action === 'scan' || p.days !== undefined || p.minKb !== undefined) doScan(false);
+        else render();
+      };
+
       const timeSinceLast = Date.now() - GlobalShotsCache.lastScanTime;
       // 关键优化：有缓存时 0ms 瞬间还原；只有冷启动或距离上次扫描超 60 秒才在后台静默探查
       if (!hasCache) {
@@ -1301,6 +1327,14 @@
       } else if (timeSinceLast >= 60000) {
         doScan(true).catch(() => {});
       }
-    }
+
+      return function unmount() {
+        liveJump = null;
+        if (window.App) window.App._onPageSize = null;
+        setActions();
+      };
+    },
+
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

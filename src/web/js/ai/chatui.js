@@ -22,11 +22,17 @@
   const AIEntries = root.AIEntries;
 
   const PAGE_LABEL = {
-    tools: ['空间工具', 'Space tools'],
     organize: ['整理文件', 'Organize'],
-    search: ['搜索文件', 'Search'],
-    apps: ['卸载程序', 'Uninstall'],
+    shots: ['清理截图', 'Screenshots'],
+    cache: ['清理缓存', 'Caches'],
+    tools: ['空间工具', 'Space tools'],
     archive: ['压缩包', 'Archives'],
+    search: ['搜索文件', 'Search'],
+    rules: ['高级规则', 'Rules'],
+    apps: ['应用与进程', 'Apps & Processes'],
+    migrate: ['数据迁移', 'Migrate'],
+    log: ['运行日志', 'Logs'],
+    settings: ['设置', 'Settings'],
     ai: ['AI 助手', 'Assistant']
   };
 
@@ -35,6 +41,11 @@
     archive: ['去压缩', 'Archive'],
     check: ['去看看', 'Inspect'],
     organize: ['去整理', 'Organize'],
+    rules: ['写规则', 'Edit rules'],
+    migrate: ['去迁移', 'Migrate'],
+    apps: ['看应用/进程', 'Inspect apps'],
+    log: ['看日志', 'Inspect logs'],
+    settings: ['去设置', 'Settings'],
     none: ['知道了', 'OK']
   };
 
@@ -43,6 +54,11 @@
     archive: 'archive',
     check: 'tools',
     organize: 'organize',
+    rules: 'rules',
+    migrate: 'migrate',
+    apps: 'apps',
+    log: 'log',
+    settings: 'settings',
     none: 'tools'
   };
 
@@ -88,12 +104,12 @@
      它们只生成待确认的卡片，不执行任何动作。真正的执行是 proposals.commit，
      只有用户点按钮才会被调用，模型手里没有这个函数，也没有工具能间接调到它。
      只读档仍然一个提案工具都不给——那是用户明确选的「只看不动」。 */
-  const PROPOSE_TOOLS = ['propose_action', 'list_proposals', 'cancel_proposal', 'navigate'];
+  const PROPOSE_TOOLS = ['propose_action', 'list_proposals', 'cancel_proposal'];
 
   const PERM_TOOLS = {
-    readonly: ['list_dir', 'read_file', 'disk_roots', 'top_folders', 'top_indexed', 'last_organize', 'explain_rules'],
-    standard: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'settings_read', 'search_roots']),
-    deep: PROPOSE_TOOLS.concat(['list_dir', 'read_file', 'open_path', 'disk_roots', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'file_signals', 'installed_apps', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'settings_read', 'search_roots'])
+    readonly: ['navigate', 'list_dir', 'read_file', 'disk_roots', 'top_folders', 'top_indexed', 'last_organize', 'explain_rules', 'system_status', 'process_list', 'read_logs'],
+    standard: PROPOSE_TOOLS.concat(['navigate', 'list_dir', 'read_file', 'open_path', 'disk_roots', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'installed_apps', 'startup_list', 'process_list', 'system_status', 'app_leftovers', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'clean_candidates', 'migrate_preview', 'rules_preview', 'read_logs', 'settings_read', 'search_roots']),
+    deep: PROPOSE_TOOLS.concat(['navigate', 'list_dir', 'read_file', 'open_path', 'disk_roots', 'top_folders', 'top_files', 'top_indexed', 'empty_dirs', 'file_signals', 'installed_apps', 'startup_list', 'process_list', 'system_status', 'app_leftovers', 'search_files', 'organize_preview', 'explain_rules', 'last_organize', 'archive_entries', 'clean_candidates', 'migrate_preview', 'rules_preview', 'read_logs', 'settings_read', 'search_roots'])
   };
 
   /* 动手档位：off 完全不提，confirm 每次点，auto 可撤销的小动作倒计时自动执行，

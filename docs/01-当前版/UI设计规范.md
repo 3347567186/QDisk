@@ -540,3 +540,26 @@ AI 页是唯一一处不跟全站蓝色强调走的地方：它按 Claude 的外
   - 页面级助手入口通过 `setActions()` 挂载于右上方常驻操作区；
   - 状态机实时追踪用户的最后活跃焦点板块（`lastActiveSection`），点击常驻助手时动态组装对应活跃区域的上下文信息交付 AI 抽屉，实现「全天候可见，上下文自适应」。
 
+---
+
+## 13. 三大标准页面布局骨架与顶栏一致性契约（1.43.0 起强制执行）
+
+为彻底消除 12 页间各自为战导致的布局割裂与空白失衡，所有功能页按交互密度收敛为三大标准化骨架（详见 `src\web\styles.css` 末尾定义及 `开发强约束与扩展规范手册.md`）：
+
+### 13.1 骨架 I：分段定高工作台（`.wb-bar` + `.wb-pane` + `.stretch-card`）
+- **适用页面**：`tools`（超大文件 / 空文件夹 / 目录浏览三段工作台）、`apps`（应用 / 自启 / 进程 / 画像四标签）、`shots`、`cache`、`archive`、`search`。
+- **结构约束**：顶部一行工具/视图分段栏（`.wb-bar` + `.wb-tabs` + `.wb-tab`），下方唯一主工作区（`.wb-pane` + `.card.stretch-card`），长列表统一归口到外层或受控滚动区，彻底淘汰「三张大卡纵向平铺 + 全页互相嵌套折叠」。
+
+### 13.2 骨架 II：双栏主从工作台（`.split-wb` / `.split-wb.master-detail`）
+- **适用页面**：`rules`（左栏 YAML 编辑器 + 右栏校验/预演/结果）、`log`（左栏 290px 文件清单 + 右栏 `.log-viewer-pre` 尾部查看器，下方 `.grid-2` 引擎诊断与历史时间线）、`migrate`（顶部合体命令与目标地址卡 + `.migrate-grid` 双栏来源与选项对照）。
+- **响应式退化**：宽度 `<= 980px` 自动退化为单列纵向流。
+
+### 13.3 骨架 III：紧凑流式配置工作台（`.set-nav-bar` + `.set-card`）
+- **适用页面**：`settings`。
+- **结构约束**：顶部吸顶 `.set-nav-bar` 提供 7 枚 `.set-nav-pill` 一键切换与平滑定位至对应手风琴分组（`appearance` / `behavior` / `defaults` / `performance` / `schedule` / `assistant` / `maintenance`），`.set-row .desc` 固定 `-webkit-line-clamp: 2` 双行截断保持视觉紧凑。
+
+### 13.4 顶栏统一 `UI.askBtn` 与全屏按钮隔离契约
+- `index.html` 中 `#btn-fullscreen` 独立放置在 `.topbar` 右端、`#top-actions` 之外，确保页面调用 `UI.setActions()` 时绝不误删全局窗口控件；
+- 除 `ai` 整页对话外，其余 11 页统一使用 `UI.askBtn({ title, question, ctx })` 生成右侧顶栏助手按钮（统一 20px `SteveAvatar` 图标与 `.ask-ai-btn` 类名），禁止各页复制手写按钮样式。
+
+

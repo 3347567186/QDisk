@@ -2224,7 +2224,7 @@ fn tray_quick_organize(app: &tauri::AppHandle) {
             match call_raw(
                 engine,
                 "organize",
-                json!({ "path": folder, "dry_run": false }),
+                json!({ "path": folder, "confirm": true, "dry_run": false }),
             ) {
                 Ok(v) => append_log(
                     "info",
@@ -2445,7 +2445,7 @@ fn main() {
                             let res = call_raw(
                                 engine,
                                 "organize",
-                                json!({ "path": folder, "dry_run": false }),
+                                json!({ "path": folder, "confirm": true, "dry_run": false }),
                             );
                             match res {
                                 Ok(v) => append_log("info", &format!("定时整理完成：{v}")),

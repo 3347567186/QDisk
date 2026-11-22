@@ -210,8 +210,6 @@
       }, { threshold: 0 });
       this.io.observe(host);
     }
-    this.onVis = () => { if (!document.hidden) schedule(); };
-    document.addEventListener('visibilitychange', this.onVis);
   }
 
   Avatar.prototype.resize = function (size) {
@@ -253,7 +251,6 @@
 
   Avatar.prototype.destroy = function () {
     if (this.io) { this.io.disconnect(); this.io = null; }
-    document.removeEventListener('visibilitychange', this.onVis);
     live.delete(this);
   };
 
@@ -625,6 +622,15 @@
   /* 动效档位切换时补一帧（从 lite 回到 full 也能立刻动起来） */
   const mo = new MutationObserver(() => { live.forEach((a) => schedule()); });
   mo.observe(document.body, { attributes: true, attributeFilter: ['data-motion'] });
+
+  /* 全局唯一可见性监听：切回前台时顺带清掉已卸载的旧实例并恢复调度 */
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    for (const a of live) {
+      if (!a.el || !a.el.isConnected) a.destroy();
+    }
+    if (live.size) schedule();
+  });
 
   /* 换显示器 / 改缩放：DPR 变了就按新倍率重开画布，200ms 防抖 */
   let rzTimer = 0;

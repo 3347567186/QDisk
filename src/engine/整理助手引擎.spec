@@ -57,6 +57,8 @@ a = Analysis(
         '_hashlib',
         # 明显无关的科学栈
         # 注意：lxml 不能排——python-docx 靠它解析 XML，排掉之后 .docx 抽文本会静默返回空。
+        # 但 lxml.objectify / lxml.html / pythonwin / win32ui 引擎零引用，可安全剥离（省 ~3.2 MB）
+        'lxml.objectify', 'lxml.html', 'pythonwin', 'win32ui',
         'numpy', 'pythonnet', 'clr', 'pandas', 'matplotlib',
         'scipy', 'cv2', 'IPython', 'pytest', 'sqlalchemy', 'setuptools',
     ],
@@ -85,8 +87,12 @@ exe = EXE(
 )
 
 # PIL 的插件是按需加载的二进制，excludes 管不住，单独筛一遍。
-# 截图的处理只用 PNG/JPEG/WEBP，AVIF 解码器 7.5 MB 用不上。
-DROP_BIN = ('_avif', '_imagingcms', '_imagingmath', 'imageqt', '_imagingtk')
+# 截图与图标已全面走 Windows 原生 Shell / GDI，不再需要 _imagingft / AVIF 等扩展；
+# 保留 _imaging.pyd 供 pypdf 顶层 import 兼容，剥离其余零引用扩展（共减 ~5.4 MB）。
+DROP_BIN = (
+    '_avif', '_imagingcms', '_imagingmath', 'imageqt', '_imagingtk',
+    '_imagingft', 'objectify', 'win32ui', '_difflib', 'html\\diff'
+)
 binaries_kept = [b for b in a.binaries if not any(k in b[0].lower() for k in DROP_BIN)]
 
 coll = COLLECT(

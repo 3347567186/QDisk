@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, section, toast, empty, skeleton, confirm, modal } = UI;
+  const { h, T, icon, section, toast, empty, skeleton, confirm, modal, setActions } = UI;
 
   const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
@@ -41,6 +41,7 @@
   /* 当前挂载的页面；语言切换时按它重绘 */
   let active = null;
   let guardBound = false;
+  let liveJump = null;
 
   UI.onLangChange(() => {
     if (active && active.root.isConnected) active.paint();
@@ -261,6 +262,16 @@
         h('span', { class: 'set-cap-text', text }),
         tail || null);
 
+      const SETTINGS_NAV = [
+        ['appearance', '外观', 'Appearance'],
+        ['behavior', '行为', 'Behavior'],
+        ['defaults', '默认值', 'Defaults'],
+        ['performance', '性能', 'Performance'],
+        ['schedule', '定时', 'Schedule'],
+        ['assistant', 'AI 助手', 'AI Assistant'],
+        ['maintenance', '维护', 'Maintenance']
+      ];
+
       /* ---------- 顶层 ---------- */
       function paint() {
         root.textContent = '';
@@ -273,6 +284,19 @@
         state.modelModal = null;
         if (staleModal) { try { staleModal.close(); } catch (e) { /* 已经关了 */ } }
         const holder = h('div', { class: 'stack' });
+        const navBar = h('div', { class: 'set-nav-bar', role: 'navigation', 'aria-label': T('设置分组跳转', 'Settings sections') },
+          SETTINGS_NAV.map(([id, zh, en]) => h('button', {
+            type: 'button',
+            class: 'set-nav-pill' + (state.openId === id ? ' active' : ''),
+            onclick: () => {
+              state.openId = id;
+              paint();
+              const sec = root.querySelector('[data-section="' + id + '"]');
+              if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: 'start', behavior: 'smooth' });
+            }
+          }, T(zh, en)))
+        );
+        holder.appendChild(navBar);
         holder.appendChild(secAppearance(holder));
         holder.appendChild(secBehavior(holder));
         holder.appendChild(secDefaults(holder));
@@ -2144,6 +2168,21 @@
         }, true);
       }
 
+      setActions(UI.askBtn({
+        title: T('问助手 · 设置与模型', 'Ask AI · Settings'),
+        question: T('帮我检查当前软件设置或免费 AI 模型配置。', 'Help me check current app settings or free AI model configuration.'),
+        ctx: () => ({ page: '设置', section: state.openId, mode: state.mode })
+      }));
+
+      liveJump = function (payload) {
+        const sec = payload && (payload.section || payload.tab || payload.id);
+        if (!sec) return;
+        state.openId = String(sec);
+        paint();
+        const node = root.querySelector('[data-section="' + state.openId + '"]');
+        if (node && node.scrollIntoView) node.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      };
+
       active = { root, state, paint };
       bindNavGuard();
       paint();
@@ -2152,6 +2191,14 @@
       state.loading = false;
       if (state.theme === 'system') await applySystemTheme();
       paint();
-    }
+
+      return function unmount() {
+        liveJump = null;
+        active = null;
+        setActions();
+      };
+    },
+
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

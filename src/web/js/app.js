@@ -208,7 +208,7 @@
      语言切换会重建导航，旧头像要先停掉自己的渲染循环再丢弃。 */
   function navMark(item) {
     if (item.id === 'ai' && window.SteveAvatar) {
-      return window.SteveAvatar.el({ size: 24, variant: 'nav' });
+      return window.SteveAvatar.el({ size: 18, variant: 'nav' });
     }
     return icon(item.icon);
   }

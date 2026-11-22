@@ -1669,6 +1669,151 @@ for (const c of CASES) {
   results.push({ id: 'G59', group: '压缩', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
 
+/* G60 OpenRouter 同源免费池自动扩展 + 被动冷却避让：主模型冷却时自动从健康候选起步 */
+{
+  const bad = [];
+  const orEp = 'https://openrouter.ai/api/v1/chat/completions';
+  const now = Date.now();
+  const cands = agentApi.buildCandidates({
+    endpoint: orEp,
+    model: 'google/gemma-4-26b-a4b-it:free',
+    apiKey: 'sk-or-test',
+    caps: {
+      [agentApi.capKeyOf(orEp, 'google/gemma-4-26b-a4b-it:free')]: { cooldownUntil: now + 60000 }
+    }
+  });
+  if (cands.length < 3) bad.push('同源免费池未自动扩充，候选仅 ' + cands.length + ' 个');
+  if (cands[0] && cands[0].model === 'google/gemma-4-26b-a4b-it:free') {
+    bad.push('冷却中的模型仍排在首位：' + cands[0].model);
+  }
+  results.push({ id: 'G60', group: '免费池', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* G61 429 单 slug 冷却学习 + 同源故障转移 + HTTP 200 空回复自动切换 */
+{
+  const bad = [];
+  const learned = {};
+  const seenModels = [];
+  const ep = 'https://openrouter.ai/api/v1/chat/completions';
+  const agent = createAgent({
+    transport: async (req) => {
+      const b = JSON.parse(req.body);
+      seenModels.push(b.model);
+      if (b.model === 'google/gemma-4-26b-a4b-it:free') {
+        return { status: 429, body: '{"error":{"message":"Provider rate limit, Retry-After: 90"}}' };
+      }
+      if (b.model === 'openrouter/free') {
+        return { status: 200, body: JSON.stringify({ choices: [{ message: { content: '' } }] }) };
+      }
+      return {
+        status: 200,
+        body: JSON.stringify({
+          choices: [{ message: { content: answer({ answer: '备用免费模型答复：一切正常。' }) } }],
+          usage: { prompt_tokens: 100, completion_tokens: 20 }
+        })
+      };
+    },
+    tools,
+    prompt,
+    learn: (k, c) => { learned[k] = c; },
+    settings: Object.assign({}, settings, {
+      endpoint: ep,
+      model: 'google/gemma-4-26b-a4b-it:free',
+      apiKey: 'sk-or-test'
+    })
+  });
+  const res = await agent.run({ userText: '现在几点了', ctx: { page: 'ai' } });
+  if (!res.ok) bad.push('单模型 429 与空回退后仍失败');
+  if (seenModels.length < 3) bad.push('未依次切换经历 429 和 200-空响应：' + seenModels.join(' -> '));
+  const c1 = learned[agentApi.capKeyOf(ep, 'google/gemma-4-26b-a4b-it:free')];
+  if (!c1 || !(c1.cooldownUntil > Date.now())) bad.push('未记录首个失败 slug 的 cooldownUntil');
+  const c2 = learned[agentApi.capKeyOf(ep, 'openrouter/free')];
+  if (!c2 || !(c2.cooldownUntil > Date.now())) bad.push('HTTP 200 空响应未触发冷却记录');
+  results.push({ id: 'G61', group: '免费池', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G62 401 鉴权错误不污染模型冷却状态，跳过同域名直切跨站/Ollama */
+{
+  const bad = [];
+  const learned = {};
+  const hitHosts = [];
+  const orEp = 'https://openrouter.ai/api/v1/chat/completions';
+  const ollamaEp = 'http://127.0.0.1:11434/v1/chat/completions';
+  const agent = createAgent({
+    transport: async (req) => {
+      const u = new URL(req.url);
+      hitHosts.push(u.host);
+      if (req.url === orEp) {
+        return { status: 401, body: '{"error":{"message":"Invalid API key"}}' };
+      }
+      return {
+        status: 200,
+        body: JSON.stringify({
+          choices: [{ message: { content: answer({ answer: '本地 Ollama 已兜底回复。' }) } }],
+          usage: { prompt_tokens: 90, completion_tokens: 18 }
+        })
+      };
+    },
+    tools,
+    prompt,
+    learn: (k, c) => { learned[k] = c; },
+    settings: Object.assign({}, settings, {
+      endpoint: orEp,
+      model: 'google/gemma-4-26b-a4b-it:free',
+      apiKey: 'bad-key',
+      ollamaFallback: true,
+      ollamaModel: 'qwen2.5:7b'
+    })
+  });
+  const res = await agent.run({ userText: '现在几点了', ctx: { page: 'ai' } });
+  if (!res.ok) bad.push('401 后未切换到 Ollama 兜底：' + (res.answer || ''));
+  if (hitHosts.filter((h) => h === 'openrouter.ai').length > 1) {
+    bad.push('401 密钥错误却在同域名下无效试错：' + hitHosts.join(','));
+  }
+  const c401 = learned[agentApi.capKeyOf(orEp, 'google/gemma-4-26b-a4b-it:free')];
+  if (c401 && c401.cooldownUntil > Date.now()) bad.push('401 错误错误地污染了模型 cooldownUntil');
+  if (res.endpoint !== ollamaEp) bad.push('最终端点不是 Ollama：' + res.endpoint);
+  results.push({ id: 'G62', group: '免费池', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G63 账号日限额（daily limit 429）跳过同域名其他 free slug 直切本地 Ollama */
+{
+  const bad = [];
+  const hitHosts = [];
+  const orEp = 'https://openrouter.ai/api/v1/chat/completions';
+  const agent = createAgent({
+    transport: async (req) => {
+      const u = new URL(req.url);
+      hitHosts.push(u.host);
+      if (u.host === 'openrouter.ai') {
+        return { status: 429, body: '{"error":{"message":"You have reached the daily limit of 200 free-model requests."}}' };
+      }
+      return {
+        status: 200,
+        body: JSON.stringify({
+          choices: [{ message: { content: answer({ answer: '日限额用尽后由本地 Ollama 继续服务。' }) } }],
+          usage: { prompt_tokens: 90, completion_tokens: 20 }
+        })
+      };
+    },
+    tools,
+    prompt,
+    settings: Object.assign({}, settings, {
+      endpoint: orEp,
+      model: 'google/gemma-4-26b-a4b-it:free',
+      apiKey: 'sk-or-test',
+      ollamaFallback: true,
+      ollamaModel: 'qwen2.5:7b'
+    })
+  });
+  const res = await agent.run({ userText: '现在几点了', ctx: { page: 'ai' } });
+  if (!res.ok) bad.push('日限额耗尽后未能切换到 Ollama');
+  if (hitHosts.filter((h) => h === 'openrouter.ai').length > 1) {
+    bad.push('账号级 daily limit 后仍在同域循环探测：' + hitHosts.join(','));
+  }
+  results.push({ id: 'G63', group: '免费池', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

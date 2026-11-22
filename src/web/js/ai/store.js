@@ -61,7 +61,10 @@
        按完整地址记会把「换了条路径」变成「又要重填一遍 Key」。
        为什么存在这里而不是另开一个文件：它跟端点、模型是一件事，
        存 app.json 的 ai 段就能跟着用户备份一起走。 */
-    providerKeys: {}
+    providerKeys: {},
+    /* V3 本机兜底开关：外部免费/付费模型全失效时可退到本机 Ollama */
+    ollamaFallback: false,
+    ollamaModel: ''
   };
 
   /* 端点没报窗口时的兜底：1M。
@@ -276,11 +279,26 @@
           const n = Number(v[f]);
           if (Number.isFinite(n) && n > 0 && n <= 400000) one[f] = Math.round(n);
         });
+        /* V2 失败学习字段：单 slug 指数冷却、连续失败计数、最近成功时间戳 */
+        if (Number.isFinite(Number(v.cooldownUntil)) && Number(v.cooldownUntil) >= 0) {
+          one.cooldownUntil = Math.round(Number(v.cooldownUntil));
+        }
+        if (Number.isFinite(Number(v.lastOk)) && Number(v.lastOk) >= 0) {
+          one.lastOk = Math.round(Number(v.lastOk));
+        }
+        if (Number.isFinite(Number(v.consecutiveFail)) && Number(v.consecutiveFail) >= 0) {
+          one.consecutiveFail = Math.min(1000, Math.round(Number(v.consecutiveFail)));
+        }
+        if (typeof v.lastFailReason === 'string' && v.lastFailReason.trim()) {
+          one.lastFailReason = v.lastFailReason.trim().slice(0, 80);
+        }
         one.updatedAt = Number(v.updatedAt) || Date.now();
         caps[k] = one;
       });
       out.caps = caps;
     }
+    if (typeof raw.ollamaFallback === 'boolean') out.ollamaFallback = raw.ollamaFallback;
+    if (typeof raw.ollamaModel === 'string') out.ollamaModel = raw.ollamaModel.trim().slice(0, 120);
     /* 备用端点：最多 5 条，只留 endpoint/model/key 三个字段。
        空项直接丢掉——界面上删到一半的空白行不该变成一条「配置」。 */
     if (Array.isArray(raw.fallbacks)) {

@@ -1,6 +1,6 @@
 /* 高级规则页：规则文件编辑、校验、预演与执行 */
 (function () {
-  const { h, T, toast, icon, fmtCount, busy, confirm, card, table, skeleton, empty, attachMenu } = UI;
+  const { h, T, toast, icon, fmtCount, busy, confirm, card, table, skeleton, empty, attachMenu, setActions } = UI;
 
   // 右键菜单用：复制文本到剪贴板。
   const copyText = UI.copy;
@@ -53,6 +53,7 @@
   /* 助手起草的桥：规则页没打开时先把草稿存着，
      打开后自动填进编辑器——不然点了「填入规则编辑器」像没反应 */
   let liveFill = null;
+  let liveJump = null;
   let pendingDraft = '';
 
   window.AIRulesDraft = {
@@ -96,18 +97,7 @@
     const btnTemplate = mkBtn('插入示例', 'Insert sample', 'ghost', 'file', insertTemplate);
     const btnDraft = mkBtn('让助手起草', 'Draft with AI', 'ghost', 'spark', draftRules);
 
-    const fileCard = card(
-      h('div', { class: 'card-title' },
-        h('h2', null, T('规则文件', 'Rule file')),
-        dirtyBadge
-      ),
-      h('div', { class: 'toolbar' }, pathInput, btnLoad, btnSave, btnTemplate, btnDraft),
-      h('div', { class: 'muted small' },
-        T('规则使用 organize 的 YAML 格式：rules 下每条含 locations / filters / actions。校验与预览直接读编辑器内容，不必先保存；只有「执行规则」需要把规则保存成文件。保存会弹出另存为对话框。',
-          'Rules use organize YAML: each item under rules has locations / filters / actions. Validate and preview read the editor directly — no need to save first. Only Run rules needs the file on disk. Saving opens a Save As dialog.'))
-    );
-
-    /* ---------------- 规则内容 ---------------- */
+    /* ---------------- 顶部命令条（文件 + 目标目录 + 核心动作） ---------------- */
     const editor = h('textarea', {
       class: 'textarea',
       rows: 20,
@@ -121,16 +111,6 @@
       renderValidation(null);
     });
 
-    const lineBadge = h('span', { class: 'badge' }, '');
-    const editorCard = card(
-      h('div', { class: 'card-title' },
-        h('h2', null, T('规则内容', 'Rule content')),
-        lineBadge
-      ),
-      editor
-    );
-
-    /* ---------------- 校验与执行 ---------------- */
     const folderInput = h('input', {
       class: 'input grow mono',
       type: 'text',
@@ -156,24 +136,44 @@
       if (S.preview) { S.preview = null; renderPreview(null); }
     });
 
-    const valBox = h('div', { class: 'stack' });
-
-    const actionCard = card(
+    const cmdCard = card(
       h('div', { class: 'card-title' },
-        h('h2', null, T('校验与执行', 'Validate and run')),
-        h('span', { class: 'hint' }, T('执行前建议先预览', 'Preview before running'))
+        h('h2', null, T('规则工作台', 'Rules workbench')),
+        dirtyBadge,
+        h('span', { class: 'spacer' }),
+        btnValidate, btnPreview, btnRun
       ),
       h('div', { class: 'toolbar' },
-        h('span', { class: 'muted small' }, T('目标目录', 'Target folder')),
-        folderInput, btnBrowse
+        h('span', { class: 'muted small', style: { minWidth: '58px' } }, T('规则文件', 'Rule file')),
+        pathInput, btnLoad, btnSave, btnTemplate, btnDraft
       ),
       h('div', { class: 'toolbar' },
-        h('span', { class: 'spacer' }), btnValidate, btnPreview, btnRun
+        h('span', { class: 'muted small', style: { minWidth: '58px' } }, T('目标目录', 'Target folder')),
+        folderInput, btnBrowse,
+        h('span', { class: 'hint' }, T('校验与预览直读编辑器，执行前需先保存', 'Validate/preview read editor directly; save before running'))
+      )
+    );
+
+    /* ---------------- 规则内容（左栏） ---------------- */
+    const lineBadge = h('span', { class: 'badge' }, '');
+    const editorCard = card(
+      h('div', { class: 'card-title' },
+        h('h2', null, T('规则内容', 'Rule content')),
+        lineBadge
+      ),
+      editor
+    );
+
+    /* ---------------- 校验 + 预演 + 执行结果（右栏） ---------------- */
+    const valBox = h('div', { class: 'stack' });
+    const valCard = card(
+      h('div', { class: 'card-title' },
+        h('h2', null, T('校验结果', 'Validation')),
+        h('span', { class: 'hint' }, T('语法与字段检查', 'Syntax check'))
       ),
       valBox
     );
 
-    /* ---------------- 预演结果 ---------------- */
     const previewSummary = h('div', { class: 'muted small' });
     const previewBox = h('div', { class: 'stack' });
     const previewCard = card(
@@ -183,8 +183,8 @@
       ),
       previewBox
     );
+    previewCard.classList.add('stretch-card');
 
-    /* ---------------- 执行结果 ---------------- */
     const runBox = h('div', { class: 'stack' });
     const runCard = card(
       h('div', { class: 'card-title' },
@@ -194,11 +194,11 @@
     );
     runCard.hidden = true;
 
-    root.appendChild(fileCard);
-    root.appendChild(editorCard);
-    root.appendChild(actionCard);
-    root.appendChild(previewCard);
-    root.appendChild(runCard);
+    root.appendChild(cmdCard);
+    root.appendChild(h('div', { class: 'split-wb' },
+      h('div', { class: 'split-left' }, editorCard),
+      h('div', { class: 'split-right', style: { gap: '12px' } }, valCard, previewCard, runCard)
+    ));
 
     updateDirty(false);
     renderValidation(null);
@@ -568,9 +568,32 @@
       renderPreview(null);
     }
 
+    setActions(UI.askBtn({
+      title: T('问助手 · 高级规则', 'Ask AI · Rules'),
+      question: T('帮我检查或完善当前目录的 organize YAML 规则。', 'Help me inspect or improve the organize YAML rules for this folder.'),
+      ctx: () => ({
+        page: '高级规则',
+        dir: folderInput.value.trim(),
+        note: T('当前规则共 ' + fmtCount((editor.value.match(/^\s*-\s+name:/gm) || []).length) + ' 条',
+          'Rules: ' + fmtCount((editor.value.match(/^\s*-\s+name:/gm) || []).length))
+      })
+    }));
+
+    liveJump = function (payload) {
+      const p = payload || {};
+      if (p.folder || p.dir) {
+        folderInput.value = String(p.folder || p.dir).trim();
+        S.preview = null;
+        renderPreview(null);
+      }
+      if (p.yaml) applyDraft(String(p.yaml));
+    };
+
     /* 切页后编辑器和函数都成了孤儿：清掉桥，草稿改为挂起等下次挂载 */
     return function () {
       liveFill = null;
+      liveJump = null;
+      setActions();
     };
   }
 
@@ -578,6 +601,7 @@
   window.Pages.rules = {
     title: ['高级规则', 'Rules'],
     subtitle: ['用 organize YAML 规则批量移动文件，先校验与预演再执行', 'Batch-move files with organize YAML rules: validate and preview first'],
-    mount: mount
+    mount: mount,
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

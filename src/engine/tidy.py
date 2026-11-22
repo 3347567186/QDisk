@@ -1536,60 +1536,6 @@ def guess_source(path, name):
     return "其他"
 
 
-def regroup(plans, mode="type", rules=None):
-    """把扫描结果换一种分类口径，返回新的 plans（不改原对象）。
-
-    mode:
-      type      按文件类型（默认，01_安装包程序 / 05_图片 …）
-      date      按修改月份（2026-10）
-      source    按来源（微信 / QQ / 截图 / 手机相册 / 浏览器下载 …）
-      type_date 先类型再月份（05_图片/2026-10）
-    """
-    if mode in (None, "", "type"):
-        return plans
-    out = []
-    for plan in plans:
-        new_by_cat = {}
-        for cat, items in plan.by_cat.items():
-            for name, size, mt in items:
-                if mode == "date":
-                    key = datetime.datetime.fromtimestamp(mt).strftime("%Y-%m")
-                elif mode == "source":
-                    key = guess_source(plan.folder, name)
-                else:  # type_date
-                    key = cat + "/" + datetime.datetime.fromtimestamp(mt).strftime("%Y-%m")
-                new_by_cat.setdefault(key, []).append((name, size, mt))
-        clone = Plan(plan.folder)
-        clone.by_cat = new_by_cat
-        clone.error = plan.error
-        clone.evidence = list(plan.evidence or [])
-        clone.skipped = list(plan.skipped or [])
-        out.append(clone)
-    return out
-
-
-def check_dest(dest, src_root=None):
-    """目标目录的安全检查，返回 (ok, why)。"""
-    if not dest:
-        return False, "没有指定目标目录"
-    dest = os.path.normpath(dest)
-    try:
-        os.makedirs(dest, exist_ok=True)
-    except OSError as ex:
-        return False, "无法创建目标目录：%s" % ex
-    low = dest.lower().rstrip("\\")
-    drive, rest = os.path.splitdrive(low)
-    if rest in ("", "\\"):
-        return False, "不能直接选盘符根目录"
-    if low.startswith(("c:\\windows", "c:\\program files", "c:\\program files (x86)")):
-        return False, "这是系统/程序目录，不能作为整理目标"
-    if src_root and os.path.normcase(norm(dest)) == os.path.normcase(norm(src_root)):
-        return False, "目标目录和源目录是同一个"
-    if src_root and os.path.normcase(norm(src_root)).startswith(os.path.normcase(norm(dest)) + "\\"):
-        pass          # 目标在上层没关系
-    return True, ""
-
-
 def undo(folder):
     if not os.path.isdir(hist_dir()):
         return 0, ["没有整理记录"]
@@ -1690,14 +1636,6 @@ rules:
 """
 
 
-def organize_available():
-    try:
-        import organize  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
 def run_rules(config_text, simulate=True, tags=None, skip_tags=None,
               output=None, working_dir=None):
     """调用内置的 organize 引擎。返回 (输出文本, 是否成功)。
@@ -1759,25 +1697,6 @@ SAFE_ROOT_DENY = {
 }
 SAFE_REG_DENY = {"microsoft", "windows", "classes", "policies", "wow6432node",
                  "clients", "registeredapplications", "wow6432node"}
-
-
-def is_admin():
-    try:
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
-
-
-def relaunch_as_admin():
-    """以管理员身份重新启动自己"""
-    try:
-        import ctypes
-        exe = sys.executable
-        r = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, "", None, 1)
-        return r > 32
-    except Exception:
-        return False
 
 
 def _open_uninstall_key(hive_name, sub):
@@ -1934,21 +1853,6 @@ def _reg_key_mtime(key):
         return 0.0
 
 
-def remove_uninstall_entry(app):
-    """只删注册表条目（Geek 的「删除条目」），不动磁盘文件"""
-    import winreg
-    hives = {"HKLM64": (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_64KEY),
-             "HKLM32": (winreg.HKEY_LOCAL_MACHINE, winreg.KEY_WOW64_32KEY),
-             "HKCU": (winreg.HKEY_CURRENT_USER, 0)}
-    root, flag = hives.get(app.get("hive"), (None, 0))
-    if root is None:
-        raise RuntimeError("未知的注册表分支")
-    parent, _, leaf = app["key"].rpartition("\\")
-    with winreg.OpenKey(root, parent, 0,
-                        winreg.KEY_SET_VALUE | flag) as k:
-        winreg.DeleteKeyEx(k, leaf, flag, 0)
-
-
 def _safe_dir(p):
     """目录是否允许删除"""
     try:
@@ -2081,32 +1985,6 @@ def export_reg_key(hive_name, key_path, out_file):
         return False
 
 
-def delete_reg_tree(hive_name, key_path):
-    import winreg
-
-    def walk(h, path):
-        try:
-            with winreg.OpenKey(h, path, 0, winreg.KEY_READ | _flag(hive_name)) as k:
-                n = winreg.QueryInfoKey(k)[0]
-                kids = []
-                for i in range(n):
-                    try:
-                        kids.append(winreg.EnumKey(k, i))
-                    except OSError:
-                        pass
-        except OSError:
-            return True
-        for kid in kids:
-            walk(h, path + "\\" + kid)
-        try:
-            winreg.DeleteKey(h, path)
-            return True
-        except OSError:
-            return False
-
-    return walk(_hive_root(hive_name), key_path)
-
-
 def _delete_reg_tree(root, path, flag):
     """递归删除注册表子树（DeleteKeyEx + WOW64 flag）。
 
@@ -2142,19 +2020,6 @@ def _delete_reg_tree(root, path, flag):
     except OSError as ex:
         return "删除注册表键失败：%s" % ex
     return ""
-
-
-def run_uninstaller(app, quiet=True):
-    """运行程序自带的卸载器"""
-    cmd = (app.get("quiet") or app.get("uninstall") or "").strip()
-    if not cmd:
-        return False, "该程序没有卸载命令，只能强制清理残留"
-    try:
-        subprocess.Popen(cmd, shell=True,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return True, cmd
-    except Exception as ex:
-        return False, str(ex)
 
 
 def delete_paths(paths, progress=None):
@@ -2323,112 +2188,6 @@ SHOT_DIR_NAMES = {
 }
 # 扫描深度：根目录 + 最多 3 层子目录（游戏截图常放 Pictures\游戏名\Screenshots）
 SHOT_MAX_DEPTH = 3
-
-# 只清图片/视频，绝不碰文档
-# 截图清理的计划任务名
-SHOT_TASK = "整理助手_清理截图"
-CACHE_TASK = "整理助手_清理缓存"
-
-
-# ── 计划任务工具 ──────────────────────────────────────────────
-# 以前用 "成功" in out 判断 schtasks 是否成功，但中文 Windows 的 schtasks
-# 输出是 GBK，我们却按 UTF-8 解码 —— 拿到的是一串乱码，于是「成功」永远匹配
-# 不上：任务其实建好了，界面却弹「创建失败」，任务看着也不能用。
-# 现在一律以返回码为准，输出只用来展示（先按 GBK 解，失败再退回 UTF-8）。
-
-def _schtasks():
-    """schtasks.exe 的绝对路径。
-
-    打包成无控制台的 exe 后，PATH 有时拿不到 System32（尤其从快捷方式、
-    开机自启拉起时），直接写 "schtasks" 会 FileNotFoundError，表现就是
-    「任务明明建好了，界面却显示未设置」。
-    """
-    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
-    p = os.path.join(root, "System32", "schtasks.exe")
-    if os.path.isfile(p):
-        return p
-    p32 = os.path.join(root, "Sysnative", "schtasks.exe")
-    return p32 if os.path.isfile(p32) else "schtasks"
-
-
-def _run_hidden(args):
-    """静默执行命令，返回 (返回码, 解码后的输出)。"""
-    import subprocess
-    try:
-        r = subprocess.run(args, capture_output=True,
-                           creationflags=getattr(subprocess,
-                                                 "CREATE_NO_WINDOW", 0))
-    except Exception as ex:
-        return -1, str(ex)
-    raw = (r.stdout or b"") + (r.stderr or b"")
-    text = ""
-    for enc in ("gbk", "utf-8"):
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    if not text:
-        text = raw.decode("utf-8", "replace")
-    return r.returncode, text.strip()
-
-
-def task_query(name):
-    """查计划任务，返回 (是否存在, 下次运行时间, 原文)。"""
-    rc, txt = _run_hidden([_schtasks(), "/Query", "/TN", name, "/FO", "LIST"])
-    nxt = ""
-    for line in txt.splitlines():
-        low = line.lower()
-        if "下次运行时间" in line or "next run time" in low:
-            nxt = line.split(":", 1)[-1].strip()
-            break
-    return (rc == 0), nxt, txt
-
-
-def task_create(name, when, command):
-    """建每日计划任务。成功/失败以返回码判定，成功后回查一次。"""
-    rc, txt = _run_hidden([_schtasks(), "/Create", "/F", "/TN", name,
-                           "/SC", "DAILY", "/ST", when, "/TR", command])
-    if rc != 0:
-        return False, txt or ("返回码 %d" % rc), ""
-    ok, nxt, _ = task_query(name)
-    if not ok:
-        return False, "命令返回成功，但查不到这个任务", ""
-    return True, "", nxt
-
-
-def task_delete(name):
-    rc, txt = _run_hidden([_schtasks(), "/Delete", "/F", "/TN", name])
-    ok, _, _ = task_query(name)
-    return (rc == 0 and not ok), txt
-
-
-def task_run_now(command):
-    """立刻按任务里的命令跑一次，用来验证配置真的能用。"""
-    import subprocess
-    try:
-        r = subprocess.run(command, shell=True, capture_output=True,
-                           creationflags=getattr(subprocess,
-                                                 "CREATE_NO_WINDOW", 0))
-        return r.returncode == 0, (r.returncode,
-                                   (r.stdout or b"")[-400:].decode("utf-8",
-                                                                   "replace"))
-    except Exception as ex:
-        return False, (-1, str(ex))
-
-
-def check_when(text):
-    """把 'H:MM' / 'HH:MM' 规范成 'HH:MM'，不合法返回空串。"""
-    parts = (text or "").strip().replace("：", ":").split(":")
-    if len(parts) != 2:
-        return ""
-    try:
-        h, m = int(parts[0]), int(parts[1])
-    except ValueError:
-        return ""
-    if not (0 <= h < 24 and 0 <= m < 60):
-        return ""
-    return "%02d:%02d" % (h, m)
 
 SHOT_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".heic", ".tif", ".tiff",
              ".mp4", ".mov", ".mkv", ".avi"}
@@ -3116,36 +2875,6 @@ def _tree_size(path, limit_files=200000):
     return total, files
 
 
-def scan_caches(only_ids=None, progress=None):
-    """扫描内置缓存项，返回 [{item, paths, size, count, blocked}]。"""
-    out = []
-    todo = [it for it in CACHE_ITEMS
-            if (not only_ids or it["id"] in only_ids) and it["kind"] != "recycle"]
-    total = len(todo) or 1
-    for idx, it in enumerate(todo, 1):
-        if progress:
-            try:
-                progress(idx - 1, total, "正在统计 %s（%d/%d）"
-                          % (it["name"], idx, total))
-            except Exception:
-                pass
-        real = []
-        for pat in it["paths"]:
-            for p in _expand_cache_paths(pat):
-                bad, why = cache_path_forbidden(p)
-                if bad:
-                    continue
-                if p not in real:
-                    real.append(p)
-        size = count = 0
-        for p in real:
-            s, c = _tree_size(p)
-            size += s
-            count += c
-        out.append(dict(item=it, paths=real, size=size, count=count))
-    return out
-
-
 def _fail_reason(ex):
     """把 OSError 翻成一句能看懂的原因，带 WinError 码。"""
     code = getattr(ex, "winerror", None) or getattr(ex, "errno", None)
@@ -3327,217 +3056,6 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
     if gone:
         index_touch(gone)
     return removed, failed, freed
-
-
-def empty_recycle_bin():
-    """清空回收站（用 shell 接口，绕开删除权限问题）。"""
-    try:
-        import ctypes
-        flags = 0x1 | 0x2 | 0x4          # NOCONFIRM | NOPROGRESS | NOSOUND
-        r = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, flags)
-        return r == 0, ""
-    except Exception as ex:
-        return False, str(ex)
-
-
-def _tray_icon_keys():
-    """列出 NotifyIconSettings 里属于本程序的子键名（Win10 没这键就返回 []）。"""
-    import winreg
-    base = r"Control Panel\NotifyIconSettings"
-    out = []
-    try:
-        target = os.path.normcase(sys.executable)
-    except Exception:
-        return out
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base) as root:
-            i = 0
-            while True:
-                try:
-                    sub = winreg.EnumKey(root, i)
-                except OSError:
-                    break
-                i += 1
-                try:
-                    with winreg.OpenKey(root, sub) as k:
-                        exe, _ = winreg.QueryValueEx(k, "ExecutablePath")
-                except OSError:
-                    continue
-                if os.path.normcase(exe) == target:
-                    out.append(sub)
-    except OSError:
-        pass
-    return out
-
-
-def set_tray_promoted(flag):
-    """把本程序的托盘图标固定到任务栏(True) / 交还给用户位置(False)。
-
-    只在用户明确要求时调用 —— 上一版每次启动都强制置 1，
-    结果用户把它拖进 ^ 折叠区后，下次启动又被系统拽回任务栏。
-    """
-    import winreg
-    base = r"Control Panel\NotifyIconSettings"
-    n = 0
-    for sub in _tray_icon_keys():
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base + "\\" + sub, 0,
-                                winreg.KEY_SET_VALUE) as k:
-                winreg.SetValueEx(k, "IsPromoted", 0, winreg.REG_DWORD,
-                                  1 if flag else 0)
-                n += 1
-        except OSError:
-            continue
-    return n
-
-
-def get_tray_promoted():
-    """读回本程序托盘键的 IsPromoted 实际值：{键名: 0/1/None}。"""
-    import winreg
-    base = r"Control Panel\NotifyIconSettings"
-    out = {}
-    for sub in _tray_icon_keys():
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base + "\\" + sub) as k:
-                v, _ = winreg.QueryValueEx(k, "IsPromoted")
-                out[sub] = int(v)
-        except OSError:
-            out[sub] = None
-    return out
-
-
-def apply_tray_pin(mode=None):
-    """按设置摆放托盘图标的位置，并读回确认。
-
-    返回 (写入次数, 仍不符合期望的键名列表)。
-
-    - taskbar  : IsPromoted=1，图标固定在任务栏（默认，用户一眼能看到）
-    - overflow : IsPromoted=0，只放在 ^ 折叠区里
-    - system   : 一个键都不写，完全交给 Windows 和用户自己的拖动
-
-    老版本每次启动都写 1，于是用户把图标拖进折叠区后下次启动又被拽回任务栏；
-    现在位置是明确选项，「跟随系统」模式下用户拖到哪就一直在哪。
-    """
-    mode = mode or S.get("tray_pin", "taskbar")
-    if mode not in ("taskbar", "overflow"):
-        return 0, []
-    want = 1 if mode == "taskbar" else 0
-    n = set_tray_promoted(bool(want))
-    states = get_tray_promoted()
-    if not states:
-        # 一个自己的托盘键都没找到（比如用别的解释器跑源码版），
-        # 这时不能算「已经做对了」，否则 exe 那份永远改不了
-        return n, []
-    bad = [k for k, v in states.items() if v != want]
-    return n, bad
-
-
-def tray_stop():
-    icon = _tray.get("icon")
-    if icon is not None:
-        try:
-            icon.stop()
-        except Exception:
-            pass
-    _tray["icon"] = None
-    _tray["ok"] = False
-
-
-# ─────────────────────────── 单实例 ───────────────────────────
-# 两个用途：
-#   互斥体 —— 同时只允许一个界面实例（不然几个托盘图标互相抢位置）
-#   命名事件 —— 第二个实例点开时，把已经在跑的那个窗口叫到前面
-MUTEX_NAME = "Local\\TidyHelper_MainInstance"
-SHOW_EVENT = "Local\\TidyHelper_Show_Main"
-_MUTEX = {"handle": None}
-_K32 = {"lib": None}
-
-
-def _kernel32():
-    """显式声明签名：默认 c_int 返回值会把 64 位句柄截断。"""
-    if _K32["lib"] is None:
-        import ctypes
-        k = ctypes.windll.kernel32
-        k.CreateMutexW.restype = ctypes.c_void_p
-        k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-        k.OpenMutexW.restype = ctypes.c_void_p
-        k.OpenMutexW.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p]
-        k.CreateEventW.restype = ctypes.c_void_p
-        k.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_int,
-                                   ctypes.c_int, ctypes.c_wchar_p]
-        k.OpenEventW.restype = ctypes.c_void_p
-        k.OpenEventW.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p]
-        k.WaitForSingleObject.restype = ctypes.c_uint
-        k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-        k.SetEvent.restype = ctypes.c_int
-        k.SetEvent.argtypes = [ctypes.c_void_p]
-        k.CloseHandle.restype = ctypes.c_int
-        k.CloseHandle.argtypes = [ctypes.c_void_p]
-        _K32["lib"] = k
-    return _K32["lib"]
-
-
-def _claim_single_instance():
-    """只允许一个界面实例。已经有一个在跑就返回 False。"""
-    try:
-        k = _kernel32()
-        # 先试打开：能打开说明已有实例，比读 GetLastError 可靠
-        h = k.OpenMutexW(0x00100000, False, MUTEX_NAME)   # SYNCHRONIZE
-        if h:
-            k.CloseHandle(h)
-            return False
-        h = k.CreateMutexW(None, False, MUTEX_NAME)
-        if not h:
-            return True                                   # 建不了就别拦用户
-        _MUTEX["handle"] = h                              # 持有到进程结束
-        return True
-    except Exception:
-        return True
-
-
-def _signal_show_existing():
-    """通知已经在跑的那个实例：把窗口叫出来。"""
-    try:
-        k = _kernel32()
-        ev = k.OpenEventW(0x0002, False, SHOW_EVENT)      # EVENT_MODIFY_STATE
-        if not ev:
-            return False
-        k.SetEvent(ev)
-        k.CloseHandle(ev)
-        return True
-    except Exception:
-        return False
-
-
-def start_show_listener(callback):
-    """后台等命名事件；收到就回调（回调里自己 root.after 切主线程）。
-
-    比 FindWindow + ShowWindow 稳：Tk 自己 withdraw 过的窗口
-    被外部 ShowWindow 显示出来，Tk 内部状态还是「隐藏」的。
-    """
-    try:
-        k = _kernel32()
-        ev = k.CreateEventW(None, False, False, SHOW_EVENT)
-        if not ev:
-            return False
-    except Exception:
-        return False
-
-    def loop():
-        import threading
-        while True:
-            try:
-                if k.WaitForSingleObject(ev, 500) == 0:
-                    try:
-                        callback()
-                    except Exception:
-                        pass
-            except Exception:
-                time.sleep(0.5)
-
-    import threading
-    threading.Thread(target=loop, daemon=True).start()
-    return True
 
 
 # ─────────────────────────── 数据迁移 ───────────────────────────
@@ -5476,17 +4994,6 @@ def find_everything():
     return ""
 
 
-def open_everything_search(keyword):
-    exe = find_everything()
-    if not exe:
-        return False
-    try:
-        subprocess.Popen([exe, "-search", keyword])
-        return True
-    except Exception:
-        return False
-
-
 def find_es():
     """Everything 的命令行版 es.exe（如果装了）"""
     cand = []
@@ -5575,15 +5082,6 @@ def _reg_delete_tree(root, path):
     return walk(root, path)
 
 
-def explorer_menu_installed():
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, MENU_KEYS[0][0], 0, winreg.KEY_READ):
-            return True
-    except OSError:
-        return False
-
-
 def _console_free_exe():
     """返回一个启动时不会弹黑窗口的解释器/程序路径。
 
@@ -5599,20 +5097,6 @@ def _console_free_exe():
                 if os.path.exists(p):
                     return p
     return exe
-
-
-def _task_runner():
-    """计划任务用的命令前缀（带引号）。
-
-    打包后是 exe 本身；源码模式必须带上脚本路径，否则
-    `pythonw.exe --clean-shots` 找不到脚本，返回码 2。
-    """
-    exe = _console_free_exe()
-    if getattr(sys, "frozen", False):
-        return '"%s"' % exe
-    # 用本文件的真实路径，不能用 sys.argv[0]（被 import 时会指向调用方）
-    script = os.path.abspath(__file__)
-    return '"%s" "%s"' % (exe, script)
 
 
 def install_explorer_menu():
@@ -5680,19 +5164,6 @@ def run_scheduled(targets):
 
 
 # ─────────────────────────── 界面 ───────────────────────────
-
-def prefill_dir(args):
-    """命令行里给的第一个已存在目录（右键菜单会带上）。"""
-    for a in args:
-        if a and not a.startswith("--") and os.path.isdir(a):
-            return a
-    return None
-
-
-def _ask_close_action(master=None):
-    """已归档：Tkinter 关闭询问对话框。参见 archive/legacy_tk/legacy_gui.py。"""
-    return "tray", True
-
 
 def run_gui(prefill=None, tray_only=False):
     """已归档的旧版 Tkinter 界面。
@@ -6235,8 +5706,13 @@ def _engine_scan(params):
 
 
 def _engine_organize(params):
-    """organize 方法：confirm=false 只预演；confirm=true 才真正移动。"""
-    confirm = _engine_get(params, "confirm", False, bool)
+    """organize 方法：confirm=false 只预演；confirm=true（或显式 dry_run=false）才真正移动。"""
+    if "confirm" in params and params["confirm"] is not None:
+        confirm = _engine_get(params, "confirm", False, bool)
+    elif "dry_run" in params and params["dry_run"] is not None:
+        confirm = not _engine_get(params, "dry_run", True, bool)
+    else:
+        confirm = False
     policy = params.get("policy")
     if policy is not None:
         if not isinstance(policy, str) or policy.strip().lower() not in (
@@ -8491,26 +7967,6 @@ def _engine_system_performance(params=None):
     }
 
 
-def _engine_index_meta_path():
-    return os.path.join(cache_dir(), "fileindex.json")
-
-
-def _engine_index_meta():
-    try:
-        with open(_engine_index_meta_path(), encoding="utf-8-sig") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _engine_paths_same(a, b):
-    def key(xs):
-        return sorted(os.path.normcase(os.path.normpath(str(x)))
-                      for x in (xs or []) if isinstance(x, str) and x.strip())
-    return key(a) == key(b)
-
-
 def _engine_search_selfcheck(params):
     """search.selfcheck：抽查索引，判定过期的就重建，返回报告。
 
@@ -9559,41 +9015,19 @@ def main():
             run_scheduled(args or [os.getcwd()])
             return
         if "--tray" in argv:
-            # 自启用：直接进托盘，全程不显示窗口
-            if not _claim_single_instance():
-                return                      # 已经有一个在跑，静默退出
-            if prefill_dir(args):
-                run_gui(prefill=prefill_dir(args), tray_only=False)
-            else:
-                run_gui(prefill=None, tray_only=True)
-            return
-        if not _claim_single_instance():
-            _signal_show_existing()         # 再点一次 = 把窗口叫出来
+            run_gui(prefill=args[0] if args and os.path.isdir(args[0]) else None, tray_only=True)
             return
         run_gui(prefill=args[0] if args and os.path.isdir(args[0]) else None)
         return
 
     if "--tray" in argv:
         hide_console()
-        if not _claim_single_instance():
-            return
         run_gui(prefill=None, tray_only=True)
         return
 
-    if "--gui" in argv:
+    if "--gui" in argv or not args:
         hide_console()
-        if not _claim_single_instance():
-            _signal_show_existing()
-            return
         run_gui(prefill=args[0] if args else None)
-        return
-
-    if not args:
-        hide_console()
-        if not _claim_single_instance():
-            _signal_show_existing()
-            return
-        run_gui()
         return
 
     pause_needed = console_is_ours()

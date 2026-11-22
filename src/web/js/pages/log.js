@@ -2,13 +2,14 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, card, toast, empty, busy, confirm, fmtBytes, fmtCount, fmtTime, skeleton, attachMenu } = UI;
+  const { h, T, icon, card, toast, empty, busy, confirm, fmtBytes, fmtCount, fmtTime, skeleton, attachMenu, setActions } = UI;
 
   window.Pages = window.Pages || {};
 
   // 右键菜单里用到的两个小工具：把错误转成可读文本、复制到剪贴板。
   const errText = UI.errText;
   const copyText = UI.copy;
+  let liveJump = null;
 
   window.Pages.log = {
     title: ['日志', 'Logs'],
@@ -59,10 +60,14 @@
       function paint() {
         contentBox = null;
         root.textContent = '';
-        root.appendChild(filesCard());
-        root.appendChild(contentCard());
-        root.appendChild(engineCard());
-        root.appendChild(historyCard());
+        root.appendChild(h('div', { class: 'split-wb master-detail' },
+          h('div', { class: 'split-left' }, filesCard()),
+          h('div', { class: 'split-right' }, contentCard())
+        ));
+        root.appendChild(h('div', { class: 'grid-2' },
+          engineCard(),
+          historyCard()
+        ));
       }
 
       /* ---------- 操作历史（整理记录时间线） ----------
@@ -189,7 +194,7 @@
         const body = [];
         if (!state.selected) {
           body.push(empty(T('选择一个日志文件', 'Select a log file'),
-            T('点击列表中的查看按钮', 'Use View in the list above')));
+            T('点击左侧列表即可查看日志末尾内容', 'Select a file from the left list')));
         } else if (state.contentError) {
           body.push(empty(T('日志读取失败', 'Could not read the log'), state.contentError));
         } else if (state.content === null) {
@@ -201,14 +206,11 @@
             h('span', { class: 'mono ellipsis', title: state.selected.path, style: { minWidth: 0, flex: 1 }, text: state.selected.path }),
             h('span', { class: 'small muted', text: fmtBytes(state.selected.size) })
           ));
-          body.push(h('div', {
-            class: 'table-wrap',
-            ref: (el) => { contentBox = el; }
-          }, h('pre', {
-            class: 'mono',
-            style: { margin: 0, padding: 'var(--space-2)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+          body.push(h('pre', {
+            class: 'log-viewer-pre',
+            ref: (el) => { contentBox = el; },
             text: state.content
-          })));
+          }));
         }
 
         return card(
@@ -356,10 +358,36 @@
         }
       }
 
+      setActions(UI.askBtn({
+        title: T('问助手 · 日志诊断', 'Ask AI · Log diagnostics'),
+        question: T('请帮我读取最近的运行日志并排查异常或失败原因。', 'Read recent logs and diagnose any errors or failures.'),
+        ctx: () => ({
+          page: '日志',
+          selected: state.selected ? state.selected.name : '',
+          note: state.files ? T('共 ' + state.files.length + ' 个日志文件', state.files.length + ' log files') : ''
+        })
+      }));
+
+      liveJump = async function (payload) {
+        const target = String((payload && (payload.file || payload.name || payload.path)) || '').trim().toLowerCase();
+        if (!target) return;
+        if (!state.files) await loadFiles();
+        const hit = (state.files || []).find((f) => f.name.toLowerCase().includes(target) || f.path.toLowerCase() === target);
+        if (hit) await openFile(hit);
+      };
+
       paint();
       await Promise.all([loadFiles(), loadEngine(), loadAppInfo()]);
       state.loading = false;
       paint();
-    }
+
+      return function unmount() {
+        openToken++;
+        liveJump = null;
+        setActions();
+      };
+    },
+
+    jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }
   };
 })();

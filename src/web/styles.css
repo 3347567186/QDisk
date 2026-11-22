@@ -3594,23 +3594,6 @@ html[data-theme="dark"] .ai-page {
 .ai-empty-card:active { transform: scale(.99); }
 .ai-empty-q { display: block; line-height: 1.5; }
 
-/* 历史浮层 */
-.ai-history {
-  position: absolute; left: 0; top: 2px; z-index: 24; width: 316px; max-height: 66%;
-  overflow: auto; padding: 6px; background: var(--surface);
-  border: 1px solid var(--line-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-2);
-  animation: rise-in var(--dur-2) var(--ease) both;
-}
-.ai-history-empty { padding: 10px; font-size: var(--fs-small); color: var(--text-3); }
-.ai-history-row { display: flex; align-items: center; gap: 2px; border-radius: var(--radius); }
-.ai-history-row:hover { background: var(--hover); }
-.ai-history-open {
-  flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: transparent;
-  padding: 6px 8px; cursor: pointer; display: flex; flex-direction: column; gap: 2px;
-}
-.ai-history-title { font-size: var(--fs-small); color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-history-meta { font-size: var(--fs-tiny); color: var(--text-3); font-family: var(--mono); }
-
 /* 抽屉 */
 .ai-drawer-mask {
   position: fixed; inset: 0; z-index: 60; background: var(--scrim); opacity: 0;
@@ -3631,7 +3614,6 @@ html[data-theme="dark"] .ai-page {
   padding: 10px 10px 10px 12px; border-bottom: 1px solid var(--line);
 }
 .ai-drawer-head > svg { width: 14px; height: 14px; color: var(--accent-text); }
-.ai-drawer-title { flex: 1 1 auto; font-size: var(--fs-group); font-weight: 600; color: var(--text-1); min-width: 0; }
 .ai-drawer-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 0 12px 12px; }
 /* ============================================================
    AI 输入框（composer.js）与推理强度滑块（effort.js）
@@ -4208,36 +4190,21 @@ html[data-theme="dark"] .ai-page {
   .nav-item:hover .steve { transform: none; }
 }
 
-/* ================= AI 入口：只留史蒂夫头像（1.23.5） =================
-   侧栏「AI 助手」那一行不再显示文字，只把头像居中放大。
-   文字不是从 DOM 删掉，而是视觉隐藏：读屏仍读「AI 助手」，按钮 title
-   照常给悬停提示，键盘焦点框仍然框住整行。 */
-.nav-item[data-id="ai"] {
-  justify-content: center;
-  gap: 0;
-  padding-left: 0;
-  padding-right: 0;
+/* ================= AI 入口：与其余导航统一左对齐，收起态居中头像（1.43.0） ================= */
+.nav-item > .steve {
+  transition: translate var(--dur-2) var(--ease-out), transform var(--dur-jelly) var(--ease-elastic);
 }
-
-.nav-item[data-id="ai"] .lbl {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
+.nav-item.active > .steve { translate: 6px 0; }
+.nav-item[data-id="ai"] .steve { width: 16px; height: 16px; }
+.app.collapsed .nav-item[data-id="ai"] {
+  justify-content: center; gap: 0; padding-left: 0; padding-right: 0;
 }
-
-/* 24px 是这套图标里最大且不挤的一档：30px 行高上下各留 3px。
-   DOM 里 SteveAvatar.el 也按 24 渲染（app.js 的 navMark），CSS 与画布同尺寸，
-   所以是原样显示，不是把小画布拉大，像素点仍然清楚。收起态同尺寸。 */
-.nav-item[data-id="ai"] .steve {
-  width: 24px;
-  height: 24px;
+.app.collapsed .nav-item[data-id="ai"] .steve { width: 22px; height: 22px; }
+.app.collapsed .nav-item[data-id="ai"].active > .steve { translate: 2px 0; }
+@media (max-width: 940px) {
+  .nav-item[data-id="ai"] { justify-content: center; gap: 0; padding: 0; }
+  .nav-item[data-id="ai"] .steve { width: 22px; height: 22px; }
+  .nav-item[data-id="ai"].active > .steve { translate: 2px 0; }
 }
 
 /* ---------------- AI 设置：获取模型 / 上下文窗口（1.23.12） ---------------- */
@@ -4509,12 +4476,13 @@ html[data-theme="dark"] .ai-tnav-pop {
   font-size: var(--fs-small); color: var(--text-2);
   line-height: 1.4; padding-top: 7px;
 }
-/* 说明只留一行：全文挂在 title 上，悬停看得到。
-   多行说明是这块最大的高度来源——十行乘两行就是 300px。 */
+/* 说明允许自然换行最多两行，避免关键配置说明被生硬截断；全文仍挂在 title 兜底 */
 .set-row .desc {
-  margin-top: 3px; font-size: var(--fs-tiny); line-height: 1.45;
+  margin-top: 3px; font-size: var(--fs-tiny); line-height: 1.48;
   color: var(--text-3);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  white-space: normal;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .set-row .input { max-width: 100%; }
 .set-row .row { align-items: center; }
@@ -4546,10 +4514,6 @@ html[data-theme="dark"] .ai-tnav-pop {
 .ai-dw-hist-btn { flex: 0 0 auto; gap: 5px; }
 .ai-dw-hist-btn svg { width: 14px; height: 14px; }
 .ai-dw-hist-btn.on { background: var(--surface-2); color: var(--text-1); }
-.ai-drawer-title { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding-left: 4px; }
-.ai-dw-title { font-size: var(--fs-small); font-weight: 600; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ai-dw-sub { font-size: var(--fs-tiny); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
 /* 抽屉的「正在运行」条：整页左栏有 .ai-busy，抽屉以前完全没有，
    于是在抽屉里切到别的会话就再也看不见那条还在跑。
    口径与 .ai-busy 对齐（同一个描边 / 圆角 / 底色 / 字号 token），
@@ -4561,8 +4525,6 @@ html[data-theme="dark"] .ai-tnav-pop {
   background: var(--surface);
 }
 .ai-dw-busy[hidden] { display: none; }
-/* 标题行：跟整页左栏的 .ai-busy-head 同口径，只把左边距收到 5px
-   （抽屉这条自己的 padding 已经是 5px，再按整页的 6px 会顶到描边上）。 */
 .ai-dw-busy-head {
   display: flex; align-items: center; gap: 6px;
   padding: 0 5px 3px;
@@ -4585,8 +4547,6 @@ html[data-theme="dark"] .ai-tnav-pop {
   flex: 0 0 auto; font-size: var(--fs-tiny); color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
-/* 呼吸点直接复用整页那份 .ai-busy-dot 与 ai-busy-pulse 关键帧，
-   这里只补「跟文字对齐」：行是 baseline 对齐，圆点得自己居中。 */
 .ai-dw-busy .ai-busy-dot { width: 6px; height: 6px; align-self: center; }
 
 /* 历史面板：从头部下面推下来，不盖住输入框 */
@@ -4850,17 +4810,6 @@ html[data-theme="dark"] .ai-tnav-pop {
   .ai-rail-list { margin: 0 4px; }
 }
 
-/* 过程行的 chevron：早前那版用元素自身的 border 画箭头（opacity 0、只有悬停才出现，
-   静态看跟不可展开的行一样），跟后面的 ::before 版本叠成了两个箭头。
-   这里收口：尺寸与静息可见度按后面那版走，元素自身不再画边。 */
-.ai-page .tl-step .ai-step-chev {
-  width: 14px; height: 14px; margin: 0 0 0 4px; opacity: .45;
-  border: 0; transform: none;
-}
-.ai-page .tl-step.openable:hover .ai-step-chev,
-.ai-page .tl-step.openable:focus-visible .ai-step-chev { opacity: .9; }
-.ai-page .tl-step[aria-expanded="true"] .ai-step-chev { transform: rotate(180deg); opacity: .9; margin-bottom: 0; }
-
 /* ================= 查证过程组（procs.js）· 复刻 dsh-claude-style Process rows =================
    一行计数 + 平铺过程行 + 可展开的思考/返回值。
    度量照实测：行高 28px、图标 15px、标签 13px、摘要 12px 等宽、缩进 8px。
@@ -5082,4 +5031,172 @@ html[data-theme="dark"] .ai-tnav-pop {
 .pool-source { margin-top: 9px; }
 @media (prefers-reduced-motion: reduce) {
   .pool-row, .pool-chip, .pool-models { transition: none; animation: none; }
+}
+
+/* ============================================================
+   全站统一缺失工具类、Markdown 别名与三大页面布局骨架（1.43.0）
+   ============================================================ */
+.text-muted { color: var(--text-3); }
+.tiny { font-size: var(--fs-tiny); }
+.center { display: flex; align-items: center; justify-content: center; text-align: center; }
+.neutral { color: var(--text-2); background: var(--surface-2); border-color: var(--line); }
+.ai-hit-tag {
+  border-color: var(--accent-ring); background: var(--accent-weak);
+  color: var(--accent-text); font-weight: 500;
+}
+.cache-list-card { gap: 10px; }
+.top-tab-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ask-ai-btn { gap: 6px; padding-left: 9px; padding-right: 11px; }
+.ask-ai-btn .steve { --steve-size: 20px; width: 20px; height: 20px; }
+
+/* Markdown 显式类（md.js 输出），与 .ai-answer.md 保持统一视觉 */
+.md-table {
+  width: 100%; margin: .4em 0 .75em; border-collapse: collapse;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  font-size: 12.5px;
+}
+.md-table th, .md-table td {
+  padding: 6px 10px; text-align: left; vertical-align: top;
+  border-top: .5px solid var(--line); word-break: break-word;
+}
+.md-table thead th { border-top: 0; background: var(--surface-2); font-weight: 600; color: var(--text-2); }
+.md-pre {
+  margin: .5em 0 .7em; padding: 11px 13px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); overflow-x: auto;
+}
+.md-code {
+  font-family: var(--mono); font-size: 12.5px;
+  background: var(--surface-2); border-radius: 4px; padding: 1px 5px;
+}
+.md-list { margin: 0 0 .7em; padding-left: 1.35em; }
+.md-list-sub { margin: .18em 0 .2em; padding-left: 1.35em; }
+.md-quote {
+  margin: .5em 0 .8em; padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--line-strong); color: var(--text-2);
+}
+.md-hr { border: 0; border-top: .5px solid var(--line-strong); margin: 1em 0; }
+.md-link {
+  color: var(--accent-text); text-decoration: underline;
+  text-underline-offset: 2px; text-decoration-thickness: 1px;
+}
+.md-link:hover { color: var(--accent-hover); }
+
+/* ---------------- 骨架 I：分段定高工作台（.wb-bar） ---------------- */
+.wb-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  flex: 0 0 auto; padding: 6px 10px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+.wb-tabs {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px; background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.wb-tab {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 11px;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-2);
+  font-size: var(--fs-small); font-weight: 500; cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.wb-tab:hover { background: var(--hover); color: var(--text-1); }
+.wb-tab.active {
+  background: var(--surface); border-color: var(--line);
+  color: var(--text-1); box-shadow: var(--shadow-1);
+}
+.wb-tab.active svg { color: var(--accent-text); }
+.wb-tab-badge {
+  font-size: 10px; padding: 0 5px; line-height: 16px;
+  border-radius: 999px; background: var(--surface-2); color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.wb-tab.active .wb-tab-badge { background: var(--accent-weak); color: var(--accent-text); }
+.wb-meta { margin-left: auto; font-size: var(--fs-tiny); color: var(--text-3); }
+.wb-pane { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; gap: 10px; }
+.wb-pane[hidden] { display: none; }
+
+/* 吸顶卡片头部（长列表滚动时保持主执行键始终可见） */
+.sticky-cmd {
+  position: sticky; top: 0; z-index: 6;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  margin: calc(var(--space-5) * -1) calc(var(--space-5) * -1) 0;
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+/* ---------------- 骨架 II：双栏主从工作台（.split-wb） ---------------- */
+.split-wb {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px; align-items: stretch; flex: 1 1 auto; min-height: 400px;
+}
+.split-wb.master-detail { grid-template-columns: 290px minmax(0, 1fr); }
+.split-left, .split-right {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+}
+.split-left > .card, .split-right > .card {
+  flex: 1 1 auto; min-height: 0;
+}
+.split-wb .textarea {
+  flex: 1 1 auto; min-height: 360px; resize: vertical;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+}
+.log-viewer-pre {
+  flex: 1 1 auto; min-height: 320px; max-height: 54vh; overflow: auto;
+  margin: 0; padding: 12px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius);
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+  -webkit-user-select: text; user-select: text;
+}
+@media (max-width: 980px) {
+  .split-wb, .split-wb.master-detail { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+}
+
+/* ---------------- 骨架 III：设置页快速导航锚点栏 ---------------- */
+.set-nav-bar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 7px 10px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  position: sticky; top: 0; z-index: 5;
+}
+.set-nav-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface-2);
+  color: var(--text-2); font-size: var(--fs-tiny); font-weight: 500;
+  cursor: pointer; transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
+}
+.set-nav-pill:hover { background: var(--hover); color: var(--text-1); border-color: var(--line-strong); }
+.set-nav-pill.active { background: var(--accent-weak); border-color: var(--accent-ring); color: var(--accent-text); }
+
+/* ---------------- 应用与自启页 KPI 与图表组件收编 ---------------- */
+.app-kpi-grid {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+}
+@media (max-width: 960px) {
+  .app-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.app-kpi-card {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 12px; min-height: 76px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.app-kpi-card.accent { border-left: 3px solid var(--accent); }
+.app-kpi-card.ok { border-left: 3px solid var(--ok); }
+.app-kpi-card.warn { border-left: 3px solid var(--warn); }
+.app-kpi-card.danger { border-left: 3px solid var(--danger); }
+.app-kpi-label { font-size: var(--fs-tiny); color: var(--text-3); }
+.app-kpi-val { font-size: 18px; font-weight: 600; color: var(--text-1); font-variant-numeric: tabular-nums; line-height: 1.25; }
+.app-kpi-sub { font-size: var(--fs-tiny); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perf-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 960px) { .perf-grid-2 { grid-template-columns: minmax(0, 1fr); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pool-row, .pool-chip, .pool-models, .wb-tab, .set-nav-pill { transition: none; animation: none; }
 }

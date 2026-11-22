@@ -22,7 +22,7 @@ window.Pages.shots = {
 
 ## 可用全局
 
-- `API.engine(method, params)` → Promise<any>，调用 Python 引擎 24 个 RPC 方法之一。
+- `API.engine(method, params)` → Promise<any>，调用 Python 引擎 43 个 RPC 方法之一。
 - `API.pickFolder(start?)`、`API.saveText(name, content)`、`API.reveal(path)`、`API.openPath(path)`。
 - `API.configGet()` / `API.configSet(patch)`：应用配置（theme/lang/close_action/last_folder/scheduled）。
 - `API.getAutostart()` / `API.setAutostart(bool)` / `API.scheduleSet(enabled,time,folder)` / `API.scheduleGet()`。
@@ -41,14 +41,16 @@ window.Pages.shots = {
 - `UI.state`：`{ lang: 'zh-CN'|'en-US', theme: 'light'|'dark' }`。
 - `UI.onLangChange(fn)`：语言切换时回调（一般不需要）。
 
-## 第二轮改版：布局 / 折叠 / 右键菜单（必须遵守）
+## 第二轮改版与 1.43.0 三大布局骨架及全页生命周期契约（必须遵守）
 
-### 布局
+### 布局与生命周期
 
-- 页面内容由 `#scroll` 统一滚动，**页面自己不要再套 overflow:auto**，也不要写死高度。
-- 页面根 `page-body` 是 `flex column`，横向用 `.grid-2` / `.grid-3` / `.row`（自动换行，窄窗自动堆叠）。
-- 宽度不要写死 px；用 `minmax(0,1fr)`、`flex:1`、`gap` 撑满可用区域。**禁止大片留白**。
-- 每个页面最多 3 个顶层区块；超过就折叠进 `UI.section`。
+- 页面内容由 `#scroll` 统一滚动，**页面自己不要再套内部全页嵌套滚动**（`.log-viewer-pre` 等局部代码/日志查看器除外），也不要写死像素高度。
+- 页面排版必须归属以下三大标准骨架之一，禁止散装全宽堆叠或未登记临时类名：
+  1. **骨架 I · 分段定高工作台**：`.wb-bar` + `.wb-tabs` + `.wb-tab` + `.wb-pane` + `.card.stretch-card`（如 `tools`、`apps`、`shots`、`cache`、`archive`、`search`）。
+  2. **骨架 II · 双栏主从工作台**：`.split-wb` / `.split-wb.master-detail`（左栏编辑器/清单，右栏 `.log-viewer-pre`/预演面板；如 `rules`、`log`、`migrate`），窄屏 `<= 980px` 自动降级单列。
+  3. **骨架 III · 紧凑流式配置工作台**：`.set-nav-bar` + `.set-nav-pill` + `.set-card` + `.set-row`（`settings`）。
+- 全部 12 个页面（除 `ai` 整页对话外）在 `mount(root)` 内必须调用 `UI.setActions(..., UI.askBtn({...}))` 挂载顶栏 AI 副驾入口；`mount(root)` 必须返回 `unmount()` 并在其中清理定时器、`document` 监听、`App._onPageSize` 与 `UI.setActions()`；同时导出 `jump(payload)` 接收来自 AI / 页间跳转的上下文。
 
 ### 折叠区块
 
@@ -121,7 +123,9 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 | `startup.list` | `{refresh?}` | 扫描系统自启动项（注册表与启动目录），标记启用/失效状态 `{total, enabled_count, disabled_count, broken_count, items}` |
 | `startup.toggle` | `{name, kind?, location?, file_path?, enable?}` | 安全切换自启动启用/禁用（写入 StartupApproved 或软重命名） `{ok, enabled, name, kind, location, file_path, new_file_path?}` |
 | `startup.delete` | `{name, kind?, location?, file_path?}` | 清理自启动配置项或失效快捷方式（自动兼容 `.disabled` 快捷方式） `{ok, name, deleted}` |
-| `process.close` | `{name}` | 协同释放占用文件的进程（严格正则校验杜绝通配符全杀） `{ok, was_running, closed, name, detail}` |
+| `process.list` | `{aggregate?, search?}` | `{items:[{name,clean_name,pids,process_count,threads,memory,exe_path,is_system}],total_count,raw_count,total_memory}` 毫秒级进程快照 |
+| `process.close` | `{pid?, name?, force?}` | `{ok,was_running,closed,name,detail}` 协同释放占用文件的进程（严格正则校验与系统核心白名单保护） |
+| `system.performance` | `{}` | `{timestamp,drives,disk_summary,disk_io,network_io,memory,cpu}` 系统磁盘、内存、I/O 与 CPU 实时负载快照 |
 | `search.status` | `{}` | 查询索引服务整体状态、索引数量、覆盖目录及数据库信息 |
 | `search.index` | `{roots?, ids?, reuse?, full?}` | 触发一次索引建立或增量扫描（基于 indexwalk 或 Python 遍历） |
 | `search.query` | `{q, limit?, offset?}` | 关键词实时搜索匹配的文件与目录 `{items: [...], total}` |
@@ -154,14 +158,19 @@ $py='E:\AI\DeepSeekHarness多插件版\home\dsh-runtimes\dsh-primary-runtime\dep
 - 每个交互元素要有 hover / active / focus-visible 过渡；列表整体过渡，不逐行动画。
 - 文案精简，中文与英文都要写（`UI.T('中文','English')`）。
 
-## 页面要点（与 WPF 对齐）
+## 全部 12 页模块要点与 AI Agent 融合契约
 
-- **organize**：选择文件夹、递归/按内容/按日期/冲突策略、扫描预览（分组可折叠、全选/反选/清空、跳过详情）、开始整理、撤销上次、导出 CSV、打开/定位文件。
-- **shots**：扫描截图目录、按大小排序、勾选、预览（大图弹层）、清理到回收站、显示释放空间。
-- **cache**：缓存分组、勾选、按等级标注 safe/caution/advanced、预计释放空间、清理、结果汇总。
-- **search**：索引状态、选择索引根目录、建立/重建索引、关键词搜索、结果分页、定位文件。
-- **rules**：规则文件（JSON）编辑、校验、预览、执行、执行报告。
-- **apps**：已安装程序列表、空间画像（分类环形图与空间大户排行）、自启动项管理（已启用/已禁用/失效项过滤与状态切换/删除）、搜索过滤、卸载、残留扫描与清理；接入顶栏 SteveAvatar 问助手入口与 Tab 感知上下文；支持 `Pages.apps.jump({ tab, status })` 深度联动跳转。
-- **migrate**：源目录多选、目标目录、冲突策略、预演计划、执行、结果汇总。
-- **log**：日志文件列表（Rust 侧 `app-*.log`）、内容查看、刷新、清空、打开日志目录。
-- **settings**：主题、语言、关闭行为、数据目录、递归深度、冲突策略、日志保留、开机自启、定时整理、关于。
+> 所有改动须遵守 `docs\01-当前版\开发强约束与扩展规范手册.md`。AI 助手当前共开放 **26 个只读/导航工具**（`AIPrompt.TOOLS`）与 **25 个审批动作**（`AIRegistry`）。
+
+- **ai**：整页对话（Linear 风格：13 px 正文、查证过程默认收起、只用一种强调色），`navigate` 支持全 12 页直达与别名跳转（`clean` / `screenshots` / `logs` / `processes` / `startup` / `footprint`）；V2 免费模型同源池扩展 + 单 slug 指数冷却 + HTTP 200 空回复换源；V3 本地 Ollama 确定性尾备。
+- **organize**：选择文件夹/文件、三档预设（标准 / 全部文件 / 谨慎）、扫描预览、开始整理、撤销上次、导出 CSV、顶栏 `UI.askBtn`。
+- **shots**：扫描截图目录、按大小/时间排序、类型筛选、勾选预览、清理到回收站、顶栏 `UI.askBtn`、支持 `jump({ days, kind, action })`。
+- **cache**：`.card-title` 紧凑概览卡 + 分级（safe/caution/advanced）分组清理、顶栏 `UI.askBtn`、支持 `jump({ action: 'safe' | 'recommended' | 'scan' })`。
+- **tools**：骨架 I 分段工作台（`.wb-bar` 切换「超大文件 / 空文件夹 / 目录浏览」）、顶栏焦距感知 `UI.askBtn`、支持 `jump({ tab, dir, action })`。
+- **archive**：打开 / 解压 / 创建 / 预览压缩包、Esc 预览销毁清理、顶栏 `UI.askBtn`、支持 `jump({ paths })`。
+- **search**：索引状态、多目录管理、关键词搜索、分页底栏、顶栏 `UI.askBtn`、支持 `jump({ q })`。
+- **rules**：骨架 II 双栏工作台（`.split-wb`：左栏 YAML 编辑器、右栏校验 + 预演 + 运行报告）、顶栏 `UI.askBtn`、支持 `jump({ yaml, folder })` 与 `rules.draft` 提案写入。
+- **apps**：已安装程序 / 启动项管理 / 后台进程（`process.list`/`process.close`）/ 空间透视与系统画像（`system.performance` + 4 KPI 卡），切页销毁 0 定时器与监听器泄漏，顶栏 `UI.askBtn`、支持 `jump({ tab, status, filter })`。
+- **migrate**：合顶命令与目标目录条 + 平衡双栏（来源 vs 选项）、`planSlot`/`resultSlot` 局刷不丢输入焦点、顶栏 `UI.askBtn`、支持 `jump({ sources, destination })`。
+- **log**：骨架 II 主从双栏（`.split-wb.master-detail` 文件清单 + `.log-viewer-pre` 尾部查看器 + 引擎诊断与操作历史双列）、顶栏 `UI.askBtn`、支持 `jump({ file })`。
+- **settings**：骨架 III 吸顶分组快速跳转条（`.set-nav-bar`）+ 7 个手风琴分组、顶栏 `UI.askBtn`、支持 `jump({ section })`。

@@ -54,6 +54,20 @@ const engine = async (method, params) => {
   if (method === 'settings.get') return { conflict_policy: 'rename', recursive_depth: 3 };
   if (method === 'settings.set') return { ok: true, key: params.key, value: params.value };
   if (method === 'undo') return { restored: 2, failed: [], folder: params.path };
+  if (method === 'process.close') return { closed: true, pid: params.pid || 0, name: params.name || '' };
+  if (method === 'cache.list') {
+    return {
+      groups: [{
+        key: 'temp', name: '临时缓存',
+        items: [{ level: 'safe', exists: true, size: 1024000, paths: ['D:\\Users\\me\\AppData\\Local\\Temp\\x'] }]
+      }]
+    };
+  }
+  if (method === 'shots.scan') return { items: [{ path: 'D:\\Users\\me\\Pictures\\Screenshots\\old.png', size: 204800 }], size: 204800 };
+  if (method === 'clean.auto') return { ok: true, freed: 1228800 };
+  if (method === 'search.status') return { backend: 'everything', entries: [{ root: 'D:\\Users\\me\\Downloads', files: 120 }] };
+  if (method === 'search.selfcheck') return { ok: true, checked: 1 };
+  if (method === 'rules.validate') return { ok: true, rule_count: 1 };
   throw new Error('未模拟的引擎方法 ' + method);
 };
 
@@ -77,6 +91,12 @@ sandbox.AIGuard.configure({
   dataDir: 'C:\\Users\\me\\AppData\\Local\\整理助手数据',
   roots: ['C:\\', 'D:\\']
 });
+sandbox.AIRulesDraft = {
+  fill: (yaml) => { calls.push(['AIRulesDraft.fill', yaml]); return true; }
+};
+sandbox.App = {
+  jump: (page, payload) => { calls.push(['App.jump', page, payload]); }
+};
 
 const journal = [];
 const store = { aiStore: async (op, name, content) => { journal.push([op, name, content]); return ''; } };
@@ -88,7 +108,7 @@ const ok = (name, cond, extra) => out.push((cond ? 'PASS ' : 'FAIL ') + name + (
 const clearQueue = async () => { for (const q of props.list()) await props.deny(q.id, 'test'); };
 
 /* 1 目录与目录文本 */
-ok('registry 动作数 ' + actions.ids.length, actions.ids.length === 21);
+ok('registry 动作数 ' + actions.ids.length, actions.ids.length === 25);
 ok('catalog 可生成', String(actions.catalog()).length > 200);
 
 /* 2 正常提议 */
@@ -254,6 +274,30 @@ await clearQueue();
 const sharedA = sandbox.AIProposals.shared({ API, store, actions, policy: { mode: 'confirm' } });
 const sharedB = sandbox.AIProposals.shared({ API, store, actions, policy: { mode: 'confirm' } });
 ok('shared 返回同一个实例', sharedA === sharedB);
+
+/* 17 新增 4 个全栈闭环动作（process.close / clean.auto / search.selfcheck / rules.draft） */
+await clearQueue();
+props.setPolicy(Object.assign({}, props.getPolicy(), { mode: 'confirm' }));
+props.startTurn();
+const pProc = await props.propose({ action: 'process.close', args: { pid: 4321, name: 'demo.exe', force: false }, reason: '释放占用' });
+const cProc = pProc.ok ? await props.commit(pProc.proposal.id, { approvedBy: 'user' }) : { ok: false };
+ok('process.close 提议与确认执行通过', pProc.ok && cProc.ok && calls.some((c) => c[0] === 'process.close' && c[1].pid === 4321));
+
+props.startTurn();
+const pClean = await props.propose({ action: 'clean.auto', args: { cache: true, screenshots: true, days: 30 }, reason: '安全清理' });
+const cClean = pClean.ok ? await props.commit(pClean.proposal.id, { approvedBy: 'user' }) : { ok: false };
+ok('clean.auto 提议与确认执行通过', pClean.ok && cClean.ok && calls.some((c) => c[0] === 'clean.auto' && c[1].confirm === true));
+
+await clearQueue();
+props.startTurn();
+const pSelf = await props.propose({ action: 'search.selfcheck', args: { rebuild: true }, reason: '检查索引' });
+const cSelf = pSelf.ok ? await props.commit(pSelf.proposal.id, { approvedBy: 'user' }) : { ok: false };
+ok('search.selfcheck 提议与确认执行通过', pSelf.ok && cSelf.ok && calls.some((c) => c[0] === 'search.selfcheck'));
+
+props.startTurn();
+const pRule = await props.propose({ action: 'rules.draft', args: { yaml: "rules:\n  - name: 'test'\n    locations: '.'\n    actions:\n      - echo: 'ok'\n", folder: 'D:\\Users\\me\\Downloads' }, reason: '写入规则草稿' });
+const cRule = pRule.ok ? await props.commit(pRule.proposal.id, { approvedBy: 'user' }) : { ok: false };
+ok('rules.draft 校验并跳转填充编辑器', pRule.ok && cRule.ok && calls.some((c) => c[0] === 'AIRulesDraft.fill') && calls.some((c) => c[0] === 'App.jump' && c[1] === 'rules'));
 
 console.log(out.join('\n'));
 const failed = out.filter((x) => x.startsWith('FAIL')).length;

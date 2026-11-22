@@ -843,9 +843,37 @@
     window.addEventListener('blur', hide);
   }
 
+  function askBtn(opts) {
+    const o = opts || {};
+    const zh = (o.label && o.label[0]) || '问助手';
+    const en = (o.label && o.label[1]) || 'Ask AI';
+    const tip = o.title || T('让助手分析当前页面并给出可执行方案', 'Ask AI to analyze this view and suggest actions');
+    const mark = window.SteveAvatar
+      ? window.SteveAvatar.el({ size: 20, variant: 'btn' })
+      : icon('spark', 14);
+    return h('button', {
+      class: 'btn ghost ask-ai-btn',
+      type: 'button',
+      title: tip,
+      'aria-label': tip,
+      onclick: () => {
+        if (window.SteveAvatar && mark) window.SteveAvatar.spin(mark);
+        if (window.AIDrawer) {
+          window.AIDrawer.open({
+            title: tip,
+            question: o.question || '',
+            ctx: typeof o.ctx === 'function' ? o.ctx : (() => (o.ctx || {}))
+          });
+        } else {
+          toast(T('AI 助手尚未就绪', 'AI assistant is not ready yet'), 'warn');
+        }
+      }
+    }, mark, h('span', null, T(zh, en)));
+  }
+
   window.UI = {
     h, T, fmtBytes, fmtSize: fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
-    skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, setLang, onLangChange,
+    skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, askBtn, setLang, onLangChange,
     menu, attachMenu, closeMenu, modal, preview, closePreview,
     pageSize, pageSizePick, PAGE_SIZES,
     errText, copy,

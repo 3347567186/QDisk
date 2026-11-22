@@ -411,6 +411,19 @@ class TestOrganize(EngineCase):
             self.assertNotEqual(rel, name, name)
             self.assertIn(os.sep, rel, name)
 
+    def test_dry_run_false_compat_moves_files(self):
+        """兼容 Rust 托盘/定时任务传入 dry_run=false（未显式传 confirm）时也能执行整理。"""
+        folder = self.new_folder()
+        self.fill(folder)
+        params = self.scan_params(folder)
+        params["dry_run"] = False
+        r = self.engine.call({"id": 23, "method": "organize", "params": params})
+        self.assertTrue(r["ok"], r.get("error") or self.engine.stderr_text())
+        res = r["result"]
+        self.assertFalse(res["dry_run"])
+        self.assertEqual(res["moved"], 3)
+        self.assertEqual(res["failed"], [])
+
 
 class TestIndexWriteThrough(EngineCase):
     """软件自己动了磁盘，索引必须立刻认账。

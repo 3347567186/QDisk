@@ -614,7 +614,17 @@
       }
       API.reveal(state.folder).catch((e) => toast(errText(e), 'error'));
     });
-    setActions(btnUndo, btnExport, btnOpen);
+    const btnAskTop = UI.askBtn({
+      title: T('问助手 · 整理', 'Ask AI · Tidy'),
+      question: T('请根据当前扫描分类给出整理建议或规则优化方案。', 'Suggest how to organize these files or optimize the rules.'),
+      ctx: () => ({
+        page: '整理文件',
+        dir: state.sources[0] ? state.sources[0].path : '',
+        count: state.sources.length,
+        note: state.groups && state.groups.size ? ('已识别 ' + state.groups.size + ' 类') : ''
+      })
+    });
+    setActions(btnUndo, btnExport, btnOpen, btnAskTop);
 
     /* 行内状态：复选框登记表（只登记已渲染的行） */
     const rowChecks = new Map();   // key → checkbox
@@ -1671,6 +1681,11 @@
       const items = paths.map(function (p) { return { path: p, kind: guessKind(p) }; });
       addSources(items);
       await doScan();
+    };
+
+    return function unmount() {
+      liveJump = null;
+      setActions();
     };
   }
 

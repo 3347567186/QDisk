@@ -821,14 +821,26 @@
       navigate: {
         label: '跳转页面',
         run: async (args) => {
-          const page = String((args && args.page) || '').trim();
-          const okPages = ['organize', 'tools', 'search', 'apps', 'archive', 'clean', 'settings', 'ai'];
+          const rawPage = String((args && args.page) || '').trim().toLowerCase();
+          const ALIASES = {
+            clean: { page: 'cache' },
+            screenshots: { page: 'shots' },
+            logs: { page: 'log' },
+            processes: { page: 'apps', tab: 'procs' },
+            procs: { page: 'apps', tab: 'procs' },
+            startup: { page: 'apps', tab: 'startup' },
+            footprint: { page: 'apps', tab: 'footprint' }
+          };
+          const mapped = ALIASES[rawPage] || { page: rawPage };
+          const page = mapped.page;
+          const okPages = ['organize', 'shots', 'cache', 'tools', 'archive', 'search', 'rules', 'apps', 'migrate', 'log', 'settings', 'ai'];
           if (okPages.indexOf(page) < 0) throw new Error('page 只能是 ' + okPages.join(' / '));
-          const payload = (args && args.payload) || args || {};
+          const extra = (args && args.payload && typeof args.payload === 'object') ? args.payload : {};
+          const payload = Object.assign({}, args || {}, extra, mapped.tab ? { tab: mapped.tab } : {});
           if (typeof deps.navigate === 'function') deps.navigate(page, payload);
           else if (root.App && typeof root.App.jump === 'function') root.App.jump(page, payload);
           else location.hash = '#' + page;
-          return { page, opened: true };
+          return { page, tab: payload.tab || '', opened: true };
         },
         summary: (args) => `跳转 ${args.page}`
       },
@@ -929,6 +941,166 @@
           return fit({ count: (r && r.count) || items.length, indexed: r && r.indexed, items }, CAP);
         },
         summary: (args, r) => `索引 ${r.count} 个目录`
+      },
+
+      process_list: {
+        label: '运行进程',
+        run: async (args) => {
+          const filter = String((args && args.filter) || '').trim();
+          const sort = String((args && args.sort) || 'mem').trim().toLowerCase();
+          const r = await withTimeout(API.engine('process.list', { aggregate: true, search: filter }), TIMEOUT, '读取进程列表');
+          let raw = ((r && r.items) || []).slice();
+          if (sort === 'threads' || sort === 'cpu') {
+            raw.sort((a, b) => (Number(b.threads) || 0) - (Number(a.threads) || 0));
+          }
+          const items = raw.map((it) => ({
+            name: it.name || '',
+            pid: Array.isArray(it.pids) && it.pids.length ? it.pids[0] : (it.pid || 0),
+            count: it.process_count || 1,
+            threads: it.threads || 0,
+            memory: fmtBytes(it.memory || 0),
+            exe_path: it.exe_path || '',
+            is_system: it.is_system === true
+          }));
+          const want = Math.min(Math.max(Number(args && args.limit) || 20, 1), 50);
+          const off = Math.max(0, Math.floor(Number(args && args.offset) || 0));
+          return pageFit({
+            total_groups: (r && r.total_count) || items.length,
+            total_processes: (r && r.raw_count) || items.length,
+            total_memory: fmtBytes((r && r.total_memory) || 0)
+          }, items, off, want);
+        },
+        summary: (args, r) => `进程 ${r.total_processes || 0} 个 · ${r.total_memory || '0 B'}`
+      },
+
+      system_status: {
+        label: '系统状态',
+        run: async () => {
+          const r = await withTimeout(API.engine('system.performance', {}), TIMEOUT, '读取系统性能');
+          const mem = (r && r.memory) || {};
+          const cpu = (r && r.cpu) || {};
+          const ds = (r && r.disk_summary) || {};
+          const drives = ((r && r.drives) || []).slice(0, 8).map((d) => ({
+            drive: d.drive,
+            total: fmtBytes(d.total || 0),
+            used: fmtBytes(d.used || 0),
+            free: fmtBytes(d.free || 0),
+            percent: Number(d.percent) || 0,
+            is_system: !!d.is_system
+          }));
+          return fit({
+            cpu_percent: Number(cpu.percent) || 0,
+            cpu_cores: Number(cpu.cores) || 0,
+            memory_used: fmtBytes(mem.used || 0),
+            memory_total: fmtBytes(mem.total || 0),
+            memory_available: fmtBytes(mem.available || 0),
+            memory_percent: Number(mem.percent) || 0,
+            disk_used: fmtBytes(ds.used || 0),
+            disk_total: fmtBytes(ds.total || 0),
+            disk_free: fmtBytes(ds.free || 0),
+            disk_percent: Number(ds.percent) || 0,
+            drives
+          }, CAP);
+        },
+        summary: (args, r) => `CPU ${r.cpu_percent}% · 内存 ${r.memory_percent}%`
+      },
+
+      app_leftovers: {
+        label: '卸载残留扫描',
+        run: async (args) => {
+          const name = String((args && args.name) || '').trim();
+          const path = String((args && args.path) || '').trim();
+          if (!name && !path) throw new Error('缺少参数 name（软件名称）');
+          const r = await withTimeout(API.engine('apps.leftovers', { name, path }), 15000, '扫描软件残留');
+          const dirs = ((r && r.dirs) || []).slice(0, 12);
+          const regs = ((r && r.regs) || []).slice(0, 12).map((x) => (x.hive ? x.hive + '\\' : '') + (x.key || ''));
+          return fit({
+            name: (r && r.name) || name,
+            dir_count: ((r && r.dirs) || []).length,
+            reg_count: ((r && r.regs) || []).length,
+            dirs,
+            regs
+          }, CAP);
+        },
+        summary: (args, r) => `残留 ${(r.dir_count || 0)} 目录 / ${(r.reg_count || 0)} 注册表项`
+      },
+
+      migrate_preview: {
+        label: '迁移预演',
+        run: async (args) => {
+          const sources = Array.isArray(args && args.sources) ? args.sources.filter(Boolean).map(String) : [];
+          const destination = String((args && args.destination) || '').trim();
+          if (!sources.length) throw new Error('缺少参数 sources（来源路径数组）');
+          if (!destination) throw new Error('缺少参数 destination（目标目录）');
+          const mode = String((args && args.mode) || 'move').toLowerCase() === 'copy' ? 'copy' : 'move';
+          const conflict = ['skip', 'overwrite'].includes(String((args && args.conflict) || '').toLowerCase())
+            ? String(args.conflict).toLowerCase() : 'rename';
+          const r = await withTimeout(API.engine('migrate.plan', {
+            sources: sources.slice(0, 50), destination, target: destination, mode, conflict
+          }), 20000, '预演迁移计划');
+          return fit({
+            total_files: (r && r.total_files) || 0,
+            total_size: fmtBytes((r && r.total_size) || 0),
+            cross_volume: !!(r && r.cross_volume),
+            jobs: ((r && r.jobs) || []).slice(0, 6).map((j) => ({
+              source: j.source, target: j.target, items: j.items, size: fmtBytes(j.size || 0), conflict: !!j.conflict
+            })),
+            blocked: ((r && r.blocked) || []).slice(0, 6)
+          }, CAP);
+        },
+        summary: (args, r) => `迁移预演 · ${r.total_files || 0} 文件 (${r.total_size || '0 B'})`
+      },
+
+      rules_preview: {
+        label: '规则校验与预演',
+        run: async (args) => {
+          const text = String((args && args.text) || '').trim();
+          const folder = String((args && args.folder) || '').trim();
+          if (!text) throw new Error('缺少参数 text（YAML 规则文本）');
+          const val = await withTimeout(API.engine('rules.validate', { text }), TIMEOUT, '校验规则');
+          if (!val || !val.ok) {
+            return fit({
+              ok: false,
+              message: (val && val.message) || '规则校验失败',
+              errors: ((val && val.errors) || []).slice(0, 6)
+            }, CAP);
+          }
+          const out = { ok: true, rule_count: val.rule_count || 0 };
+          if (folder) {
+            const pre = await withTimeout(API.engine('rules.preview', { text, folder }), 20000, '预演规则');
+            out.folder = folder;
+            out.total = (pre && pre.total) || 0;
+            out.skipped = (pre && pre.skipped) || 0;
+            out.moves = ((pre && pre.moves) || []).slice(0, 8);
+          }
+          return fit(out, CAP);
+        },
+        summary: (args, r) => r.ok ? `规则有效 (${r.rule_count || 0} 条)` : '规则校验未通过'
+      },
+
+      read_logs: {
+        label: '读取运行日志',
+        run: async (args) => {
+          const list = await withTimeout(API.logList(), TIMEOUT, '读取日志列表');
+          const files = (Array.isArray(list) ? list : []).slice(0, 12).map((f) => ({
+            name: f.name, path: f.path, size: fmtBytes(f.size || 0), mtime: f.mtime ? fmtAge(f.mtime) : ''
+          }));
+          const want = String((args && args.name) || '').trim().toLowerCase();
+          if (!want) return fit({ count: files.length, files }, CAP);
+          const hit = (Array.isArray(list) ? list : []).find((f) =>
+            String(f.name || '').toLowerCase().includes(want) || String(f.path || '').toLowerCase() === want);
+          if (!hit) return fit({ count: files.length, files, note: '没找到匹配日志：' + want }, CAP);
+          const rawText = await withTimeout(API.logRead(hit.path), TIMEOUT, '读取日志内容');
+          const tail = Math.min(Math.max(Number(args && args.tail) || 40, 5), 120);
+          const lines = String(rawText || '').split(/\r?\n/).filter(Boolean).slice(-tail);
+          return fit({
+            file: hit.name,
+            path: hit.path,
+            size: fmtBytes(hit.size || 0),
+            lines: lines.join('\n').slice(-Math.max(300, CAP - 220))
+          }, CAP);
+        },
+        summary: (args, r) => r.file ? `日志 ${r.file}` : `日志 ${r.count || 0} 个文件`
       }
     };
 

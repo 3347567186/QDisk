@@ -146,8 +146,31 @@ const fakeLocalStorage = {
   removeItem: (k) => { delete storage[k]; }
 };
 
+const activeIntervals = new Set();
+const docListeners = new Map();
+const trackedSetInterval = (fn, ms, ...args) => {
+  const id = setInterval(fn, ms, ...args);
+  activeIntervals.add(id);
+  return id;
+};
+const trackedClearInterval = (id) => {
+  activeIntervals.delete(id);
+  return clearInterval(id);
+};
+const trackedDocAdd = (evt, cb) => {
+  if (!docListeners.has(evt)) docListeners.set(evt, []);
+  const arr = docListeners.get(evt);
+  if (!arr.includes(cb)) arr.push(cb);
+};
+const trackedDocRemove = (evt, cb) => {
+  const arr = docListeners.get(evt);
+  if (arr) docListeners.set(evt, arr.filter((x) => x !== cb));
+};
+
 const sandbox = {
-  console, setTimeout, clearTimeout, setInterval, clearInterval,
+  console, setTimeout, clearTimeout,
+  setInterval: trackedSetInterval,
+  clearInterval: trackedClearInterval,
   Date, Math, JSON, Promise, Number, String, Object, Array, Set, Map, isNaN, Intl,
   performance: globalThis.performance,
   Node: FakeNode,
@@ -161,8 +184,8 @@ const sandbox = {
     createElementNS: (ns, t) => new FakeElement(t),
     createTextNode: (txt) => { const el = new FakeElement('#text'); el.textContent = txt; return el; },
     getElementById: () => new FakeElement('div'),
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener: trackedDocAdd,
+    removeEventListener: trackedDocRemove,
     head: new FakeElement('head'),
     body: new FakeElement('body'),
     querySelector: () => new FakeElement('div'),
@@ -286,32 +309,62 @@ if (sandbox.UI.fmtBytes(1048576) !== '1.0 MB') throw new Error('fmtBytes(1048576
 if (sandbox.UI.fmtSize(1048576) !== '1.0 MB') throw new Error('fmtSize(1048576) 结果不符合预期');
 
 let count = 0;
-for (const [id, page] of Object.entries(sandbox.Pages)) {
-  const holder = new FakeElement('div');
-  try {
-    if (typeof page.mount === 'function') {
-      const ret = await page.mount(holder);
-      if (typeof ret === 'function') ret();
+const pageIds = Object.keys(sandbox.Pages);
+if (pageIds.length !== 12) {
+  console.error(`[页面计数异常] 期望 12 页，实际 ${pageIds.length}: ${pageIds.join(', ')}`);
+  process.exit(1);
+}
+
+for (const round of [1, 2]) {
+  count = 0;
+  for (const [id, page] of Object.entries(sandbox.Pages)) {
+    const holder = new FakeElement('div');
+    const beforeInt = activeIntervals.size;
+    const beforeVis = (docListeners.get('visibilitychange') || []).length;
+    const beforeKey = (docListeners.get('keydown') || []).length;
+    try {
+      if (typeof page.mount === 'function') {
+        const ret = await page.mount(holder);
+        if (id === 'apps' && typeof page.jump === 'function') {
+          await page.jump({ tab: 'footprint' });
+        }
+        if (typeof ret === 'function') ret();
+      }
+      if (typeof page.unmount === 'function') {
+        page.unmount();
+      }
+      const leakInt = activeIntervals.size - beforeInt;
+      const leakVis = (docListeners.get('visibilitychange') || []).length - beforeVis;
+      const leakKey = (docListeners.get('keydown') || []).length - beforeKey;
+      /* round=1 时 ai 会懒创建应用级单例 sharedChat（SteveAvatar + AIComposer 常驻），
+         round=2 起包括 ai 在内的全部 12 页监听器/定时器增量必须严格归零。 */
+      const allowSingleton = (round === 1 && id === 'ai');
+      if (leakInt > 0 || (!allowSingleton && (leakVis > 0 || leakKey > 0))) {
+        console.error(`[资源泄漏 round=${round}] 页面 ${id} unmount 后残留: intervals=${leakInt}, visibilitychange=${leakVis}, keydown=${leakKey}`);
+        process.exit(1);
+      }
+      count++;
+    } catch (err) {
+      console.error(`[挂载崩溃 round=${round}] 页面 ${id}:`, err);
+      process.exit(1);
     }
-    if (typeof page.unmount === 'function') {
-      page.unmount();
-    }
-    count++;
-  } catch (err) {
-    console.error(`[挂载崩溃] 页面 ${id}:`, err);
-    process.exit(1);
   }
 }
 
 // 核心回归门禁：已安装程序与自启（apps）在具备内存缓存时再次挂载（warm mount），必须正常呈现且不崩溃
 try {
   const warmHolder = new FakeElement('div');
+  const beforeWarmInt = activeIntervals.size;
   const retWarm = await sandbox.Pages.apps.mount(warmHolder);
   if (typeof retWarm === 'function') retWarm();
+  if (activeIntervals.size > beforeWarmInt) {
+    console.error('[二次挂载定时器泄漏] apps warm mount 未释放 interval');
+    process.exit(1);
+  }
 } catch (err) {
   console.error('[内存缓存二次挂载回归失败] apps.mount:', err);
   process.exit(1);
 }
 
-console.log(`结果：${count}/${count} 页面挂载与渲染全绿（0 崩溃、0 引用错误，二次缓存挂载验证通过）`);
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载验证通过）`);
 process.exit(0);

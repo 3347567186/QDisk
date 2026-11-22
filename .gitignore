@@ -13,6 +13,9 @@
 __pycache__/
 *.pyc
 /src/engine/数据/
+/src/engine/in.txt
+/.tmp/
+target/
 
 # 杂项
 *.pdb

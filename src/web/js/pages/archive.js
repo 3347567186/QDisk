@@ -1781,7 +1781,11 @@
 
     refreshRar();
     if (S.info) renderOpen();
-    setActions();
+    setActions(UI.askBtn({
+      title: T('问助手 · 压缩包', 'Ask AI · Archives'),
+      question: T('帮我分析当前压缩包结构或推荐解压/打包方案。', 'Help me inspect this archive or choose extract/compress options.'),
+      ctx: () => ({ page: '压缩包', tab: S.tab, path: S.path, entries: S.info ? S.info.total : 0 })
+    }));
 
     dropLayer = buildDropLayer();
     document.body.appendChild(dropLayer);
@@ -1797,6 +1801,7 @@
 
   function unmount() {
     destroyed = true;
+    setActions();
     if (S.busy) {
       // 离开页面会中断任务：把状态收干净，回到本页时不能停在「永远处理中」
       API.archiveCancel().catch(() => {});

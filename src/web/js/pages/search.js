@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, toast, empty, table, attachMenu, menu, skeleton } = UI;
+  const { h, T, icon, toast, empty, table, attachMenu, menu, skeleton, setActions } = UI;
 
   let PAGE_SIZE = 15;
   const STEP = 500;
@@ -47,7 +47,6 @@
         items: [],
         limit: 1000,
         page: 0,
-        elapsed: 0,
         source: '',
         hint: '',
         searched: false,
@@ -68,8 +67,8 @@
       /* ---------- 索引：清单、范围、详情都集中在这一处 ---------- */
       function statItem(k, v, cls) {
         return h('div', { class: 'stat' },
-          h('div', { class: 'k', text: k }),
-          h('div', { class: 'v' + (cls ? ' ' + cls : ''), text: v }));
+          h('div', { class: 'v' + (cls ? ' ' + cls : ''), text: v }),
+          h('div', { class: 'k', text: k }));
       }
 
       // 32 ms 显示成 0.0s 没有信息量：一秒以下按毫秒显示
@@ -616,9 +615,27 @@
         }
       };
 
+      setActions(UI.askBtn({
+        title: T('问助手 · 文件搜索', 'Ask AI · Search'),
+        question: T('帮我按关键词或索引状态查找目标文件，或者排查搜索/Everything 异常。', 'Help me search for files or diagnose search / Everything index status.'),
+        ctx: () => ({
+          page: '搜索',
+          query: state.query || state.lastQuery,
+          backend: state.backend,
+          indexed: state.indexed,
+          dirs: state.entries.map((e) => e.path)
+        })
+      }));
+
       bindBlankMenu();
       paint();
       await refreshStatus();
+
+      return function unmount() {
+        liveJump = null;
+        active = null;
+        setActions();
+      };
     },
 
     jump(payload) { return liveJump ? liveJump(payload || {}) : undefined; }

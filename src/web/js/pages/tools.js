@@ -124,63 +124,39 @@
     bigInput.addEventListener('focus', () => { lastActiveSection = 'big'; });
     bigBtn.addEventListener('click', () => { lastActiveSection = 'big'; });
 
-    /* 页面级常驻【问助手】入口（置顶于窗口右上角，永不随卡片折叠而消失） */
-    const askMark = window.SteveAvatar
-      ? window.SteveAvatar.el({ size: 24, variant: 'btn' })
-      : icon('spark');
-    const topAskBtn = h('button', {
-      class: 'btn ghost',
-      title: T('让助手分析空间占用、大文件与空文件夹', 'Ask AI about space, large files and empty folders')
-    }, askMark, T('问助手', 'Ask AI'));
-
-    function askAssistantGeneral() {
-      if (window.SteveAvatar) {
-        window.SteveAvatar.spin(askMark);
-      }
-      if (lastActiveSection === 'empty' && emptyInput && (emptyItems.length || emptyInput.value.trim())) {
-        window.AIDrawer.open({
-          title: T('问助手 · 空文件夹', 'Ask AI · Empty folders'),
-          ctx: () => ({
+    /* 页面级常驻【问助手】入口（置顶于窗口右上角，永不随视图切换而消失） */
+    const topAskBtn = UI.askBtn({
+      title: T('让助手分析空间占用、大文件与空文件夹', 'Ask AI about space, large files and empty folders'),
+      ctx: () => {
+        if (lastActiveSection === 'empty') {
+          return {
             page: '空间工具',
             tool: '空文件夹清理',
-            dir: emptyInput.value.trim(),
+            dir: emptyInput ? emptyInput.value.trim() : '',
             count: emptyItems.length,
             note: emptyItems.length ? ('已扫描出 ' + emptyItems.length + ' 个空文件夹') : ''
-          })
-        });
-      } else if (dv && dv.getPath() && lastActiveSection === 'browse') {
-        const p = dv.getPath();
-        window.AIDrawer.open({
-          title: T('问助手 · 目录浏览', 'Ask AI · Folder view'),
-          ctx: () => ({
+          };
+        }
+        if (lastActiveSection === 'browse' && dv && dv.getPath()) {
+          return {
             page: '空间工具',
             tool: '文件夹浏览',
-            dir: p
-          })
-        });
-      } else {
+            dir: dv.getPath()
+          };
+        }
         const list = bigItems || [];
         const total = list.reduce((s, x) => s + (x.size || 0), 0);
-        window.AIDrawer.open({
-          title: T('问助手 · 空间工具', 'Ask AI · Space tools'),
-          ctx: () => ({
-            page: '空间工具',
-            tool: '大文件排行',
-            dir: bigInput.value.trim() || (emptyInput ? emptyInput.value.trim() : ''),
-            count: list.length,
-            size: list.length ? fmtBytes(total) : '',
-            files: list.slice(0, 8).map((x) => x.name)
-          })
-        });
+        return {
+          page: '空间工具',
+          tool: '大文件排行',
+          dir: bigInput.value.trim() || (emptyInput ? emptyInput.value.trim() : ''),
+          count: list.length,
+          size: list.length ? fmtBytes(total) : '',
+          files: list.slice(0, 8).map((x) => x.name)
+        };
       }
-    }
-    topAskBtn.onclick = askAssistantGeneral;
+    });
 
-    const askBtn = h('button', {
-      class: 'btn ghost',
-      title: T('让助手解释这批文件能不能删', 'Ask the assistant about these files')
-    }, T('问助手', 'Ask AI'));
-    askBtn.onclick = askAssistantGeneral;
     bigBrowse.onclick = async () => {
       const d = await API.pickFolder();
       if (d) { bigInput.value = d; bigInput.focus(); }
@@ -193,13 +169,15 @@
         'Pick a folder to list the 50 largest files with type, owner and risk')));
     const bigHint = h('div', { class: 'muted small' }, '');
 
-    const bigSection = section(T('大文件排行', 'Largest files'),
-      h('div', { class: 'stack' },
-        h('div', { class: 'toolbar' }, bigInput, bigBrowse, bigBtn, sigBtn, askBtn),
-        bigFilter,
-        bigHint,
-        bigList),
-      { open: true, hint: T('只读，不删除任何东西', 'Read-only') }
+    const bigCard = h('div', { class: 'card stretch-card' },
+      h('div', { class: 'card-title' },
+        h('h2', null, T('大文件排行', 'Largest files')),
+        h('span', { class: 'hint' }, T('只读扫描，标注文件类型、归属软件与签名风险', 'Read-only scan with type, owner and signature risk'))
+      ),
+      h('div', { class: 'toolbar' }, bigInput, bigBrowse, bigBtn, sigBtn),
+      bigFilter,
+      bigHint,
+      bigList
     );
 
     /* ---------------- 空文件夹 ---------------- */
@@ -226,26 +204,27 @@
     const emptyHint = h('div', { class: 'muted small' }, '');
     let emptyDepth = 3;
 
-    const emptySection = section(T('空文件夹清理', 'Empty folders'),
-      h('div', { class: 'stack' },
-        h('div', { class: 'toolbar' }, emptyInput, emptyBrowse, emptyBtn,
-          h('span', { class: 'spacer' }), depthSeg, emptySel, emptyDel),
-        emptyHint,
-        emptyList),
-      { open: false, hint: T('只删空目录，1–3 层内判断', 'Empty dirs only, 1–3 levels deep') }
+    const emptyCard = h('div', { class: 'card stretch-card' },
+      h('div', { class: 'card-title' },
+        h('h2', null, T('空文件夹清理', 'Empty folders')),
+        h('span', { class: 'hint' }, T('只删空目录，1–3 层内判断', 'Empty dirs only, 1–3 levels deep'))
+      ),
+      h('div', { class: 'toolbar' }, emptyInput, emptyBrowse, emptyBtn,
+        h('span', { class: 'spacer' }), depthSeg, emptySel, emptyDel),
+      emptyHint,
+      emptyList
     );
 
     const jumpBox = h('div', { class: 'ai-jump', hidden: true });
 
-    /* ---------------- 文件夹浏览（应用内） ----------------
-       整理跑完会把文件移进 01_安装包程序 这类分类子文件夹，而以前应用里
-       没有任何地方能看见它们 —— 结果位置的入口只会拉起系统资源管理器。
-       这一块就是那个缺口：只读、能一层层进去、能翻页、能被跳转命中。 */
+    /* ---------------- 文件夹浏览（应用内） ---------------- */
     const dvHost = h('div', { class: 'stack' });
-    const browseSection = section(
-      '文件夹浏览',
-      dvHost,
-      { open: true, hint: '在应用内一层层看，不用跳资源管理器' }
+    const browseCard = h('div', { class: 'card stretch-card' },
+      h('div', { class: 'card-title' },
+        h('h2', null, T('文件夹浏览', 'Folder view')),
+        h('span', { class: 'hint' }, T('在应用内一层层看，不用跳资源管理器', 'Browse folders in-app without leaving TidyAssistant'))
+      ),
+      dvHost
     );
     let dv = null;
     function ensureDv() {
@@ -254,16 +233,8 @@
       return dv;
     }
 
-    /* 一进页面就把浏览区建出来。
-       以前只在「从结果位置跳过来」时才 ensureDv()，于是用户自己点开「空间工具」
-       看到的是一个只有标题的空块（1.41.8 真机就是这样），得先跳一次才有内容。
-       没有初始路径时 dirview 自己画一句「选一个文件夹」，不是白板。 */
     ensureDv();
 
-    /* 没被跳转到具体目录时，退回上一次用过的那一个。
-       用户刚在「整理文件」里扫过某个文件夹，接着点「空间工具」多半就是想知道
-       东西去哪了 —— 让他重新选一次目录纯属白费一步。configGet 是异步的，
-       回来时如果已经有人 setPath（跳转分支），就不覆盖。 */
     Promise.resolve()
       .then(() => API.configGet())
       .then((cfg) => {
@@ -273,17 +244,48 @@
       })
       .catch(() => {});
 
+    /* ---------------- 骨架 I：三分段定高工作台 ---------------- */
+    const tabBig = h('button', { class: 'wb-tab active', type: 'button', onclick: () => switchToolTab('big') },
+      icon('scan', 14), h('span', null, T('大文件排行', 'Largest files')));
+    const tabEmpty = h('button', { class: 'wb-tab', type: 'button', onclick: () => switchToolTab('empty') },
+      icon('folder', 14), h('span', null, T('空文件夹清理', 'Empty folders')));
+    const tabBrowse = h('button', { class: 'wb-tab', type: 'button', onclick: () => switchToolTab('browse') },
+      icon('layers', 14), h('span', null, T('文件夹浏览', 'Folder view')));
+    const wbMeta = h('span', { class: 'wb-meta' }, T('按体积排查大户 · 只读分析不误删', 'Inspect space hogs safely'));
+    const wbBar = h('div', { class: 'wb-bar' },
+      h('div', { class: 'wb-tabs', role: 'tablist' }, tabBig, tabEmpty, tabBrowse),
+      wbMeta
+    );
+
+    const paneBig = h('div', { class: 'wb-pane' }, bigCard);
+    const paneEmpty = h('div', { class: 'wb-pane', hidden: true }, emptyCard);
+    const paneBrowse = h('div', { class: 'wb-pane', hidden: true }, browseCard);
+
+    function switchToolTab(tab) {
+      const target = (tab === 'empty' || tab === 'browse') ? tab : 'big';
+      lastActiveSection = target;
+      tabBig.classList.toggle('active', target === 'big');
+      tabEmpty.classList.toggle('active', target === 'empty');
+      tabBrowse.classList.toggle('active', target === 'browse');
+      paneBig.hidden = target !== 'big';
+      paneEmpty.hidden = target !== 'empty';
+      paneBrowse.hidden = target !== 'browse';
+      wbMeta.textContent = target === 'big'
+        ? T('按体积排查大户 · 签名校验安全风险', 'Largest 50 files with signature & risk tags')
+        : (target === 'empty'
+          ? T('1–3 层深度排查 · 重要目录受保护锁定', 'Find empty folders safely (1–3 levels)')
+          : T('应用内层级浏览 · 支持右键操作与 AI 定位', 'In-app tree view with AI jump markers'));
+    }
+
+    root.classList.add('page-fill');
+    root.appendChild(wbBar);
     root.appendChild(jumpBox);
-    root.appendChild(browseSection);
-    root.appendChild(bigSection);
-    root.appendChild(emptySection);
+    root.appendChild(paneBig);
+    root.appendChild(paneEmpty);
+    root.appendChild(paneBrowse);
     setActions(topAskBtn);
 
-    /* ---------------- 来自助手的跳转 ----------------
-       AI 的「去工具页」以前只切页，什么也不带，用户过来看到的是一张空表。
-       现在这份载荷里有它提到过的位置和它想干的事，规则只有一条：
-       跳进来必须**看得见东西**——先把位置列出来，再把目录填进扫描框、立刻扫，
-       扫完把助手提到的行标出来并滚到它。 */
+    /* ---------------- 来自助手的跳转 ---------------- */
     const stripSlash = (p) => String(p || '').replace(/[\\/]+$/, '');
     const parentOf = (p) => {
       const s = stripSlash(p);
@@ -293,22 +295,6 @@
     const isFile = (p) => (window.AIEntries && window.AIEntries.kindOf
       ? window.AIEntries.kindOf(stripSlash(p)) === 'file'
       : /\.[A-Za-z0-9]{1,8}$/.test(stripSlash(p)));
-
-    function openSection(sec) {
-      if (!sec) return;
-      const head = sec.querySelector('.section-head');
-      if (head && head.getAttribute('aria-expanded') !== 'true') {
-        head.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      }
-    }
-
-    function closeSection(sec) {
-      if (!sec) return;
-      const head = sec.querySelector('.section-head');
-      if (head && head.getAttribute('aria-expanded') === 'true') {
-        head.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      }
-    }
 
     function paintJump(paths, why, dir) {
       const chipOf = (p) => (window.AIEntries && window.AIEntries.chip
@@ -330,10 +316,9 @@
           dir ? h('button', {
             class: 'btn sm ghost',
             onclick: () => {
-              openSection(browseSection);
+              switchToolTab('browse');
               const view = ensureDv();
               if (view) view.showPath(dir, paths[0] || '');
-              if (browseSection.scrollIntoView) browseSection.scrollIntoView({ block: 'nearest' });
             }
           }, icon('scan', 13), h('span', {}, T('在目录树中浏览', 'Browse in tree'))) : null,
           h('button', {
@@ -344,12 +329,8 @@
       jumpBox.hidden = false;
     }
 
-    /* 命中判定：同一个路径，或者「AI 给的是目录、这一行在目录里」。
-       后者很常见——助手说「最大的文件都在 release 目录」，带过来的是目录本身，
-       要标出来的是它下面的那些文件。 */
     function hitSet(paths) {
       const list = paths.map((p) => normPath(p)).filter(Boolean);
-      /* 点名了具体文件时只标那几个：把整个目录的行都点亮等于没说清楚是哪个 */
       const named = list.some((x) => paths.some((p) => normPath(p) === x && isFile(p)));
       return (rowPath) => {
         const p = normPath(rowPath || '');
@@ -389,40 +370,38 @@
     async function applyJump(data) {
       const paths = ((data && data.paths) || [])
         .filter(Boolean).map((p) => stripSlash(String(p)));
-      if (!paths.length) return;
-      const want = String((data && data.action) || 'check');
+      if (!paths.length && !(data && data.dir) && !(data && data.tab)) return;
+      const want = String((data && (data.tab || data.action)) || 'check');
+      if (!paths.length && data && data.tab) {
+        switchToolTab(data.tab);
+        return;
+      }
       const files = paths.filter(isFile);
       const dirs = paths.filter((p) => !isFile(p));
-      const dir = dirs[0] || parentOf(files[0]) || '';
-      paintJump(paths, String((data && data.why) || ''), dir);
+      const dir = dirs[0] || parentOf(files[0]) || stripSlash(String((data && data.dir) || ''));
+      if (paths.length) paintJump(paths, String((data && data.why) || ''), dir);
 
-      /* 目录浏览：整理页的「去看结果」和右键「在应用内看」都走这里。
-         要先开这一块再 setPath —— 藏在收起的 section 里 setPath 也能跑，
-         但用户看不见，等于没发生。 */
-      if (want === 'browse' || (data && data.dir)) {
-        openSection(browseSection);
+      if (want === 'browse' || (data && data.dir && want !== 'empty' && want !== 'big')) {
+        switchToolTab('browse');
         const view = ensureDv();
         if (view) {
           const start = stripSlash(String((data && data.dir) || dir || ''));
           if (start) view.showPath(start, paths[0] || '');
         }
-        if (browseSection.scrollIntoView) browseSection.scrollIntoView({ block: 'nearest' });
         return;
       }
 
-      /* 空文件夹这一类去空目录那一块；其余都走大文件排行 */
-      if (want === 'delete' && dirs.length && !files.length) {
-        openSection(emptySection);
-        /* 空目录这件事就在这一块里完成，大文件那块先收起，别让用户对着空表 */
-        closeSection(bigSection);
+      if (want === 'empty' || (want === 'delete' && dirs.length && !files.length)) {
+        switchToolTab('empty');
         if (dir) emptyInput.value = dir;
         if (dir) {
           await scanEmpty();
           markEmpty(paths);
         }
-        if (emptySection.scrollIntoView) emptySection.scrollIntoView({ block: 'nearest' });
         return;
       }
+
+      switchToolTab('big');
       if (dir) bigInput.value = dir;
       if (dir) {
         await scanBig();
@@ -430,7 +409,6 @@
       } else {
         bigHint.textContent = T('助手给的是文件，选一个目录再扫', 'Pick a folder to scan');
       }
-      if (bigSection.scrollIntoView) bigSection.scrollIntoView({ block: 'nearest' });
     }
 
     /* ---------------- 大文件逻辑 ---------------- */
