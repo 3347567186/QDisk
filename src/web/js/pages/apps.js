@@ -7,6 +7,42 @@
 
   let liveJump = null;
 
+  /* 全局跨挂载持久化内存缓存：避免切页/切Tab重复发请求、闪骨架屏与白屏 */
+  const GlobalAppsCache = {
+    // 软件管理 Tab
+    apps: null,
+    store: null,
+    storeLoaded: false,
+    selectedKey: '',
+    appsFilter: '',
+    appsView: 'all',
+    appsSortBy: 'name',
+    appsSortAsc: true,
+    appsPage: 1,
+
+    // 开机自启 Tab
+    startup: null,
+    startupFilter: '',
+    startupView: 'all',
+    startupScope: 'all',
+    startupPage: 1,
+
+    // 后台进程 Tab
+    procs: null,
+    procRawCount: 0,
+    procTotalRam: 0,
+    procFilter: '',
+    procView: 'all',
+    procPage: 1,
+
+    // 空间画像 Tab
+    perfSamples: [],
+    perfData: null,
+
+    // 当前活跃 Tab
+    activeTab: 'apps'
+  };
+
   /* 每页 50 条；表头粘性由 .table th 的 position:sticky 提供，外层用 .table-wrap */
   let PAGE_SIZE = 15;
   /* 复用一个 Collator：每次 localeCompare 都新建选项对象，排序会慢一个数量级 */
@@ -172,23 +208,47 @@
       }
     }
 
+    function fmtAppSize(a) {
+      const bytes = (Number(a.size) || 0) || ((Number(a.size_kb) || 0) * 1024);
+      if (bytes <= 0) return '—';
+      return fmtBytes(bytes);
+    }
+
+    function fmtAppDate(a) {
+      if (a.install_date && typeof a.install_date === 'string' && a.install_date.trim()) {
+        return a.install_date.trim();
+      }
+      if (a.date && Number(a.date) > 0) {
+        try {
+          const d = new Date(Number(a.date) * 1000);
+          if (!isNaN(d.getTime()) && d.getFullYear() > 1990) {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+          }
+        } catch (_) {}
+      }
+      return '—';
+    }
+
     const S = {
-      items: [],
-      store: [],
-      storeLoaded: false,
+      items: GlobalAppsCache.apps ? GlobalAppsCache.apps.slice() : [],
+      store: GlobalAppsCache.store ? GlobalAppsCache.store.slice() : [],
+      storeLoaded: !!GlobalAppsCache.storeLoaded,
       storeLoading: false,
       filtered: [],
       visible: [],
-      filter: '',
-      page: 1,
-      sortAsc: true,
-      sortBy: 'name',
-      view: 'all',
+      filter: GlobalAppsCache.appsFilter || '',
+      page: GlobalAppsCache.appsPage || 1,
+      sortAsc: GlobalAppsCache.appsSortAsc !== false,
+      sortBy: GlobalAppsCache.appsSortBy || 'name',
+      view: GlobalAppsCache.appsView || 'all',
       loading: false,
       isAdmin: false,
       uninstalling: false,
       selected: null,
-      selectedKey: '',
+      selectedKey: GlobalAppsCache.selectedKey || '',
       leftovers: null,
       leftoverApp: null,
       loSeq: 0,
@@ -196,18 +256,44 @@
       checkRegs: new Set()
     };
 
-    /* ---------------- 顶部：管理员状态 ---------------- */
-    const adminBadge = h('span', { class: 'badge' }, T('检查中…', 'Checking…'));
-    const adminHint = h('span', { class: 'muted small ellipsis' }, '');
-    const btnAdmin = btn('以管理员身份重启', 'Restart as admin', 'ghost sm', 'shield', doRestartAsAdmin);
+    /* ---------------- 顶部：管理员状态（未提权强提醒横幅 vs 提权后融合按钮） ---------------- */
+    let adminBannerDismissed = false;
+
+    const adminIconBox = h('div', { class: 'admin-icon-box' }, icon('shield', 16));
+    const adminTitle = h('span', { class: 'admin-title' }, T('未获取管理员权限', 'Running as standard user'));
+    const adminDesc = h('span', { class: 'admin-desc' }, T('部分系统级软件卸载与 HKLM 开机自启项修改需要提升权限', 'Some system uninstallers and startup items require elevation'));
+    const adminTextBox = h('div', { class: 'admin-content' }, adminTitle, adminDesc);
+    const btnAdmin = h('button', {
+      class: 'btn-admin-action',
+      title: T('以管理员身份重新启动整理助手', 'Restart TidyAssistant with administrator privileges'),
+      onclick: doRestartAsAdmin
+    }, icon('shield', 14), h('span', null, T('以管理员身份重启', 'Restart as admin')));
+
+    const btnDismissBanner = h('button', {
+      class: 'btn-dismiss',
+      title: T('收起提醒（本次会话隐藏）', 'Dismiss for this session'),
+      onclick: () => {
+        adminBannerDismissed = true;
+        updateAdminDisplay();
+      }
+    }, icon('close', 12));
 
     const adminBar = h('div', { class: 'admin-strip' },
-      icon('shield', 16),
-      adminBadge,
-      adminHint,
+      adminIconBox,
+      adminTextBox,
       h('span', { class: 'spacer' }),
-      btnAdmin
+      btnAdmin,
+      btnDismissBanner
     );
+
+    // 提权后（或横幅收起后）融合到界面的精致状态按钮
+    const fusedAdminDot = h('span', { class: 'admin-dot' });
+    const fusedAdminLabel = h('span', { class: 'admin-label' }, T('检查中…', 'Checking…'));
+    const fusedAdminBtn = h('button', {
+      class: 'btn sm admin-fused-btn',
+      style: { display: 'none' },
+      onclick: () => showAdminDetailsModal()
+    }, icon('shield', 13), fusedAdminLabel, fusedAdminDot);
 
     /* ---------------- 主卡：过滤 + 统计一行 + 表格 + 分页 ---------------- */
     const filterInput = h('input', {
@@ -215,11 +301,14 @@
       type: 'search',
       autocomplete: 'off',
       spellcheck: 'false',
-      placeholder: T('按名称、发行商或安装路径过滤', 'Filter by name, publisher or install path')
+      value: S.filter,
+      placeholder: T('按名称、发行商或安装路径过滤…', 'Filter by name, publisher or install path…')
     });
     filterInput.addEventListener('input', () => {
       S.filter = filterInput.value;
+      GlobalAppsCache.appsFilter = S.filter;
       S.page = 1;
+      GlobalAppsCache.appsPage = 1;
       /* 打字时每敲一个键都会重建表格：这时不做逐键淡入，否则整块表格一直在闪 */
       S.typing = true;
       clearTimeout(S.typingTimer);
@@ -243,41 +332,48 @@
       pageInput,
       h('span', { class: 'muted small pg-slash' }, '/'),
       pageTotal,
-      h('span', { class: 'muted small' }, T('页', '')),
-      h('span', { class: 'muted small pg-dot' }, '·'),
-      h('span', { class: 'muted small' }, T('共', 'Total')),
-      pageSumNum,
-      h('span', { class: 'muted small' }, T('项', 'items'))
+      h('span', { class: 'muted small' }, T('页', ''))
     );
     const btnPrev = pagerBtn('chevron-left', '上一页', 'Previous', () => gotoPage(S.page - 1));
     const btnNext = pagerBtn('chevron-right', '下一页', 'Next', () => gotoPage(S.page + 1));
     const pagerBar = h('div', { class: 'pager' }, btnPrev, pageWrap, btnNext);
 
-    const statAll = h('span', { class: 'badge' });
-    const statMatch = h('span', { class: 'badge accent' });
-    const statRemovable = h('span', { class: 'badge ok' });
-    const selInfo = h('span', { class: 'muted small ellipsis', style: { maxWidth: '320px' } }, '');
-    const statLine = h('div', { class: 'row wrap' },
-      statAll, statMatch, statRemovable,
-      h('span', { class: 'spacer' }),
-      selInfo,
-      h('span', { class: 'muted small' }, T('每页', 'Per page')),
-      UI.pageSizePick((n) => App.setPageSize(n))
-    );
+    const statPill = h('span', { class: 'badge', style: { fontVariantNumeric: 'tabular-nums' } });
+    const selInfo = h('span', { class: 'muted small ellipsis', style: { maxWidth: '240px' } }, '');
+
+    function renderStatLine() {
+      const total = S.items.length + S.store.length;
+      let totalBytes = 0;
+      allItems().forEach((it) => {
+        totalBytes += (Number(it.size) || 0) || ((Number(it.size_kb) || 0) * 1024);
+      });
+      const remCount = (S.filtered || []).filter((a) => a.uninstall).length;
+      statPill.textContent = T(
+        `共 ${fmtCount(total)} 款 · ${fmtBytes(totalBytes)} · 可卸载 ${fmtCount(remCount)}`,
+        `Total ${fmtCount(total)} · ${fmtBytes(totalBytes)} · ${fmtCount(remCount)} removable`
+      );
+      selInfo.textContent = S.selected
+        ? T('当前: ', 'Selected: ') + (S.selected.name || '') +
+          (S.selected.version ? ' ' + S.selected.version : '')
+        : '';
+      selInfo.title = selInfo.textContent;
+    }
 
     const tableBox = h('div');
     const actionMsg = h('div', { class: 'small muted ellipsis' });
     actionMsg.hidden = true;
 
-    /* 分类按钮：全部 / 桌面App / 系统App */
+    /* 分类按钮：全部 / 桌面应用 / 系统应用 */
     const viewBtns = {};
     function viewBtn(id, zh, en) {
       const b = h('button', { class: 'chip' + (S.view === id ? ' active' : '') }, T(zh, en));
       b.addEventListener('click', () => {
         if (S.view === id) return;
         S.view = id;
+        GlobalAppsCache.appsView = id;
         Object.entries(viewBtns).forEach(([k, el]) => el.classList.toggle('active', k === id));
         S.page = 1;
+        GlobalAppsCache.appsPage = 1;
         switchView();
       });
       viewBtns[id] = b;
@@ -314,6 +410,8 @@
           const list = await API.storeApps();
           S.store = Array.isArray(list) ? list : [];
           S.storeLoaded = true;
+          GlobalAppsCache.store = S.store;
+          GlobalAppsCache.storeLoaded = true;
         } catch (e) {
           S.store = [];
           toast(T('读取系统应用失败：' + errText(e), 'Failed to read system apps: ' + errText(e)), 'error');
@@ -351,47 +449,77 @@
       return null;
     }
 
-    /* 排序：和上面的分类用同一套 chip，替掉原来的下拉框 */
+    /* 排序：支持名称、大小、安装日期、发行商，点击同项可升降序切换 */
     const sortChips = {};
     function sortChip(id, zh, en) {
       const b = h('button', { class: 'chip' + (S.sortBy === id ? ' active' : ''), type: 'button' }, T(zh, en));
       b.addEventListener('click', () => {
-        if (S.sortBy === id) return;
-        S.sortBy = id;
+        if (S.sortBy === id) {
+          S.sortAsc = !S.sortAsc;
+        } else {
+          S.sortBy = id;
+          // 大小和日期默认降序（大到小、新到旧），名称和发行商默认升序
+          S.sortAsc = (id === 'name' || id === 'publisher');
+        }
+        GlobalAppsCache.appsSortBy = S.sortBy;
+        GlobalAppsCache.appsSortAsc = S.sortAsc;
         S.page = 1;
-        Object.entries(sortChips).forEach(([k, el]) => el.classList.toggle('active', k === id));
+        GlobalAppsCache.appsPage = 1;
+        updateSortChips();
         applyFilter();
       });
       sortChips[id] = b;
       return b;
     }
 
+    function updateSortChips() {
+      const labels = {
+        name: ['名称', 'Name'],
+        size: ['大小', 'Size'],
+        date: ['安装日期', 'Date'],
+        publisher: ['发行商', 'Publisher']
+      };
+      Object.entries(sortChips).forEach(([k, el]) => {
+        const isActive = (S.sortBy === k);
+        el.classList.toggle('active', isActive);
+        const pair = labels[k] || [k, k];
+        const arrow = isActive ? (S.sortAsc ? ' ↑' : ' ↓') : '';
+        el.textContent = T(pair[0] + arrow, pair[1] + arrow);
+      });
+    }
+
     const mainCard = card(
       h('div', { class: 'card-title' },
         h('h2', null, T('已安装程序', 'Installed programs')),
         h('span', { class: 'hint' },
-          T('右键行有更多操作', 'Right-click a row for more'))
+          T('右键行有更多操作 · 点击排序按钮可升降序切换', 'Right-click row for actions · Click sort button to toggle order'))
       ),
+      // 第一行：搜索过滤 + 视图切换 (全部/桌面/系统) + 刷新
       h('div', { class: 'toolbar' },
-        filterInput, btnRefresh,
-        h('span', { class: 'spacer' }),
-        pagerBar
-      ),
-      h('div', { class: 'toolbar' },
+        filterInput,
         h('div', { class: 'seg' },
           viewBtn('all', '全部', 'All'),
-          viewBtn('desktop', '桌面App', 'Desktop apps'),
-          viewBtn('store', '系统App', 'System apps')
+          viewBtn('desktop', '桌面应用', 'Desktop apps'),
+          viewBtn('store', '系统应用', 'System apps')
         ),
+        btnRefresh
+      ),
+      // 第二行：数据统计 + 排序分段控件 + 分页
+      h('div', { class: 'toolbar wrap' },
+        statPill,
+        selInfo,
         h('span', { class: 'spacer' }),
         h('span', { class: 'muted small' }, T('排序', 'Sort')),
         h('div', { class: 'seg' },
           sortChip('name', '名称', 'Name'),
           sortChip('size', '大小', 'Size'),
+          sortChip('date', '安装日期', 'Date'),
           sortChip('publisher', '发行商', 'Publisher')
-        )
+        ),
+        h('span', { class: 'spacer' }),
+        pagerBar,
+        UI.pageSizePick((n) => App.setPageSize(n))
       ),
-      statLine,
       tableBox,
       actionMsg
     );
@@ -438,9 +566,10 @@
     const tabProcsBtn = makeTabBtn('procs', 'scan', '后台进程', 'Running Procs');
     const tabFootprintBtn = makeTabBtn('footprint', 'chart', '空间画像', 'Space Footprint');
 
-    const topTabBar = h('div', { class: 'toolbar', style: { marginBottom: '4px' } },
+    const topTabBar = h('div', { class: 'toolbar top-tab-bar', style: { marginBottom: '4px' } },
       h('div', { class: 'seg' }, tabAppsBtn, tabStartupBtn, tabProcsBtn, tabFootprintBtn),
-      h('span', { class: 'spacer' })
+      h('span', { class: 'spacer' }),
+      fusedAdminBtn
     );
 
     /* 顶栏常驻【问助手】入口（Tab 感知上下文与 SteveAvatar 微动效） */
@@ -515,13 +644,13 @@
        TAB 2: 开机自启动管理 (Startup Items Governance)
        ================================================================ */
     const StartupState = {
-      items: [],
+      items: GlobalAppsCache.startup ? GlobalAppsCache.startup.slice() : [],
       filtered: [],
       visible: [],
-      filter: '',
-      view: 'all', // 'all' | 'enabled' | 'disabled' | 'broken'
-      scope: 'all', // 'all' | 'user' | 'system'
-      page: 1,
+      filter: GlobalAppsCache.startupFilter || '',
+      view: GlobalAppsCache.startupView || 'all', // 'all' | 'enabled' | 'disabled' | 'broken'
+      scope: GlobalAppsCache.startupScope || 'all', // 'all' | 'user' | 'system'
+      page: GlobalAppsCache.startupPage || 1,
       loading: false
     };
 
@@ -532,11 +661,14 @@
       type: 'search',
       autocomplete: 'off',
       spellcheck: 'false',
+      value: StartupState.filter,
       placeholder: T('按名称、位置或路径过滤…', 'Filter by name, location or path…')
     });
     startupFilterInput.addEventListener('input', () => {
       StartupState.filter = startupFilterInput.value.trim().toLowerCase();
+      GlobalAppsCache.startupFilter = StartupState.filter;
       StartupState.page = 1;
+      GlobalAppsCache.startupPage = 1;
       applyStartupFilter();
     });
 
@@ -674,11 +806,14 @@
     async function loadStartup(force) {
       if (StartupState.loading) return;
       StartupState.loading = true;
-      startupTableBox.innerHTML = '';
-      startupTableBox.appendChild(skeleton(6, 'apps'));
+      if (force || !StartupState.items.length) {
+        startupTableBox.innerHTML = '';
+        startupTableBox.appendChild(skeleton(6, 'apps'));
+      }
       try {
         const res = await API.engine('startup.list', { refresh: !!force });
         StartupState.items = Array.isArray(res && res.items) ? res.items : [];
+        GlobalAppsCache.startup = StartupState.items;
         StartupState.page = 1;
         applyStartupFilter();
       } catch (err) {
@@ -1031,26 +1166,29 @@
        TAB 3: 后台进程动态管理 (Running Processes Management)
        ================================================================ */
     const ProcState = {
-      items: [],
+      items: GlobalAppsCache.procs ? GlobalAppsCache.procs.slice() : [],
       filtered: [],
       visible: [],
-      view: 'all', // 'all' | 'apps' | 'system'
-      filter: '',
-      page: 1,
+      view: GlobalAppsCache.procView || 'all', // 'all' | 'apps' | 'system'
+      filter: GlobalAppsCache.procFilter || '',
+      page: GlobalAppsCache.procPage || 1,
       loading: false,
-      totalMemory: 0,
-      rawCount: 0
+      totalMemory: GlobalAppsCache.procTotalRam || 0,
+      rawCount: GlobalAppsCache.procRawCount || 0
     };
 
     const procFilterInput = h('input', {
       class: 'input grow',
       type: 'search',
       spellcheck: 'false',
+      value: ProcState.filter,
       placeholder: T('搜索进程名、路径或应用…', 'Search process name, path or app…')
     });
     procFilterInput.addEventListener('input', () => {
       ProcState.filter = procFilterInput.value.trim().toLowerCase();
+      GlobalAppsCache.procFilter = ProcState.filter;
       ProcState.page = 1;
+      GlobalAppsCache.procPage = 1;
       applyProcFilter();
     });
 
@@ -1146,14 +1284,19 @@
     async function loadProcs(force) {
       if (ProcState.loading) return;
       ProcState.loading = true;
-      procTableBox.innerHTML = '';
-      const spinner = h('div', { class: 'center text-muted', style: { padding: '32px' } }, icon('refresh', 20), h('span', { style: { marginLeft: '8px' } }, T('正在生成进程快照…', 'Snapshotting processes…')));
-      procTableBox.appendChild(spinner);
+      if (force || !ProcState.items.length) {
+        procTableBox.innerHTML = '';
+        const spinner = h('div', { class: 'center text-muted', style: { padding: '32px' } }, icon('refresh', 20), h('span', { style: { marginLeft: '8px' } }, T('正在生成进程快照…', 'Snapshotting processes…')));
+        procTableBox.appendChild(spinner);
+      }
       try {
         const res = await API.engine('process.list', { aggregate: true });
         ProcState.items = Array.isArray(res && res.items) ? res.items : [];
         ProcState.totalMemory = Number(res && res.total_memory) || 0;
         ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
+        GlobalAppsCache.procs = ProcState.items;
+        GlobalAppsCache.procRawCount = ProcState.rawCount;
+        GlobalAppsCache.procTotalRam = ProcState.totalMemory;
         ProcState.page = 1;
         applyProcFilter();
         renderProcVisual();
@@ -1688,8 +1831,10 @@
        TAB 4: 空间透视与系统画像 (Storage & System Performance Footprint)
        ================================================================ */
     const PerfState = {
-      perfData: null,
-      samples: [],
+      perfData: GlobalAppsCache.perfData || null,
+      samples: GlobalAppsCache.perfSamples && GlobalAppsCache.perfSamples.length
+        ? GlobalAppsCache.perfSamples.slice()
+        : [],
       liveTimer: null,
       isLive: true,
       lastFetch: 0
@@ -1772,6 +1917,8 @@
         if (PerfState.samples.length > 30) {
           PerfState.samples.shift();
         }
+        GlobalAppsCache.perfSamples = PerfState.samples.slice();
+        GlobalAppsCache.perfData = PerfState.perfData;
         if ((isFirst || force) && currentTab === 'footprint') {
           renderFootprint();
         } else {
@@ -2625,12 +2772,13 @@
 
     function switchTab(tab) {
       currentTab = tab;
+      GlobalAppsCache.activeTab = tab;
       tabAppsBtn.className = 'chip' + (tab === 'apps' ? ' active' : '');
       tabStartupBtn.className = 'chip' + (tab === 'startup' ? ' active' : '');
       tabProcsBtn.className = 'chip' + (tab === 'procs' ? ' active' : '');
       tabFootprintBtn.className = 'chip' + (tab === 'footprint' ? ' active' : '');
 
-      adminBar.style.display = (tab === 'apps' || tab === 'startup') ? '' : 'none';
+      updateAdminDisplay();
       mainCard.style.display = tab === 'apps' ? '' : 'none';
       loSection.style.display = tab === 'apps' ? '' : 'none';
       startupCard.style.display = tab === 'startup' ? '' : 'none';
@@ -2643,10 +2791,24 @@
         stopLiveMonitoring();
       }
 
-      if (tab === 'startup' && !StartupState.items.length) {
-        loadStartup(false);
-      } else if (tab === 'procs' && !ProcState.items.length) {
-        loadProcs(false);
+      if (tab === 'apps') {
+        if (!S.items.length) {
+          loadApps(false);
+        } else {
+          applyFilter();
+        }
+      } else if (tab === 'startup') {
+        if (!StartupState.items.length) {
+          loadStartup(false);
+        } else {
+          applyStartupFilter();
+        }
+      } else if (tab === 'procs') {
+        if (!ProcState.items.length) {
+          loadProcs(false);
+        } else {
+          applyProcFilter();
+        }
       } else if (tab === 'footprint') {
         renderFootprint();
         if (!S.items.length) loadApps(false);
@@ -2724,6 +2886,12 @@
     renderStatLine();
     renderPager();
     renderTable();
+    updateSortChips();
+
+    // 如果当前选中的不是默认 apps，立即切到记录的 Tab
+    if (currentTab !== 'apps') {
+      switchTab(currentTab);
+    }
     /* 每页条数改了：就地重排当前表格，不重建页面 */
     App._onPageSize = (v) => {
       PAGE_SIZE = Number(v) || UI.pageSize();
@@ -2742,29 +2910,127 @@
     // 引擎调用已搬到后台线程，这里只是把首帧让给动画。
     requestAnimationFrame(() => {
       refreshAdmin();
-      loadApps(false).catch(() => {});
-      // 空闲时预热商店列表：等用户点到「商店App」时数据通常已就绪，切换就是瞬时的
-      setTimeout(() => {
-        ensureStore().then(() => {
-          if (!S.filter && (S.view === 'store' || S.view === 'all')) applyFilter();
-        }).catch(() => {});
-      }, 900);
+      // 仅在冷启动（内存无缓存）时才发起后台读取；有缓存时保持 0ms 瞬间显示
+      if (!GlobalAppsCache.apps || !GlobalAppsCache.apps.length) {
+        loadApps(false).catch(() => {});
+      }
+      if (!GlobalAppsCache.storeLoaded) {
+        setTimeout(() => {
+          ensureStore().then(() => {
+            if (!S.filter && (S.view === 'store' || S.view === 'all')) applyFilter();
+          }).catch(() => {});
+        }, 900);
+      }
     });
 
-    /* ---------------- 管理员 ---------------- */
+    /* ---------------- 管理员权限展示与交互 ---------------- */
+    function updateAdminDisplay() {
+      const isAppsOrStartup = (currentTab === 'apps' || currentTab === 'startup');
+      if (S.isAdmin) {
+        // 已开启权限：横幅强提醒完全隐藏，释放垂直空间，融入为顶栏状态按钮
+        adminBar.style.display = 'none';
+        fusedAdminBtn.style.display = (isAppsOrStartup || currentTab === 'procs') ? 'inline-flex' : 'none';
+        fusedAdminBtn.className = 'btn sm admin-fused-btn ok';
+        fusedAdminLabel.textContent = T('管理员模式', 'Admin Mode');
+        fusedAdminBtn.title = T('已具备系统管理员特权，受保护卸载器与系统自启均可直接操作（点击查看详情）',
+          'Elevated privileges active; click to view details');
+        fusedAdminBtn.onclick = () => showAdminDetailsModal();
+      } else {
+        // 未开启权限（普通权限）
+        if (!adminBannerDismissed && isAppsOrStartup) {
+          adminBar.style.display = '';
+          fusedAdminBtn.style.display = 'none';
+        } else {
+          // 横幅被用户关闭，或在其他 Tab：在顶栏保留低调警示融合按钮，确保入口永不丢失
+          adminBar.style.display = 'none';
+          fusedAdminBtn.style.display = isAppsOrStartup ? 'inline-flex' : 'none';
+          fusedAdminBtn.className = 'btn sm admin-fused-btn warn';
+          fusedAdminLabel.textContent = T('普通权限', 'Standard User');
+          fusedAdminBtn.title = T('当前以普通权限运行，点击重新展开提醒或以管理员身份重启',
+            'Standard user; click to elevate or view details');
+          fusedAdminBtn.onclick = () => {
+            adminBannerDismissed = false;
+            updateAdminDisplay();
+          };
+        }
+      }
+    }
+
+    function showAdminDetailsModal() {
+      const isElevated = S.isAdmin;
+      const content = h('div', { class: 'admin-modal-box', style: { display: 'flex', flexDirection: 'column', gap: '12px', padding: '4px 0' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+          h('div', {
+            style: {
+              width: '38px',
+              height: '38px',
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: isElevated ? 'var(--ok-weak)' : 'var(--warn-weak)',
+              color: isElevated ? 'var(--ok)' : 'var(--warn)',
+              flexShrink: '0'
+            }
+          }, icon('shield', 20)),
+          h('div', null,
+            h('div', { style: { fontWeight: '600', fontSize: 'var(--fs-body)', color: 'var(--text-1)' } },
+              isElevated ? T('已获得系统管理员完整特权', 'Elevated Administrator Privileges Active') : T('当前以普通用户权限运行', 'Standard User Privileges')
+            ),
+            h('div', { class: 'muted small', style: { marginTop: '2px' } },
+              isElevated ? T('Windows 令牌级别：高完整性 (High Integrity Level)', 'Windows Token: High Integrity Level') : T('Windows 令牌级别：中完整性 (Medium Integrity Level)', 'Windows Token: Medium Integrity Level')
+            )
+          )
+        ),
+        h('div', {
+          style: {
+            background: 'var(--surface-2)',
+            borderRadius: 'var(--radius)',
+            padding: '12px 14px',
+            fontSize: 'var(--fs-small)',
+            lineHeight: '1.6',
+            color: 'var(--text-2)'
+          }
+        },
+          isElevated ? [
+            h('div', { style: { color: 'var(--ok)', fontWeight: '600', marginBottom: '6px' } }, T('已就绪的高级权限能力：', 'Active Privileged Capabilities:')),
+            h('div', null, T('• 可直接静默启动位于 Program Files 的受保护卸载程序', '• Launch protected uninstallers in Program Files directly')),
+            h('div', null, T('• 可修改与禁用系统级 (HKLM) 开机自启动注册表项', '• Modify and disable system-wide (HKLM) startup items')),
+            h('div', null, T('• 可扫描并清除需要系统特权的顽固残留文件与注册表键值', '• Scan and remove privileged leftover files and registry keys')),
+            h('div', null, T('• 卸载与清理过程免去频繁弹出的 Windows UAC 提权中断', '• Seamless uninstallation without repetitive UAC interruption prompts'))
+          ] : [
+            h('div', { style: { color: 'var(--warn)', fontWeight: '600', marginBottom: '6px' } }, T('当前权限下的受限场景：', 'Restricted Scenarios in Current Mode:')),
+            h('div', null, T('• 无法修改或禁用 HKEY_LOCAL_MACHINE 系统级启动项', '• Cannot modify HKLM system startup items')),
+            h('div', null, T('• 部分系统软件卸载器可能因无提权而启动失败或频繁弹窗', '• Protected uninstallers may fail or repeatedly prompt for UAC')),
+            h('div', null, T('• 无法清理位于受保护系统目录的软件卸载残留', '• Cannot clean leftover files in protected system directories'))
+          ]
+        )
+      );
+
+      modal({
+        title: T('权限运行环境说明', 'Privilege Environment Details'),
+        body: content,
+        buttons: isElevated ? [
+          { id: 'ok', label: T('知道了', 'Got it'), kind: 'primary' }
+        ] : [
+          { id: 'cancel', label: T('暂不处理', 'Dismiss'), kind: 'ghost' },
+          { id: 'restart', label: T('以管理员身份重启', 'Restart as admin'), kind: 'primary' }
+        ],
+        onAction: (actionId) => {
+          if (actionId === 'restart') {
+            doRestartAsAdmin();
+          }
+        }
+      });
+    }
+
     async function refreshAdmin() {
       try {
         S.isAdmin = !!(await API.isAdmin());
       } catch (e) {
         S.isAdmin = false;
       }
-      // API.isAdmin 失败按普通权限处理，不影响列表使用
-      adminBadge.className = 'badge ' + (S.isAdmin ? 'ok' : 'warn');
-      adminBadge.textContent = S.isAdmin ? T('当前为管理员', 'Administrator') : T('普通权限', 'Standard user');
-      adminHint.textContent = S.isAdmin
-        ? T('需要提升权限的卸载器可以直接启动', 'Elevated uninstallers can start directly')
-        : T('部分卸载器需要提升权限，可用右侧按钮重启', 'Some uninstallers need elevation; use the button at right');
-      btnAdmin.hidden = S.isAdmin;
+      updateAdminDisplay();
     }
 
     async function doRestartAsAdmin() {
@@ -2785,13 +3051,17 @@
       if (S.loading) return;
       S.loading = true;
       setBtnBusy(btnRefresh, true, '读取中…', 'Loading…');
-      tableBox.replaceChildren(skeleton(8, 'apps'));
+      if (loud || !S.items.length) {
+        tableBox.replaceChildren(skeleton(8, 'apps'));
+      }
       try {
         const r = await API.engine('apps.list', {});
         S.items = Array.isArray(r.items) ? r.items : [];
+        GlobalAppsCache.apps = S.items;
         const keep = S.selectedKey;
         S.selected = S.items.find((a) => keyOf(a) === keep) || null;
         S.selectedKey = S.selected ? keep : '';
+        GlobalAppsCache.selectedKey = S.selectedKey;
         applyFilter();
         if (loud) {
           toast(T('已刷新程序列表：' + fmtCount(S.items.length) + ' 项',
@@ -2829,7 +3099,14 @@
       const q = String(S.filter || '').trim().toLowerCase();
       const base = allItems().slice().sort((a, b) => {
         if (S.sortBy === 'size') {
-          return (Number(b.size_kb) || 0) - (Number(a.size_kb) || 0);
+          const szA = (Number(a.size) || 0) || ((Number(a.size_kb) || 0) * 1024);
+          const szB = (Number(b.size) || 0) || ((Number(b.size_kb) || 0) * 1024);
+          return S.sortAsc ? (szA - szB) : (szB - szA);
+        }
+        if (S.sortBy === 'date') {
+          const dtA = Number(a.date) || 0;
+          const dtB = Number(b.date) || 0;
+          return S.sortAsc ? (dtA - dtB) : (dtB - dtA);
         }
         const field = S.sortBy === 'publisher' ? 'publisher' : 'name';
         const c = collator.compare(String(a[field] || ''), String(b[field] || ''));
@@ -2837,7 +3114,7 @@
       });
       let list = base;
       S.filtered = q
-        ? list.filter((a) => [a.name, a.publisher, a.install_path, a.version]
+        ? list.filter((a) => [a.name, a.publisher, a.install_path, a.version, a.install_date]
           .some((v) => String(v || '').toLowerCase().includes(q)))
         : list;
       const pages = Math.max(1, Math.ceil(S.filtered.length / PAGE_SIZE));
@@ -2850,20 +3127,9 @@
     function toggleSort() {
       S.sortAsc = !S.sortAsc;
       S.page = 1;
+      GlobalAppsCache.appsSortAsc = S.sortAsc;
+      updateSortChips();
       applyFilter();
-    }
-
-    function renderStatLine() {
-      const total = S.items.length + S.store.length;
-      statAll.textContent = T('已安装 ', 'Installed ') + fmtCount(total);
-      statMatch.textContent = T('当前匹配 ', 'Matching ') + fmtCount(S.filtered.length);
-      statRemovable.textContent = T('可卸载 ', 'Removable ') +
-        fmtCount(S.filtered.filter((a) => a.uninstall).length);
-      selInfo.textContent = S.selected
-        ? T('当前 ', 'Selected ') + (S.selected.name || '') +
-          (S.selected.version ? ' ' + S.selected.version : '')
-        : T('未选择程序', 'No program selected');
-      selInfo.title = selInfo.textContent;
     }
 
     function renderTable() {
@@ -2874,7 +3140,7 @@
       if (!allItems().length) {
         tableBox.appendChild(empty(T('没有读取到已安装程序', 'No installed programs found'),
           S.view === 'store'
-            ? T('切换「全部」或「桌面App」看看', 'Try All or Desktop apps')
+            ? T('切换「全部」或「桌面应用」看看', 'Try All or Desktop apps')
             : T('点「刷新」重新读取注册表', 'Click Refresh to read the registry again')));
         S.visible = [];
         return;
@@ -2890,11 +3156,12 @@
       S.visible = S.filtered.slice(start, start + PAGE_SIZE);
 
       const tbl = table({
+        className: 'apps-table',
         columns: [
           {
             key: 'name',
+            className: 'col-name',
             label: T('名称 / 版本', 'Name / version'),
-            width: '32%',
             render: (a) => h('div', { class: 'name' },
               appIcon(a),
               h('span', { class: 'txt', style: { minWidth: '0' }, title: a.name || '' },
@@ -2906,34 +3173,72 @@
               kindTag(a))
           },
           {
+            key: 'size',
+            className: 'col-size',
+            align: 'right',
+            label: T('大小', 'Size'),
+            render: (a) => {
+              const szText = fmtAppSize(a);
+              const szNum = (Number(a.size) || 0) || ((Number(a.size_kb) || 0) * 1024);
+              return h('span', {
+                class: szNum > 0 ? 'txt-size' : 'muted small',
+                style: { fontVariantNumeric: 'tabular-nums' }
+              }, szText);
+            }
+          },
+          {
+            key: 'date',
+            className: 'col-date',
+            align: 'center',
+            label: T('安装日期', 'Install date'),
+            render: (a) => h('span', {
+              class: 'small muted',
+              style: { fontVariantNumeric: 'tabular-nums' }
+            }, fmtAppDate(a))
+          },
+          {
             key: 'publisher',
+            className: 'col-publisher',
             label: T('发行商', 'Publisher'),
-            width: '16%',
             render: (a) => h('div', { class: 'ellipsis', title: a.publisher || '' },
               a.publisher || '—')
           },
           {
             key: 'install_path',
+            className: 'col-path',
             label: T('安装路径', 'Install path'),
             render: (a) => h('div', { class: 'mono ellipsis', title: a.install_path || '' },
               a.install_path || '—')
           },
           {
             key: 'ops',
-            label: T('操作', 'Actions'),
-            width: '104px',
+            className: 'col-actions',
             align: 'right',
-            render: (a) => h('div', { class: 'row', style: { justifyContent: 'flex-end' } },
-              (() => {
-                const b = iconBtn('卸载', a.uninstall ? 'Uninstall' : 'No uninstaller', 'trash',
-                  () => { select(a); uninstallOne(a); }, true);
-                if (!a.uninstall) { b.disabled = true; b.title = T('没有可用的卸载程序', 'No uninstaller available'); }
-                return b;
-              })(),
-              a.source === 'store' ? null
-                : iconBtn('扫描残留', 'Scan leftovers', 'scan', () => { select(a); scanLeftovers(a); }),
-              iconBtn('打开安装目录', 'Open install folder', 'folder', () => openInstallDir(a))
-            )
+            label: T('操作', 'Actions'),
+            render: (a) => {
+              const bTrash = iconBtn('卸载', 'Uninstall', 'trash', () => {
+                select(a);
+                uninstallOne(a);
+              }, true);
+              if (!a.uninstall) {
+                bTrash.disabled = true;
+                bTrash.title = T('没有可用的卸载程序', 'No uninstaller available');
+              }
+              const bScan = iconBtn('扫描残留', 'Scan leftovers', 'scan', () => {
+                select(a);
+                scanLeftovers(a);
+              });
+              if (a.source === 'store') {
+                bScan.disabled = true;
+                bScan.title = T('商店应用由系统沙盒管理，无需扫描残留', 'Store apps are managed by system sandbox');
+              }
+              const bFolder = iconBtn('打开安装目录', 'Open install folder', 'folder', () => openInstallDir(a));
+              if (!a.install_path) {
+                bFolder.disabled = true;
+                bFolder.title = T('未检测到本地安装目录', 'No local folder detected');
+              }
+              return h('div', { class: 'app-actions' }, bTrash, bScan, bFolder);
+            }
           }
         ],
         rows: S.visible,
@@ -3043,6 +3348,8 @@
           S.store = [];
           S.storeLoaded = false;
           await ensureStore();
+          GlobalAppsCache.store = S.store;
+          GlobalAppsCache.storeLoaded = true;
           applyFilter();
         } catch (e) {
           toast(errText(e), 'error');
@@ -3420,6 +3727,22 @@
     return function unmount() {
       liveJump = null;
       stopLiveMonitoring();
+      GlobalAppsCache.activeTab = currentTab;
+      GlobalAppsCache.appsFilter = S.filter;
+      GlobalAppsCache.appsView = S.view;
+      GlobalAppsCache.appsSortBy = S.sortBy;
+      GlobalAppsCache.appsSortAsc = S.sortAsc;
+      GlobalAppsCache.appsPage = S.page;
+      GlobalAppsCache.selectedKey = S.selectedKey;
+      GlobalAppsCache.startupFilter = StartupState.filter;
+      GlobalAppsCache.startupView = StartupState.view;
+      GlobalAppsCache.startupScope = StartupState.scope;
+      GlobalAppsCache.startupPage = StartupState.page;
+      GlobalAppsCache.procFilter = ProcState.filter;
+      GlobalAppsCache.procView = ProcState.view;
+      GlobalAppsCache.procPage = ProcState.page;
+      GlobalAppsCache.perfSamples = PerfState.samples.slice();
+      GlobalAppsCache.perfData = PerfState.perfData;
       if (window.App) window.App._onPageSize = null;
       setActions();
     };

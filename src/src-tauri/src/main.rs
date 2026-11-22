@@ -2133,14 +2133,27 @@ fn store_apps() -> Result<Vec<Value>, String> {
         if name.is_empty() {
             continue;
         }
+        let path_str = it.get("InstallLocation").and_then(|x| x.as_str()).unwrap_or("");
+        let mut date_ts = 0.0;
+        if !path_str.is_empty() {
+            if let Ok(meta) = std::fs::metadata(path_str) {
+                if let Ok(time) = meta.created().or_else(|_| meta.modified()) {
+                    if let Ok(dur) = time.duration_since(std::time::UNIX_EPOCH) {
+                        date_ts = dur.as_secs_f64();
+                    }
+                }
+            }
+        }
         list.push(json!({
             "name": name,
             "version": it.get("Version").and_then(|x| x.as_str()).unwrap_or(""),
             "publisher": it.get("Publisher").and_then(|x| x.as_str()).unwrap_or(""),
-            "install_path": it.get("InstallLocation").and_then(|x| x.as_str()).unwrap_or(""),
+            "install_path": path_str,
             "package": it.get("PackageFullName").and_then(|x| x.as_str()).unwrap_or(""),
             "source": "store",
             "uninstall": true,
+            "size_kb": 0,
+            "date": date_ts,
         }));
     }
     list.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_lowercase());

@@ -1835,6 +1835,19 @@ def list_installed_apps(progress=None):
                                 size_kb = int(g("EstimatedSize") or 0)
                             except (ValueError, TypeError):
                                 size_kb = 0
+                            raw_idate = str(g("InstallDate") or "").strip()
+                            idate = ""
+                            if len(raw_idate) == 8 and raw_idate.isdigit():
+                                idate = f"{raw_idate[:4]}-{raw_idate[4:6]}-{raw_idate[6:]}"
+                            elif raw_idate:
+                                idate = raw_idate
+                            mtime = _reg_key_mtime(ck)
+                            if not idate and mtime > 0:
+                                try:
+                                    import datetime
+                                    idate = datetime.date.fromtimestamp(mtime).isoformat()
+                                except Exception:
+                                    idate = ""
                             apps.append({
                                 "name": name,
                                 "version": ver,
@@ -1850,7 +1863,8 @@ def list_installed_apps(progress=None):
                                          or _guess_icon(
                                              str(g("InstallLocation")).strip().strip('"'),
                                              str(g("UninstallString")).strip())),
-                                "date": _reg_key_mtime(ck),
+                                "date": mtime,
+                                "install_date": idate,
                             })
                     except OSError:
                         continue
@@ -7153,6 +7167,8 @@ def _engine_apps_list(params):
             "key": a.get("key") or "",
             "url": a.get("url") or "",
             "size_kb": int(a.get("size_kb") or 0),
+            "date": float(a.get("date") or 0.0),
+            "install_date": str(a.get("install_date") or ""),
         })
     return {"items": items, "total": len(items)}
 
