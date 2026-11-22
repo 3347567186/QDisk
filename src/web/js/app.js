@@ -208,7 +208,7 @@
      语言切换会重建导航，旧头像要先停掉自己的渲染循环再丢弃。 */
   function navMark(item) {
     if (item.id === 'ai' && window.SteveAvatar) {
-      return window.SteveAvatar.el({ size: 18, variant: 'nav' });
+      return window.SteveAvatar.el({ size: 42, variant: 'nav' });
     }
     return icon(item.icon);
   }
@@ -230,18 +230,21 @@
     NAV_GROUPS.forEach((group) => {
       const items = group.ids.map((id) => NAV.find((n) => n.id === id)).filter(Boolean);
       if (!items.length) return;
+      const isAiGroup = group.ids.length === 1 && group.ids[0] === 'ai';
       const box = h('div', { class: 'nav-group' },
-        h('div', { class: 'nav-group-label' }, UI.T(group.zh, group.en))
+        isAiGroup ? null : h('div', { class: 'nav-group-label' }, UI.T(group.zh, group.en))
       );
       items.forEach((item) => {
         placed.add(item.id);
         const mark = navMark(item);
+        const labelText = UI.T(item.zh, item.en);
         box.appendChild(h('button', {
           class: 'nav-item' + (item.id === app.current ? ' active' : ''),
           dataset: { id: item.id, icon: item.icon },
-          'aria-label': UI.T(item.zh, item.en),
+          'aria-label': labelText,
+          title: item.id === 'ai' ? labelText : undefined,
           onclick: () => goNav(item, mark)
-        }, mark, h('span', { class: 'lbl' }, UI.T(item.zh, item.en))));
+        }, mark, item.id === 'ai' ? null : h('span', { class: 'lbl' }, labelText)));
       });
       nav.appendChild(box);
     });
@@ -426,8 +429,7 @@
     const page = (window.Pages || {})[id];
     const title = page && page.title ? UI.T(page.title[0], page.title[1]) : UI.T(item.zh, item.en);
     document.getElementById('page-title').textContent = title;
-    const sub = page && page.subtitle ? UI.T(page.subtitle[0], page.subtitle[1]) : '';
-    document.getElementById('page-sub').textContent = sub;
+    document.getElementById('page-sub').textContent = '';
     document.title = title + ' · ' + UI.T('整理助手', 'Tidy Assistant');
   }
 

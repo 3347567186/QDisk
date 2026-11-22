@@ -149,8 +149,7 @@
       ),
       h('div', { class: 'toolbar' },
         h('span', { class: 'muted small', style: { minWidth: '58px' } }, T('目标目录', 'Target folder')),
-        folderInput, btnBrowse,
-        h('span', { class: 'hint' }, T('校验与预览直读编辑器，执行前需先保存', 'Validate/preview read editor directly; save before running'))
+        folderInput, btnBrowse
       )
     );
 
@@ -168,8 +167,7 @@
     const valBox = h('div', { class: 'stack' });
     const valCard = card(
       h('div', { class: 'card-title' },
-        h('h2', null, T('校验结果', 'Validation')),
-        h('span', { class: 'hint' }, T('语法与字段检查', 'Syntax check'))
+        h('h2', null, T('校验结果', 'Validation'))
       ),
       valBox
     );
@@ -568,16 +566,7 @@
       renderPreview(null);
     }
 
-    setActions(UI.askBtn({
-      title: T('问助手 · 高级规则', 'Ask AI · Rules'),
-      question: T('帮我检查或完善当前目录的 organize YAML 规则。', 'Help me inspect or improve the organize YAML rules for this folder.'),
-      ctx: () => ({
-        page: '高级规则',
-        dir: folderInput.value.trim(),
-        note: T('当前规则共 ' + fmtCount((editor.value.match(/^\s*-\s+name:/gm) || []).length) + ' 条',
-          'Rules: ' + fmtCount((editor.value.match(/^\s*-\s+name:/gm) || []).length))
-      })
-    }));
+    setActions();
 
     liveJump = function (payload) {
       const p = payload || {};

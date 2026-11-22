@@ -89,19 +89,26 @@
 
       /* ---------- 顶部动作 + 目标目录 ---------- */
       function actionCard() {
+        const askBtn = UI.askBtn({
+          title: T('问助手 · 数据迁移', 'Ask AI · Migrate'),
+          question: T('帮我检查这批迁移来源和目标目录，预演看有没有冲突或跨盘风险。', 'Review these migration sources and destination and preview conflicts or cross-volume risks.'),
+          ctx: () => ({
+            page: '数据迁移',
+            sources: state.sources.slice(0, 8),
+            destination: state.destination.trim(),
+            note: T(state.sources.length + ' 个来源 · ' + state.mode, state.sources.length + ' sources · ' + state.mode)
+          })
+        });
         return card(
           h('div', { class: 'toolbar' },
-            h('div', { class: 'migrate-hint' },
-              h('strong', { text: T('先预演，再执行', 'Plan, then run') }),
-              h('span', { class: 'small muted', text: T('预演只读不改磁盘；目标不存在会自动创建', 'Planning is read-only; missing destination is created') })
-            ),
             h('span', { class: 'spacer' }),
             h('button', {
               class: 'btn', disabled: state.running, onclick: doPlan
             }, icon('scan'), h('span', { text: T('预演计划', 'Plan') })),
             h('button', {
               class: 'btn primary', disabled: state.running, onclick: doApply
-            }, icon('play'), h('span', { text: T('执行迁移', 'Run') }))
+            }, icon('play'), h('span', { text: T('执行迁移', 'Run') })),
+            askBtn
           ),
           h('div', { class: 'row' },
             h('span', { class: 'small muted', style: { minWidth: '58px' }, text: T('目标目录', 'Destination') }),
@@ -476,16 +483,7 @@
         try { await API.openPath(dir); } catch (e) { toast(e && e.message ? e.message : String(e), 'error'); }
       }
 
-      setActions(UI.askBtn({
-        title: T('问助手 · 数据迁移', 'Ask AI · Migrate'),
-        question: T('帮我检查这批迁移来源和目标目录，预演看有没有冲突或跨盘风险。', 'Review these migration sources and destination and preview conflicts or cross-volume risks.'),
-        ctx: () => ({
-          page: '数据迁移',
-          sources: state.sources.slice(0, 8),
-          destination: state.destination.trim(),
-          note: T(state.sources.length + ' 个来源 · ' + state.mode, state.sources.length + ' sources · ' + state.mode)
-        })
-      }));
+      setActions();
 
       liveJump = function (payload) {
         const p = payload || {};

@@ -1746,7 +1746,12 @@
     const create = buildCreate();
     const headTools = h('div', { class: 'arc-head-tools' }, els.pathRow || null, els.createTools || null);
     els.headTools = headTools;
-    const head = h('div', { class: 'arc-head' }, tabs, headTools);
+    const askBtn = UI.askBtn({
+      title: T('问助手 · 压缩包', 'Ask AI · Archives'),
+      question: T('帮我分析当前压缩包结构或推荐解压/打包方案。', 'Help me inspect this archive or choose extract/compress options.'),
+      ctx: () => ({ page: '压缩包', tab: S.tab, path: S.path, entries: S.info ? S.info.total : 0 })
+    });
+    const head = h('div', { class: 'arc-head' }, tabs, headTools, askBtn);
     /* 页头固定、视图占满剩余高度：包一层 page-fill，页面本体就不再整页滚动，
        滚动交给 .arc-table-wrap（虚拟列表按它自己的 scrollTop 取窗口）。 */
     const body = h('div', { class: 'stack page-fill arc-body' }, head, open, create);
@@ -1781,11 +1786,7 @@
 
     refreshRar();
     if (S.info) renderOpen();
-    setActions(UI.askBtn({
-      title: T('问助手 · 压缩包', 'Ask AI · Archives'),
-      question: T('帮我分析当前压缩包结构或推荐解压/打包方案。', 'Help me inspect this archive or choose extract/compress options.'),
-      ctx: () => ({ page: '压缩包', tab: S.tab, path: S.path, entries: S.info ? S.info.total : 0 })
-    }));
+    setActions();
 
     dropLayer = buildDropLayer();
     document.body.appendChild(dropLayer);

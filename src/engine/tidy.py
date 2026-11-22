@@ -626,6 +626,13 @@ def prune_data_dir(dry_run=False):
                                       "note": "WebView2 旧数据目录，正主在线才清"}
     report["files"] += w_files
     report["bytes"] += w_bytes
+
+    ix_files, ix_bytes, ix_kept = _ix_prune_orphan_files(dry_run=dry_run)
+    report["items"]["index"] = {"files": ix_files, "bytes": ix_bytes, "kept": ix_kept,
+                                "path": index_dir(),
+                                "note": "搜索索引库，只保留当前有效目录的最新版本"}
+    report["files"] += ix_files
+    report["bytes"] += ix_bytes
     return report
 
 
@@ -3865,6 +3872,188 @@ def _ix_refresh_subtree(db, folder):
     return len(seen_dirs), total
 
 
+def _ix_sync_item_totals(item_id, db):
+    """原地刷完索引库后，把最新的 files/dirs/bytes/built_at 同步回 meta 与 catalog.json。"""
+    now_ts = int(time.time())
+    try:
+        row = db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(n_files), 0) FROM dirs").fetchone()
+        d_cnt = int((row[0] if row else 0) or 0)
+        f_cnt = int((row[1] if row else 0) or 0)
+        with db:
+            db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES('built_at', ?)",
+                       (str(now_ts),))
+    except Exception:
+        return
+    with _IX_LOCK:
+        items = _ix_load()
+        changed = False
+        for it in items:
+            if it.get("id") != item_id:
+                continue
+            try:
+                b = os.path.getsize(_ix_db_abspath(it))
+            except OSError:
+                b = int(it.get("bytes") or 0)
+            it.update({
+                "files": f_cnt,
+                "dirs": d_cnt,
+                "bytes": int(b),
+                "built_at": now_ts,
+                "why": "",
+            })
+            changed = True
+        if changed:
+            _ix_save(items)
+
+
+def _ix_find_dirty_subtrees(db, root, skip_norm=None, max_dirs=25):
+    """浅层发现根目录及直系子目录的新增/变更/删除（即使不在下载夹内也能静默覆写最新索引）。"""
+    root = os.path.abspath(str(root or ""))
+    if not root or not os.path.isdir(root):
+        return 0, 0
+    skip_set = set(skip_norm or ())
+    touched_dirs = 0
+    try:
+        with os.scandir(root) as it:
+            entries = list(it)
+    except OSError:
+        return 0, 0
+
+    # 1) 检查根目录直属文件是否变化
+    direct_files = 0
+    disk_subs = {}
+    for e in entries:
+        try:
+            if e.is_dir(follow_symlinks=False):
+                if e.name.lower() in INDEX_SKIP or e.name.startswith("$"):
+                    continue
+                ap = os.path.abspath(e.path)
+                st = e.stat(follow_symlinks=False)
+                disk_subs[os.path.normcase(ap)] = (ap, float(st.st_mtime or 0))
+            else:
+                direct_files += 1
+        except OSError:
+            continue
+
+    try:
+        r_stat = float(os.stat(root).st_mtime or 0)
+        r_row = db.execute(
+            "SELECT mtime, n_files FROM dirs WHERE path = ?", (root,)).fetchone()
+        if (r_row is None or int(r_row[1] or 0) != direct_files
+                or abs(float(r_row[0] or 0) - r_stat) > 1.0):
+            if _ix_refresh_dir(db, root):
+                touched_dirs += 1
+    except Exception:
+        pass
+
+    # 2) 比对深度 1 子目录：新增未收录、mtime 变更、已删除
+    prefix = root.rstrip("\\/") + os.sep
+    try:
+        db_rows = db.execute(
+            "SELECT path, mtime FROM dirs WHERE path LIKE ? ESCAPE '\\'"
+            " AND path NOT LIKE ? ESCAPE '\\'",
+            (_like_literal(prefix) + "%", _like_literal(prefix) + "%\\\\%")
+        ).fetchall()
+    except Exception:
+        db_rows = []
+    db_subs = {}
+    for p, mt in db_rows:
+        db_subs[os.path.normcase(os.path.abspath(p))] = (p, float(mt or 0))
+
+    for k, (old_p, _mt) in db_subs.items():
+        if k not in disk_subs and not os.path.isdir(old_p):
+            touched_dirs += _ix_drop_subtree(db, old_p)
+
+    dirty = []
+    for k, (ap, mt) in disk_subs.items():
+        if k in skip_set:
+            continue
+        old = db_subs.get(k)
+        if old is None or abs(mt - old[1]) > 1.0:
+            dirty.append((mt, ap))
+
+    dirty.sort(key=lambda x: x[0], reverse=True)
+    for _mt, ap in dirty[:max(1, int(max_dirs or 25))]:
+        d, _f = _ix_refresh_subtree(db, ap)
+        touched_dirs += d
+
+    total_files = 0
+    try:
+        total_files = int(db.execute(
+            "SELECT COALESCE(SUM(n_files), 0) FROM dirs").fetchone()[0] or 0)
+    except Exception:
+        pass
+    return touched_dirs, total_files
+
+
+def _ix_prune_orphan_files(dry_run=False):
+    """清理过期/孤儿索引库与半成品 staging，仅保留每个有效索引根的最新版 .db。"""
+    d = index_dir()
+    if not os.path.isdir(d):
+        return 0, 0, 0
+    locked = _HOT_LOCK.acquire(blocking=False)
+    try:
+        with _IX_LOCK:
+            items = _ix_load()
+            best = {}
+            order = []
+            for it in items:
+                try:
+                    k = os.path.normcase(os.path.abspath(it.get("root") or ""))
+                except (OSError, ValueError):
+                    continue
+                if not k:
+                    continue
+                score = (int(it.get("built_at") or 0), int(it.get("files") or 0))
+                if k not in best:
+                    best[k] = (score, it)
+                    order.append(k)
+                elif score >= best[k][0]:
+                    best[k] = (score, it)
+            dedup = [best[k][1] for k in order]
+            if not dry_run and len(dedup) != len(items):
+                _ix_save(dedup)
+            active = {os.path.basename(_ix_db_abspath(it)).lower() for it in dedup}
+            keep_names = active | {"catalog.json"}
+            # 已激活主库的伴随 WAL/SHM 也放行，免得把正在用的库事务拆坏
+            for name in list(active):
+                keep_names.update({name + "-wal", name + "-shm", name + "-journal"})
+
+        gone = 0
+        freed = 0
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if not e.is_file(follow_symlinks=False):
+                        continue
+                    ln = e.name.lower()
+                    if ln in keep_names:
+                        continue
+                    # 后台热路径未拿到锁时不碰正在写入的 .new 文件
+                    if not locked and ln.endswith(".new"):
+                        continue
+                    if not (ln.endswith(".db") or ".db." in ln or ln.endswith(("-wal", "-shm", "-journal"))):
+                        continue
+                    try:
+                        sz = int(e.stat(follow_symlinks=False).st_size or 0)
+                    except OSError:
+                        sz = 0
+                    if not dry_run:
+                        try:
+                            os.remove(e.path)
+                        except OSError:
+                            continue
+                    gone += 1
+                    freed += sz
+        except OSError:
+            pass
+        return gone, freed, len(dedup)
+    finally:
+        if locked:
+            _HOT_LOCK.release()
+
+
 # 一次写穿最多刷多少个目录。整理 5000 个文件通常只涉及几十个目标目录，
 # 去重之后远小于这个数；真超过说明动的范围太大，直接重建索引更划算。
 _IX_TOUCH_MAX_DIRS = 4000
@@ -3935,6 +4124,8 @@ def index_touch(paths):
                         touched += 1
                 for folder in dropped.get(ident, (item, set()))[1]:
                     touched += _ix_drop_subtree(db, folder)
+            if touched:
+                _ix_sync_item_totals(item["id"], db)
         except Exception:
             continue
         finally:
@@ -4120,6 +4311,9 @@ def _build_index_locked(roots, ids, progress, full):
                     fresh.append(item)
                     by_id[item["id"]] = item
             _ix_save(fresh)
+        _ix_prune_orphan_files(dry_run=False)
+        _INDEX_WATCH["miss"] = 0.0
+        _INDEX_WATCH["hot"] = time.time()
 
     _index_last_run.clear()
     _index_last_run.update({
@@ -4187,6 +4381,13 @@ def _ix_verify_one(item):
         rows = db.execute(
             "SELECT path, mtime, n_files FROM dirs ORDER BY RANDOM() LIMIT ?",
             (_IX_VERIFY_DIRS,)).fetchall()
+        root_dir = os.path.abspath(str(item.get("root") or ""))
+        prefix = root_dir.rstrip("\\/") + os.sep
+        top_db_rows = db.execute(
+            "SELECT path FROM dirs WHERE path LIKE ? ESCAPE '\\'"
+            " AND path NOT LIKE ? ESCAPE '\\'",
+            (_like_literal(prefix) + "%", _like_literal(prefix) + "%\\\\%")
+        ).fetchall()
     except Exception:
         return {"ok": True, "checked": 0, "missing": 0, "dirty": 0,
                 "why": "读不了目录表"}
@@ -4219,10 +4420,29 @@ def _ix_verify_one(item):
         elif abs(float(st.st_mtime) - float(mtime or 0)) > 1.0:
             dirty += 1
 
-    checked = len(rows)
+    # 抽查根目录直属一级子目录：新增未录入的子目录也必须立即判过期，避免被随机采样稀释漏检
+    new_top = 0
+    try:
+        if os.path.isdir(root_dir):
+            db_top = {os.path.normcase(os.path.abspath(p)) for (p,) in top_db_rows}
+            for e in os.scandir(root_dir):
+                try:
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                    if e.name.lower() in INDEX_SKIP or e.name.startswith("$"):
+                        continue
+                    if os.path.normcase(os.path.abspath(e.path)) not in db_top:
+                        new_top += 1
+                        dirty += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+    checked = len(rows) + new_top
     miss_ratio = missing / float(checked)
     dirty_ratio = dirty / float(checked)
-    ok = miss_ratio <= _IX_MISSING_MAX and dirty_ratio <= _IX_DIRTY_MAX
+    ok = (new_top == 0) and miss_ratio <= _IX_MISSING_MAX and dirty_ratio <= _IX_DIRTY_MAX
     why = ""
     if not ok:
         why = "抽查 %d 个目录：%d 个已不存在，%d 个内容已变" % (
@@ -4264,6 +4484,8 @@ def index_selfcheck(rebuild=True, progress=None):
             report["rebuilt"] = list(stale_ids)
         except Exception as exc:
             report["failed"] = [{"ids": stale_ids, "why": str(exc)}]
+    else:
+        _ix_prune_orphan_files(dry_run=False)
     report["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
     return report
 
@@ -4437,8 +4659,7 @@ def hot_refresh(force=False):
 
 def _hot_refresh_locked(force):
     roots = _hot_roots()
-    if not roots:
-        return {"roots": [], "files": 0, "elapsed_ms": 0, "skipped": "没有可保鲜的热目录"}
+    t0 = time.perf_counter()
     try:
         ok, used, cap = index_quota_ok()
         if not ok:
@@ -4448,66 +4669,75 @@ def _hot_refresh_locked(force):
                                % (used // 1048576, cap // 1048576)}
     except Exception:
         pass
-    t0 = time.perf_counter()
     try:
         items = _ix_load()
+        if not items:
+            return {"roots": [], "files": 0, "elapsed_ms": 0,
+                    "skipped": "还没有建过索引，等一次正常建库"}
         known_roots = {}
         for item in items:
             root = os.path.normcase(os.path.abspath(item.get("root") or ""))
             known_roots[root] = max(known_roots.get(root, 0),
                                     int(item.get("files") or 0))
-        # 热目录也可能很大（有人把几十万个文件的目录当下载夹）。后台节拍
-        # 不该在这种机器上每 10 分钟烧掉几秒 CPU，交给 index_selfcheck 的
-        # 抽查更划算。用户自己点「立即刷新」不受这个限制。
-        if not force:
+        skip_hot_deep = False
+        if not force and roots:
             known = max([known_roots.get(os.path.normcase(os.path.abspath(p)), 0)
                          for p in roots] or [0])
             if known > _HOT_INLINE_MAX:
-                return {"roots": roots, "files": 0, "elapsed_ms": 0,
-                        "skipped": "热目录有 %d 个文件，超过同步重扫上限，"
-                                   "交给后台抽查" % known}
-        # 只刷新「已经在索引范围内」的目录，绝不 index_add 新根。
-        # 1.42.0/1.42.1 在这里对 missing 调了 index_add —— 保鲜顺手把范围
-        # 扩了：用户只索引了 D:\，却多出一份 C:\Users\...\Downloads，占用
-        # 排行也跟着变。那是越权，不是保鲜。
-        #
-        # 也不能用 build_index(roots=...)：它的 roots 分支同样先 index_add，
-        # 会把 D:\下载 登记成第二条索引根。这里逐个目录 upsert 库里的行，
-        # 清单一个字都不动。
-        roots = [p for p in roots
-                 if _ix_items_for_path(p)]
-        if not roots:
-            return {"roots": [], "files": 0, "elapsed_ms": 0,
-                    "skipped": "热目录还没进过索引，等一次正常建库"}
+                skip_hot_deep = True
+
+        # 只刷新「已经在索引范围内」的目录与浅层变动子树，绝不 index_add 新根。
+        hot_by_item = {}
+        valid_hot = []
+        if not skip_hot_deep:
+            for p in roots:
+                owners = _ix_items_for_path(p)
+                if not owners:
+                    continue
+                valid_hot.append(p)
+                hot_by_item.setdefault(owners[0][0]["id"], []).append(p)
+
         total_dirs = 0
         total_files = 0
         errs = []
-        for p in roots:
-            owners = _ix_items_for_path(p)
-            if not owners:
+        touched_roots = list(valid_hot)
+        for item in items:
+            root_path = str(item.get("root") or "")
+            if not root_path or not os.path.isdir(root_path):
                 continue
-            item = owners[0][0]
             db = None
             try:
                 db = _index_open(_ix_db_abspath(item))
                 if db is None or not _index_has_totals(db):
-                    # 老库没有 size_sum：等它重建时自然升级
                     continue
+                item_hots = hot_by_item.get(item["id"], [])
+                skip_set = {os.path.normcase(os.path.abspath(hp)) for hp in item_hots}
+                changed = False
                 with db:
-                    d, f = _ix_refresh_subtree(db, p)
-                total_dirs += d
-                total_files += f
+                    for hp in item_hots:
+                        d, f = _ix_refresh_subtree(db, hp)
+                        total_dirs += d
+                        total_files += f
+                        changed = True
+                    d2, f2 = _ix_find_dirty_subtrees(db, root_path, skip_norm=skip_set)
+                    if d2 > 0:
+                        total_dirs += d2
+                        total_files = max(total_files, f2)
+                        changed = True
+                        if root_path not in touched_roots:
+                            touched_roots.append(root_path)
+                if changed:
+                    _ix_sync_item_totals(item["id"], db)
             except Exception as exc:
-                errs.append((p, str(exc)))
+                errs.append((root_path, str(exc)))
             finally:
                 try:
                     if db is not None:
                         db.close()
                 except Exception:
                     pass
-        # 时间戳记在这里而不是调用方：查询补扫和后台节拍走的是同一个函数。
         _INDEX_WATCH["hot"] = time.time()
-        return {"roots": roots, "files": total_files, "dirs": total_dirs,
+        return {"roots": touched_roots, "files": total_files, "dirs": total_dirs,
                 "errs": errs,
                 "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
     except Exception as exc:
@@ -4515,38 +4745,34 @@ def _hot_refresh_locked(force):
 
 
 def _hot_maybe_stale():
-    """这次「没搜到」值不值得先给热目录补扫一遍？
-
-    判据不是「索引多久没更新」，而是「上一次补扫距今够不够久」。理由：按
-    索引年龄判断有个必然的漏洞——文件恰好在重建之后、搜索之前下载下来，
-    那一刻索引是最新的，于是这次搜索会搜不到，然后要等下一个周期。而按
-    冷却时间判断，任何一次没搜到都会立刻补扫一次（300ms），只有「连续
-    搜同一个不存在的名字」才会被 15 秒冷却挡掉重复劳动。
-
-    manual 档不补扫：用户选「只手动」就是要自己掌握扫盘时机。
-    """
+    """这次「没搜到」值不值得先给已索引目录静默补扫一次？"""
     try:
         if _freshness_mode() == "manual":
             return False
-        if not _hot_roots():
+        items = _ix_load()
+        if not items:
             return False
-        # 热目录特别大的机器（比如下载夹里塞了 20 万个文件）不能在查询里
-        # 同步重扫，那会把「搜一下」变成几十秒的卡顿。超过这个规模就交给
-        # 后台线程，查询立刻返回空结果 + hint。
-        known = 0
-        hot = {os.path.normcase(os.path.abspath(p)) for p in _hot_roots()}
-        for item in _ix_load():
-            root = os.path.normcase(os.path.abspath(item.get("root") or ""))
-            if root in hot:
-                known = max(known, int(item.get("files") or 0))
-        if known > _HOT_INLINE_MAX:
-            return False
-        # 冷却只针对「上一次因为没搜到而补扫」，不针对后台那次定期刷新。
-        # 两者混用一个时间戳会出现这种事：后台刚刷过，用户三秒后下载了文件
-        # 再搜，明明该补扫却被冷却挡住，等下一次搜索才命中。分开放就没有
-        # 这个窗口，而防抖的效果不变。
         last = float(_INDEX_WATCH.get("miss") or 0)
-        return (time.time() - last) >= _HOT_MIN_GAP
+        if (time.time() - last) >= _HOT_MIN_GAP:
+            return True
+        # 冷却期内但磁盘根目录/热目录 mtime 明显晚于上次刷盘时刻（O(1) stat），仍放行补扫
+        hot_at = float(_INDEX_WATCH.get("hot") or 0)
+        if hot_at > 0:
+            for hp in _hot_roots():
+                try:
+                    if os.stat(hp).st_mtime > hot_at:
+                        return True
+                except OSError:
+                    pass
+            for it in items:
+                rp = str(it.get("root") or "")
+                if rp:
+                    try:
+                        if os.stat(rp).st_mtime > hot_at:
+                            return True
+                    except OSError:
+                        pass
+        return False
     except Exception:
         return False
 
@@ -8308,9 +8534,10 @@ def _engine_search_index(params):
                 "elapsed_ms": int((time.perf_counter() - t0) * 1000),
                 "failed": _uniq_failed(failed), "error": "选中的目录都不存在，没有重建索引"}
 
-    # 库都在、都有条数、又不是强制全量，就别白跑一遍
+    # 库都在、都有条数、抽查通过、又不是强制全量，才跳过重建
     if reuse and not full and all(
             os.path.isfile(_ix_db_abspath(i)) and int(i.get("files") or 0) > 0
+            and _ix_verify_one(i).get("ok")
             for i in targets):
         return {"indexed": int(index_count()), "reused": True,
                 "entries": len(targets), "elapsed_ms": 0, "failed": _uniq_failed(failed),

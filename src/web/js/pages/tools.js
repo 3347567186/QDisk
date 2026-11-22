@@ -171,8 +171,7 @@
 
     const bigCard = h('div', { class: 'card stretch-card' },
       h('div', { class: 'card-title' },
-        h('h2', null, T('大文件排行', 'Largest files')),
-        h('span', { class: 'hint' }, T('只读扫描，标注文件类型、归属软件与签名风险', 'Read-only scan with type, owner and signature risk'))
+        h('h2', null, T('大文件排行', 'Largest files'))
       ),
       h('div', { class: 'toolbar' }, bigInput, bigBrowse, bigBtn, sigBtn),
       bigFilter,
@@ -206,8 +205,7 @@
 
     const emptyCard = h('div', { class: 'card stretch-card' },
       h('div', { class: 'card-title' },
-        h('h2', null, T('空文件夹清理', 'Empty folders')),
-        h('span', { class: 'hint' }, T('只删空目录，1–3 层内判断', 'Empty dirs only, 1–3 levels deep'))
+        h('h2', null, T('空文件夹清理', 'Empty folders'))
       ),
       h('div', { class: 'toolbar' }, emptyInput, emptyBrowse, emptyBtn,
         h('span', { class: 'spacer' }), depthSeg, emptySel, emptyDel),
@@ -221,8 +219,7 @@
     const dvHost = h('div', { class: 'stack' });
     const browseCard = h('div', { class: 'card stretch-card' },
       h('div', { class: 'card-title' },
-        h('h2', null, T('文件夹浏览', 'Folder view')),
-        h('span', { class: 'hint' }, T('在应用内一层层看，不用跳资源管理器', 'Browse folders in-app without leaving TidyAssistant'))
+        h('h2', null, T('文件夹浏览', 'Folder view'))
       ),
       dvHost
     );
@@ -251,10 +248,10 @@
       icon('folder', 14), h('span', null, T('空文件夹清理', 'Empty folders')));
     const tabBrowse = h('button', { class: 'wb-tab', type: 'button', onclick: () => switchToolTab('browse') },
       icon('layers', 14), h('span', null, T('文件夹浏览', 'Folder view')));
-    const wbMeta = h('span', { class: 'wb-meta' }, T('按体积排查大户 · 只读分析不误删', 'Inspect space hogs safely'));
     const wbBar = h('div', { class: 'wb-bar' },
       h('div', { class: 'wb-tabs', role: 'tablist' }, tabBig, tabEmpty, tabBrowse),
-      wbMeta
+      h('span', { class: 'spacer' }),
+      topAskBtn
     );
 
     const paneBig = h('div', { class: 'wb-pane' }, bigCard);
@@ -270,11 +267,6 @@
       paneBig.hidden = target !== 'big';
       paneEmpty.hidden = target !== 'empty';
       paneBrowse.hidden = target !== 'browse';
-      wbMeta.textContent = target === 'big'
-        ? T('按体积排查大户 · 签名校验安全风险', 'Largest 50 files with signature & risk tags')
-        : (target === 'empty'
-          ? T('1–3 层深度排查 · 重要目录受保护锁定', 'Find empty folders safely (1–3 levels)')
-          : T('应用内层级浏览 · 支持右键操作与 AI 定位', 'In-app tree view with AI jump markers'));
     }
 
     root.classList.add('page-fill');
@@ -283,7 +275,7 @@
     root.appendChild(paneBig);
     root.appendChild(paneEmpty);
     root.appendChild(paneBrowse);
-    setActions(topAskBtn);
+    setActions();
 
     /* ---------------- 来自助手的跳转 ---------------- */
     const stripSlash = (p) => String(p || '').replace(/[\\/]+$/, '');

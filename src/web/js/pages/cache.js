@@ -84,11 +84,17 @@
         class: 'btn sm ghost', disabled: true, onclick: () => toggleAll()
       }, icon('chevrons-down', 13), collapseLabel);
 
+      const askBtn = UI.askBtn({
+        title: T('问助手 · 清理缓存', 'Ask AI · Caches'),
+        question: T('帮我看看当前扫描到的缓存分组，哪些可以安全清理？', 'Review the scanned cache groups and tell me which ones are safe to clean.'),
+        ctx: () => ({ page: '清理缓存', groups: S.groups.length, selected: S.selected.size })
+      });
+
       const topCard = h('div', { class: 'card' },
         h('div', { class: 'card-title' },
           h('h2', null, T('缓存概览', 'Cache overview')),
           h('span', { class: 'spacer' }),
-          reloadBtn, recBtn, cleanBtn, collapseBtn
+          reloadBtn, recBtn, cleanBtn, collapseBtn, askBtn
         ),
         h('div', { class: 'stats inline' },
           h('div', { class: 'stat' }, statGroups, h('div', { class: 'k' }, T('分组', 'Groups'))),
@@ -122,16 +128,12 @@
           h('label', { class: 'check' }, chkPrune, h('span', null, T('清理后删除空目录', 'Remove empty folders after cleaning'))),
           h('span', { class: 'spacer' }),
           safeBtn
-        ),
-        h('div', { class: 'small muted' },
-          T('缓存只清内容、不删目录；系统目录受硬黑名单保护。',
-            'Only contents are cleared; system paths are hard-protected.'))
+        )
       );
       const optSection = section(T('选项', 'Options'), optBody, {
         open: false,
         id: 'cache-opts',
-        icon: 'shield',
-        hint: T('安全 / 谨慎 / 高级', 'Safe / Caution / Advanced')
+        icon: 'shield'
       });
 
       /* ---------- 分组列表 ---------- */
@@ -139,9 +141,7 @@
       const groupsBody = h('div', { class: 'cache-body' }, groupsBox);
       const listCard = h('div', { class: 'card stretch-card cache-list-card' },
         h('div', { class: 'card-title' },
-          h('h2', null, T('缓存分组', 'Cache groups')),
-          h('span', { class: 'hint' }, T('右键分组或条目可批量选择 / 只清此项',
-            'Right-click a group or an item for more actions'))
+          h('h2', null, T('缓存分组', 'Cache groups'))
         ),
         groupsBody
       );
@@ -863,11 +863,7 @@
         PAGE_SIZE = UI.pageSize();
         render();
       };
-      setActions(UI.askBtn({
-        title: T('问助手 · 清理缓存', 'Ask AI · Caches'),
-        question: T('帮我看看当前扫描到的缓存分组，哪些可以安全清理？', 'Review the scanned cache groups and tell me which ones are safe to clean.'),
-        ctx: () => ({ page: '清理缓存', groups: S.groups.length, selected: S.selected.size })
-      }));
+      setActions();
 
       liveJump = function (payload) {
         const p = payload || {};

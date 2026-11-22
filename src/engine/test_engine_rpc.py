@@ -780,6 +780,32 @@ class TestHotFreshness(EngineCase):
         res = self.rpc_ok("search.query", {"q": "no_such_file_zzz", "limit": 20})
         self.assertEqual(res["items"], [], res)
 
+    def test_hot_refresh_covers_new_non_download_subfolder_and_syncs_catalog(self):
+        """索引根内新增任意非下载类子文件夹，未搜到时静默补全索引并同步更新 catalog 统计。"""
+        base = self.new_folder()
+        old_dl = os.path.join(base, "existing")
+        os.makedirs(old_dl, exist_ok=True)
+        with open(os.path.join(old_dl, "base_item.txt"), "wb") as f:
+            f.write(b"a" * 32)
+        self.rpc_ok("search.index", {"roots": [base], "reuse": False})
+        st0 = self.rpc_ok("search.status")
+        base_entry0 = [e for e in st0["entries"] if os.path.normcase(e["root"]) == os.path.normcase(base)][0]
+        count0 = int(base_entry0["files"])
+
+        proj = os.path.join(base, "NewProjectData")
+        os.makedirs(proj, exist_ok=True)
+        target = os.path.join(proj, "fresh_non_dl_probe.txt")
+        with open(target, "wb") as f:
+            f.write(b"b" * 64)
+
+        res = self.rpc_ok("search.query", {"q": "fresh_non_dl_probe", "limit": 20})
+        names = {i["name"] for i in res["items"]}
+        self.assertIn("fresh_non_dl_probe.txt", names,
+                      "非 Downloads 新增目录内文件未被静默索引覆盖：%r" % (res,))
+        st1 = self.rpc_ok("search.status")
+        base_entry1 = [e for e in st1["entries"] if os.path.normcase(e["root"]) == os.path.normcase(base)][0]
+        self.assertGreater(int(base_entry1["files"]), count0, st1)
+
     def test_hot_refresh_reports_what_it_did(self):
         """保鲜动作要能自证：扫了哪些根、多少文件、花了多久。"""
         rep = self.rpc_ok("search.hot", {})
@@ -1348,6 +1374,38 @@ class TestPrune(EngineCase):
         self.assertLess(len(os.listdir(folder)), 6, "超上限该淘汰")
         self.assertIn("05.png", os.listdir(folder), "最新的不能被淘汰")
         self.assertNotIn("00.png", os.listdir(folder), "最旧的该先走")
+
+    def test_index_dir_retains_only_latest_and_prunes_orphans(self):
+        """索引目录只保留有效最新库，孤儿旧库 / .db.new / 遗留 files.db 一并清理。"""
+        T = self.T
+        old_cache = T.S.get("cache_dir")
+        cache_tmp = os.path.join(self.tmp, "cache_idx")
+        os.makedirs(cache_tmp, exist_ok=True)
+        T.S["cache_dir"] = cache_tmp
+        self.addCleanup(lambda: T.S.__setitem__("cache_dir", old_cache))
+
+        root = os.path.join(self.tmp, "idx_root")
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, "doc.txt"), "wb") as f:
+            f.write(b"ok")
+        T.index_add([root])
+        T.build_index(roots=[root])
+
+        idx_dir = T.index_dir()
+        item = [i for i in T._ix_load() if os.path.normcase(i["root"]) == os.path.normcase(root)][0]
+        live_db = os.path.basename(T._ix_db_abspath(item))
+        for orphan in ("deadbeef1234.db", "stale_tmp.db.new", "files.db"):
+            with open(os.path.join(idx_dir, orphan), "wb") as f:
+                f.write(b"orphan" * 100)
+
+        rep = T.prune_data_dir()
+        left = set(os.listdir(idx_dir))
+        self.assertIn(live_db, left)
+        self.assertIn("catalog.json", left)
+        self.assertNotIn("deadbeef1234.db", left)
+        self.assertNotIn("stale_tmp.db.new", left)
+        self.assertNotIn("files.db", left)
+        self.assertEqual(rep["items"]["index"]["files"], 3)
 
 
 class TestUndo(EngineCase):

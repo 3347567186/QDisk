@@ -180,6 +180,12 @@
       const statSize = h('b', { class: 'shot-num' }, '0 B');
       const statSel = h('b', { class: 'shot-num' }, '0');
 
+      const askBtn = UI.askBtn({
+        title: T('问助手 · 清理截图', 'Ask AI · Screenshots'),
+        question: T('帮我筛选或清理旧截图与大体积录屏。', 'Help me filter or clean old screenshots and large recordings.'),
+        ctx: () => ({ page: '清理截图', items: S.items.length, days: S.days, selected: S.selected.size })
+      });
+
       const topCard = h('div', { class: 'card cmd-bar', style: { justifyContent: 'flex-start' } },
         h('div', { class: 'cmd-main', style: { width: '100%', justifyContent: 'flex-start' } },
           h('span', { class: 'small muted' }, T('保留天数', 'Keep days')),
@@ -191,7 +197,9 @@
           allImagesLabel,
           h('span', { class: 'cmd-sep' }),
           scanBtn,
-          cleanBtn
+          cleanBtn,
+          h('span', { class: 'spacer' }),
+          askBtn
         )
       );
 
@@ -208,15 +216,11 @@
           addDirBtn, resetDirBtn,
           h('span', { class: 'spacer' }),
           dirHint
-        ),
-        h('div', { class: 'small muted' },
-          T('默认使用引擎内置的截图目录；添加后只扫描列表里的目录。',
-            'By default the engine built-in screenshot folders are scanned; once you add folders, only those are scanned.'))
+        )
       );
       const dirSection = section(T('扫描目录', 'Scan folders'), dirBody, {
         open: false,
-        id: 'shots-dirs',
-        hint: T('多目录', 'Multiple folders')
+        id: 'shots-dirs'
       });
 
       /* ---------- 结果卡 ---------- */
@@ -1296,11 +1300,7 @@
       renderDirs();
       render();
 
-      setActions(UI.askBtn({
-        title: T('问助手 · 清理截图', 'Ask AI · Screenshots'),
-        question: T('帮我筛选或清理旧截图与大体积录屏。', 'Help me filter or clean old screenshots and large recordings.'),
-        ctx: () => ({ page: '清理截图', items: S.items.length, days: S.days, selected: S.selected.size })
-      }));
+      setActions();
 
       liveJump = function (payload) {
         const p = payload || {};

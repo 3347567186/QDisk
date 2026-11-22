@@ -307,6 +307,18 @@
           }
         });
 
+        const askBtn = UI.askBtn({
+          title: T('问助手 · 文件搜索', 'Ask AI · Search'),
+          question: T('帮我按关键词或索引状态查找目标文件，或者排查搜索/Everything 异常。', 'Help me search for files or diagnose search / Everything index status.'),
+          ctx: () => ({
+            page: '搜索',
+            query: state.query || state.lastQuery,
+            backend: state.backend,
+            indexed: state.indexed,
+            dirs: state.entries.map((e) => e.path)
+          })
+        });
+
         return h('div', { class: 'toolbar' },
           input,
           h('button', {
@@ -318,7 +330,8 @@
             class: 'btn',
             disabled: !state.searched,
             onclick: clearResults
-          }, icon('close', 14), h('span', { text: T('清空', 'Clear') }))
+          }, icon('close', 14), h('span', { text: T('清空', 'Clear') })),
+          askBtn
         );
       }
 
@@ -615,17 +628,7 @@
         }
       };
 
-      setActions(UI.askBtn({
-        title: T('问助手 · 文件搜索', 'Ask AI · Search'),
-        question: T('帮我按关键词或索引状态查找目标文件，或者排查搜索/Everything 异常。', 'Help me search for files or diagnose search / Everything index status.'),
-        ctx: () => ({
-          page: '搜索',
-          query: state.query || state.lastQuery,
-          backend: state.backend,
-          indexed: state.indexed,
-          dirs: state.entries.map((e) => e.path)
-        })
-      }));
+      setActions();
 
       bindBlankMenu();
       paint();

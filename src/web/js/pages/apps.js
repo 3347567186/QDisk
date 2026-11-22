@@ -500,9 +500,7 @@
 
     const mainCard = card(
       h('div', { class: 'card-title' },
-        h('h2', null, T('已安装程序', 'Installed programs')),
-        h('span', { class: 'hint' },
-          T('右键行有更多操作 · 点击排序按钮可升降序切换', 'Right-click row for actions · Click sort button to toggle order'))
+        h('h2', null, T('已安装程序', 'Installed programs'))
       ),
       // 第一行：搜索过滤 + 视图切换 (全部/桌面/系统) + 刷新 + 孤立残留排查
       h('div', { class: 'toolbar' },
@@ -576,13 +574,7 @@
       setTabBadge(tabProcsBtn, ProcState.items.length);
     }
 
-    const topTabBar = h('div', { class: 'wb-bar top-tab-bar', style: { marginBottom: '4px' } },
-      h('div', { class: 'wb-tabs' }, tabAppsBtn, tabStartupBtn, tabProcsBtn, tabFootprintBtn),
-      h('span', { class: 'spacer' }),
-      fusedAdminBtn
-    );
-
-    /* 顶栏常驻【问助手】入口（Tab 感知上下文） */
+    /* 面板内【问助手】入口（Tab 感知上下文） */
     let isMounted = true;
     const topAskBtn = UI.askBtn({
       title: T('让助手分析已安装软件、开机自启与磁盘空间画像', 'Ask AI about apps, startup items, and space footprint'),
@@ -630,7 +622,13 @@
         };
       }
     });
-    setActions(topAskBtn);
+
+    const topTabBar = h('div', { class: 'wb-bar top-tab-bar', style: { marginBottom: '4px' } },
+      h('div', { class: 'wb-tabs' }, tabAppsBtn, tabStartupBtn, tabProcsBtn, tabFootprintBtn),
+      h('span', { class: 'spacer' }),
+      fusedAdminBtn,
+      topAskBtn
+    );
 
     /* ================================================================
        TAB 2: 开机自启动管理 (Startup Items Governance)
@@ -766,8 +764,7 @@
 
     const startupCard = card(
       h('div', { class: 'card-title' },
-        h('h2', null, T('开机自启', 'Startup Apps')),
-        h('span', { class: 'hint' }, T('管理随系统启动的应用与清理失效残留', 'Manage boot autorun & clean broken entries'))
+        h('h2', null, T('开机自启', 'Startup Apps'))
       ),
       h('div', { class: 'toolbar' },
         startupFilterInput,
@@ -1167,7 +1164,9 @@
       page: GlobalAppsCache.procPage || 1,
       loading: false,
       totalMemory: GlobalAppsCache.procTotalRam || 0,
-      rawCount: GlobalAppsCache.procRawCount || 0
+      rawCount: GlobalAppsCache.procRawCount || 0,
+      liveTimer: null,
+      isLive: true
     };
 
     const procFilterInput = h('input', {
@@ -1248,7 +1247,6 @@
         procViewBtn('apps', '后台应用', 'Apps'),
         procViewBtn('system', '系统保护', 'System')
       ),
-      btnRefreshProc,
       h('span', { class: 'spacer' }),
       procPagerBar
     );
@@ -1259,13 +1257,45 @@
       procPagePicker
     );
 
+    const liveProcBadge = h('span', {
+      class: 'chip ok sm',
+      style: { cursor: 'pointer', userSelect: 'none', fontSize: '11px', padding: '3px 8px' },
+      title: T('点击暂停/恢复实时采样', 'Click to pause/resume live sampling')
+    }, icon('activity', 12), h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (2.5s)', 'Live (2.5s)')));
+
+    function updateProcLiveBadge() {
+      if (ProcState.isLive && ProcState.liveTimer) {
+        liveProcBadge.className = 'chip ok sm';
+        liveProcBadge.innerHTML = '';
+        liveProcBadge.appendChild(icon('activity', 12));
+        liveProcBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (2.5s)', 'Live (2.5s)')));
+      } else {
+        liveProcBadge.className = 'chip neutral sm';
+        liveProcBadge.innerHTML = '';
+        liveProcBadge.appendChild(icon('pause', 12));
+        liveProcBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('已暂停采样', 'Paused')));
+      }
+    }
+
+    liveProcBadge.onclick = () => {
+      ProcState.isLive = !ProcState.isLive;
+      if (ProcState.isLive) {
+        startProcLiveMonitoring();
+      } else {
+        stopProcLiveMonitoring();
+      }
+      updateProcLiveBadge();
+    };
+
     const procVisualBox = h('div', { class: 'proc-visual', style: { marginBottom: '12px' } });
     const procTableBox = h('div', { class: 'table-wrap' });
 
     const procsCard = card(
       h('div', { class: 'card-title' },
         h('h2', null, T('后台进程管理', 'Running Processes')),
-        h('span', { class: 'hint' }, T('实时快照 · 优雅通知释放 · 严禁系统误杀 · 0% 闲置后台负载', 'Instant snapshot, safe shutdown, zero idle CPU'))
+        h('span', { class: 'spacer' }),
+        liveProcBadge,
+        btnRefreshProc
       ),
       procVisualBox,
       procToolbar1,
@@ -1274,31 +1304,56 @@
     );
     procsCard.style.display = 'none';
 
-    async function loadProcs(force) {
+    async function loadProcs(force, silent = false) {
       if (ProcState.loading) return;
       ProcState.loading = true;
-      if (force || !ProcState.items.length) {
+      if (!silent && (force || !ProcState.items.length)) {
         procTableBox.innerHTML = '';
         const spinner = h('div', { class: 'center text-muted', style: { padding: '32px' } }, icon('refresh', 20), h('span', { style: { marginLeft: '8px' } }, T('正在生成进程快照…', 'Snapshotting processes…')));
         procTableBox.appendChild(spinner);
       }
       try {
         const res = await API.engine('process.list', { aggregate: true });
+        if (!isMounted) return;
         ProcState.items = Array.isArray(res && res.items) ? res.items : [];
         ProcState.totalMemory = Number(res && res.total_memory) || 0;
         ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
         GlobalAppsCache.procs = ProcState.items;
         GlobalAppsCache.procRawCount = ProcState.rawCount;
         GlobalAppsCache.procTotalRam = ProcState.totalMemory;
-        ProcState.page = 1;
+        if (!silent) ProcState.page = 1;
         applyProcFilter();
         renderProcVisual();
       } catch (err) {
-        procTableBox.innerHTML = '';
-        procTableBox.appendChild(empty(T('读取进程列表失败', 'Failed to read processes'), (err && err.message) || String(err)));
+        if (!silent) {
+          procTableBox.innerHTML = '';
+          procTableBox.appendChild(empty(T('读取进程列表失败', 'Failed to read processes'), (err && err.message) || String(err)));
+        }
       } finally {
         ProcState.loading = false;
       }
+    }
+
+    function startProcLiveMonitoring() {
+      if (!isMounted || ProcState.liveTimer) return;
+      ProcState.isLive = true;
+      if (currentTab === 'procs') {
+        loadProcs(false, !!ProcState.items.length);
+      }
+      ProcState.liveTimer = setInterval(() => {
+        if (isMounted && ProcState.isLive && currentTab === 'procs' && !document.hidden) {
+          loadProcs(false, true);
+        }
+      }, 2500);
+      updateProcLiveBadge();
+    }
+
+    function stopProcLiveMonitoring() {
+      if (ProcState.liveTimer) {
+        clearInterval(ProcState.liveTimer);
+        ProcState.liveTimer = null;
+      }
+      updateProcLiveBadge();
     }
 
     function applyProcFilter() {
@@ -1396,8 +1451,7 @@
       });
 
       const donutTitle = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
-        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('内存空间分布透视', 'Memory Distribution')),
-        h('span', { class: 'muted small' }, T('悬停查看 · 点击过滤', 'Hover slice / click to filter'))
+        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('内存空间分布透视', 'Memory Distribution'))
       );
 
       const r = 50;
@@ -1551,8 +1605,7 @@
       });
 
       const barTitle = h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } },
-        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('内存大户排行榜 Top 5', 'Top 5 Memory Consumers')),
-        h('span', { class: 'muted small' }, T('点击条目快速定位', 'Click row to locate'))
+        h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('内存大户排行榜 Top 5', 'Top 5 Memory Consumers'))
       );
       rightCol.appendChild(barTitle);
 
@@ -1873,7 +1926,6 @@
     const footprintCard = card(
       h('div', { class: 'card-title' },
         h('h2', null, T('空间透视与系统画像', 'Storage & System Footprint')),
-        h('span', { class: 'hint' }, T('全盘存储水位 · 实时资源走势 · 空间与内存占用大户治理', 'Partitions, live trend charts & consumer governance')),
         h('span', { class: 'spacer' }),
         livePerfBadge,
         btnPerfRefresh
@@ -1943,8 +1995,10 @@
       if (!isMounted) return;
       if (document.hidden) {
         stopLiveMonitoring();
-      } else if (currentTab === 'footprint' && PerfState.isLive) {
-        startLiveMonitoring();
+        stopProcLiveMonitoring();
+      } else {
+        if (currentTab === 'footprint' && PerfState.isLive) startLiveMonitoring();
+        if (currentTab === 'procs' && ProcState.isLive) startProcLiveMonitoring();
       }
     }
     document.addEventListener('visibilitychange', onVisChange);
@@ -2762,6 +2816,12 @@
         startLiveMonitoring();
       } else {
         stopLiveMonitoring();
+      }
+
+      if (tab === 'procs') {
+        startProcLiveMonitoring();
+      } else {
+        stopProcLiveMonitoring();
       }
 
       if (tab === 'apps') {
@@ -4040,6 +4100,8 @@
       liveJump = null;
       PerfState.isLive = false;
       stopLiveMonitoring();
+      ProcState.isLive = false;
+      stopProcLiveMonitoring();
       document.removeEventListener('visibilitychange', onVisChange);
       GlobalAppsCache.activeTab = currentTab;
       GlobalAppsCache.appsFilter = S.filter;

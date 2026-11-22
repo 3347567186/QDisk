@@ -480,6 +480,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.title-wrap .sub:empty { display: none; }
 .top-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* 唯一滚动容器 */
@@ -4169,8 +4170,7 @@ html[data-theme="dark"] .ai-page {
   image-rendering: pixelated;
 }
 
-/* 侧栏：占位与其它图标同宽 15px，画布 22px 向两侧溢出一点点更饱满 */
-.nav-item[data-id="ai"] .steve { width: 15px; height: 15px; }
+/* 侧栏顶部 AI 入口：无文字，仅保留放大适配留白区的体素史蒂夫头像 */
 .nav-item:hover .steve { transform: scale(1.12) rotate(-3deg); }
 /* 选中态不再缩放头像：非整数缩放会把像素点糊掉，选中另有底色与侧条 */
 .app.collapsed .nav-item[data-id="ai"] .steve { transform-origin: 50% 55%; }
@@ -4192,21 +4192,39 @@ html[data-theme="dark"] .ai-page {
   .nav-item:hover .steve { transform: none; }
 }
 
-/* ================= AI 入口：与其余导航统一左对齐，收起态居中头像（1.43.0） ================= */
+/* ================= AI 入口：无文字大尺寸头像适配侧栏顶部空间 ================= */
 .nav-item > .steve {
   transition: translate var(--dur-2) var(--ease-out), transform var(--dur-jelly) var(--ease-elastic);
 }
-.nav-item.active > .steve { translate: 6px 0; }
-.nav-item[data-id="ai"] .steve { width: 16px; height: 16px; }
-.app.collapsed .nav-item[data-id="ai"] {
-  justify-content: center; gap: 0; padding-left: 0; padding-right: 0;
+.nav-item[data-id="ai"] {
+  height: 54px;
+  justify-content: center;
+  padding: 4px 0;
+  gap: 0;
 }
-.app.collapsed .nav-item[data-id="ai"] .steve { width: 22px; height: 22px; }
-.app.collapsed .nav-item[data-id="ai"].active > .steve { translate: 2px 0; }
+.nav-item[data-id="ai"] .steve {
+  --steve-size: 42px;
+  width: 42px;
+  height: 42px;
+}
+.nav-item[data-id="ai"] .steve-cv {
+  width: 100% !important;
+  height: 100% !important;
+}
+.nav-item[data-id="ai"].active > .steve { translate: 0 0; }
+.app.collapsed .nav-item[data-id="ai"] {
+  height: 44px;
+  justify-content: center;
+  gap: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+.app.collapsed .nav-item[data-id="ai"] .steve { --steve-size: 32px; width: 32px; height: 32px; }
+.app.collapsed .nav-item[data-id="ai"].active > .steve { translate: 0 0; }
 @media (max-width: 940px) {
-  .nav-item[data-id="ai"] { justify-content: center; gap: 0; padding: 0; }
-  .nav-item[data-id="ai"] .steve { width: 22px; height: 22px; }
-  .nav-item[data-id="ai"].active > .steve { translate: 2px 0; }
+  .nav-item[data-id="ai"] { height: 44px; justify-content: center; gap: 0; padding: 0; }
+  .nav-item[data-id="ai"] .steve { --steve-size: 32px; width: 32px; height: 32px; }
+  .nav-item[data-id="ai"].active > .steve { translate: 0 0; }
 }
 
 /* ---------------- AI 设置：获取模型 / 上下文窗口（1.23.12） ---------------- */

@@ -84,7 +84,6 @@
         return h('div', { class: 'card' },
           h('div', { class: 'card-title' },
             h('h2', { text: T('操作历史', 'Activity history') }),
-            h('div', { class: 'hint', text: T('最近 20 次整理', 'Latest 20 tidy runs') }),
             h('span', { class: 'spacer' }),
             h('button', {
               class: 'btn ghost sm',
@@ -177,13 +176,25 @@
           ));
         }
 
+        const askBtn = UI.askBtn({
+          title: T('问助手 · 日志诊断', 'Ask AI · Log diagnostics'),
+          question: T('请帮我读取最近的运行日志并排查异常或失败原因。', 'Read recent logs and diagnose any errors or failures.'),
+          ctx: () => ({
+            page: '日志',
+            selected: state.selected ? state.selected.name : '',
+            note: state.files ? T('共 ' + state.files.length + ' 个日志文件', state.files.length + ' log files') : ''
+          })
+        });
+
         return card(
           titleRow(T('日志文件', 'Log files'),
             state.files && state.files.length ? T('共 {n} 个', '{n} total').replace('{n}', fmtCount(state.files.length)) : null),
           h('div', { class: 'toolbar' },
             h('button', { class: 'btn', disabled: state.loading, onclick: refresh }, icon('refresh'), h('span', { text: T('刷新', 'Refresh') })),
             h('button', { class: 'btn ghost', onclick: openLogDir }, icon('external'), h('span', { text: T('打开日志目录', 'Open log folder') })),
-            h('button', { class: 'btn danger', disabled: state.loading, onclick: clearLogs }, icon('trash'), h('span', { text: T('清空', 'Clear') }))
+            h('button', { class: 'btn danger', disabled: state.loading, onclick: clearLogs }, icon('trash'), h('span', { text: T('清空', 'Clear') })),
+            h('span', { class: 'spacer' }),
+            askBtn
           ),
           body
         );
@@ -214,8 +225,7 @@
         }
 
         return card(
-          titleRow(T('日志内容', 'Log content'),
-            state.selected ? T('较大文件仅显示末尾内容', 'Large files show the tail only') : null),
+          titleRow(T('日志内容', 'Log content'), null),
           body
         );
       }
@@ -358,15 +368,7 @@
         }
       }
 
-      setActions(UI.askBtn({
-        title: T('问助手 · 日志诊断', 'Ask AI · Log diagnostics'),
-        question: T('请帮我读取最近的运行日志并排查异常或失败原因。', 'Read recent logs and diagnose any errors or failures.'),
-        ctx: () => ({
-          page: '日志',
-          selected: state.selected ? state.selected.name : '',
-          note: state.files ? T('共 ' + state.files.length + ' 个日志文件', state.files.length + ' log files') : ''
-        })
-      }));
+      setActions();
 
       liveJump = async function (payload) {
         const target = String((payload && (payload.file || payload.name || payload.path)) || '').trim().toLowerCase();
