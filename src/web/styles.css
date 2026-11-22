@@ -1401,7 +1401,7 @@ html[data-theme="dark"] .admin-fused-btn.warn .admin-dot {
   padding: 0;
   overflow: hidden;
   border-radius: var(--radius-lg, 12px);
-  background: var(--surface-1);
+  background: var(--surface);
   box-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.28), 0 0 0 1px var(--line);
 }
 .wizard-head {
@@ -1490,6 +1490,7 @@ html[data-theme="dark"] .admin-fused-btn.warn .admin-dot {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  background: var(--surface);
 }
 
 .wizard-hero-card {
@@ -1505,7 +1506,7 @@ html[data-theme="dark"] .admin-fused-btn.warn .admin-dot {
   width: 44px;
   height: 44px;
   border-radius: var(--radius-sm);
-  background: var(--surface-1);
+  background: var(--surface);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1555,7 +1556,7 @@ html[data-theme="dark"] .admin-fused-btn.warn .admin-dot {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
-  background: var(--surface-1);
+  background: var(--surface);
 }
 .wizard-group-head {
   display: flex;
@@ -2821,7 +2822,7 @@ body[data-idle="1"] *::after {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 12px; margin-bottom: 10px;
   border: 1px solid var(--line); border-left: 3px solid var(--ok, #2f9e6d);
-  border-radius: var(--radius-2); background: var(--panel);
+  border-radius: var(--radius); background: var(--surface-2);
   animation: arc-last-in 180ms ease-out;
 }
 .arc-last-ic { color: var(--ok, #2f9e6d); display: flex; }
@@ -3437,14 +3438,14 @@ html[data-theme="dark"] .ai-page {
 }
 .ai-prop-item {
   display: flex; align-items: baseline; gap: 6px; padding: 3px 8px; min-height: var(--row-h);
-  font-size: var(--fs-tiny); background: var(--bg-1);
+  font-size: var(--fs-tiny); background: var(--surface-2);
   transition: background var(--dur-2) var(--ease-out);
 }
 .ai-prop-item:hover { background: var(--hover, var(--surface)); }
 .ai-prop-item-t { color: var(--text-1); flex: 0 0 auto; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-prop-item-s { color: var(--text-3); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-prop-item-d { color: var(--danger); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-prop-more { font-size: var(--fs-tiny); color: var(--text-3); padding: 2px 8px; background: var(--bg-1); }
+.ai-prop-more { font-size: var(--fs-tiny); color: var(--text-3); padding: 2px 8px; background: var(--surface-2); }
 
 /* 批量确认：一张卡里勾选要执行的那几条。
    行高比数据行矮一点（30px），勾掉的行压暗，勾选数变化时右侧给出真实数量与体积。 */
@@ -3453,7 +3454,7 @@ html[data-theme="dark"] .ai-page {
 .ai-prop-pickbox { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
 .ai-prop-picks-head {
   display: flex; align-items: center; gap: 8px;
-  padding: 5px 8px; background: var(--bg-1);
+  padding: 5px 8px; background: var(--surface-2);
   font-size: var(--fs-tiny); color: var(--text-3);
   border-bottom: 1px solid var(--line);
 }
@@ -3472,7 +3473,7 @@ html[data-theme="dark"] .ai-page {
   display: flex; align-items: center; gap: 8px;
   padding: 0 8px; min-height: 30px; cursor: pointer;
   font-size: var(--fs-tiny);
-  background: var(--bg-1);
+  background: var(--surface-2);
   transition: background var(--dur-1) var(--ease-out), opacity var(--dur-1) var(--ease-out);
 }
 .ai-prop-pick + .ai-prop-pick { border-top: .5px solid var(--line); }
@@ -3505,7 +3506,7 @@ html[data-theme="dark"] .ai-page {
 .ai-prop-done { font-size: var(--fs-tiny); color: var(--text-2); }
 .ai-prop-count-wrap { margin-left: auto; font-size: var(--fs-tiny); color: var(--text-3); }
 .ai-prop-word {
-  border: 1px solid var(--line); border-radius: 999px; background: var(--bg-1); color: var(--text-1);
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--text-1);
   font: inherit; font-size: var(--fs-tiny); padding: 4px 10px; min-width: 0; width: 8.5em;
   transition: border-color var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
 }
@@ -4380,7 +4381,7 @@ html[data-theme="dark"] .ai-page {
 .ai-tnav-mark::before {
   content: ''; display: block; width: 14px; height: 2px; border-radius: 2px;
   background: var(--text-3); transform: scaleX(.6); transform-origin: right center;
-  transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), opacity var(--dur-fast);
+  transition: transform var(--dur-1) var(--ease), background var(--dur-1) var(--ease), opacity var(--dur-1);
   opacity: .9;
 }
 .ai-tnav-mark:hover::before { transform: scaleX(1); background: var(--text-2); }
@@ -4433,7 +4434,7 @@ html[data-theme="dark"] .ai-tnav-pop {
   border-radius: 100px; border: 1px solid var(--line); background: var(--surface);
   color: var(--text-2); box-shadow: var(--shadow-2); cursor: pointer;
   opacity: 0; transform: translateY(4px) scale(.94); pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+  transition: opacity var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
 .ai-tobottom.on { opacity: 1; transform: none; pointer-events: auto; }
 .ai-tobottom:hover { color: var(--text-1); background: var(--surface-2); }
@@ -4573,7 +4574,7 @@ html[data-theme="dark"] .ai-tnav-pop {
 .ai-dh-del {
   flex: 0 0 auto; width: 26px; height: 26px; display: grid; place-items: center;
   border: 0; border-radius: var(--radius); background: none; color: var(--text-3);
-  cursor: pointer; opacity: 0; transition: opacity var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
+  cursor: pointer; opacity: 0; transition: opacity var(--dur-1), color var(--dur-1), background var(--dur-1);
 }
 .ai-dh-row:hover .ai-dh-del, .ai-dh-del:focus-visible { opacity: 1; }
 .ai-dh-del:hover { color: var(--danger); background: var(--surface-2); }

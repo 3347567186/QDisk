@@ -543,11 +543,13 @@
     let currentTab = 'apps';
 
     function makeTabBtn(id, iconName, zh, en) {
+      const badge = h('span', { class: 'wb-tab-badge', style: { display: 'none' } }, '0');
       const b = h('button', {
-        class: 'chip' + (currentTab === id ? ' active' : ''),
+        class: 'wb-tab' + (currentTab === id ? ' active' : ''),
         type: 'button',
         onclick: () => switchTab(id)
-      }, icon(iconName, 13), h('span', null, T(zh, en)));
+      }, icon(iconName, 13), h('span', null, T(zh, en)), badge);
+      b._badge = badge;
       return b;
     }
 
@@ -556,8 +558,26 @@
     const tabProcsBtn = makeTabBtn('procs', 'scan', '后台进程', 'Running Procs');
     const tabFootprintBtn = makeTabBtn('footprint', 'chart', '空间画像', 'Space Footprint');
 
-    const topTabBar = h('div', { class: 'toolbar top-tab-bar', style: { marginBottom: '4px' } },
-      h('div', { class: 'seg' }, tabAppsBtn, tabStartupBtn, tabProcsBtn, tabFootprintBtn),
+    function setTabBadge(btnEl, n) {
+      if (!btnEl || !btnEl._badge) return;
+      const num = Number(n) || 0;
+      if (num > 0) {
+        btnEl._badge.textContent = String(num);
+        btnEl._badge.style.display = '';
+      } else {
+        btnEl._badge.style.display = 'none';
+      }
+    }
+
+    function updateTabBadges() {
+      const appsTotal = S.items.length + S.store.length;
+      setTabBadge(tabAppsBtn, appsTotal);
+      setTabBadge(tabStartupBtn, StartupState.items.length);
+      setTabBadge(tabProcsBtn, ProcState.items.length);
+    }
+
+    const topTabBar = h('div', { class: 'wb-bar top-tab-bar', style: { marginBottom: '4px' } },
+      h('div', { class: 'wb-tabs' }, tabAppsBtn, tabStartupBtn, tabProcsBtn, tabFootprintBtn),
       h('span', { class: 'spacer' }),
       fusedAdminBtn
     );
@@ -839,6 +859,7 @@
       statStartupAll.textContent = T(`全部 ${fmtCount(total)}`, `All ${fmtCount(total)}`);
       statStartupEnabled.textContent = T(`已启用 ${fmtCount(enabled)}`, `Enabled ${fmtCount(enabled)}`);
       statStartupDisabled.textContent = T(`已禁用 ${fmtCount(disabled)}`, `Disabled ${fmtCount(disabled)}`);
+      updateTabBadges();
 
       if (broken > 0) {
         statStartupBroken.style.display = '';
@@ -1313,6 +1334,7 @@
       statProcApps.textContent = `后台应用 ${fmtCount(apps)}`;
       statProcSys.textContent = `系统保护 ${fmtCount(sys)}`;
       statProcMem.textContent = `总内存 ${fmtSize(ProcState.totalMemory)}`;
+      updateTabBadges();
 
       const pages = Math.max(1, Math.ceil(ProcState.filtered.length / PAGE_SIZE));
       procPageInput.value = String(ProcState.page);
@@ -2725,10 +2747,10 @@
     function switchTab(tab) {
       currentTab = tab;
       GlobalAppsCache.activeTab = tab;
-      tabAppsBtn.className = 'chip' + (tab === 'apps' ? ' active' : '');
-      tabStartupBtn.className = 'chip' + (tab === 'startup' ? ' active' : '');
-      tabProcsBtn.className = 'chip' + (tab === 'procs' ? ' active' : '');
-      tabFootprintBtn.className = 'chip' + (tab === 'footprint' ? ' active' : '');
+      tabAppsBtn.className = 'wb-tab' + (tab === 'apps' ? ' active' : '');
+      tabStartupBtn.className = 'wb-tab' + (tab === 'startup' ? ' active' : '');
+      tabProcsBtn.className = 'wb-tab' + (tab === 'procs' ? ' active' : '');
+      tabFootprintBtn.className = 'wb-tab' + (tab === 'footprint' ? ' active' : '');
 
       updateAdminDisplay();
       mainCard.style.display = tab === 'apps' ? '' : 'none';
@@ -3068,6 +3090,7 @@
       S.page = Math.min(Math.max(1, S.page), pages);
       renderTable();
       renderStatLine();
+      updateTabBadges();
       renderPager();
     }
 
@@ -3476,10 +3499,14 @@
             app.version ? h('span', { class: 'badge' }, app.version) : null,
             sizeVal > 0 ? h('span', { class: 'badge ghost' }, fmtBytes(sizeVal)) : null
           ),
-          h('div', { class: 'wizard-hero-sub mono ellipsis', title: app.install_path || app.publisher || '' },
-            app.install_path
-              ? `${T('安装目录', 'Path')}: ${app.install_path}`
-              : (app.publisher ? `${T('发行商', 'Publisher')}: ${app.publisher}` : T('Windows 系统注册条目', 'System registered entry'))
+          h('div', { class: 'wizard-hero-sub mono ellipsis', title: app.install_path || app.location || app.publisher || '' },
+            (app.install_path || app.location)
+              ? `${T('安装目录', 'Path')}: ${app.install_path || app.location}`
+              : (app.publisher
+                  ? `${T('发行商', 'Publisher')}: ${app.publisher}`
+                  : (app._orphan || !app.key
+                      ? T('已卸载软件 · 全盘孤立残留深度排查', 'Uninstalled App · Deep Orphan Scan')
+                      : T('Windows 系统注册条目', 'System registered entry')))
           )
         );
         return h('div', { class: 'wizard-hero-card' }, iconWrap, heroInfo);
@@ -3640,7 +3667,11 @@
         try {
           const r = await API.engine('apps.leftovers', {
             name: app.name,
-            version: app.version || ''
+            version: app.version || '',
+            location: app.install_path || app.location || '',
+            publisher: app.publisher || '',
+            hive: app.hive || '',
+            key: app.key || ''
           });
           leftoversData = r || { name: app.name, dirs: [], regs: [], blocked: [] };
           checkedDirs = new Set((leftoversData.dirs || []).map((_, i) => i));
@@ -3824,6 +3855,10 @@
           const r = await API.engine('apps.cleanup', {
             name: app.name,
             version: app.version || '',
+            location: app.install_path || app.location || '',
+            publisher: app.publisher || '',
+            hive: app.hive || '',
+            key: app.key || '',
             dirs: dirs,
             regs: regs,
             confirm: true
@@ -3939,7 +3974,7 @@
           return;
         }
         if (orphanModal) orphanModal.close();
-        openUninstallWizard({ name: q }, 'scan');
+        openUninstallWizard({ name: q, _orphan: true }, 'scan');
       }
 
       const chips = commonOrphans.map((name) =>

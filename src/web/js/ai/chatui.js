@@ -44,6 +44,9 @@
     rules: ['写规则', 'Edit rules'],
     migrate: ['去迁移', 'Migrate'],
     apps: ['看应用/进程', 'Inspect apps'],
+    cache: ['去清缓存', 'Clean cache'],
+    shots: ['清理截图', 'Clean screenshots'],
+    search: ['去搜文件', 'Search files'],
     log: ['看日志', 'Inspect logs'],
     settings: ['去设置', 'Settings'],
     none: ['知道了', 'OK']
@@ -57,6 +60,9 @@
     rules: 'rules',
     migrate: 'migrate',
     apps: 'apps',
+    cache: 'cache',
+    shots: 'shots',
+    search: 'search',
     log: 'log',
     settings: 'settings',
     none: 'tools'
@@ -207,39 +213,45 @@
     if (!list || !list.length) return null;
     const wrap = h('div', { class: 'ai-suggest' });
     list.forEach((s) => {
-      if (!s.paths || !s.paths.length) return;
+      const paths = Array.isArray(s && s.paths) ? s.paths.filter(Boolean).map(String) : [];
+      const hasPaths = paths.length > 0;
+      const canPageOnly = !!(s && s.action && ACTION_PAGE[s.action] && s.action !== 'none');
+      if (!hasPaths && !canPageOnly) return;
       const page = ACTION_PAGE[s.action] || 'tools';
       const label = ACTION_LABEL[s.action] || ACTION_LABEL.check;
-      const body = h('div', { class: 'ai-card-body' });
-      s.paths.slice(0, 5).forEach((p) => {
-        body.appendChild(AIEntries.chip(p, { compact: true, src: 'suggest' }));
-      });
-      if (s.paths.length > 5) {
-        body.appendChild(h('div', { class: 'ai-card-more' }, T('还有 ', 'and ') + (s.paths.length - 5) + T(' 项', ' more')));
-      }
-      const first = s.paths[0];
-      /* 1.42.9 起：主按钮直接跳到对应页面（in-app），不再 AIEntries.open 打开 Explorer。
-         次要按钮是「在资源管理器中打开」，彻底反转了优先级——
-         用户的主要动作是在软件内处理，不是跳到软件外面去。 */
-      const btns = h('div', { class: 'ai-card-bar' },
+      const barBtns = [
         h('button', {
           class: 'btn sm',
-          onclick: () => { jumpToPage(page, s); }
-        }, UIx.icon(page === 'organize' ? 'organize' : 'scan', 14), T(label[0], label[1])),
-        h('button', {
-          class: 'btn sm ghost',
-          onclick: () => { AIEntries.open(first, { external: true }); }
-        }, T('在资源管理器中打开', 'Open in Explorer')),
-        h('button', {
-          class: 'btn sm ghost',
-          onclick: () => { UIx.copy(s.paths.join('\r\n')); }
-        }, T('复制路径', 'Copy paths'))
-      );
+          onclick: () => { jumpToPage(page, Object.assign({}, s, { paths })); }
+        }, UIx.icon(page === 'organize' ? 'organize' : 'scan', 14), T(label[0], label[1]))
+      ];
+      let body = null;
+      if (hasPaths) {
+        body = h('div', { class: 'ai-card-body' });
+        paths.slice(0, 5).forEach((p) => {
+          body.appendChild(AIEntries.chip(p, { compact: true, src: 'suggest' }));
+        });
+        if (paths.length > 5) {
+          body.appendChild(h('div', { class: 'ai-card-more' }, T('还有 ', 'and ') + (paths.length - 5) + T(' 项', ' more')));
+        }
+        const first = paths[0];
+        barBtns.push(
+          h('button', {
+            class: 'btn sm ghost',
+            onclick: () => { AIEntries.open(first, { external: true }); }
+          }, T('在资源管理器中打开', 'Open in Explorer')),
+          h('button', {
+            class: 'btn sm ghost',
+            onclick: () => { UIx.copy(paths.join('\r\n')); }
+          }, T('复制路径', 'Copy paths'))
+        );
+      }
+      const btns = h('div', { class: 'ai-card-bar' }, ...barBtns);
       wrap.appendChild(h('div', { class: 'ai-card' },
         h('div', { class: 'ai-card-head' },
           UIx.icon('shield'),
           h('span', {}, s.why || T('建议处理', 'Suggested')),
-          h('span', { class: 'ai-card-badge' }, T('需你确认', 'Confirm'))
+          h('span', { class: 'ai-card-badge' }, hasPaths ? T('需你确认', 'Confirm') : T('直达页面', 'Open view'))
         ),
         body,
         btns
@@ -781,11 +793,62 @@
       emptyBox.hidden = !show;
     }
 
+    function pageEmptySamples(ctx) {
+      const pg = String((ctx && ctx.page) || '').toLowerCase();
+      const hash = String((root.location && root.location.hash) || '').replace(/^#/, '').toLowerCase();
+      const key = hash || pg;
+      const dir = (ctx && ctx.dir) ? String(ctx.dir) : '';
+      if (key.includes('apps') || key.includes('应用')) {
+        return ['哪些应用最占磁盘空间？', '开机自启里有哪些可以安全禁用？', '有哪些后台进程在悄悄吃内存？', '帮我查一下已卸载软件还有没有残留'];
+      }
+      if (key.includes('cache') || key.includes('缓存')) {
+        return ['当前系统里哪些缓存可以安全清理？', '清理浏览器/构建缓存前要注意什么？', '哪些后台进程正在占用缓存文件？', '对比一下哪类缓存能释放最多空间'];
+      }
+      if (key.includes('shots') || key.includes('截图')) {
+        return ['先扫描各目录有哪些多余旧截图', '微信/QQ 自动保存的图片能一起清吗？', '哪些截图目录最占磁盘空间？', '删旧截图前怎么按天数确认最安全？'];
+      }
+      if (key.includes('organize') || key.includes('整理')) {
+        return [
+          (dir ? dir + ' 里最占地方的是什么？' : '下载目录里最占地方的是什么？'),
+          '先帮我预演一下目录整理效果',
+          '哪些文件夹属于源码/系统目录不能动？',
+          '上次整理动了哪些文件，能撤销吗？'
+        ];
+      }
+      if (key.includes('archive') || key.includes('压缩')) {
+        return ['哪些目录里堆积了很多陈年大压缩包？', '帮我查看指定压缩包里包含什么文件', '清理大压缩包前如何确认里面没有孤本？', '最近哪个目录大文件最多？'];
+      }
+      if (key.includes('rules') || key.includes('规则')) {
+        return ['帮我检查当前整理规则有没有冲突或重复', '按当前规则，下载目录的文件会被分到哪？', '源码项目目录怎样加入忽略保护？', '解释一下各分类规则目前的匹配逻辑'];
+      }
+      if (key.includes('migrate') || key.includes('迁移')) {
+        return ['C 盘哪些大目录适合迁移到其他盘？', '各个驱动器现在分别还剩多少可用空间？', '迁移应用或微信数据目录前要注意什么？', '哪个磁盘分区空间最紧张？'];
+      }
+      if (key.includes('search') || key.includes('搜')) {
+        return ['帮我搜一下超过 500 MB 的旧安装包', '目前搜索索引覆盖了哪些根目录？', '哪些目录占了最多磁盘空间？', '最近修改过的大文件主要集中在哪里？'];
+      }
+      if (key.includes('log') || key.includes('日志')) {
+        return ['最近几条操作日志里有没有失败或警告？', '上次批量整理改动了哪些文件？', '当前系统磁盘和引擎运行状态正常吗？', '日志里有哪些反复清理不掉的目录？'];
+      }
+      if (key.includes('settings') || key.includes('设置')) {
+        return ['当前助手权限和模型兜底配置合理吗？', '各磁盘剩余空间与当前索引根目录状态怎样？', '为什么有时候建议禁用高风险直删？', '查看最近的操作日志与系统状态'];
+      }
+      if (key.includes('tools') || key.includes('工具')) {
+        return [
+          (dir ? dir + ' 里哪个子目录最占地方？' : '最近什么最占空间？'),
+          '哪些空文件夹可以安全删掉？',
+          (dir ? dir + ' 里有没有没签名的可疑文件？' : '哪个目录里大文件最多？'),
+          '能直接删的和需要小心处理的目录怎么区分？'
+        ];
+      }
+      return ['最近什么最占空间？', 'D:\\Downloads 里有什么大文件？', '有哪些空文件夹或陈年缓存可以清掉？', '哪些程序和自启项占用了磁盘或内存？'];
+    }
+
     function renderEmpty() {
       emptyBox.innerHTML = '';
-      const samples = compact
-        ? ['这个目录里最占地方的是什么？', '这些空文件夹能删吗？']
-        : ['最近什么最占空间？', 'D:\\Downloads 里有什么大文件？', '有哪些空文件夹可以清掉？', '上次整理动了哪些文件？'];
+      const ctx = typeof ctxProvider === 'function' ? (ctxProvider() || {}) : {};
+      const all = pageEmptySamples(ctx);
+      const samples = compact ? all.slice(0, 2) : all.slice(0, 4);
       const grid = h('div', { class: 'ai-empty-grid' });
       samples.forEach((q) => {
         grid.appendChild(h('button', { class: 'ai-empty-card', onclick: () => ask({ text: q }) },

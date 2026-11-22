@@ -1775,7 +1775,7 @@ class TestAppUninstall(EngineCase):
 
 
 class TestAppLeftovers(EngineCase):
-    """apps.leftovers：只读；缺 name / 名字不存在都是协议错误。"""
+    """apps.leftovers：只读；缺 name 报错；未在列表中的软件自动走孤立残留排查。"""
 
     def test_requires_name(self):
         for params in ({}, {"name": ""}, {"name": "  "}, {"name": None}):
@@ -1783,10 +1783,63 @@ class TestAppLeftovers(EngineCase):
             self.assertFalse(r["ok"], (params, r))
             self.assertIn("name", r["error"])
 
-    def test_not_found(self):
-        r = self.rpc("apps.leftovers", {"name": "绝对不存在的程序_zzz_9417"})
-        self.assertFalse(r["ok"], r)
-        self.assertIn("找不到程序：", r["error"])
+    def test_orphan_scan_returns_structure_for_unlisted_app(self):
+        res = self.rpc_ok("apps.leftovers", {"name": "绝对不存在的程序_zzz_9417"})
+        self.assertEqual(res["name"], "绝对不存在的程序_zzz_9417")
+        self.assertTrue(res.get("orphan"), res)
+        self.assertEqual(res["blocked"], [])
+        self.assertIsInstance(res["dirs"], list)
+        self.assertIsInstance(res["regs"], list)
+
+    def test_orphan_alias_and_version_cleanup(self):
+        """已卸载/孤立程序支持中英文别名（如 鲁大师 -> Ludashi）与去版本号匹配并可安全清理。"""
+        import winreg
+        import uuid
+        os.makedirs(os.path.join(self.root, "temp"), exist_ok=True)
+        local_app = os.path.join(self.root, "localappdata")
+        roaming_app = os.path.join(self.root, "appdata")
+        luda_dir = os.path.join(local_app, "Ludashi")
+        foo_dir = os.path.join(roaming_app, "FooOrphanDemo")
+        os.makedirs(luda_dir, exist_ok=True)
+        os.makedirs(foo_dir, exist_ok=True)
+        with open(os.path.join(luda_dir, "cfg.ini"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(foo_dir, "state.dat"), "wb") as f:
+            f.write(b"y")
+        reg_sub = "SOFTWARE\\TidyOrphanAlias_%s" % uuid.uuid4().hex[:8]
+        try:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, reg_sub, 0, winreg.KEY_WRITE) as k:
+                winreg.SetValueEx(k, "Probe", 0, winreg.REG_SZ, "1")
+            res1 = self.rpc_ok("apps.leftovers", {"name": "鲁大师"})
+            self.assertTrue(res1.get("orphan"), res1)
+            self.assertIn(os.path.normpath(luda_dir), [os.path.normpath(d) for d in res1["dirs"]], res1)
+
+            res2 = self.rpc_ok("apps.leftovers", {"name": "FooOrphanDemo v2.1 (x64)"})
+            self.assertIn(os.path.normpath(foo_dir), [os.path.normpath(d) for d in res2["dirs"]], res2)
+
+            res_deny = self.rpc_ok("apps.cleanup", {
+                "name": "FooOrphanDemo v2.1 (x64)",
+                "dirs": [],
+                "regs": [{"hive": "HKCU", "key": "SOFTWARE\\Google"}],
+                "confirm": True,
+            })
+            self.assertEqual(res_deny["removed_regs"], [])
+            self.assertEqual(len(res_deny["failed"]), 1, res_deny)
+
+            res_clean = self.rpc_ok("apps.cleanup", {
+                "name": "FooOrphanDemo v2.1 (x64)",
+                "dirs": [foo_dir],
+                "regs": [{"hive": "HKCU", "key": reg_sub}],
+                "confirm": True,
+            })
+            self.assertEqual(res_clean["failed"], [], res_clean)
+            self.assertFalse(os.path.exists(foo_dir))
+            with self.assertRaises(OSError):
+                winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_sub)
+        finally:
+            shutil.rmtree(luda_dir, ignore_errors=True)
+            shutil.rmtree(foo_dir, ignore_errors=True)
+            _drop_reg_tree_quiet(winreg.HKEY_CURRENT_USER, reg_sub)
 
     def test_structure_of_real_app(self):
         item = _first_app_with(self)

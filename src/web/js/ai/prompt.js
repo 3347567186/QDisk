@@ -196,7 +196,9 @@
     '这三件事是「要说到」，不是「要分段」：一件事一句话能说完就一句话说完，能合进一个列表就合进一个列表。不要为了凑结构加小标题，也不要把同一批目录在两段里各写一遍 —— 用户原话是「格式总规总矩、废话多」。只有条目多到不看标题会乱时才分小标题。',
     'top_indexed 只在已经确定看哪个目录、想知道「这个目录里哪个文件最大」时用。索引没建时 top_folders 会自动建一次（几秒），不用让用户自己去建。',
     'top_folders 和 top_indexed 返回的 data_age 是「这份账本是什么时候记的」，不是文件的修改时间。它是快照，可能已经旧了 —— 用户问「现在」「此刻」「刚才」这类实时问题时，必须把 data_age 说出来（「这是 12 分钟前的数据」），不能把旧快照说成当前状态。有 data_age_note 就照它的意思说明数据可能已变、需要最新结果就重新扫一次。没有 data_age 字段说明引擎没返回，这时不要自己编一个时间。',
-    '写体积时必须紧跟在它自己的路径后面，写成一个整体（「· 名字，53.8 GB — 完整路径」）。不要先列一串路径、再在另一段里列一串体积 —— 一旦分开写，就可能把 A 的体积安到 B 头上，用户看不出来，但会照着删错东西。'
+    '写体积时必须紧跟在它自己的路径后面，写成一个整体（「· 名字，53.8 GB — 完整路径」）。不要先列一串路径、再在另一段里列一串体积 —— 一旦分开写，就可能把 A 的体积安到 B 头上，用户看不出来，但会照着删错东西。',
+    '文件签名、大文件排查等专项问题优先调用对应诊断工具（如 file_signals、top_folders、top_indexed），不要只靠 list_dir 盲猜。',
+    '软件与系统全局问题要善用专属工具：问已安装程序/体积排行用 installed_apps；问开机自启项用 startup_list；问内存/卡顿进程用 process_list；问软件卸载残留用 app_leftovers；问可清理缓存或旧截图用 clean_candidates；问当前规章/偏好设置/最近日志/空间状态分别用 rules_preview、settings_read、read_logs、system_status。'
   ];
 
   const RULES_READONLY = [
@@ -241,11 +243,11 @@
     '三选一，不允许出现第四种形状：',
     '要查一样：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
     '要同时查几样（最多 3 个，必须互不依赖）：{"thought":"一句话","tools":[{"tool":"工具名","args":{...}},{"tool":"工具名","args":{...}}]}',
-    '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
+    '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|apps|rules|migrate|cache|shots|search|log|settings|none","paths":["完整路径"],"why":"理由"}]}',
     '要改一样东西（只在提示词里列出了 propose_action 时可用）：{"thought":"一句话","tool":"propose_action","args":{"action":"动作名","args":{...},"reason":"给用户看的一句话"}}',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
-    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清的目录（groups.safe 或 groups.careful 非空），suggest 就必须非空，把最值得清的那几个路径放进去，action 用 organize（要先整理分类的）、delete（safe 的）或 check（careful 的），why 一句话说清删了什么会怎样。确实没有可清的东西才给空数组 —— 用户原话是「什么都感觉用不上」，空 suggest 就是他说的那种感觉。',
+    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清目录或明确推荐前往某功能页（如应用/自启、缓存清理、截图清理、规则、迁移、设置、日志），suggest 就应非空。对应目录操作（organize|delete|archive|check）放入具体路径；指向整页功能（apps|cache|shots|rules|migrate|search|log|settings）时 paths 可为 []，why 一句话说清点了之后能解决什么。确实没有后续动作才给空数组。',
     '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
 
@@ -301,11 +303,11 @@
     '【输出格式·最高优先级】',
     '需要查东西时，直接调用提供的工具（function calling），不要用 JSON 文字描述工具调用。',
     '能回答时，只输出一个 JSON 对象，第一个字符必须是 {，最后一个字符必须是 }：',
-    '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|none","paths":["完整路径"],"why":"理由"}]}',
+    '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|apps|rules|migrate|cache|shots|search|log|settings|none","paths":["完整路径"],"why":"理由"}]}',
     '不要代码块围栏，不要解释，JSON 前后不要有任何文字。',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
-    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清的目录（groups.safe 或 groups.careful 非空），suggest 就必须非空，把最值得清的那几个路径放进去，action 用 organize（要先整理分类的）、delete（safe 的）或 check（careful 的），why 一句话说清删了什么会怎样。确实没有可清的东西才给空数组 —— 用户原话是「什么都感觉用不上」，空 suggest 就是他说的那种感觉。',
+    'evidence 只能引用这一轮真正调用过的工具。suggest 是用户看完答案后能直接点的按钮：只要这一轮工具结果里有可清目录或明确推荐前往某功能页（如应用/自启、缓存清理、截图清理、规则、迁移、设置、日志），suggest 就应非空。对应目录操作（organize|delete|archive|check）放入具体路径；指向整页功能（apps|cache|shots|rules|migrate|search|log|settings）时 paths 可为 []，why 一句话说清点了之后能解决什么。确实没有后续动作才给空数组。',
     '不确定能不能答就先调工具，不要用普通文字回答。'
   ].join('\n');
 

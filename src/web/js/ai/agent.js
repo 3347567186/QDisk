@@ -2059,8 +2059,17 @@
     if (used.has('empty_dirs')) out.push('这些空文件夹删了会影响什么？');
     if (used.has('file_signals')) out.push('有没有没签名的可疑文件？');
     if (used.has('installed_apps')) out.push('这些程序里哪个占用最大？');
+    if (used.has('startup_list')) out.push('哪些开机自启项可以放心禁用？');
+    if (used.has('process_list')) out.push('哪些后台进程占用内存最高？');
+    if (used.has('app_leftovers')) out.push('能提议安全清理掉这些残留吗？');
+    if (used.has('clean_candidates')) out.push('这几类缓存或截图里建议先清哪类？');
+    if (used.has('archive_entries')) out.push('这个压缩包里旧版本能删吗？');
     if (used.has('organize_preview')) out.push('为什么有些文件被跳过了？');
     if (used.has('last_organize')) out.push('上次整理能撤销吗？');
+    if (used.has('rules_preview') || used.has('explain_rules')) out.push('有哪些规则可能误命中或需调优？');
+    if (used.has('migrate_preview')) out.push('迁移前需要先关掉哪些占用进程？');
+    if (used.has('read_logs')) out.push('日志里的报错该怎么处理？');
+    if (used.has('system_status')) out.push('哪个盘最紧张，优先清哪里？');
     if (!out.length) {
       out.push(ctx && ctx.dir ? '这个目录里最占地方的是什么？' : '最近什么最占空间？');
       out.push('有哪些空文件夹可以清掉？');

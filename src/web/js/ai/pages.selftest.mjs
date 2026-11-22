@@ -366,5 +366,22 @@ try {
   process.exit(1);
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载验证通过）`);
+// 静态样式令牌校验：防止 CSS 里引用未定义且无回退值的 var(--*) 导致弹窗透明等隐蔽渲染故障
+{
+  const cssPath = path.join(root, 'src', 'web', 'styles.css');
+  const cssText = fs.readFileSync(cssPath, 'utf8');
+  const defs = new Set([...cssText.matchAll(/(--[a-zA-Z0-9_-]+)\s*:/g)].map((m) => m[1]));
+  const badVars = [];
+  cssText.split(/\r?\n/).forEach((line, idx) => {
+    for (const m of line.matchAll(/var\((--[a-zA-Z0-9_-]+)\s*\)/g)) {
+      if (!defs.has(m[1])) badVars.push(`styles.css:${idx + 1} ${m[1]}`);
+    }
+  });
+  if (badVars.length) {
+    console.error(`[CSS 未定义令牌] 发现 ${badVars.length} 处无回退未定义 CSS 变量:\n` + badVars.join('\n'));
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载 & CSS 令牌校验通过）`);
 process.exit(0);

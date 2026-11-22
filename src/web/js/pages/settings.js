@@ -1639,6 +1639,71 @@
                 : T('每次执行都写进 ai\\journal 审计日志；把档位切回「只读」，助手立刻失去动手能力', 'Every run is journalled under ai\\journal; switching back to read-only revokes everything'))
         );
 
+        const ollamaCb = h('input', {
+          type: 'checkbox',
+          checked: d.ollamaFallback === true,
+          onchange: (e) => { d.ollamaFallback = e.target.checked; paint(); }
+        });
+        const ollamaModelIn = h('input', {
+          class: 'input',
+          style: 'max-width: 200px;',
+          placeholder: 'qwen2.5:7b',
+          value: String(d.ollamaModel || ''),
+          oninput: (e) => { d.ollamaModel = e.target.value.trim(); }
+        });
+        cardModel.appendChild(setRow(T('本机兜底', 'Local fallback'),
+          h('div', { class: 'row wrap', style: 'gap: 10px; align-items: center;' },
+            h('label', { class: 'check' }, ollamaCb,
+              h('span', { text: T('云端全不可用时切本机 Ollama', 'Use local Ollama if all cloud fail') })),
+            ollamaModelIn
+          ),
+          T('需本机已运行 Ollama（127.0.0.1:11434）；留空模型名默认使用 qwen2.5:7b',
+            'Requires local Ollama at 127.0.0.1:11434; empty defaults to qwen2.5:7b')));
+
+        const nowMs = Date.now();
+        const capsObj = (d.caps && typeof d.caps === 'object') ? d.caps : {};
+        const capKeys = Object.keys(capsObj);
+        const cooledKeys = capKeys.filter((k) => (Number(capsObj[k] && capsObj[k].cooldownUntil) || 0) > nowMs);
+        const capStatusBadge = cooledKeys.length > 0
+          ? h('span', { class: 'badge warn', text: T(`${cooledKeys.length} 个端点冷却中`, `${cooledKeys.length} cooled down`) })
+          : (capKeys.length > 0
+            ? h('span', { class: 'badge ok', text: T(`已学习 ${capKeys.length} 个端点特性`, `${capKeys.length} learned`) })
+            : h('span', { class: 'badge', text: T('暂无学习缓存', 'No cached caps') }));
+        const capResetBtn = h('button', {
+          class: 'btn ghost sm',
+          type: 'button',
+          disabled: capKeys.length === 0,
+          onclick: async () => {
+            if (!capKeys.length) return;
+            try {
+              let nextCaps = {};
+              if (cooledKeys.length > 0) {
+                nextCaps = Object.assign({}, capsObj);
+                cooledKeys.forEach((k) => {
+                  nextCaps[k] = Object.assign({}, nextCaps[k], { cooldownUntil: 0, consecutiveFail: 0 });
+                });
+              }
+              const saved = await AIStore.save({ caps: nextCaps });
+              d.caps = saved.caps || {};
+              if (state.ai) state.ai.caps = d.caps;
+              toast(cooledKeys.length > 0
+                ? T('已解除所有端点冷却', 'Cooldown cleared')
+                : T('已清空端点学习缓存', 'Capability cache cleared'), 'ok');
+              paint();
+            } catch (err) {
+              toast(errText(err), 'error');
+            }
+          }
+        }, h('span', {
+          text: cooledKeys.length > 0
+            ? T(`立即解除冷却 (${cooledKeys.length})`, `Clear cooldown (${cooledKeys.length})`)
+            : T(`重置特性缓存 (${capKeys.length})`, `Reset cap cache (${capKeys.length})`)
+        }));
+        cardModel.appendChild(setRow(T('节点健康', 'Health & caps'),
+          h('div', { class: 'row wrap', style: 'gap: 8px; align-items: center;' }, capStatusBadge, capResetBtn),
+          T('自动记住端点的流式/工具支持与限流冷却期；重连异常时可手动重置',
+            'Remembers stream/tool capability & rate-limit cooldowns; reset here when troubleshooting')));
+
         const body = h('div', { class: 'stack set-stack' },
           h('div', { class: 'set-cols' }, cardConn, cardModel),
           cardAct,

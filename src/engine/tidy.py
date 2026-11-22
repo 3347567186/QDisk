@@ -1875,7 +1875,7 @@ def _safe_dir(p):
 
 def _safe_reg_key(hive_name, key_path):
     parts = [x.lower() for x in key_path.split("\\") if x]
-    if len(parts) < 3:
+    if len(parts) < 2:
         return False
     if parts[0] != "software":
         return False
@@ -1883,38 +1883,123 @@ def _safe_reg_key(hive_name, key_path):
     uninst_root = ["software", "microsoft", "windows", "currentversion", "uninstall"]
     if parts[:5] == uninst_root and len(parts) > 5:
         return True
-    # 以下这些位置一律不碰
-    if parts[1].lower() in ("microsoft", "windows", "classes", "policies",
-                            "registeredapplications", "clients"):
+    # 以下这些系统/通用厂商根键在顶层或受保护分支一律不碰
+    if parts[1] in ("microsoft", "windows", "classes", "policies",
+                    "registeredapplications", "clients", "wow6432node"):
         return False
-    if parts[-1].lower() in {"clsid", "system", "currentcontrolset", "services",
-                             "run", "runonce"}:
+    if len(parts) == 2 and parts[1] in (
+        "google", "mozilla", "adobe", "oracle", "intel", "amd", "nvidia",
+        "realtek", "valve", "python", "jetbrains", "gnu", "odbc",
+        "tencent", "alibaba", "netease", "baidu", "bytedance", "kingsoft",
+        "360safe", "qihoo", "apple", "steam",
+    ):
+        return False
+    if parts[-1] in {"clsid", "system", "currentcontrolset", "services",
+                     "run", "runonce"}:
         return False
     return True
+
+
+_APP_LEFTOVER_ALIASES = {
+    "鲁大师": ("ludashi", "computerz", "360ludashi"),
+    "ludashi": ("鲁大师", "computerz", "360ludashi"),
+    "微信": ("wechat", "weixin"),
+    "wechat": ("微信", "weixin"),
+    "weixin": ("微信", "wechat"),
+    "企业微信": ("wxwork", "wecom"),
+    "qq": ("qq", "qqnt"),
+    "钉钉": ("dingtalk", "dingding"),
+    "飞书": ("feishu", "lark"),
+    "网易云音乐": ("cloudmusic",),
+    "百度网盘": ("baidunetdisk",),
+    "迅雷": ("thunder", "xunlei"),
+    "搜狗输入法": ("sogouinput", "sogou"),
+    "搜狗高速浏览器": ("sogouexplorer",),
+    "火绒": ("huorong", "sysdiag"),
+    "火绒安全软件": ("huorong", "sysdiag"),
+    "向日葵": ("sunlogin", "sunloginclient", "oray"),
+    "向日葵远程控制": ("sunlogin", "sunloginclient"),
+    "剪映": ("jianyingpro", "capcut"),
+    "wps": ("wpsoffice",),
+    "wpsoffice": ("wps", "kingsoft"),
+    "bandizip": ("bandizip", "bandisoft"),
+    "potplayer": ("potplayer", "daum"),
+    "7zip": ("7zip", "7-zip"),
+    "豆包": ("doubao",),
+    "元宝": ("yuanbao",),
+}
+
+_GENERIC_FOLDER_STOP = frozenset({
+    "bin", "app", "apps", "client", "program", "programs", "programfiles",
+    "windows", "system32", "data", "common", "files", "setup", "install",
+    "release", "dist", "x64", "x86", "temp", "tmp", "user", "users",
+})
+
+_VER_SUFFIX_RE = re.compile(
+    r"(?:\s*\((?:x86|x64|64-?bit|32-?bit|64位|32位|en-?us|zh-?cn|简体中文)\)"
+    r"|\s*\[(?:x86|x64|64-?bit|32-?bit)\]"
+    r"|\s+[-_vV]?\d+(?:\.\d+)+(?:[-._a-zA-Z0-9]*)?"
+    r"|\s+(?:x64|x86|64-?bit|32-?bit|64位|32位))+$",
+    re.IGNORECASE,
+)
 
 
 def _norm(s):
     return re.sub(r"[\s\-_()（）\[\]·.]", "", (s or "").lower())
 
 
+def _app_leftover_tokens(app):
+    """提取用于残留匹配的规范化标识集合与厂商二级目录标识。"""
+    raw = re.sub(r'[\\/:*?"<>|]', "", app.get("name") or "").strip()
+    tokens = set()
+    raw_norm = _norm(raw)
+    if len(raw_norm) >= 2 and raw_norm not in _GENERIC_FOLDER_STOP:
+        tokens.add(raw_norm)
+    stem = _VER_SUFFIX_RE.sub("", raw).strip()
+    stem_norm = _norm(stem)
+    if len(stem_norm) >= 3 and stem_norm not in _GENERIC_FOLDER_STOP:
+        tokens.add(stem_norm)
+    loc = (app.get("location") or "").strip()
+    if loc:
+        leaf = _norm(os.path.basename(os.path.normpath(loc)))
+        if len(leaf) >= 3 and leaf not in _GENERIC_FOLDER_STOP:
+            tokens.add(leaf)
+    for key in list(tokens):
+        for alias in _APP_LEFTOVER_ALIASES.get(key, ()):
+            na = _norm(alias)
+            if len(na) >= 2:
+                tokens.add(na)
+    vendor_tokens = set()
+    pub = _norm(app.get("publisher") or "")
+    if len(pub) >= 3 and pub not in _GENERIC_FOLDER_STOP:
+        vendor_tokens.add(pub)
+    for vt in ("tencent", "kingsoft", "netease", "baidu", "bytedance", "oray",
+               "bandisoft", "daum", "360", "qihoo"):
+        if vt in tokens:
+            vendor_tokens.add(vt)
+    return tokens, vendor_tokens
+
+
 def scan_leftovers(app):
-    """扫描残留：目录 + 注册表键（对应 BCU 的 junk cleanup）"""
-    name = re.sub(r'[\\/:*?"<>|]', "", app["name"]).strip()
-    norm_name = _norm(name)
-    if len(norm_name) < 2:
+    """扫描残留：目录 + 注册表键（兼容已卸载/孤立残留、中英文别名与版本号变体）"""
+    tokens, vendor_tokens = _app_leftover_tokens(app)
+    if not tokens:
         return [], []
 
     cand_dirs = []
-    loc = app.get("location", "")
+    loc = (app.get("location") or "").strip()
     if loc and os.path.isdir(loc):
         cand_dirs.append(loc)
 
+    user_profile = os.environ.get("USERPROFILE", "")
+    local_low = os.path.join(user_profile, "AppData", "LocalLow") if user_profile else ""
     bases = [
         os.environ.get("ProgramFiles"),
         os.environ.get("ProgramFiles(x86)"),
         os.environ.get("ProgramData"),
         os.environ.get("LOCALAPPDATA"),
         os.environ.get("APPDATA"),
+        local_low,
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
     ]
     for base in bases:
@@ -1924,8 +2009,16 @@ def scan_leftovers(app):
             for entry in os.scandir(base):
                 if not entry.is_dir(follow_symlinks=False):
                     continue
-                if _norm(entry.name) == norm_name:
+                ne = _norm(entry.name)
+                if ne in tokens:
                     cand_dirs.append(entry.path)
+                elif ne in vendor_tokens:
+                    try:
+                        for sub in os.scandir(entry.path):
+                            if sub.is_dir(follow_symlinks=False) and _norm(sub.name) in tokens:
+                                cand_dirs.append(sub.path)
+                    except OSError:
+                        pass
         except OSError:
             pass
 
@@ -1934,25 +2027,63 @@ def scan_leftovers(app):
         if _safe_dir(d):
             dirs.append(d)
 
-    regs = []
-    key_app = app.get("key", "")
-    if key_app and _safe_reg_key(app.get("hive", ""), key_app):
-        regs.append((app["hive"], key_app))
-
     import winreg
-    for hive_name, hive in (("HKLM64", winreg.HKEY_LOCAL_MACHINE),
-                            ("HKLM32", winreg.HKEY_LOCAL_MACHINE),
-                            ("HKCU", winreg.HKEY_CURRENT_USER)):
+    regs = []
+    key_app = (app.get("key") or "").strip()
+    hive_app = (app.get("hive") or "").strip()
+    if key_app and hive_app and _safe_reg_key(hive_app, key_app):
         try:
-            with winreg.OpenKey(hive, "SOFTWARE", 0, winreg.KEY_READ) as bk:
+            with winreg.OpenKey(_hive_root(hive_app), key_app, 0,
+                                winreg.KEY_READ | _flag(hive_app)):
+                regs.append((hive_app, key_app))
+        except OSError:
+            pass
+
+    for hive_name in ("HKLM64", "HKLM32", "HKCU"):
+        hive = _hive_root(hive_name)
+        flag = _flag(hive_name)
+        try:
+            with winreg.OpenKey(hive, "SOFTWARE", 0, winreg.KEY_READ | flag) as bk:
                 n = winreg.QueryInfoKey(bk)[0]
                 for i in range(n):
                     try:
                         sub = winreg.EnumKey(bk, i)
                     except OSError:
                         continue
-                    if _norm(sub) == norm_name and _safe_reg_key(hive_name, "SOFTWARE\\" + sub):
-                        regs.append((hive_name, "SOFTWARE\\" + sub))
+                    ns = _norm(sub)
+                    full = "SOFTWARE\\" + sub
+                    if ns in tokens and _safe_reg_key(hive_name, full):
+                        regs.append((hive_name, full))
+                    elif ns in vendor_tokens:
+                        try:
+                            with winreg.OpenKey(bk, sub, 0, winreg.KEY_READ | flag) as vk:
+                                vn = winreg.QueryInfoKey(vk)[0]
+                                for j in range(vn):
+                                    try:
+                                        vsub = winreg.EnumKey(vk, j)
+                                    except OSError:
+                                        continue
+                                    vfull = full + "\\" + vsub
+                                    if _norm(vsub) in tokens and _safe_reg_key(hive_name, vfull):
+                                        regs.append((hive_name, vfull))
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        # 排查遗留在 Uninstall 下的孤立子键
+        uninst = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"
+        try:
+            with winreg.OpenKey(hive, uninst, 0, winreg.KEY_READ | flag) as uk:
+                n = winreg.QueryInfoKey(uk)[0]
+                for i in range(n):
+                    try:
+                        sub = winreg.EnumKey(uk, i)
+                    except OSError:
+                        continue
+                    if _norm(sub) in tokens or _norm(_VER_SUFFIX_RE.sub("", sub)) in tokens:
+                        ufull = uninst + "\\" + sub
+                        if _safe_reg_key(hive_name, ufull):
+                            regs.append((hive_name, ufull))
         except OSError:
             pass
 
@@ -6694,6 +6825,32 @@ def _engine_find_app(params):
     raise EngineError("找不到程序：%s" % name)
 
 
+def _engine_find_app_or_orphan(params):
+    """先按已安装程序匹配；找不到时构造孤立程序描述，支持卸载后/孤立残留扫描。"""
+    name = params.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise EngineError("参数 name 必须是非空字符串")
+    name = name.strip()
+    version = params.get("version")
+    if version is not None and not isinstance(version, str):
+        raise EngineError("参数 version 必须是字符串")
+    version = (version or "").strip()
+    for app in list_installed_apps(progress=_engine_progress):
+        if (app.get("name") or "").strip() != name:
+            continue
+        if version and (app.get("version") or "").strip() != version:
+            continue
+        return app, False
+    return {
+        "name": name,
+        "version": version,
+        "location": str(params.get("location") or params.get("path") or "").strip(),
+        "publisher": str(params.get("publisher") or "").strip(),
+        "hive": str(params.get("hive") or "").strip(),
+        "key": str(params.get("key") or "").strip(),
+    }, True
+
+
 def _engine_uninstall_command(app, mode="auto"):
     """卸载命令：auto 交互优先（能看到卸载器），quiet 静默优先。"""
     quiet = (app.get("quiet") or "").strip()
@@ -6927,10 +7084,10 @@ def _engine_app_leftovers(app):
 
 
 def _engine_apps_leftovers(params):
-    """apps.leftovers：只列出残留目录与注册表键，不删任何东西。"""
-    app = _engine_find_app(params)
+    """apps.leftovers：只列出残留目录与注册表键（支持已卸载或孤立程序），不删任何东西。"""
+    app, is_orphan = _engine_find_app_or_orphan(params)
     dirs, regs = _engine_app_leftovers(app)
-    return {"name": app.get("name") or "", "dirs": dirs,
+    return {"name": app.get("name") or "", "orphan": is_orphan, "dirs": dirs,
             "regs": [{"hive": h, "key": k} for h, k in regs],
             "blocked": []}
 
@@ -7027,10 +7184,11 @@ def _engine_dir_reject_why(p):
 def _engine_apps_cleanup(params):
     """apps.cleanup：先导出注册表备份，再删目录、再删键；每步都重新过安全规则。
 
+    支持已安装程序与已卸载/孤立残留清理。
     confirm=false 只回计划（零副作用）；confirm=true 才动盘/动注册表，
     被安全规则拒绝或导出失败的项一律进 failed，绝不静默跳过。
     """
-    app = _engine_find_app(params)
+    app, _is_orphan = _engine_find_app_or_orphan(params)
     confirm = _engine_get(params, "confirm", False, bool)
     scan_dirs, scan_regs = [], []
     if params.get("dirs") is None or params.get("regs") is None:
