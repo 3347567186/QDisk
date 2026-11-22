@@ -107,6 +107,9 @@
   async function mount(root) {
     root.classList.add('stack');
 
+    let emptyInput = null;
+    let emptyItems = [];
+
     /* ---------------- 大文件 ---------------- */
     const bigInput = h('input', {
       class: 'input grow', type: 'text', spellcheck: 'false',
@@ -134,7 +137,7 @@
       if (window.SteveAvatar) {
         window.SteveAvatar.spin(askMark);
       }
-      if (lastActiveSection === 'empty' && (emptyItems.length || emptyInput.value.trim())) {
+      if (lastActiveSection === 'empty' && emptyInput && (emptyItems.length || emptyInput.value.trim())) {
         window.AIDrawer.open({
           title: T('问助手 · 空文件夹', 'Ask AI · Empty folders'),
           ctx: () => ({
@@ -163,7 +166,7 @@
           ctx: () => ({
             page: '空间工具',
             tool: '大文件排行',
-            dir: bigInput.value.trim() || emptyInput.value.trim(),
+            dir: bigInput.value.trim() || (emptyInput ? emptyInput.value.trim() : ''),
             count: list.length,
             size: list.length ? fmtBytes(total) : '',
             files: list.slice(0, 8).map((x) => x.name)
@@ -200,7 +203,7 @@
     );
 
     /* ---------------- 空文件夹 ---------------- */
-    const emptyInput = h('input', {
+    emptyInput = h('input', {
       class: 'input grow', type: 'text', spellcheck: 'false',
       placeholder: T('要扫描的目录，例如 D:\\工具', 'Folder to scan, e.g. D:\\tools')
     });
@@ -624,7 +627,7 @@
     renderFilter();
 
     /* ---------------- 空文件夹逻辑 ---------------- */
-    let emptyItems = [];
+    emptyItems = [];
     const emptyChecked = new Set();
     let emptyBusy = false;
 

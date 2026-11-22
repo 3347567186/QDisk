@@ -7691,6 +7691,9 @@ def _engine_startup_list(params):
                     is_disabled = bool(appr and len(appr) > 0 and (appr[0] % 2 == 1))
                     
                     status = "broken" if not exists else ("disabled" if is_disabled else "enabled")
+                    scope = "user" if hive_name == "HKCU" else "system"
+                    icon_src = exe_path if exists else ""
+                    icon = app_icon_cached(icon_src) if icon_src else ""
                     items.append({
                         "id": "%s_%s" % (hive_name, n),
                         "name": n,
@@ -7700,11 +7703,13 @@ def _engine_startup_list(params):
                         "enabled": not is_disabled,
                         "status": status,
                         "location": loc_desc,
+                        "scope": scope,
                         "source_type": "registry",
                         "hive": hive_name,
                         "key": sub,
                         "file_path": "",
-                        "icon_src": exe_path if exists else ""
+                        "icon_src": icon_src,
+                        "icon": icon
                     })
         except OSError:
             pass
@@ -7736,6 +7741,9 @@ def _engine_startup_list(params):
 
                 exists = bool(exe_target and os.path.exists(exe_target))
                 status = "broken" if not exists else ("disabled" if is_disabled else "enabled")
+                scope = "user" if "appdata" in folder.lower() else "system"
+                icon_src = exe_target if exists else ""
+                icon = app_icon_cached(icon_src) if icon_src else ""
                 items.append({
                     "id": "folder_%s" % fname,
                     "name": name,
@@ -7745,11 +7753,13 @@ def _engine_startup_list(params):
                     "enabled": not is_disabled,
                     "status": status,
                     "location": loc_desc,
+                    "scope": scope,
                     "source_type": "folder",
                     "hive": "",
                     "key": "",
                     "file_path": full,
-                    "icon_src": exe_target if exists else ""
+                    "icon_src": icon_src,
+                    "icon": icon
                 })
         except OSError:
             pass
@@ -8145,6 +8155,9 @@ def _engine_process_list(params=None):
             clean = clean[:-4]
         is_system = clean in _SYS_PROTECTED or pid <= 4
 
+        icon_src = exe_path if exe_path else ""
+        icon = app_icon_cached(icon_src) if icon_src else ""
+
         total_memory += mem_size
         raw_procs.append({
             "pid": pid,
@@ -8153,6 +8166,8 @@ def _engine_process_list(params=None):
             "threads": threads,
             "memory": mem_size,
             "exe_path": exe_path,
+            "icon_src": icon_src,
+            "icon": icon,
             "is_system": is_system
         })
         ok = ctypes.windll.kernel32.Process32NextW(hSnap, ctypes.byref(pe))
@@ -8172,6 +8187,8 @@ def _engine_process_list(params=None):
                     "threads": p["threads"],
                     "memory": p["memory"],
                     "exe_path": p["exe_path"],
+                    "icon_src": p["icon_src"],
+                    "icon": p["icon"],
                     "is_system": p["is_system"]
                 }
             else:
@@ -8182,6 +8199,8 @@ def _engine_process_list(params=None):
                 g["memory"] += p["memory"]
                 if not g["exe_path"] and p["exe_path"]:
                     g["exe_path"] = p["exe_path"]
+                    g["icon_src"] = p["icon_src"]
+                    g["icon"] = p["icon"]
         items = list(grouped.values())
     else:
         items = raw_procs
@@ -8276,33 +8295,137 @@ def _engine_system_performance(params=None):
                 )
             return (0, 0, 0, time.perf_counter())
 
+        # 磁盘 I/O 字节快照 (NtQuerySystemInformation)
+        def _read_disk_transfer():
+            try:
+                buf = (ctypes.c_byte * 312)()
+                if ctypes.windll.ntdll.NtQuerySystemInformation(2, ctypes.byref(buf), 312, None) == 0:
+                    import struct
+                    _, r_b, w_b, _ = struct.unpack_from('<qqqq', buf, 0)
+                    return int(r_b), int(w_b)
+            except Exception:
+                pass
+            return 0, 0
+
+        # 网络 I/O 字节快照 (GetIfTable2)
+        class _MIB_IF_ROW2(ctypes.Structure):
+            _fields_ = [
+                ('InterfaceLuid', ctypes.c_uint64),
+                ('InterfaceIndex', wintypes.DWORD),
+                ('InterfaceGuid', ctypes.c_byte * 16),
+                ('Alias', wintypes.WCHAR * 257),
+                ('Description', wintypes.WCHAR * 257),
+                ('PhysicalAddressLength', wintypes.DWORD),
+                ('PhysicalAddress', ctypes.c_byte * 32),
+                ('PermanentPhysicalAddress', ctypes.c_byte * 32),
+                ('Mtu', wintypes.DWORD),
+                ('Type', wintypes.DWORD),
+                ('TunnelType', wintypes.DWORD),
+                ('MediaType', wintypes.DWORD),
+                ('PhysicalMediumType', wintypes.DWORD),
+                ('AccessType', wintypes.DWORD),
+                ('DirectionType', wintypes.DWORD),
+                ('InterfaceAndOperStatusFlags', ctypes.c_byte),
+                ('OperStatus', wintypes.DWORD),
+                ('AdminStatus', wintypes.DWORD),
+                ('MediaConnectState', wintypes.DWORD),
+                ('NetworkGuid', ctypes.c_byte * 16),
+                ('ConnectionType', wintypes.DWORD),
+                ('TransmitLinkSpeed', ctypes.c_uint64),
+                ('ReceiveLinkSpeed', ctypes.c_uint64),
+                ('InOctets', ctypes.c_uint64),
+                ('InUcastPkts', ctypes.c_uint64),
+                ('InNUcastPkts', ctypes.c_uint64),
+                ('InDiscards', ctypes.c_uint64),
+                ('InErrors', ctypes.c_uint64),
+                ('InUnknownProtos', ctypes.c_uint64),
+                ('InUcastOctets', ctypes.c_uint64),
+                ('InMulticastOctets', ctypes.c_uint64),
+                ('InBroadcastOctets', ctypes.c_uint64),
+                ('OutOctets', ctypes.c_uint64),
+                ('OutUcastPkts', ctypes.c_uint64),
+                ('OutNUcastPkts', ctypes.c_uint64),
+                ('OutDiscards', ctypes.c_uint64),
+                ('OutErrors', ctypes.c_uint64),
+                ('OutUcastOctets', ctypes.c_uint64),
+                ('OutMulticastOctets', ctypes.c_uint64),
+                ('OutBroadcastOctets', ctypes.c_uint64),
+                ('OutQLen', ctypes.c_uint64),
+            ]
+
+        class _MIB_IF_TABLE2(ctypes.Structure):
+            _fields_ = [
+                ('NumEntries', wintypes.ULONG),
+                ('Table', _MIB_IF_ROW2 * 1)
+            ]
+
+        def _read_network_transfer():
+            try:
+                pTable = ctypes.POINTER(_MIB_IF_TABLE2)()
+                if ctypes.windll.iphlpapi.GetIfTable2(ctypes.byref(pTable)) == 0:
+                    table = pTable.contents
+                    num = table.NumEntries
+                    rows = ctypes.cast(ctypes.byref(table.Table), ctypes.POINTER(_MIB_IF_ROW2 * num)).contents
+                    in_b = sum(r.InOctets for r in rows if r.OperStatus == 1 and r.Type != 24)
+                    out_b = sum(r.OutOctets for r in rows if r.OperStatus == 1 and r.Type != 24)
+                    ctypes.windll.iphlpapi.FreeMibTable(pTable)
+                    return int(in_b), int(out_b)
+            except Exception:
+                pass
+            return 0, 0
+
         now_times = _get_times()
+        disk_r, disk_w = _read_disk_transfer()
+        net_in, net_out = _read_network_transfer()
+
         cpu_pct = 0.0
+        disk_r_bps = 0
+        disk_w_bps = 0
+        net_in_bps = 0
+        net_out_bps = 0
+
         prev = _SYS_PERF_PREV[0]
         if prev and (now_times[3] - prev[3]) < 5.0 and (now_times[3] - prev[3]) >= 0.05:
+            dt = now_times[3] - prev[3]
             idle_delta = now_times[0] - prev[0]
             kern_delta = now_times[1] - prev[1]
             user_delta = now_times[2] - prev[2]
             total_delta = kern_delta + user_delta
             if total_delta > 0:
                 cpu_pct = round(max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0)), 1)
+            if len(prev) >= 8 and dt > 0:
+                disk_r_bps = max(0, int((disk_r - prev[4]) / dt))
+                disk_w_bps = max(0, int((disk_w - prev[5]) / dt))
+                net_in_bps = max(0, int((net_in - prev[6]) / dt))
+                net_out_bps = max(0, int((net_out - prev[7]) / dt))
         else:
             time.sleep(0.04)
             t2 = _get_times()
+            d2_r, d2_w = _read_disk_transfer()
+            n2_in, n2_out = _read_network_transfer()
+            dt = t2[3] - now_times[3]
             idle_delta = t2[0] - now_times[0]
             kern_delta = t2[1] - now_times[1]
             user_delta = t2[2] - now_times[2]
             total_delta = kern_delta + user_delta
             if total_delta > 0:
                 cpu_pct = round(max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0)), 1)
+            if dt > 0:
+                disk_r_bps = max(0, int((d2_r - disk_r) / dt))
+                disk_w_bps = max(0, int((d2_w - disk_w) / dt))
+                net_in_bps = max(0, int((n2_in - net_in) / dt))
+                net_out_bps = max(0, int((n2_out - net_out) / dt))
             now_times = t2
+            disk_r, disk_w = d2_r, d2_w
+            net_in, net_out = n2_in, n2_out
 
-        _SYS_PERF_PREV[0] = now_times
+        _SYS_PERF_PREV[0] = (now_times[0], now_times[1], now_times[2], now_times[3], disk_r, disk_w, net_in, net_out)
         cpu_cores = os.cpu_count() or 1
     else:
         mem_total = mem_avail = mem_used = mem_load = 0
         cpu_pct = 0.0
         cpu_cores = 1
+        disk_r_bps = disk_w_bps = net_in_bps = net_out_bps = 0
 
     return {
         "timestamp": int(time.time() * 1000),
@@ -8312,6 +8435,16 @@ def _engine_system_performance(params=None):
             "used": used_disk_bytes,
             "free": free_disk_bytes,
             "percent": round(used_disk_bytes / total_disk_bytes * 100, 1) if total_disk_bytes else 0.0
+        },
+        "disk_io": {
+            "read_bps": disk_r_bps,
+            "write_bps": disk_w_bps,
+            "total_bps": disk_r_bps + disk_w_bps
+        },
+        "network_io": {
+            "in_bps": net_in_bps,
+            "out_bps": net_out_bps,
+            "total_bps": net_in_bps + net_out_bps
         },
         "memory": {
             "total": mem_total,

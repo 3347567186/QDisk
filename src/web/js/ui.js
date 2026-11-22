@@ -7,16 +7,34 @@
     return PAGE_SIZES.includes(Number(state.pageSize)) ? Number(state.pageSize) : 15;
   }
 
-  /* 列表页通用的「每页条数」选择器：使用自定义胶囊下拉组件，保持界面精致一致 */
-  function pageSizePick(onChange) {
+  /* 列表页通用的「每页条数」选择器：使用自定义胶囊下拉组件，支持 (onChange) 与 (current, sizes, onChange) 重载 */
+  function pageSizePick(arg1, arg2, arg3) {
+    let cur = pageSize();
+    let sizes = PAGE_SIZES;
+    let onChange = null;
+
+    if (typeof arg1 === 'function') {
+      onChange = arg1;
+    } else if (typeof arg3 === 'function') {
+      cur = Number(arg1) || cur;
+      sizes = Array.isArray(arg2) ? arg2 : sizes;
+      onChange = arg3;
+    } else if (typeof arg2 === 'function') {
+      if (typeof arg1 === 'number') cur = arg1;
+      else if (Array.isArray(arg1)) sizes = arg1;
+      onChange = arg2;
+    }
+
     const sel = customSelect({
-      options: PAGE_SIZES.map((n) => ({ value: String(n), label: T(n + ' 条', n + ' rows') })),
-      value: String(pageSize()),
+      options: sizes.map((n) => ({ value: String(n), label: T(n + ' 条', n + ' rows') })),
+      value: String(cur),
       alignUp: true,
       className: 'sm',
       title: T('每页条数', 'Rows per page'),
       onChange: (val) => {
         const n = Number(val) || 15;
+        state.pageSize = n;
+        if (window.UI && window.UI.state) window.UI.state.pageSize = n;
         try { onChange && onChange(n); } catch { /* ignore */ }
       }
     });

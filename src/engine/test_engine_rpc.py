@@ -3043,6 +3043,10 @@ class TestStartup(EngineCase):
             self.assertIn(it["status"], ("enabled", "disabled", "broken"))
             self.assertIn("source_type", it)
             self.assertIn(it["source_type"], ("registry", "folder"))
+            self.assertIn("scope", it)
+            self.assertIn(it["scope"], ("user", "system"))
+            self.assertIn("icon_src", it)
+            self.assertIn("icon", it)
 
     def test_startup_toggle_and_delete_in_hkcu(self):
         import winreg
@@ -3220,6 +3224,8 @@ class TestProcess(EngineCase):
         self.assertIn("memory", first)
         self.assertIn("process_count", first)
         self.assertIn("threads", first)
+        self.assertIn("icon_src", first)
+        self.assertIn("icon", first)
 
         # 尝试查询包含 python 的进程
         r_py = self.rpc_ok("process.list", {"search": "python"})
@@ -3247,6 +3253,12 @@ class TestSystemPerformance(EngineCase):
         self.assertIn("memory", r)
         self.assertIn("cpu", r)
         self.assertIn("disk_summary", r)
+        self.assertIn("disk_io", r)
+        self.assertIn("network_io", r)
+        self.assertGreaterEqual(r["disk_io"]["read_bps"], 0)
+        self.assertGreaterEqual(r["disk_io"]["write_bps"], 0)
+        self.assertGreaterEqual(r["network_io"]["in_bps"], 0)
+        self.assertGreaterEqual(r["network_io"]["out_bps"], 0)
         self.assertIsInstance(r["drives"], list)
         self.assertGreater(len(r["drives"]), 0)
 
