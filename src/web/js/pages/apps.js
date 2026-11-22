@@ -92,7 +92,12 @@
   }
 
   function setBtnBusy(b, on, zh, en) {
-    b.disabled = on;
+    if (!b) return;
+    b.disabled = !!on;
+    b.classList.toggle('busy', !!on);
+    if (b.classList.contains('no-label-swap') || b.querySelector('.ic-refresh')) {
+      return;
+    }
     if (b._label) b._label.textContent = on ? T(zh || '处理中…', en || 'Working…') : T(b._zh, b._en);
   }
 
@@ -291,8 +296,7 @@
     const fusedAdminLabel = h('span', { class: 'admin-label' }, T('检查中…', 'Checking…'));
     const fusedAdminBtn = h('button', {
       class: 'btn sm admin-fused-btn',
-      style: { display: 'none' },
-      onclick: () => showAdminDetailsModal()
+      style: { display: 'none' }
     }, icon('shield', 13), fusedAdminLabel, fusedAdminDot);
 
     /* ---------------- 主卡：过滤 + 统计一行 + 表格 + 分页 ---------------- */
@@ -316,7 +320,8 @@
       applyFilter();
     });
 
-    const btnRefresh = btn('刷新', 'Refresh', 'ghost', 'refresh', () => loadApps(true));
+    const btnRefresh = btn('刷新', 'Refresh', 'ghost no-label-swap', 'refresh', () => loadApps(true));
+    btnRefresh.style.minWidth = '68px';
     const pageInput = h('input', {
       class: 'input sm pg-input',
       type: 'text',
@@ -342,16 +347,17 @@
     const selInfo = h('span', { class: 'muted small ellipsis', style: { maxWidth: '240px' } }, '');
 
     function renderStatLine() {
-      const total = S.items.length + S.store.length;
+      const total = allItems().length;
       let totalBytes = 0;
       allItems().forEach((it) => {
         totalBytes += (Number(it.size) || 0) || ((Number(it.size_kb) || 0) * 1024);
       });
       const remCount = (S.filtered || []).filter((a) => a.uninstall).length;
-      statPill.textContent = T(
-        `共 ${fmtCount(total)} 款 · ${fmtBytes(totalBytes)} · 可卸载 ${fmtCount(remCount)}`,
-        `Total ${fmtCount(total)} · ${fmtBytes(totalBytes)} · ${fmtCount(remCount)} removable`
-      );
+      const q = String(S.filter || '').trim();
+      const countPart = q
+        ? T(`已匹配 ${fmtCount(S.filtered.length)} 款（共 ${fmtCount(total)} 款）`, `Matched ${fmtCount(S.filtered.length)} of ${fmtCount(total)}`)
+        : T(`共 ${fmtCount(total)} 款`, `Total ${fmtCount(total)}`);
+      statPill.textContent = `${countPart} · ${fmtBytes(totalBytes)} · ${T('可卸载 ' + fmtCount(remCount), fmtCount(remCount) + ' removable')}`;
       selInfo.textContent = S.selected
         ? T('当前: ', 'Selected: ') + (S.selected.name || '') +
           (S.selected.version ? ' ' + S.selected.version : '')
@@ -368,7 +374,10 @@
     function viewBtn(id, zh, en) {
       const b = h('button', { class: 'chip' + (S.view === id ? ' active' : '') }, T(zh, en));
       b.addEventListener('click', () => {
-        if (S.view === id) return;
+        if (S.view === id) {
+          applyFilter();
+          return;
+        }
         S.view = id;
         GlobalAppsCache.appsView = id;
         Object.entries(viewBtns).forEach(([k, el]) => el.classList.toggle('active', k === id));
@@ -437,8 +446,8 @@
     }
 
     function allItems() {
-      if (S.view === 'store') return S.items.filter((it) => appKind(it) === 'system');
-      if (S.view === 'desktop') return S.items.filter((it) => appKind(it) !== 'system').concat(S.store);
+      if (S.view === 'store') return S.items.filter((it) => appKind(it) === 'system' || appKind(it) === 'store').concat(S.store);
+      if (S.view === 'desktop') return S.items.filter((it) => appKind(it) === 'plain');
       return S.items.concat(S.store);
     }
 
@@ -466,6 +475,7 @@
         S.page = 1;
         GlobalAppsCache.appsPage = 1;
         updateSortChips();
+    syncLeftoverPanel(S.selected || null);
         applyFilter();
       });
       sortChips[id] = b;
@@ -524,27 +534,38 @@
       actionMsg
     );
 
-    /* ---------------- 第三块：残留清理（折叠） ---------------- */
-    const loSummary = h('div', { class: 'muted small' },
-      T('先在上方选中一个程序，再点「扫描残留」', 'Select a program above, then scan for leftovers'));
+    /* ---------------- 第三块：残留清理（与卸载深度配合） ---------------- */
+    const loTargetBox = h('div', { class: 'lo-target-box' });
+    const loSummary = h('div', { class: 'muted small' });
     const loList = h('div', { class: 'stack' });
     const loResult = h('div', { class: 'stack' });
 
-    const btnRescan = btn('重新扫描', 'Rescan', 'ghost sm', 'refresh', () => scanLeftovers(S.leftoverApp || S.selected));
+    const btnRescan = btn('重新扫描', 'Rescan', 'ghost sm no-label-swap', 'refresh', () => {
+      const target = S.leftoverApp || S.selected;
+      if (target) scanLeftovers(target);
+      else toast(T('请先选择一个程序', 'Select a program first'), 'warn');
+    });
+    btnRescan.style.minWidth = '68px';
     const btnCheckAll = btn('全选', 'Select all', 'ghost sm', 'check', () => setAllChecks(true));
     const btnNone = btn('全不选', 'Select none', 'ghost sm', 'close', () => setAllChecks(false));
     const btnCleanup = btn('清理选中', 'Clean selected', 'danger', 'trash', cleanup);
     btnCleanup.disabled = true;
 
+    const loToolbar = h('div', { class: 'toolbar', style: { display: 'none' } },
+      btnRescan, btnCheckAll, btnNone,
+      h('span', { class: 'spacer' }),
+      btnCleanup
+    );
+
     const loSection = section(T('残留清理', 'Leftovers'),
       h('div', { class: 'stack' },
+        loTargetBox,
         loSummary,
-        h('div', { class: 'toolbar' }, btnRescan, btnCheckAll, btnNone,
-          h('span', { class: 'spacer' }), btnCleanup),
+        loToolbar,
         loList,
         loResult
       ),
-      { open: false, hint: T('注册表项清理前会先导出备份', 'Registry keys are backed up before removal') }
+      { open: false, hint: T('卸载后自动联动扫描 · 注册表项清理前会自动备份', 'Auto-links after uninstall · Registry keys are backed up') }
     );
 
     /* ================================================================
@@ -2883,15 +2904,10 @@
       ];
     });
 
-    renderStatLine();
-    renderPager();
-    renderTable();
-    updateSortChips();
+    // 统一初始化当前活跃 Tab 的数据流与视图呈现（消灭单独分支导致的未过滤与空白状态）
+    switchTab(currentTab);
+    syncLeftoverPanel(S.selected || null);
 
-    // 如果当前选中的不是默认 apps，立即切到记录的 Tab
-    if (currentTab !== 'apps') {
-      switchTab(currentTab);
-    }
     /* 每页条数改了：就地重排当前表格，不重建页面 */
     App._onPageSize = (v) => {
       PAGE_SIZE = Number(v) || UI.pageSize();
@@ -2910,14 +2926,10 @@
     // 引擎调用已搬到后台线程，这里只是把首帧让给动画。
     requestAnimationFrame(() => {
       refreshAdmin();
-      // 仅在冷启动（内存无缓存）时才发起后台读取；有缓存时保持 0ms 瞬间显示
-      if (!GlobalAppsCache.apps || !GlobalAppsCache.apps.length) {
-        loadApps(false).catch(() => {});
-      }
       if (!GlobalAppsCache.storeLoaded) {
         setTimeout(() => {
           ensureStore().then(() => {
-            if (!S.filter && (S.view === 'store' || S.view === 'all')) applyFilter();
+            if (S.view === 'store' || S.view === 'all' || S.view === 'desktop') applyFilter();
           }).catch(() => {});
         }, 900);
       }
@@ -2956,7 +2968,10 @@
       }
     }
 
+    let adminModalActive = false;
     function showAdminDetailsModal() {
+      if (adminModalActive) return;
+      adminModalActive = true;
       const isElevated = S.isAdmin;
       const content = h('div', { class: 'admin-modal-box', style: { display: 'flex', flexDirection: 'column', gap: '12px', padding: '4px 0' } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
@@ -3016,6 +3031,9 @@
           { id: 'cancel', label: T('暂不处理', 'Dismiss'), kind: 'ghost' },
           { id: 'restart', label: T('以管理员身份重启', 'Restart as admin'), kind: 'primary' }
         ],
+        onClose: () => {
+          adminModalActive = false;
+        },
         onAction: (actionId) => {
           if (actionId === 'restart') {
             doRestartAsAdmin();
@@ -3129,6 +3147,7 @@
       S.page = 1;
       GlobalAppsCache.appsSortAsc = S.sortAsc;
       updateSortChips();
+    syncLeftoverPanel(S.selected || null);
       applyFilter();
     }
 
@@ -3284,6 +3303,7 @@
       const tbl = tableBox.querySelector('table');
       if (tbl) applySelection(tbl);
       renderStatLine();
+      syncLeftoverPanel(it, false);
     }
 
     function renderPager() {
@@ -3378,7 +3398,12 @@
         actionMsg.textContent = T('已启动卸载程序：', 'Uninstaller started: ') + (it.name || '');
         toast(r && r.started === false
           ? T('卸载器没能启动，试试「强制删除」', 'Uninstaller failed to start; try Force remove')
-          : T('已启动系统卸载程序', 'System uninstaller started'), 'ok');
+          : T('已启动系统卸载程序，已联动打开下方残留清理', 'System uninstaller started; leftovers scanner ready'), 'ok');
+        select(it);
+        if (loSection._toggle) loSection._toggle(true);
+        else loSection.classList.add('open');
+        syncLeftoverPanel(it, true);
+        try { loSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
       } catch (e) {
         toast(errText(e), 'error');
       } finally {
@@ -3475,7 +3500,73 @@
         .catch((e) => toast(errText(e), 'error'));
     }
 
-    /* ---------------- 残留 ---------------- */
+    /* ---------------- 残留清理深度联动 ---------------- */
+    function syncLeftoverPanel(app, isUninstalling = false) {
+      loTargetBox.innerHTML = '';
+      if (!app) {
+        loTargetBox.appendChild(h('div', {
+          class: 'lo-target-card',
+          style: { justifyContent: 'space-between', color: 'var(--text-3)' }
+        },
+          h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
+            icon('info', 16),
+            h('span', null, T('在上方列表中点击选中任意软件，或卸载后自动关联并扫描残留。',
+              'Select any app above, or uninstall it to automatically link and scan leftovers.'))
+          )
+        ));
+        loSummary.textContent = '';
+        loToolbar.style.display = 'none';
+        loList.innerHTML = '';
+        loResult.innerHTML = '';
+        return;
+      }
+
+      if (isUninstalling) {
+        const guideBanner = h('div', { class: 'lo-uninstall-banner' },
+          icon('activity', 18),
+          h('div', { style: { flex: '1', minWidth: '0' } },
+            h('div', { style: { fontWeight: '600', fontSize: 'var(--fs-body)' } },
+              T(`已启动「${app.name}」的系统卸载向导`, `Uninstaller started for "${app.name}"`)),
+            h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '2px' } },
+              T('请在系统窗口完成卸载。完成后点击右侧按钮，一键扫描并清理注册表与磁盘残留。',
+                'Finish uninstall in system window, then click button to scan and clean leftovers.'))
+          ),
+          h('button', {
+            class: 'btn primary',
+            onclick: () => scanLeftovers(app)
+          }, icon('scan', 14), T('已完成卸载，扫描残留', 'Uninstall done, scan leftovers'))
+        );
+        loTargetBox.appendChild(guideBanner);
+      }
+
+      const appCard = h('div', { class: 'lo-target-card' },
+        h('div', { class: 'app-icon-wrap' }, appIcon(app)),
+        h('div', { class: 'app-info' },
+          h('div', { class: 'app-name-row' },
+            h('span', { class: 'app-name' }, app.name),
+            app.version ? h('span', { class: 'badge' }, app.version) : null
+          ),
+          h('div', { class: 'app-sub mono ellipsis', title: app.install_path || app.publisher || '' },
+            app.install_path || app.publisher || T('系统注册表条目', 'System registry entry'))
+        ),
+        h('button', {
+          class: 'btn sm primary',
+          onclick: () => scanLeftovers(app)
+        }, icon('scan', 13), T('扫描此程序残留', 'Scan leftovers'))
+      );
+      loTargetBox.appendChild(appCard);
+
+      // 如果当前选中的正是之前已扫描的软件，恢复结果
+      if (S.leftoverApp && keyOf(S.leftoverApp) === keyOf(app) && S.leftovers) {
+        loToolbar.style.display = '';
+        renderLeftovers();
+      } else {
+        loToolbar.style.display = 'none';
+        loList.innerHTML = '';
+        loSummary.textContent = '';
+      }
+    }
+
     async function scanLeftovers(itArg) {
       const it = itArg || S.selected;
       if (!it) {
@@ -3483,10 +3574,11 @@
         return;
       }
       const mySeq = ++S.loSeq;
-      loSection.classList.add('open');
+      if (loSection._toggle) loSection._toggle(true);
+      else loSection.classList.add('open');
       setBtnBusy(btnRescan, true, '扫描中…', 'Scanning…');
-      loSummary.textContent = T('正在扫描「' + it.name + '」的安装目录与注册表…',
-        'Scanning install folders and registry for "' + it.name + '"…');
+      loSummary.textContent = T('正在深度扫描「' + it.name + '」的安装目录、AppData 与注册表残留…',
+        'Scanning install folders, AppData and registry for "' + it.name + '"…');
       loList.replaceChildren(skeleton(4, 'apps'));
       loResult.innerHTML = '';
       try {
@@ -3497,9 +3589,10 @@
         if (mySeq !== S.loSeq) return; // 慢响应回来时用户已换目标，别覆盖新面板
         S.leftovers = r || { name: it.name, dirs: [], regs: [], blocked: [] };
         S.leftoverApp = it;
-        // 默认不勾：残留目录里可能有仍在用的配置，全选等于一键全删。
-        S.checkDirs = new Set();
-        S.checkRegs = new Set();
+        loToolbar.style.display = '';
+        // 智能全选所有安全残留项，避免空壳感
+        S.checkDirs = new Set((S.leftovers.dirs || []).map((_, i) => i));
+        S.checkRegs = new Set((S.leftovers.regs || []).map((_, i) => i));
         renderLeftovers();
       } catch (e) {
         if (mySeq !== S.loSeq) return;
@@ -3508,6 +3601,7 @@
         loSummary.textContent = '';
         loList.replaceChildren(empty(T('扫描失败', 'Scan failed'), errText(e)));
         btnCleanup.disabled = true;
+        loToolbar.style.display = 'none';
         toast(errText(e), 'error');
       } finally {
         setBtnBusy(btnRescan, false);
@@ -3658,9 +3752,21 @@
       renderLeftovers();
       renderCleanupResult(r);
       const failed = Array.isArray(r.failed) ? r.failed.length : 0;
-      if (!failed) toast(T('残留已清理', 'Leftovers cleaned'), 'ok');
-      else toast(T('清理完成，有 ' + fmtCount(failed) + ' 项失败',
-        'Cleaned with ' + fmtCount(failed) + ' failure(s)'), 'warn');
+      if (!failed) {
+        toast(T('残留已全部清理完毕', 'All leftovers cleaned'), 'ok');
+        if (!S.leftovers.dirs.length && !S.leftovers.regs.length) {
+          if (app) {
+            S.items = S.items.filter((x) => keyOf(x) !== keyOf(app));
+            GlobalAppsCache.apps = S.items;
+            applyFilter();
+            renderStatLine();
+          }
+          loToolbar.style.display = 'none';
+        }
+      } else {
+        toast(T('清理完成，有 ' + fmtCount(failed) + ' 项失败',
+          'Cleaned with ' + fmtCount(failed) + ' failure(s)'), 'warn');
+      }
     }
 
     function renderCleanupResult(r) {

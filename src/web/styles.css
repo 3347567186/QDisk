@@ -1391,6 +1391,75 @@ html[data-theme="dark"] .admin-fused-btn.warn .admin-dot {
   flex-shrink: 0;
 }
 
+/* ---------- 残留清理与卸载协同样式 ---------- */
+.lo-target-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  margin-bottom: var(--space-2);
+  transition: all var(--dur-1) var(--ease);
+}
+.lo-target-card .app-icon-wrap {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lo-target-card .app-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.lo-target-card .app-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lo-target-card .app-name {
+  font-weight: 600;
+  font-size: var(--fs-body);
+  color: var(--text-1);
+}
+.lo-target-card .app-sub {
+  font-size: var(--fs-tiny);
+  color: var(--text-2);
+}
+.lo-uninstall-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--accent-weak);
+  border: 1px solid rgba(217, 119, 87, 0.28);
+  color: var(--text-1);
+  margin-bottom: var(--space-2);
+  animation: banner-glow 2s infinite alternate;
+}
+@keyframes banner-glow {
+  from { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0.1); }
+  to { box-shadow: 0 0 0 4px rgba(217, 119, 87, 0.18); }
+}
+.lo-item-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  transition: background var(--dur-1) var(--ease);
+}
+.lo-item-row:hover {
+  background: var(--hover);
+}
+
 /* ---------- 工具行 / 时间线 ---------- */
 .tool-list { display: flex; flex-direction: column; gap: 2px; }
 .tool-row {

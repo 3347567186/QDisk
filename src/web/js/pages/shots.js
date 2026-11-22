@@ -40,6 +40,22 @@
     if (sc) sc.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
   }
 
+  /* 全局跨挂载持久化内存缓存：切页 0ms 瞬间还原，杜绝重复扫描和闪骨架屏 */
+  const GlobalShotsCache = {
+    items: null,
+    effDirs: null,
+    missing: null,
+    suggest: null,
+    lastScanTime: 0,
+    cfgDirs: null,
+    days: 7,
+    minKb: 0,
+    allImages: false,
+    view: 'grid',
+    sort: 'size',
+    kind: 'all'
+  };
+
   window.Pages = window.Pages || {};
 
   window.Pages.shots = {
@@ -48,26 +64,27 @@
 
     async mount(root) {
       PAGE_SIZE = UI.pageSize();
+      const hasCache = !!(GlobalShotsCache.items && GlobalShotsCache.items.length);
       /* ---------- 状态 ---------- */
       const S = {
-        items: [],
-        cfgDirs: [],          // 配置里的目录（空 = 用引擎默认）
-        effDirs: [],          // 引擎实际扫描的目录
-        missing: [],
-        suggest: [],          // 引擎默认目录里尚未加入的那些
-        days: 7,
-        minKb: 0,
-        allImages: false,     // 包含所有图片（不只按截图命名）
+        items: GlobalShotsCache.items ? GlobalShotsCache.items.slice() : [],
+        cfgDirs: GlobalShotsCache.cfgDirs ? GlobalShotsCache.cfgDirs.slice() : [],
+        effDirs: GlobalShotsCache.effDirs ? GlobalShotsCache.effDirs.slice() : [],
+        missing: GlobalShotsCache.missing ? GlobalShotsCache.missing.slice() : [],
+        suggest: GlobalShotsCache.suggest ? GlobalShotsCache.suggest.slice() : [],
+        days: GlobalShotsCache.days || 7,
+        minKb: GlobalShotsCache.minKb || 0,
+        allImages: !!GlobalShotsCache.allImages,
         selected: new Set(),  // path 集合
-        view: 'grid',
-        sort: 'size',
+        view: GlobalShotsCache.view || 'grid',
+        sort: GlobalShotsCache.sort || 'size',
         page: 1,
         loading: false,
-        loaded: false,
+        loaded: hasCache,
         failed: false,
         lastPath: '',         // 最近播放/查看的文件
         lastKind: '',         // 'play' | 'view'
-        kind: 'all'           // all | shot | image | video
+        kind: GlobalShotsCache.kind || 'all'
       };
       const sizeMap = new Map();   // path -> size，供选中统计 / 菜单用
 
@@ -1067,10 +1084,14 @@
       /* ---------- 扫描 ---------- */
       async function doScan(silent) {
         if (S.loading) return;
-        S.loading = true;
-        S.loaded = false;
-        S.failed = false;
-        render();
+        const isBackgroundCheck = silent && S.loaded && S.items.length > 0;
+
+        if (!isBackgroundCheck) {
+          S.loading = true;
+          S.loaded = false;
+          S.failed = false;
+          render();
+        }
 
         const days = clampInt(S.days, 0, MAX_DAYS);
         const minKb = clampInt(S.minKb, 0, MAX_KB);
@@ -1083,27 +1104,57 @@
           if (silent) res = await API.engine('shots.scan', params);
           else res = await busy(() => API.engine('shots.scan', params), T('正在扫描截图…', 'Scanning screenshots…'), 'shots');
         } catch (e) {
-          toast(errText(e), 'error');
-          S.failed = true;
+          if (!isBackgroundCheck) {
+            toast(errText(e), 'error');
+            S.failed = true;
+          }
         } finally {
-          S.loading = false;
-          S.loaded = true;
+          if (!isBackgroundCheck) {
+            S.loading = false;
+            S.loaded = true;
+          }
         }
 
-        if (!res) { render(); renderDirs(); return; }
+        if (!res) { if (!isBackgroundCheck) { render(); renderDirs(); } return; }
         if (res.error) {
-          toast(res.error, 'error');
-          S.failed = true;
-          render();
-          renderDirs();
+          if (!isBackgroundCheck) {
+            toast(res.error, 'error');
+            S.failed = true;
+            render();
+            renderDirs();
+          }
           return;
         }
 
-        S.items = Array.isArray(res.items) ? res.items : [];
+        const newItems = Array.isArray(res.items) ? res.items : [];
+        const oldPaths = new Set(S.items.map((it) => it.path));
+        const hasChange = isBackgroundCheck ? (newItems.length !== S.items.length || newItems.some((it) => !oldPaths.has(it.path))) : true;
+
+        GlobalShotsCache.lastScanTime = Date.now();
+
+        // 静默检查：如果列表内容完全一致，不做无谓的 DOM 重建和界面抖动
+        if (isBackgroundCheck && !hasChange) {
+          return;
+        }
+
+        S.items = newItems;
         S.effDirs = Array.isArray(res.dirs) ? res.dirs : [];
         S.missing = Array.isArray(res.missing) ? res.missing : [];
         S.suggest = Array.isArray(res.suggest) ? res.suggest : [];
-        S.page = 1;
+        if (!isBackgroundCheck) S.page = 1;
+
+        // 同步至全局持久缓存
+        GlobalShotsCache.items = S.items.slice();
+        GlobalShotsCache.effDirs = S.effDirs.slice();
+        GlobalShotsCache.missing = S.missing.slice();
+        GlobalShotsCache.suggest = S.suggest.slice();
+        GlobalShotsCache.cfgDirs = S.cfgDirs.slice();
+        GlobalShotsCache.days = S.days;
+        GlobalShotsCache.minKb = S.minKb;
+        GlobalShotsCache.allImages = S.allImages;
+        GlobalShotsCache.view = S.view;
+        GlobalShotsCache.sort = S.sort;
+        GlobalShotsCache.kind = S.kind;
 
         sizeMap.clear();
         S.items.forEach((it) => sizeMap.set(it.path, Number(it.size) || 0));
@@ -1118,6 +1169,8 @@
         if (!silent) {
           toast(T('扫描完成：' + fmtCount(S.items.length) + ' 张，共 ' + fmtBytes(sumSize()),
             'Scan finished: ' + fmtCount(S.items.length) + ' files, ' + fmtBytes(sumSize())), 'ok');
+        } else if (isBackgroundCheck && hasChange) {
+          toast(T('已自动发现新截图并更新列表', 'New screenshots detected and list updated'), 'ok', 3000);
         }
       }
 
@@ -1240,7 +1293,14 @@
       allImagesCb.checked = !!S.allImages;
       renderDirs();
       render();
-      await doScan(true);
+
+      const timeSinceLast = Date.now() - GlobalShotsCache.lastScanTime;
+      // 关键优化：有缓存时 0ms 瞬间还原；只有冷启动或距离上次扫描超 60 秒才在后台静默探查
+      if (!hasCache) {
+        await doScan(true);
+      } else if (timeSinceLast >= 60000) {
+        doScan(true).catch(() => {});
+      }
     }
   };
 })();

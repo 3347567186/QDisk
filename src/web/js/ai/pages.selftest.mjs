@@ -208,6 +208,15 @@ sandbox.API = {
         ]
       };
     }
+    if (method === 'apps.list') {
+      return {
+        ok: true,
+        items: [
+          { name: 'App1', version: '1.0', publisher: 'Pub1', install_path: 'C:\\App1', size: 1048576, date: 1700000000, uninstall: 'cmd1' },
+          { name: 'App2', version: '2.0', publisher: 'Pub2', install_path: 'C:\\App2', size: 2097152, date: 1710000000, uninstall: 'cmd2' }
+        ]
+      };
+    }
     return { ok: true, items: [], partitions: [], drives: [] };
   },
   isAdmin: async () => true,
@@ -294,5 +303,15 @@ for (const [id, page] of Object.entries(sandbox.Pages)) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面挂载与渲染全绿（0 崩溃、0 引用错误）`);
+// 核心回归门禁：已安装程序与自启（apps）在具备内存缓存时再次挂载（warm mount），必须正常呈现且不崩溃
+try {
+  const warmHolder = new FakeElement('div');
+  const retWarm = await sandbox.Pages.apps.mount(warmHolder);
+  if (typeof retWarm === 'function') retWarm();
+} catch (err) {
+  console.error('[内存缓存二次挂载回归失败] apps.mount:', err);
+  process.exit(1);
+}
+
+console.log(`结果：${count}/${count} 页面挂载与渲染全绿（0 崩溃、0 引用错误，二次缓存挂载验证通过）`);
 process.exit(0);

@@ -33,6 +33,14 @@
     if (sc) sc.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
   }
 
+  /* 全局跨挂载持久化内存缓存：切页 0ms 瞬间还原，杜绝重复全盘扫描与闪骨架屏 */
+  const GlobalCachePageCache = {
+    groups: null,
+    lastScanTime: 0,
+    includeCustom: true,
+    pruneEmpty: false
+  };
+
   window.Pages = window.Pages || {};
 
   window.Pages.cache = {
@@ -41,14 +49,15 @@
 
     async mount(root) {
       PAGE_SIZE = UI.pageSize();
+      const hasCache = !!(GlobalCachePageCache.groups && GlobalCachePageCache.groups.length);
       /* ---------- 状态 ---------- */
       const S = {
-        groups: [],
-        includeCustom: true,
-        pruneEmpty: false,
+        groups: GlobalCachePageCache.groups ? GlobalCachePageCache.groups.slice() : [],
+        includeCustom: GlobalCachePageCache.includeCustom !== undefined ? GlobalCachePageCache.includeCustom : true,
+        pruneEmpty: !!GlobalCachePageCache.pruneEmpty,
         selected: new Set(),     // path 集合
         loading: false,
-        loaded: false,
+        loaded: hasCache,
         failed: false
       };
       const refs = new Map();    // 分组名 -> { sec, body, group, page, filled, cb }
@@ -504,13 +513,16 @@
       }
 
       /* ---------- 读取 ---------- */
-      async function doLoad(withOverlay) {
+      async function doLoad(withOverlay, silent = false) {
         if (S.loading) return;
-        S.loading = true;
-        S.loaded = false;
-        S.failed = false;
-        S.selected.clear();
-        render();
+        const isBackgroundCheck = silent && S.loaded && S.groups.length > 0;
+        if (!isBackgroundCheck) {
+          S.loading = true;
+          S.loaded = false;
+          S.failed = false;
+          S.selected.clear();
+          render();
+        }
 
         let res;
         try {
@@ -519,21 +531,48 @@
             ? await busy(() => API.engine('cache.list', params), T('正在读取缓存目录…', 'Reading cache folders…'), 'cache')
             : await API.engine('cache.list', params);
         } catch (e) {
-          toast(errText(e), 'error');
-          S.failed = true;
+          if (!isBackgroundCheck) {
+            toast(errText(e), 'error');
+            S.failed = true;
+          }
         } finally {
-          S.loading = false;
-          S.loaded = true;
+          if (!isBackgroundCheck) {
+            S.loading = false;
+            S.loaded = true;
+          }
         }
 
-        if (!res) { render(); return; }
-        if (res.error) { toast(res.error, 'error'); S.failed = true; render(); return; }
+        if (!res) { if (!isBackgroundCheck) render(); return; }
+        if (res.error) {
+          if (!isBackgroundCheck) {
+            toast(res.error, 'error');
+            S.failed = true;
+            render();
+          }
+          return;
+        }
 
-        S.groups = (Array.isArray(res.groups) ? res.groups : []).map((g) => ({
+        const newGroups = (Array.isArray(res.groups) ? res.groups : []).map((g) => ({
           name: g.name || T('其他', 'Other'),
           level: g.level || 'caution',
           items: Array.isArray(g.items) ? g.items : []
         }));
+
+        GlobalCachePageCache.lastScanTime = Date.now();
+        GlobalCachePageCache.includeCustom = S.includeCustom;
+        GlobalCachePageCache.pruneEmpty = S.pruneEmpty;
+
+        if (isBackgroundCheck) {
+          const oldTotal = S.groups.reduce((sum, g) => sum + g.items.length, 0);
+          const newTotal = newGroups.reduce((sum, g) => sum + g.items.length, 0);
+          const oldBytes = S.groups.reduce((sum, g) => sum + g.items.reduce((s, it) => s + (Number(it.size) || 0), 0), 0);
+          const newBytes = newGroups.reduce((sum, g) => sum + g.items.reduce((s, it) => s + (Number(it.size) || 0), 0), 0);
+          // 若总项数与总字节数没有变化，保持原视图不闪烁
+          if (oldTotal === newTotal && oldBytes === newBytes) return;
+        }
+
+        S.groups = newGroups;
+        GlobalCachePageCache.groups = newGroups;
         render();
       }
 
@@ -823,7 +862,13 @@
         render();
       };
       render();
-      await doLoad(false);
+      const timeSinceLast = Date.now() - GlobalCachePageCache.lastScanTime;
+      // 关键优化：有缓存时 0ms 瞬间还原；只有冷启动或距离上次读取超 60 秒才在后台静默探查
+      if (!hasCache) {
+        await doLoad(false);
+      } else if (timeSinceLast >= 60000) {
+        doLoad(false, true).catch(() => {});
+      }
     }
   };
 })();
