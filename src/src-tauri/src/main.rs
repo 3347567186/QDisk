@@ -1,3 +1,6 @@
+// TidyAssistant / 整理助手
+// Developer: 白林 (Type) <3347567186@qq.com>
+// Note: 独立开发者白林（是个帅气的男孩）；本注释仅留存于底层源码供二次开发与维护查阅，严禁展示在软件可见 UI。
 // 发布版不要控制台窗口：Windows 下把子系统设为 windows，
 // 否则每次启动都会额外弹一个黑色终端（双击快捷方式时最明显）。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

@@ -98,7 +98,7 @@
     return n.replace(ARCHIVE_SUFFIX, '') || n;
   };
 
-  const BAD_FOLDER_CHARS = /[<>:"\\|?*\u0000-\u001f]/;
+  const BAD_FOLDER_CHARS = /[<>:"/\\|?*\u0000-\u001f]/;
   function folderNameError(name) {
     const n = String(name || '').trim();
     if (!n) return T('文件夹名不能为空', 'Folder name is required');
@@ -892,8 +892,8 @@
     await doExtract(null);
   }
 
-  /* 软件内的「解压到」对话框：选位置、定文件夹名、实时看最终路径。
-     取代系统选择器，解压结果不再散落在目标目录。 */
+  /* 软件内的「解压到」对话框：支持「直接解压 / 同名文件夹 / 自定义新建文件夹」，
+     输入文件夹名称后在解压时自动创建并实时预览完整目标路径。 */
   function askExtractDest(indices) {
     return new Promise((resolve) => {
       const stem = archiveStem(S.path);
@@ -918,10 +918,19 @@
       const soloName = solo ? baseName(entries[0].name) : '';
       const soloStem = (solo && soloName.toLowerCase() === stem.toLowerCase())
         ? (soloName.replace(/\.[^.]+$/, '') || stem) : '';
-      const nameEl = h('input', { class: 'input', value: sameRoot ? root : (soloStem || stem) });
-      const sub = h('input', { type: 'checkbox', checked: !sameRoot });
+      const defaultName = sameRoot ? root : (soloStem || stem);
+
+      let folderMode = sameRoot ? 'none' : 'same'; // 'none' | 'same' | 'custom'
+      let customDraft = '';
+
+      const nameEl = h('input', {
+        class: 'input grow',
+        placeholder: T('输入文件夹名称，解压时自动创建', 'Enter folder name (auto-created on extract)'),
+        value: defaultName
+      });
       const openCb = h('input', { type: 'checkbox', checked: S.extract.openAfter !== false });
       const target = h('code', { class: 'xdlg-path' }, '');
+      const autoBadge = h('span', { class: 'badge accent xdlg-auto-badge' }, T('自动创建', 'Auto-create'));
       const errEl = h('div', { class: 'xdlg-err' }, '');
       const hint = h('div', { class: 'small muted xdlg-hint' }, '');
 
@@ -932,6 +941,48 @@
           if (p) { dest.value = p; sync(); }
         } catch (e) { toast(errText(e), 'error'); }
       };
+
+      const modeNoneBtn = h('button', {
+        type: 'button',
+        class: 'xdlg-mode',
+        'aria-pressed': 'false',
+        onclick: () => setMode('none', false)
+      }, T('直接解压', 'Direct'));
+      const modeSameBtn = h('button', {
+        type: 'button',
+        class: 'xdlg-mode',
+        'aria-pressed': 'false',
+        onclick: () => setMode('same', true)
+      }, T('同名文件夹', 'Same-name'));
+      const modeCustomBtn = h('button', {
+        type: 'button',
+        class: 'xdlg-mode',
+        'aria-pressed': 'false',
+        onclick: () => setMode('custom', true)
+      }, T('自定义新建文件夹', 'Custom new folder'));
+
+      const resetNameBtn = h('button', {
+        type: 'button',
+        class: 'btn ghost sm',
+        title: T('恢复为压缩包同名文件夹', 'Reset to archive name'),
+        onclick: () => setMode('same', false)
+      }, T('用同名', 'Use archive name'));
+
+      const clearNameBtn = h('button', {
+        type: 'button',
+        class: 'btn ghost sm icon',
+        title: T('清空名称', 'Clear name'),
+        'aria-label': T('清空名称', 'Clear name'),
+        onclick: () => {
+          customDraft = '';
+          nameEl.value = '';
+          folderMode = 'custom';
+          sync();
+          nameEl.focus();
+        }
+      }, icon('close', 12));
+
+      const nameRow = h('div', { class: 'xdlg-name-row' }, nameEl, resetNameBtn, clearNameBtn);
 
       const body = h('div', { class: 'xdlg' },
         h('div', { class: 'xdlg-src' },
@@ -944,18 +995,34 @@
         h('div', { class: 'arc-field' },
           h('span', { class: 'arc-field-label' }, T('文件夹', 'Folder')),
           h('div', { class: 'xdlg-sub' },
-            h('label', { class: 'check' }, sub, h('span', null, T('放进同名文件夹', 'Into a folder'))),
-            nameEl)),
+            h('div', { class: 'xdlg-modes' }, modeNoneBtn, modeSameBtn, modeCustomBtn),
+            nameRow)),
         hint,
-        h('div', { class: 'xdlg-target' }, icon('folder', 14), target),
+        h('div', { class: 'xdlg-target' }, icon('folder', 14), target, autoBadge),
         errEl,
         h('label', { class: 'check' }, openCb, h('span', null, T('完成后打开文件夹', 'Open the folder when done')))
       );
 
+      function setMode(mode, focusInput) {
+        if (folderMode === 'custom') customDraft = nameEl.value;
+        folderMode = mode;
+        if (mode === 'same') {
+          nameEl.value = defaultName;
+        } else if (mode === 'custom') {
+          nameEl.value = customDraft || defaultName;
+        }
+        sync();
+        if (focusInput && mode !== 'none') {
+          nameEl.focus();
+          if ((mode === 'same' || !customDraft) && typeof nameEl.select === 'function') nameEl.select();
+        }
+      }
+
       function peek() {
         const dir = dest.value.trim();
         const name = nameEl.value.trim();
-        return { dir, name, subOn: !!sub.checked, out: sub.checked ? joinPath(dir, name) : dir };
+        const subOn = folderMode !== 'none';
+        return { dir, name, mode: folderMode, subOn, out: subOn ? joinPath(dir, name) : dir };
       }
       function validate() {
         const p = peek();
@@ -969,11 +1036,34 @@
       }
       function sync() {
         const p = peek();
+        modeNoneBtn.classList.toggle('on', folderMode === 'none');
+        modeNoneBtn.setAttribute('aria-pressed', folderMode === 'none' ? 'true' : 'false');
+        modeSameBtn.classList.toggle('on', folderMode === 'same');
+        modeSameBtn.setAttribute('aria-pressed', folderMode === 'same' ? 'true' : 'false');
+        modeCustomBtn.classList.toggle('on', folderMode === 'custom');
+        modeCustomBtn.setAttribute('aria-pressed', folderMode === 'custom' ? 'true' : 'false');
+
+        nameRow.hidden = !p.subOn;
+        nameEl.disabled = !p.subOn;
+        resetNameBtn.hidden = !(folderMode === 'custom' && p.name !== defaultName);
+        clearNameBtn.hidden = !nameEl.value.length;
+
+        const nameOk = p.subOn && !folderNameError(p.name);
+        autoBadge.hidden = !nameOk;
         target.textContent = p.out || '—';
         errEl.textContent = validate();
-        if (p.subOn) {
-          hint.textContent = T('压缩包里的文件保持原文件名，放进「' + p.name + '」。',
-            'Files keep their names and go into “' + p.name + '”.');
+        if (folderMode === 'custom') {
+          const base = p.name
+            ? T('解压时会自动新建文件夹「' + p.name + '」，内容将放入其中。',
+              'Folder “' + p.name + '” will be created automatically on extract.')
+            : T('请输入新建文件夹名称，解压时会自动创建。',
+              'Enter a folder name to auto-create on extract.');
+          hint.textContent = root
+            ? base + ' ' + T('（提示：压缩包内已自带顶层目录「' + root + '」）', '(Note: archive already has top folder “' + root + '”)')
+            : base;
+        } else if (folderMode === 'same') {
+          hint.textContent = T('自动新建「' + p.name + '」并将压缩包内容解压入内。',
+            'Auto-creates “' + p.name + '” and extracts files inside.');
         } else {
           hint.textContent = root
             ? T('压缩包自带顶层文件夹「' + root + '」，直接解压到所选位置，不会多套一层。',
@@ -990,9 +1080,14 @@
       let settled = false;
       const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
       const submit = () => {
-        const bad = validate();
-        if (bad) { errEl.textContent = bad; dest.focus(); return false; }
         const p = peek();
+        const bad = validate();
+        if (bad) {
+          errEl.textContent = bad;
+          if (p.subOn && folderNameError(p.name)) nameEl.focus();
+          else dest.focus();
+          return false;
+        }
         finish({ dir: p.dir, folder: p.name, subfolder: p.subOn, openAfter: !!openCb.checked });
         return true;
       };
@@ -1018,12 +1113,14 @@
       dest.addEventListener('keydown', onEnter);
       nameEl.addEventListener('keydown', onEnter);
       dest.addEventListener('input', sync);
-      nameEl.addEventListener('input', sync);
-      sub.addEventListener('change', () => { nameEl.disabled = !sub.checked; sync(); });
-      nameEl.disabled = !sub.checked;
+      nameEl.addEventListener('input', () => {
+        if (folderMode === 'same' && nameEl.value.trim() !== defaultName) folderMode = 'custom';
+        if (folderMode === 'custom') customDraft = nameEl.value;
+        sync();
+      });
       sync();
-      // 弹窗默认把焦点给了第一个按钮，这里抢回到名字输入框，开箱即改。
-      setTimeout(() => { if (sub.checked) { nameEl.focus(); nameEl.select(); } else { dest.focus(); } }, 30);
+      // 弹窗默认把焦点给了第一个按钮，这里抢回到文件夹命名输入框或路径框，开箱即改。
+      setTimeout(() => { if (folderMode !== 'none') { nameEl.focus(); if (typeof nameEl.select === 'function') nameEl.select(); } else { dest.focus(); } }, 30);
     });
   }
 

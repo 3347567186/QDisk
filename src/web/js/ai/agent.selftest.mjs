@@ -1991,6 +1991,31 @@ for (const c of CASES) {
   results.push({ id: 'G67', group: '数字同源', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
 
+/* G68 开发者署名（白林 / Type / 3347567186@qq.com）底层注入与稳重带彩蛋身份防幻觉 */
+{
+  const bad = [];
+  const sys = prompt.systemPrompt({ page: 'ai' });
+  for (const tok of ['白林', 'Type', '3347567186@qq.com', '帅气的男孩', '进一步追问']) {
+    if (!sys.includes(tok)) bad.push('系统提示词缺少开发者信息关键片段：' + tok);
+  }
+  const agent = createAgent({
+    transport: scripted([
+      answer({ answer: '整理助手是由智谱AI公司开发的。' })
+    ]),
+    tools,
+    prompt,
+    settings
+  });
+  const res = await agent.run({ userText: '整理助手是谁开发的？', ctx: { page: 'ai' } });
+  const ans = String(res.answer || '');
+  if (!res.ok) bad.push('开发者归属拦截问答失败');
+  if (/智谱/.test(ans)) bad.push('未能拦截第三方厂商归属幻觉：' + ans);
+  if (!ans.includes('白林') || !ans.includes('Type')) {
+    bad.push('归属修正文案未准确指向独立开发者白林（Type）：' + ans);
+  }
+  results.push({ id: 'G68', group: '开发者', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

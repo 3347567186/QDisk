@@ -2958,9 +2958,24 @@ body[data-motion="off"] .shot-flag { animation: none; }
 }
 .xdlg-src > svg { flex: 0 0 auto; color: var(--text-3); }
 .xdlg-src > .ellipsis { min-width: 0; color: var(--text-1); }
-.xdlg-sub { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.xdlg-sub > .check { flex: 0 0 auto; }
-.xdlg-sub > .input { flex: 1 1 auto; min-width: 0; }
+.xdlg-sub { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.xdlg-modes {
+  display: inline-flex; width: fit-content; max-width: 100%; flex-wrap: wrap;
+  padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface-2);
+}
+.xdlg-mode {
+  border: 0; background: transparent; color: var(--text-3);
+  font: inherit; font-size: var(--fs-small); font-weight: 500;
+  padding: 4px 12px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.xdlg-mode:hover { color: var(--text-1); }
+.xdlg-mode:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-ring); }
+.xdlg-mode.on { background: var(--surface); color: var(--accent-text); box-shadow: var(--shadow-1); }
+.xdlg-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.xdlg-name-row[hidden] { display: none; }
+.xdlg-name-row > .input { flex: 1 1 auto; min-width: 0; }
 .xdlg-hint { margin-top: -2px; }
 .xdlg-target {
   display: flex; align-items: center; gap: 8px; min-width: 0;
@@ -2973,6 +2988,8 @@ body[data-motion="off"] .shot-flag { animation: none; }
   text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-small); color: var(--text-1);
 }
+.xdlg-auto-badge { flex: 0 0 auto; }
+.xdlg-auto-badge[hidden] { display: none; }
 .xdlg-err { min-height: 1.35em; color: var(--danger); font-size: var(--fs-small); line-height: 1.35; }
 .modal-foot .btn:disabled { opacity: .45; pointer-events: none; }
 
@@ -5337,5 +5354,5 @@ html[data-theme="dark"] .ai-tnav-pop {
 @media (max-width: 960px) { .perf-grid-2 { grid-template-columns: minmax(0, 1fr); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .pool-row, .pool-chip, .pool-models, .wb-tab, .ai-suggest-prompts, .ai-sp-chip, .log-file-item, .agent-cat-chip { transition: none; animation: none; }
+  .pool-row, .pool-chip, .pool-models, .wb-tab, .ai-suggest-prompts, .ai-sp-chip, .log-file-item, .agent-cat-chip, .xdlg-mode { transition: none; animation: none; }
 }

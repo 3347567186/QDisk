@@ -124,6 +124,7 @@ class FakeElement extends FakeNode {
   }
   focus() {}
   blur() {}
+  select() {}
   scrollIntoView() {}
   getContext() {
     return {
@@ -187,10 +188,11 @@ const sandbox = {
   MutationObserver: class { observe() {} disconnect() {} takeRecords() { return []; } },
   localStorage: fakeLocalStorage,
   document: {
+    _byId: { 'modal-root': new FakeElement('div') },
     createElement: (t) => new FakeElement(t),
     createElementNS: (ns, t) => new FakeElement(t),
     createTextNode: (txt) => { const el = new FakeElement('#text'); el.textContent = txt; return el; },
-    getElementById: () => new FakeElement('div'),
+    getElementById: (id) => (id && sandbox.document._byId[id]) ? sandbox.document._byId[id] : new FakeElement('div'),
     addEventListener: trackedDocAdd,
     removeEventListener: trackedDocRemove,
     head: new FakeElement('head'),
@@ -578,5 +580,131 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮移除校验通过）`);
+// 回归 6：开发者信息仅存于底层源码注释，软件可见 UI 与 HTML 正文严禁渲染展示
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const html = fs.readFileSync(path.join(root, 'src', 'web', 'index.html'), 'utf8');
+  if (!/<!--[\s\S]*?白林[\s\S]*?3347567186@qq\.com[\s\S]*?-->/.test(html)) {
+    console.error('[开发者隐私回归] index.html 底层注释中缺少白林 / Type / 3347567186@qq.com 信息');
+    process.exit(1);
+  }
+  const visibleHtml = html.replace(/<!--[\s\S]*?-->/g, '');
+  if (/白林|3347567186@qq\.com|帅气的男孩/.test(visibleHtml)) {
+    console.error('[开发者隐私回归] index.html 可见正文不应暴露开发者信息');
+    process.exit(1);
+  }
+  const setHolder = new FakeElement('div');
+  const retSet = await sandbox.Pages.settings.mount(setHolder);
+  if (/白林|3347567186@qq\.com|帅气的男孩/.test(txt(setHolder))) {
+    console.error('[开发者隐私回归] 设置页渲染文本不应包含开发者信息');
+    process.exit(1);
+  }
+  if (typeof retSet === 'function') retSet();
+  if (typeof sandbox.Pages.settings.unmount === 'function') sandbox.Pages.settings.unmount();
+}
+
+// 回归 7：压缩包「解压到」支持自定义新建文件夹并自动创建目标目录
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const modalRoot = sandbox.document._byId['modal-root'];
+  modalRoot.children = [];
+  const origOpen = sandbox.API.archiveOpen;
+  const origExtract = sandbox.API.archiveExtract;
+  const extractCalls = [];
+  sandbox.API.archiveOpen = async (p) => ({
+    path: p,
+    format: 'zip',
+    rarReady: true,
+    entries: [{ index: 0, name: 'init.sql', size: 1024, is_dir: false, mtime: 1732200000 }]
+  });
+  sandbox.API.archiveExtract = async (pathArg, outDir) => {
+    extractCalls.push({ path: pathArg, outDir });
+    return { files: 1, dirs: 0, bytes: 1024, skipped: 0, outDir };
+  };
+
+  const arcHolder = new FakeElement('div');
+  const beforeKey = (docListeners.get('keydown') || []).length;
+  const beforeInt = activeIntervals.size;
+  const retArc = await sandbox.Pages.archive.mount(arcHolder);
+  await sandbox.Pages.archive.jump({ paths: ['D:\\下载\\数据库.zip'] });
+
+  const extractAllBtn = findNodes(arcHolder, (n) => n.tagName === 'BUTTON' && txt(n).includes('解压全部'))[0];
+  if (!extractAllBtn) {
+    console.error('[压缩包回归] 未找到「解压全部」按钮');
+    process.exit(1);
+  }
+  clickBtn(extractAllBtn);
+
+  const modes = findNodes(modalRoot, (n) => n.classList && n.classList.contains('xdlg-mode'));
+  const customBtn = modes.find((b) => txt(b).includes('自定义新建文件夹'));
+  const nameRow = findNodes(modalRoot, (n) => n.classList && n.classList.contains('xdlg-name-row'))[0];
+  const nameInput = nameRow ? findNodes(nameRow, (n) => n.tagName === 'INPUT')[0] : null;
+  const targetCode = findNodes(modalRoot, (n) => n.classList && n.classList.contains('xdlg-path'))[0];
+  const errDiv = findNodes(modalRoot, (n) => n.classList && n.classList.contains('xdlg-err'))[0];
+  const startBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始解压'))[0];
+  if (modes.length !== 3 || !customBtn || !nameInput || !targetCode || !errDiv || !startBtn) {
+    console.error(`[压缩包回归] 解压弹窗自定义文件夹控件缺失: modes=${modes.length}, custom=${!!customBtn}, input=${!!nameInput}`);
+    process.exit(1);
+  }
+
+  clickBtn(customBtn);
+  nameInput.value = 'bad/name';
+  nameInput.dispatchEvent(new sandbox.Event('input'));
+  if (!errDiv.textContent) {
+    console.error('[压缩包回归] 含 / 的非法文件夹名未触发错误提示');
+    process.exit(1);
+  }
+  clickBtn(startBtn);
+  if (extractCalls.length !== 0) {
+    console.error('[压缩包回归] 非法文件夹名不应触发解压调用');
+    process.exit(1);
+  }
+
+  nameInput.value = '我的新目录';
+  nameInput.dispatchEvent(new sandbox.Event('input'));
+  if (errDiv.textContent || targetCode.textContent !== 'D:\\下载\\我的新目录') {
+    console.error(`[压缩包回归] 自定义文件夹预览路径异常: err=${errDiv.textContent}, target=${targetCode.textContent}`);
+    process.exit(1);
+  }
+  clickBtn(startBtn);
+  await new Promise((r) => setTimeout(r, 40));
+
+  if (extractCalls.length !== 1 || extractCalls[0].outDir !== 'D:\\下载\\我的新目录') {
+    console.error('[压缩包回归] API.archiveExtract 收到的目标路径不符合自定义目录:', extractCalls);
+    process.exit(1);
+  }
+
+  const closeDoneBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭')[0];
+  clickBtn(closeDoneBtn);
+  if (typeof retArc === 'function') retArc();
+  sandbox.API.archiveOpen = origOpen;
+  sandbox.API.archiveExtract = origExtract;
+  await new Promise((r) => setTimeout(r, 220));
+  const afterKey = (docListeners.get('keydown') || []).length;
+  const afterInt = activeIntervals.size;
+  if (afterKey !== beforeKey || afterInt !== beforeInt) {
+    console.error(`[压缩包回归] unmount/关闭弹窗后资源未回收: keydown=${afterKey - beforeKey}, intervals=${afterInt - beforeInt}`);
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录校验通过）`);
 process.exit(0);
