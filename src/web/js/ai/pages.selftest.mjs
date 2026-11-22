@@ -139,7 +139,7 @@ class FakeElement extends FakeNode {
   getAttribute(k) { return this.attributes[k]; }
   removeAttribute(k) { delete this.attributes[k]; }
   get textContent() { return this._textContent; }
-  set textContent(v) { this._textContent = String(v); }
+  set textContent(v) { this._textContent = String(v); if (v === '') this.children = []; }
   get innerHTML() { return this._innerHTML; }
   set innerHTML(v) { this._innerHTML = String(v); if (!v) this.children = []; }
   get className() { return this.classList.toString(); }
@@ -421,6 +421,17 @@ function findNodes(rootNode, pred, out = []) {
     console.error('[设置页回归] 未保留 AI 助手配置手风琴 [data-section="assistant"]');
     process.exit(1);
   }
+  const modeBars = findNodes(assistantSecs[0], (n) => n.classList && n.classList.contains('ai-modes'));
+  const catChips = findNodes(assistantSecs[0], (n) => n.classList && n.classList.contains('agent-cat-chip'));
+  const limitFields = [];
+  findNodes(assistantSecs[0], (n) => n.classList && n.classList.contains('agent-limits')).forEach((lim) => {
+    findNodes(lim, (c) => c.classList && c.classList.contains('field'), limitFields);
+  });
+  const setBars = findNodes(assistantSecs[0], (n) => n.classList && n.classList.contains('ai-set-bar'));
+  if (!modeBars.length || catChips.length < 7 || limitFields.length !== 3 || !setBars.length) {
+    console.error(`[设置页回归] AI 助手配置重排结构缺失: modes=${modeBars.length}, chips=${catChips.length}, limits=${limitFields.length}, bar=${setBars.length}`);
+    process.exit(1);
+  }
   sandbox.Pages.settings.jump({ section: 'assistant' });
   if (typeof ret === 'function') ret();
   if (typeof sandbox.Pages.settings.unmount === 'function') sandbox.Pages.settings.unmount();
@@ -524,5 +535,48 @@ function findNodes(rootNode, pred, out = []) {
   await new Promise((r) => setTimeout(r, 200));
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉建议提示词校验通过）`);
+// 回归 4：全软件移除顶栏全屏按钮 (#btn-fullscreen) 与 app.js 绑定
+{
+  const html = fs.readFileSync(path.join(root, 'src', 'web', 'index.html'), 'utf8');
+  if (/id\s*=\s*["']btn-fullscreen["']/.test(html)) {
+    console.error('[全局回归] index.html 中仍残留全屏按钮 #btn-fullscreen');
+    process.exit(1);
+  }
+}
+
+// 回归 5：日志页主从工作台单行顶栏重排（无旧双重工具条，左侧图标动作组，右侧问助手/复制/定位）
+{
+  const origLogList = sandbox.API.logList;
+  const origLogRead = sandbox.API.logRead;
+  sandbox.API.logList = async () => ([
+    { name: 'tidy-2026.log', path: 'D:\\Logs\\tidy-2026.log', size: 2048, mtime: 1732200000 }
+  ]);
+  sandbox.API.logRead = async () => '[INFO] moved 3 files\n';
+  const logHolder = new FakeElement('div');
+  const beforeInt = activeIntervals.size;
+  const ret = await sandbox.Pages.log.mount(logHolder);
+  await sandbox.Pages.log.jump({ file: 'tidy-2026.log' });
+  const splitLeft = findNodes(logHolder, (n) => n.classList && n.classList.contains('split-left'))[0];
+  const splitRight = findNodes(logHolder, (n) => n.classList && n.classList.contains('split-right'))[0];
+  const heads = findNodes(logHolder, (n) => n.classList && n.classList.contains('log-pane-head'));
+  const leftToolbars = splitLeft ? findNodes(splitLeft, (n) => n.classList && n.classList.contains('toolbar')) : [];
+  const leftAsk = splitLeft ? findNodes(splitLeft, (n) => n.classList && n.classList.contains('ask-ai-btn')) : [];
+  const rightAsk = splitRight ? findNodes(splitRight, (n) => n.classList && n.classList.contains('ask-ai-btn')) : [];
+  const items = findNodes(logHolder, (n) => n.classList && n.classList.contains('log-file-item'));
+  const preNodes = findNodes(logHolder, (n) => n.classList && n.classList.contains('log-viewer-pre'));
+  if (heads.length !== 2 || leftToolbars.length !== 0 || leftAsk.length !== 0 || rightAsk.length !== 1 || items.length !== 1 || preNodes.length !== 1) {
+    console.error(`[日志页回归] 重排结构校验失败: heads=${heads.length}, leftToolbars=${leftToolbars.length}, leftAsk=${leftAsk.length}, rightAsk=${rightAsk.length}, items=${items.length}, pre=${preNodes.length}`);
+    process.exit(1);
+  }
+  if (typeof ret === 'function') ret();
+  if (typeof sandbox.Pages.log.unmount === 'function') sandbox.Pages.log.unmount();
+  sandbox.API.logList = origLogList;
+  sandbox.API.logRead = origLogRead;
+  if (activeIntervals.size > beforeInt) {
+    console.error('[日志页回归] unmount 后残留定时器');
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮移除校验通过）`);
 process.exit(0);

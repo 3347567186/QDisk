@@ -1381,23 +1381,29 @@
         }
 
         const modeBtns = (window.AIProposals ? AIProposals.MODES : ['off', 'confirm', 'auto', 'full']).map((m) => h('button', {
-          class: 'ai-mode' + (m === pol.mode ? ' on' : '') + (m !== 'off' ? ' armed' : ''),
+          class: 'ai-mode' + (m === pol.mode ? ' on' : '') + (m !== 'off' ? ' armed' : '') + (m === 'full' ? ' danger' : ''),
           type: 'button',
           'aria-pressed': m === pol.mode ? 'true' : 'false',
           onclick: () => saveAgent({ mode: m })
         }, h('span', { text: { off: T('只读', 'Read-only'), confirm: T('确认', 'Confirm'), auto: T('自动', 'Auto'), full: T('放手', 'Full') }[m] })));
 
-        const catBoxes = (window.AIProposals ? AIProposals.CATS : Object.keys(CAT_ZH)).map((c) => h('label', { class: 'check' },
-          h('input', {
-            type: 'checkbox',
-            checked: !!(pol.cats && pol.cats[c]),
-            disabled: pol.mode === 'off',
-            onchange: (e) => {
-              const cats = Object.assign({}, pol.cats, { [c]: e.target.checked });
-              saveAgent({ cats });
-            }
-          }),
-          h('span', { text: CAT_ZH[c] || c })));
+        const catBoxes = (window.AIProposals ? AIProposals.CATS : Object.keys(CAT_ZH)).map((c) => {
+          const isChecked = !!(pol.cats && pol.cats[c]);
+          const isDisabled = pol.mode === 'off';
+          return h('label', {
+            class: 'check agent-cat-chip' + (isChecked ? ' is-on' : '') + (isDisabled ? ' is-disabled' : '')
+          },
+            h('input', {
+              type: 'checkbox',
+              checked: isChecked,
+              disabled: isDisabled,
+              onchange: (e) => {
+                const cats = Object.assign({}, pol.cats, { [c]: e.target.checked });
+                saveAgent({ cats });
+              }
+            }),
+            h('span', { text: CAT_ZH[c] || c }));
+        });
 
         const numIn = (key, lo, hi, def) => h('input', {
           class: 'input', type: 'number', min: String(lo), max: String(hi), value: String(pol[key] || def),
@@ -1591,29 +1597,29 @@
         const cardAct = h('div', { class: 'set-card' },
             setCap(T('行为与权限', 'Behaviour & permissions'), agentBadge),
             setRow(T('开关', 'Switches'),
-              h('div', { class: 'row wrap' },
+              h('div', { class: 'ai-switch-row' },
                 h('label', { class: 'check' }, enabledCb, h('span', { text: T('启用 AI 助手', 'Enable AI assistant') })),
                 h('label', { class: 'check' }, jsonCb, h('span', { text: T('要求 JSON 模式', 'Request JSON mode') })))),
             setRow(T('档位', 'Mode'),
               h('div', { class: 'ai-modes' }, ...modeBtns),
               MODE_TIP[pol.mode] || ''),
-            /* 能力范围 + 上限合成一行：都是「动手能到什么程度」，
-               原来分成两行、各带一句说明，白掉将近 100px。 */
-            setRow(T('范围与上限', 'Scope & limits'),
-              h('div', { class: 'set-body' },
-                h('div', { class: 'agent-cats' }, ...catBoxes),
-                h('div', { class: 'set-sub' },
-                  h('label', { text: T('每轮提案 / 每会话执行 / 单次项目', 'Per turn / per session / items') }),
-                  h('div', { class: 'agent-limits' },
-                    h('div', { class: 'field' }, numIn('maxOpsPerTurn', 1, 10, 2)),
-                    h('div', { class: 'field' }, numIn('maxOpsPerSession', 1, 200, 30)),
-                    h('div', { class: 'field' }, numIn('maxItems', 10, 20000, 200))
-                  )
-                )
+            setRow(T('允许范围', 'Scope'),
+              h('div', { class: 'agent-cats' }, ...catBoxes),
+              pol.mode === 'off' ? T('档位在「只读」时这些开关不生效', 'Inactive while the mode is read-only') : ''),
+            setRow(T('安全上限', 'Safety limits'),
+              h('div', { class: 'agent-limits' },
+                h('div', { class: 'field' },
+                  h('label', { text: T('每轮提案', 'Per turn') }),
+                  numIn('maxOpsPerTurn', 1, 10, 2)),
+                h('div', { class: 'field' },
+                  h('label', { text: T('每会话执行', 'Per session') }),
+                  numIn('maxOpsPerSession', 1, 200, 30)),
+                h('div', { class: 'field' },
+                  h('label', { text: T('单次项目', 'Max items') }),
+                  numIn('maxItems', 10, 20000, 200))
               ),
-              pol.mode === 'off'
-                ? T('档位在「只读」时这些开关不生效', 'Inactive while the mode is read-only')
-                : T('每次执行都写进 ai\\journal 审计日志；把档位切回「只读」，助手立刻失去动手能力', 'Every run is journalled under ai\\journal; switching back to read-only revokes everything'))
+              T('每次执行均写入 ai\\journal 审计日志；切回「只读」立刻停止动手权限',
+                'Every action is logged to ai\\journal; switching to read-only revokes write access'))
         );
 
         const ollamaCb = h('input', {
@@ -1622,19 +1628,18 @@
           onchange: (e) => { d.ollamaFallback = e.target.checked; paint(); }
         });
         const ollamaModelIn = h('input', {
-          class: 'input',
-          style: 'max-width: 200px;',
+          class: 'input mono ai-ollama-in',
           placeholder: 'qwen2.5:7b',
           value: String(d.ollamaModel || ''),
           oninput: (e) => { d.ollamaModel = e.target.value.trim(); }
         });
         cardModel.appendChild(setRow(T('本机兜底', 'Local fallback'),
-          h('div', { class: 'row wrap', style: 'gap: 10px; align-items: center;' },
+          h('div', { class: 'ai-ollama-row' },
             h('label', { class: 'check' }, ollamaCb,
-              h('span', { text: T('云端全不可用时切本机 Ollama', 'Use local Ollama if all cloud fail') })),
+              h('span', { text: T('云端不可用时切换 Ollama', 'Fallback to Ollama if offline') })),
             ollamaModelIn
           ),
-          T('需本机已运行 Ollama（127.0.0.1:11434）；留空模型名默认使用 qwen2.5:7b',
+          T('需本机已运行 Ollama（127.0.0.1:11434）；留空默认 qwen2.5:7b',
             'Requires local Ollama at 127.0.0.1:11434; empty defaults to qwen2.5:7b')));
 
         const nowMs = Date.now();
@@ -1647,7 +1652,7 @@
             ? h('span', { class: 'badge ok', text: T(`已学习 ${capKeys.length} 个端点特性`, `${capKeys.length} learned`) })
             : h('span', { class: 'badge', text: T('暂无学习缓存', 'No cached caps') }));
         const capResetBtn = h('button', {
-          class: 'btn ghost sm',
+          class: 'btn sm',
           type: 'button',
           disabled: capKeys.length === 0,
           onclick: async () => {
@@ -1671,15 +1676,15 @@
               toast(errText(err), 'error');
             }
           }
-        }, h('span', {
+        }, icon('refresh', 12), h('span', {
           text: cooledKeys.length > 0
-            ? T(`立即解除冷却 (${cooledKeys.length})`, `Clear cooldown (${cooledKeys.length})`)
-            : T(`重置特性缓存 (${capKeys.length})`, `Reset cap cache (${capKeys.length})`)
+            ? T(`解除冷却 (${cooledKeys.length})`, `Clear cooldown (${cooledKeys.length})`)
+            : T(`重置缓存 (${capKeys.length})`, `Reset cache (${capKeys.length})`)
         }));
-        cardModel.appendChild(setRow(T('节点健康', 'Health & caps'),
+        cardConn.appendChild(setRow(T('节点健康', 'Health & caps'),
           h('div', { class: 'row wrap', style: 'gap: 8px; align-items: center;' }, capStatusBadge, capResetBtn),
-          T('自动记住端点的流式/工具支持与限流冷却期；重连异常时可手动重置',
-            'Remembers stream/tool capability & rate-limit cooldowns; reset here when troubleshooting')));
+          T('自动记住端点流式/工具支持与限流冷却期；重连异常时可手动重置',
+            'Remembers stream/tool capability & rate-limit cooldowns; reset when troubleshooting')));
 
         const body = h('div', { class: 'stack set-stack' },
           h('div', { class: 'set-cols' }, cardConn, cardModel),
@@ -1696,14 +1701,14 @@
           test && test.ok && test.hint
             ? h('div', { class: 'small muted', text: test.hint })
             : null,
-          h('div', { class: 'action-bar' },
+          h('div', { class: 'action-bar ai-set-bar' },
             testBadge,
             h('div', { class: 'spacer' }),
             h('button', {
               class: 'btn sm', disabled: state.aiTesting, onclick: testAi
             }, icon('play', 14), h('span', { text: state.aiTesting ? T('测试中…', 'Testing…') : T('测试连接', 'Test connection') })),
             h('button', {
-              class: 'btn sm ghost', onclick: clearAiData
+              class: 'btn sm ghost ai-set-danger', onclick: clearAiData
             }, icon('trash', 14), h('span', { text: T('清空对话记录', 'Clear chats') })),
             h('button', {
               class: 'btn primary sm', disabled: state.aiBusy, onclick: saveAi

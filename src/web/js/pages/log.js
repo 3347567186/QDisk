@@ -136,6 +136,36 @@
       }
 
 
+      const askBtn = UI.askBtn({
+        title: T('问助手 · 日志诊断', 'Ask AI · Log diagnostics'),
+        question: T('请帮我读取最近的运行日志并排查异常或失败原因。', 'Read recent logs and diagnose any errors or failures.'),
+        ctx: () => ({
+          page: '日志',
+          selected: state.selected ? state.selected.name : '',
+          note: state.files ? T('共 ' + state.files.length + ' 个日志文件', state.files.length + ' log files') : ''
+        })
+      });
+
+      async function copyLogContent(text) {
+        const v = String(text == null ? '' : text);
+        if (!v) return;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(v);
+          } else {
+            const ta = h('textarea', { style: { position: 'fixed', opacity: '0', top: '0', left: '0' } });
+            ta.value = v;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+          }
+          toast(T('已复制日志内容', 'Log content copied'), 'ok');
+        } catch (e) {
+          toast(errText(e), 'error');
+        }
+      }
+
       /* ---------- 日志文件列表 ---------- */
       function filesCard() {
         let body;
@@ -146,24 +176,25 @@
             h('button', { class: 'btn sm', onclick: refresh }, icon('refresh', 14), h('span', { text: T('重试', 'Retry') })));
         } else if (!state.files || !state.files.length) {
           body = empty(T('暂无日志文件', 'No log files'),
-            T('运行一次整理后这里会出现日志', 'Logs appear here after the app runs'));
+            T('运行一次整理后这里会出现日志', 'Logs appear here after the app runs'), 'log');
         } else {
-          body = h('div', { class: 'table-wrap tall' }, h('div', { class: 'list' },
+          body = h('div', { class: 'log-file-scroll' }, h('div', { class: 'log-file-list' },
             state.files.map((f) => {
               const active = state.selected && state.selected.path === f.path;
-              const row = h('div', {
-                class: 'list-item',
+              const row = h('button', {
+                type: 'button',
+                class: 'log-file-item' + (active ? ' is-active' : ''),
+                'aria-current': active ? 'true' : null,
                 onclick: () => openFile(f)
               },
-                icon('file'),
-                h('span', { class: 'ellipsis spacer', title: f.name, text: f.name }),
-                active ? h('span', { class: 'badge accent', text: T('查看中', 'Open') }) : null,
-                h('span', { class: 'small muted', text: fmtBytes(f.size) }),
-                h('span', { class: 'small muted', text: fmtTime(f.mtime) }),
-                h('button', {
-                  class: 'btn ghost sm',
-                  onclick: (e) => { e.stopPropagation(); openFile(f); }
-                }, h('span', { text: T('查看', 'View') }))
+                h('div', { class: 'log-file-top' },
+                  icon('file', 13),
+                  h('span', { class: 'log-file-name ellipsis', title: f.name, text: f.name })
+                ),
+                h('div', {
+                  class: 'log-file-meta',
+                  text: fmtBytes(f.size) + ' · ' + fmtTime(f.mtime)
+                })
               );
               // 右键：查看 / 定位文件 / 复制文件名
               attachMenu(row, [
@@ -176,46 +207,62 @@
           ));
         }
 
-        const askBtn = UI.askBtn({
-          title: T('问助手 · 日志诊断', 'Ask AI · Log diagnostics'),
-          question: T('请帮我读取最近的运行日志并排查异常或失败原因。', 'Read recent logs and diagnose any errors or failures.'),
-          ctx: () => ({
-            page: '日志',
-            selected: state.selected ? state.selected.name : '',
-            note: state.files ? T('共 ' + state.files.length + ' 个日志文件', state.files.length + ' log files') : ''
-          })
-        });
-
-        return card(
-          titleRow(T('日志文件', 'Log files'),
-            state.files && state.files.length ? T('共 {n} 个', '{n} total').replace('{n}', fmtCount(state.files.length)) : null),
-          h('div', { class: 'toolbar' },
-            h('button', { class: 'btn', disabled: state.loading, onclick: refresh }, icon('refresh'), h('span', { text: T('刷新', 'Refresh') })),
-            h('button', { class: 'btn ghost', onclick: openLogDir }, icon('external'), h('span', { text: T('打开日志目录', 'Open log folder') })),
-            h('button', { class: 'btn danger', disabled: state.loading, onclick: clearLogs }, icon('trash'), h('span', { text: T('清空', 'Clear') })),
-            h('span', { class: 'spacer' }),
-            askBtn
+        const total = state.files && state.files.length ? state.files.length : 0;
+        const head = h('div', { class: 'log-pane-head' },
+          h('div', { class: 'log-pane-head-main' },
+            h('h2', { text: T('日志文件', 'Log files') }),
+            total ? h('span', { class: 'log-count-pill', text: fmtCount(total) }) : null
           ),
-          body
+          h('div', { class: 'log-pane-acts' },
+            h('button', {
+              type: 'button',
+              class: 'btn ghost sm icon',
+              disabled: state.loading,
+              title: T('刷新日志列表', 'Refresh log list'),
+              'aria-label': T('刷新日志列表', 'Refresh log list'),
+              onclick: refresh
+            }, icon('refresh', 13)),
+            h('button', {
+              type: 'button',
+              class: 'btn ghost sm icon',
+              title: T('打开日志目录', 'Open log folder'),
+              'aria-label': T('打开日志目录', 'Open log folder'),
+              onclick: openLogDir
+            }, icon('folder', 13)),
+            h('button', {
+              type: 'button',
+              class: 'btn ghost sm icon log-act-danger',
+              disabled: state.loading || !total,
+              title: T('清空所有日志', 'Clear all logs'),
+              'aria-label': T('清空所有日志', 'Clear all logs'),
+              onclick: clearLogs
+            }, icon('trash', 13))
+          )
+        );
+
+        return h('div', { class: 'card log-pane-card' },
+          head,
+          h('div', { class: 'log-pane-body' }, body)
         );
       }
 
       /* ---------- 日志内容 ---------- */
       function contentCard() {
         const body = [];
+        const hasText = !!(state.selected && !state.contentError && state.content !== null && state.content.trim());
         if (!state.selected) {
           body.push(empty(T('选择一个日志文件', 'Select a log file'),
-            T('点击左侧列表即可查看日志末尾内容', 'Select a file from the left list')));
+            T('点击左侧列表即可查看日志末尾内容', 'Select a file from the left list'), 'file'));
         } else if (state.contentError) {
           body.push(empty(T('日志读取失败', 'Could not read the log'), state.contentError));
         } else if (state.content === null) {
           body.push(skeleton(8, 'log'));
         } else if (!state.content.trim()) {
-          body.push(empty(T('日志为空', 'This log is empty')));
+          body.push(empty(T('日志为空', 'This log is empty'), state.selected.name, 'file'));
         } else {
-          body.push(h('div', { class: 'row' },
+          body.push(h('div', { class: 'log-path-bar' },
             h('span', { class: 'mono ellipsis', title: state.selected.path, style: { minWidth: 0, flex: 1 }, text: state.selected.path }),
-            h('span', { class: 'small muted', text: fmtBytes(state.selected.size) })
+            h('span', { class: 'small muted', style: { flex: '0 0 auto' }, text: fmtBytes(state.selected.size) })
           ));
           body.push(h('pre', {
             class: 'log-viewer-pre',
@@ -224,9 +271,36 @@
           }));
         }
 
-        return card(
-          titleRow(T('日志内容', 'Log content'), null),
-          body
+        const head = h('div', { class: 'log-pane-head' },
+          h('div', { class: 'log-pane-head-main' },
+            h('h2', { text: T('日志内容', 'Log content') }),
+            state.selected ? h('span', {
+              class: 'log-sel-meta ellipsis',
+              title: state.selected.name,
+              text: state.selected.name + ' · ' + fmtBytes(state.selected.size)
+            }) : null
+          ),
+          h('div', { class: 'log-pane-acts' },
+            hasText ? h('button', {
+              type: 'button',
+              class: 'btn ghost sm',
+              title: T('复制日志内容', 'Copy log content'),
+              onclick: () => copyLogContent(state.content)
+            }, icon('copy', 13), h('span', { text: T('复制', 'Copy') })) : null,
+            state.selected ? h('button', {
+              type: 'button',
+              class: 'btn ghost sm icon',
+              title: T('在资源管理器中定位', 'Reveal in Explorer'),
+              'aria-label': T('在资源管理器中定位', 'Reveal in Explorer'),
+              onclick: () => reveal(state.selected.path)
+            }, icon('external', 13)) : null,
+            askBtn
+          )
+        );
+
+        return h('div', { class: 'card log-pane-card' },
+          head,
+          h('div', { class: 'log-pane-body' }, body)
         );
       }
 
@@ -247,12 +321,16 @@
           .concat(kv(T('数据目录', 'Data folder'), pathCell((eng && eng.data_dir) || (state.app && state.app.data_dir))))
           .concat(kv(T('日志目录', 'Log folder'), pathCell(logDir)));
 
-        return card(
-          titleRow(T('引擎连接', 'Engine'), null),
-          state.engineError ? empty(T('引擎信息读取失败', 'Could not read engine info'), state.engineError) : h('dl', { class: 'kv' }, nodes),
-          h('div', { class: 'toolbar' },
-            h('button', { class: 'btn sm', onclick: refreshEngine }, icon('refresh', 14), h('span', { text: T('刷新引擎信息', 'Refresh engine info') }))
-          )
+        return h('div', { class: 'card' },
+          h('div', { class: 'card-title' },
+            h('h2', { text: T('引擎连接', 'Engine') }),
+            h('span', { class: 'spacer' }),
+            h('button', {
+              class: 'btn ghost sm',
+              onclick: refreshEngine
+            }, icon('refresh', 14), h('span', { text: T('刷新', 'Refresh') }))
+          ),
+          state.engineError ? empty(T('引擎信息读取失败', 'Could not read engine info'), state.engineError) : h('dl', { class: 'kv' }, nodes)
         );
       }
 
@@ -386,6 +464,8 @@
       return function unmount() {
         openToken++;
         liveJump = null;
+        const st = askBtn && askBtn.querySelector ? askBtn.querySelector('.steve') : null;
+        if (st && st._steve && typeof st._steve.destroy === 'function') st._steve.destroy();
         setActions();
       };
     },

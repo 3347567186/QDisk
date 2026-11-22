@@ -191,9 +191,6 @@
         API.toggleFullscreen().catch(() => {});
       }
     });
-
-    const fs = document.getElementById('btn-fullscreen');
-    fs && fs.addEventListener('click', () => API.toggleFullscreen().catch(() => {}));
   }
 
   /* 侧栏分组：只影响视觉层级，路由、页面与配置完全不变 */
