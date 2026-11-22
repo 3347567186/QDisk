@@ -903,8 +903,10 @@
       const o = opts || {};
       const el = host && host.closest ? (host.closest('.steve') || host) : host;
       const inst = el && el._steve;
+      const isBtn = !!(el && el.classList && el.classList.contains('steve--btn'));
+      const wantBurst = o.burst !== undefined ? !!o.burst : !isBtn;
       const kind = inst ? inst.react(o.kind) : (globalClickSeq++ % REACT_COUNT);
-      if (o.burst !== false && el) burst(el, kind);
+      if (wantBurst && el) burst(el, kind);
       if (o.sound !== false) playSteveSound(kind);
       return kind;
     },

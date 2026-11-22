@@ -430,17 +430,47 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-// 回归 2：SteveAvatar 3D 渲染、点击动作、音效合成与粒子动画安全生命周期
+// 回归 2：SteveAvatar 3D 渲染、点击动作、音效合成与「导航/主图保留爆裂、按钮问助手入口禁爆裂」回归
 {
+  const burstCount = () => findNodes(sandbox.document.body, (n) => n.classList && n.classList.contains('steve-burst')).length;
+
   const st = sandbox.SteveAvatar.el({ size: 28, variant: 'nav' });
+  const b0 = burstCount();
   sandbox.SteveAvatar.click(st);
+  if (burstCount() <= b0) {
+    console.error('[SteveAvatar 回归] 侧栏导航入口 variant=nav 点击未触发爆裂效果');
+    process.exit(1);
+  }
   sandbox.SteveAvatar.sound(0);
-  sandbox.SteveAvatar.burst(st, 'happy');
   if (!st || !st._steve || typeof st._steve.destroy !== 'function') {
     console.error('[SteveAvatar 回归] 未挂载 _steve 控制器或 destroy 方法');
     process.exit(1);
   }
   st._steve.destroy();
+
+  const btnMark = sandbox.SteveAvatar.el({ size: 18, variant: 'btn' });
+  const b1 = burstCount();
+  sandbox.SteveAvatar.click(btnMark);
+  if (burstCount() !== b1) {
+    console.error('[SteveAvatar 回归] 面板按钮入口 variant=btn 默认点击不应触发爆裂效果');
+    process.exit(1);
+  }
+  btnMark._steve.destroy();
+
+  const askEl = sandbox.UI.askBtn({ title: '测试问助手', question: '测试问题' });
+  const beforeKey = (docListeners.get('keydown') || []).length;
+  const beforeInt = activeIntervals.size;
+  const b2 = burstCount();
+  askEl.dispatchEvent(new sandbox.Event('click'));
+  if (burstCount() !== b2) {
+    console.error('[SteveAvatar 回归] UI.askBtn 问助手入口点击时不应显示爆炸效果');
+    process.exit(1);
+  }
+  sandbox.AIDrawer.close();
+  if ((docListeners.get('keydown') || []).length !== beforeKey || activeIntervals.size !== beforeInt) {
+    console.error('[SteveAvatar 回归] UI.askBtn 打开后关闭未完整回收监听或定时器');
+    process.exit(1);
+  }
 }
 
 // 回归 3：AIDrawer 打开仅生成建议提示词（绝不 120ms 自动发送），关闭严格回收 keydown Esc 监听与 busyTimer

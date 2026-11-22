@@ -858,7 +858,7 @@
       'aria-label': tip,
       onclick: () => {
         if (window.SteveAvatar && mark) {
-          if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(mark);
+          if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(mark, { burst: false });
           else window.SteveAvatar.spin(mark);
         }
         if (window.AIDrawer) {

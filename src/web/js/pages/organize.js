@@ -277,7 +277,7 @@
     }, askMark, T('问助手', 'Ask AI'));
     btnAsk.onclick = () => {
       if (window.SteveAvatar) {
-        if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(askMark);
+        if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(askMark, { burst: false });
         else window.SteveAvatar.spin(askMark);
       }
       window.AIDrawer.open({
@@ -1060,7 +1060,7 @@
     function askWhy(question, note) {
       if (!window.AIDrawer) return;
       if (window.SteveAvatar) {
-        if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(askMark);
+        if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(askMark, { burst: false });
         else window.SteveAvatar.spin(askMark);
       }
       window.AIDrawer.open({
