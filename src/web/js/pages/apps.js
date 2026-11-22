@@ -2151,7 +2151,7 @@
       if (elDiskVal) elDiskVal.textContent = fmtSize(disk.total || 0);
       if (elDiskBar) elDiskBar.style.width = Math.min(100, Math.max(0, disk.percent || 0)) + '%';
       if (elDiskSub) elDiskSub.textContent = T(`已用 ${fmtSize(disk.used || 0)} (${disk.percent || 0}%)`, `Used ${fmtSize(disk.used || 0)} (${disk.percent || 0}%)`);
-      if (elDiskFoot) elDiskFoot.textContent = T(`跨 ${drives.length} 分区 · 余 ${fmtSize(disk.free || 0)}`, `Across ${drives.length} partitions · Free ${fmtSize(disk.free || 0)}`);
+      if (elDiskFoot) elDiskFoot.textContent = T(`可用 ${fmtSize(disk.free || 0)}`, `Free ${fmtSize(disk.free || 0)}`);
 
       // 实时更新 3 张动态图表
       const cardCpuRam = container.querySelector('#fp-chart-card-cpu-ram');
@@ -2306,9 +2306,9 @@
         disk.percent || 0,
         'var(--chart-4)',
         'fp-kpi-disk-sub',
-        `已用 ${fmtBytes(disk.used || 0)} (${disk.percent || 0}%)`,
+        T(`已用 ${fmtBytes(disk.used || 0)} (${disk.percent || 0}%)`, `Used ${fmtBytes(disk.used || 0)} (${disk.percent || 0}%)`),
         'fp-kpi-disk-foot',
-        `跨 ${drives.length} 分区 · 余 ${fmtBytes(disk.free || 0)}`
+        T(`可用 ${fmtBytes(disk.free || 0)}`, `Free ${fmtBytes(disk.free || 0)}`)
       );
 
       kpiRow.appendChild(cardMem);
