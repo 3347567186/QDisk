@@ -1391,7 +1391,7 @@
           color: 'var(--text-3)'
         }
       },
-        h('span', null, T(`共 ${ProcState.items.length} 个应用 (${ProcState.allProcs.length} 进程)`, `Total ${ProcState.items.length} apps (${ProcState.allProcs.length} procs)`)),
+        h('span', null, T(`共 ${ProcState.items.length} 个应用 (${ProcState.rawCount} 进程)`, `Total ${ProcState.items.length} apps (${ProcState.rawCount} procs)`)),
         h('span', { style: { color: 'var(--text-2)', fontFamily: 'var(--mono)', fontWeight: '600' } }, T('后台总计: ' + fmtSize(ProcState.totalMemory), 'Total: ' + fmtSize(ProcState.totalMemory)))
       );
 
@@ -1556,18 +1556,18 @@
       const columns = [
         {
           key: 'name',
-          title: T('应用与进程', 'App & Process'),
+          label: T('应用与进程', 'App & Process'),
           render: (it) => {
             const iconEl = appIcon(it);
             const countTag = it.process_count > 1
-              ? h('span', { class: 'badge', style: { marginLeft: '6px' } }, `${it.process_count} 进程`)
-              : (it.pids && it.pids.length ? h('span', { class: 'badge neutral', style: { marginLeft: '6px' } }, `PID ${it.pids[0]}`) : null);
+              ? h('span', { class: 'badge', style: { marginLeft: '6px', flexShrink: '0' } }, `${it.process_count} 进程`)
+              : (it.pids && it.pids.length ? h('span', { class: 'badge neutral', style: { marginLeft: '6px', flexShrink: '0' } }, `PID ${it.pids[0]}`) : null);
 
-            return h('div', { class: 'name' },
+            return h('div', { class: 'name', style: { minWidth: '0' } },
               iconEl,
-              h('div', { class: 'txt' },
-                h('div', { class: 'ellipsis', title: it.exe_path || it.name, style: { fontWeight: '500' } }, it.name),
-                it.exe_path ? h('div', { class: 'hint ellipsis', style: { fontSize: '11px' }, title: it.exe_path }, it.exe_path) : null
+              h('div', { class: 'txt', style: { minWidth: '0', overflow: 'hidden' } },
+                h('div', { class: 'ellipsis', title: it.name, style: { fontWeight: '600', fontSize: '13px', color: 'var(--text-1)' } }, it.name),
+                it.exe_path ? h('div', { class: 'hint ellipsis mono', style: { fontSize: '11px', color: 'var(--text-3)' }, title: it.exe_path }, it.exe_path) : null
               ),
               countTag
             );
@@ -1575,61 +1575,69 @@
         },
         {
           key: 'memory',
-          title: T('占用内存', 'Memory'),
-          width: '140px',
+          label: T('占用内存', 'Memory'),
+          width: '110px',
+          align: 'right',
+          className: 'col-memory',
           render: (it) => {
             const memText = fmtSize(it.memory);
-            const maxMem = 500 * 1024 * 1024; // 500MB scale
-            const pct = Math.min(100, Math.max(3, Math.round((it.memory / maxMem) * 100)));
+            const maxMem = 1024 * 1024 * 1024; // 1GB scale
+            const pct = Math.min(100, Math.max(4, Math.round((it.memory / maxMem) * 100)));
             const isHigh = it.memory > 400 * 1024 * 1024;
-            return h('div', { style: { minWidth: '100px' } },
-              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontVariantNumeric: 'tabular-nums' } },
-                h('span', { style: { fontWeight: isHigh ? '600' : 'normal', color: isHigh ? 'var(--warn)' : 'inherit' } }, memText)
-              ),
+            const isCrit = it.memory > 1024 * 1024 * 1024;
+            const barCol = isCrit ? '#ef4444' : (isHigh ? '#f59e0b' : 'var(--chart-1, #3b82f6)');
+            return h('div', { style: { minWidth: '75px', textAlign: 'right' } },
+              h('div', { style: { fontWeight: '600', fontFamily: 'var(--mono)', fontSize: '12px', color: isHigh ? barCol : 'var(--text-1)' } }, memText),
               h('div', { style: { height: '4px', background: 'var(--line)', borderRadius: '2px', overflow: 'hidden', marginTop: '3px' } },
-                h('div', { style: { width: `${pct}%`, height: '100%', background: isHigh ? 'var(--warn)' : 'var(--accent)' } })
+                h('div', { style: { width: `${pct}%`, height: '100%', background: barCol, borderRadius: '2px', transition: 'width 0.3s ease' } })
               )
             );
           }
         },
         {
           key: 'threads',
-          title: T('线程', 'Threads'),
-          width: '70px',
-          render: (it) => h('span', { class: 'num' }, String(it.threads || 1))
+          label: T('线程', 'Threads'),
+          width: '55px',
+          align: 'right',
+          className: 'col-threads hide-sm',
+          render: (it) => h('span', { class: 'num mono small', style: { color: 'var(--text-3)' } }, String(it.threads || 1))
         },
         {
           key: 'type',
-          title: T('属性', 'Type'),
-          width: '90px',
+          label: T('属性', 'Type'),
+          width: '80px',
+          className: 'col-type',
           render: (it) => {
             if (it.is_system) {
-              return h('span', { class: 'badge neutral' }, T('系统保护', 'System'));
+              return h('span', { class: 'tag system', style: { whiteSpace: 'nowrap' }, title: T('Windows 系统核心与关键保护组件，严禁终止', 'Protected system component') }, T('🛡️ 系统', '🛡️ System'));
             }
-            return h('span', { class: 'badge ok' }, T('后台应用', 'App'));
+            return h('span', { class: 'tag user', style: { color: 'var(--c-accent, #3b82f6)', background: 'rgba(59, 130, 246, 0.1)', borderColor: 'rgba(59, 130, 246, 0.25)', whiteSpace: 'nowrap' }, title: T('用户态运行的第三方应用程序', 'User app') }, T('👤 应用', '👤 App'));
           }
         },
         {
           key: 'actions',
-          title: T('操作', 'Actions'),
-          width: '130px',
+          label: T('操作', 'Actions'),
+          width: '105px',
+          align: 'right',
+          className: 'col-actions',
           render: (it) => {
-            const bClose = btn('结束', 'Kill', 'danger sm', 'power', () => closeProcOne(it, false));
+            const bClose = btn(T('结束', 'Kill'), T('结束任务', 'Close task'), 'ghost danger sm', 'power', () => closeProcOne(it, false));
             if (it.is_system) {
               bClose.disabled = true;
-              bClose.title = T('系统核心保护进程不可关闭', 'System process is protected');
+              bClose.title = T('系统核心保护组件受系统级保护，禁止关闭', 'Protected system component');
             }
-            const bFolder = iconBtn('folder', '打开文件位置', () => {
+            const bFolder = iconBtn('打开所在目录', 'Open file location', 'folder', () => {
               if (it.exe_path) openPath(it.exe_path);
             });
             if (!it.exe_path) bFolder.disabled = true;
 
-            return h('div', { class: 'row', style: { gap: '4px' } }, bClose, bFolder);
+            return h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '4px', flexWrap: 'nowrap' } }, bClose, bFolder);
           }
         }
       ];
 
       const tbl = UI.table({
+        className: 'proc-table',
         columns,
         rows: ProcState.visible,
         rowKey: (row, i) => String(i)
@@ -1738,6 +1746,7 @@
     async function fetchPerfSample(force) {
       if ((!PerfState.isLive && !force) || currentTab !== 'footprint') return;
       try {
+        const isFirst = !PerfState.perfData;
         const data = await API.engine('system.performance', {});
         if (!data) return;
         PerfState.perfData = data;
@@ -1763,7 +1772,11 @@
         if (PerfState.samples.length > 30) {
           PerfState.samples.shift();
         }
-        updateFootprintLiveView();
+        if ((isFirst || force) && currentTab === 'footprint') {
+          renderFootprint();
+        } else {
+          updateFootprintLiveView();
+        }
       } catch (err) {
         // 静默单次采样失败
       }
@@ -1886,6 +1899,7 @@
       const dotA = crosshair.querySelector('.crosshair-dot-a');
       const dotB = crosshair.querySelector('.crosshair-dot-b');
       const tipGroup = crosshair.querySelector('.crosshair-tip');
+      const tipBg = crosshair.querySelector('.crosshair-tip-bg');
       const tipText = crosshair.querySelector('.crosshair-tip-text');
 
       const W = 360;
@@ -1927,11 +1941,17 @@
         dotB.setAttribute('cx', cx);
         dotB.setAttribute('cy', cyB);
 
-        // 浮动数据胶囊：限制在图表有效绘制边界 [65, W - 65]，防止边缘遮挡
-        if (tipGroup && tipText) {
-          const clampedX = Math.max(65, Math.min(W - 65, cx));
+        // 浮动数据胶囊：自适应文本宽度 + 动态计算边界防裁切
+        if (tipGroup && tipText && tipBg) {
+          const str = `${s.time || ''} · ${compactFmt ? compactFmt(s) : defaultFmt(s)}`;
+          tipText.textContent = str;
+          const textW = tipText.getComputedTextLength ? tipText.getComputedTextLength() : (str.length * 6.2);
+          const boxW = Math.max(120, Math.round(textW + 18));
+          tipBg.setAttribute('width', boxW);
+          tipBg.setAttribute('x', -Math.round(boxW / 2));
+          const halfW = boxW / 2 + 6;
+          const clampedX = Math.max(halfW, Math.min(W - halfW, cx));
           tipGroup.setAttribute('transform', `translate(${clampedX}, ${padTop})`);
-          tipText.textContent = `${s.time || ''} · ${compactFmt ? compactFmt(s) : defaultFmt(s)}`;
         }
 
         // 顶部文本保持精简，避免折行破坏卡片高度
@@ -1957,19 +1977,38 @@
       const mem = p.memory || {};
       const cpu = p.cpu || {};
       const disk = p.disk_summary || {};
+      const drives = p.drives || [];
       const samples = PerfState.samples;
       const latest = samples.length ? samples[samples.length - 1] : { memPct: 0, cpuPct: 0, diskR: 0, diskW: 0, netIn: 0, netOut: 0 };
 
       // 更新顶部 4 KPI 卡片
       const elMemVal = container.querySelector('#fp-kpi-mem-val');
       const elMemBar = container.querySelector('#fp-kpi-mem-bar');
-      const elCpuVal = container.querySelector('#fp-kpi-cpu-val');
-      const elCpuBar = container.querySelector('#fp-kpi-cpu-bar');
+      const elMemSub = container.querySelector('#fp-kpi-mem-sub');
+      const elMemFoot = container.querySelector('#fp-kpi-mem-foot');
 
       if (elMemVal) elMemVal.textContent = (mem.percent || 0) + '%';
       if (elMemBar) elMemBar.style.width = Math.min(100, Math.max(0, mem.percent || 0)) + '%';
+      if (elMemSub) elMemSub.textContent = fmtSize(mem.used || 0) + ' / ' + fmtSize(mem.total || 0);
+      if (elMemFoot) elMemFoot.textContent = T('可用 ', 'Avail ') + fmtSize(mem.available || 0);
+
+      const elCpuVal = container.querySelector('#fp-kpi-cpu-val');
+      const elCpuBar = container.querySelector('#fp-kpi-cpu-bar');
+      const elCpuFoot = container.querySelector('#fp-kpi-cpu-foot');
+
       if (elCpuVal) elCpuVal.textContent = (cpu.percent || 0).toFixed(1) + '%';
       if (elCpuBar) elCpuBar.style.width = Math.min(100, Math.max(0, cpu.percent || 0)) + '%';
+      if (elCpuFoot) elCpuFoot.textContent = (cpu.percent > 70 ? T('负载偏高', 'High load') : T('负载平稳', 'Stable load'));
+
+      const elDiskVal = container.querySelector('#fp-kpi-disk-val');
+      const elDiskBar = container.querySelector('#fp-kpi-disk-bar');
+      const elDiskSub = container.querySelector('#fp-kpi-disk-sub');
+      const elDiskFoot = container.querySelector('#fp-kpi-disk-foot');
+
+      if (elDiskVal) elDiskVal.textContent = fmtSize(disk.total || 0);
+      if (elDiskBar) elDiskBar.style.width = Math.min(100, Math.max(0, disk.percent || 0)) + '%';
+      if (elDiskSub) elDiskSub.textContent = T(`已用 ${fmtSize(disk.used || 0)} (${disk.percent || 0}%)`, `Used ${fmtSize(disk.used || 0)} (${disk.percent || 0}%)`);
+      if (elDiskFoot) elDiskFoot.textContent = T(`跨 ${drives.length} 分区 · 余 ${fmtSize(disk.free || 0)}`, `Across ${drives.length} partitions · Free ${fmtSize(disk.free || 0)}`);
 
       // 实时更新 3 张动态图表
       const cardCpuRam = container.querySelector('#fp-chart-card-cpu-ram');
@@ -1980,7 +2019,7 @@
         const svgBox = cardCpuRam.querySelector('.chart-svg-box');
         if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'memPct', 'cpuPct', 'var(--chart-1)', 'var(--chart-2)', 100, 'gradCpuRam');
         attachChartCrosshair(cardCpuRam, samples, 'memPct', 'cpuPct', '%',
-          (s) => `内存: ${s.memPct || 0}% · CPU: ${s.cpuPct || 0}%`,
+          (s) => `内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`,
           (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`
         );
       }
@@ -1989,8 +2028,8 @@
         const svgBox = cardDisk.querySelector('.chart-svg-box');
         if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'diskR', 'diskW', '#38bdf8', '#f43f5e', 0, 'gradDiskIO');
         attachChartCrosshair(cardDisk, samples, 'diskR', 'diskW', 'MB/s',
-          (s) => `读: ${s.diskR || 0} MB/s · 写: ${s.diskW || 0} MB/s`,
-          (s) => `读 ${s.diskR || 0}M / 写 ${s.diskW || 0}M`
+          (s) => `读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`,
+          (s) => `读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`
         );
       }
 
@@ -1998,8 +2037,8 @@
         const svgBox = cardNet.querySelector('.chart-svg-box');
         if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'netIn', 'netOut', '#10b981', '#a855f7', 0, 'gradNetIO');
         attachChartCrosshair(cardNet, samples, 'netIn', 'netOut', 'KB/s',
-          (s) => `↓ ${s.netIn || 0} KB/s · ↑ ${s.netOut || 0} KB/s`,
-          (s) => `↓ ${s.netIn || 0}K / ↑ ${s.netOut || 0}K`
+          (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
+          (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`
         );
       }
     }
@@ -2044,7 +2083,7 @@
         }
       });
 
-      function createKpiCard(iconName, title, valId, valText, barId, barPct, barColor, subText, footText) {
+      function createKpiCard(iconName, title, valId, valText, barId, barPct, barColor, subId, subText, footId, footText) {
         const barFill = h('div', {
           id: barId,
           style: {
@@ -2089,8 +2128,8 @@
           }, valText),
           barTrack,
           h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-3)' } },
-            h('span', null, subText),
-            h('span', { style: { fontFamily: 'var(--mono)' } }, footText)
+            h('span', { id: subId }, subText),
+            h('span', { id: footId, style: { fontFamily: 'var(--mono)' } }, footText)
           )
         );
       }
@@ -2103,7 +2142,9 @@
         'fp-kpi-mem-bar',
         mem.percent || 0,
         'var(--chart-1)',
+        'fp-kpi-mem-sub',
         fmtBytes(mem.used || 0) + ' / ' + fmtBytes(mem.total || 0),
+        'fp-kpi-mem-foot',
         T('可用 ', 'Free ') + fmtBytes(mem.available || 0)
       );
 
@@ -2115,7 +2156,9 @@
         'fp-kpi-cpu-bar',
         cpu.percent || 0,
         'var(--chart-2)',
+        'fp-kpi-cpu-sub',
         (cpu.cores || 1) + T(' 个逻辑处理器', ' Cores'),
+        'fp-kpi-cpu-foot',
         (cpu.percent || 0) < 30 ? T('负载平稳', 'Idle/Smooth') : T('正在运转', 'Active')
       );
 
@@ -2127,7 +2170,9 @@
         'fp-kpi-apps-bar',
         disk.total ? (totalAppsSize / disk.total) * 100 : 0,
         'var(--chart-3)',
+        'fp-kpi-apps-sub',
         `已统计 ${valid.length} 款软件`,
+        'fp-kpi-apps-foot',
         totalAppsSize ? `Top 6 占 ${((topSum / totalAppsSize) * 100).toFixed(1)}%` : '—'
       );
 
@@ -2139,7 +2184,9 @@
         'fp-kpi-disk-bar',
         disk.percent || 0,
         'var(--chart-4)',
+        'fp-kpi-disk-sub',
         `已用 ${fmtBytes(disk.used || 0)} (${disk.percent || 0}%)`,
+        'fp-kpi-disk-foot',
         `跨 ${drives.length} 分区 · 余 ${fmtBytes(disk.free || 0)}`
       );
 
@@ -2167,10 +2214,10 @@
           style: {
             justifyContent: 'space-between',
             alignItems: 'center',
-            height: '22px',
-            minHeight: '22px',
-            maxHeight: '22px',
-            lineHeight: '22px',
+            height: '24px',
+            minHeight: '24px',
+            maxHeight: '24px',
+            lineHeight: '24px',
             overflow: 'hidden',
             whiteSpace: 'nowrap',
             flexWrap: 'nowrap',
@@ -2178,15 +2225,15 @@
           }
         },
           h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', minWidth: '0', flexShrink: '0', whiteSpace: 'nowrap' } },
-            h('strong', { style: { fontSize: '12px', color: 'var(--text-1)', whiteSpace: 'nowrap', flexShrink: '0' } }, title),
-            h('div', { class: 'row', style: { gap: '6px', fontSize: '10px', whiteSpace: 'nowrap', flexShrink: '0' } },
-              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap' } },
+            h('strong', { style: { fontSize: '12px', color: 'var(--text-1)', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } }, title),
+            h('div', { class: 'row', style: { gap: '6px', fontSize: '10px', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } },
+              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } },
                 h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorA, flexShrink: '0' } }),
-                h('span', { style: { color: 'var(--text-3)' } }, legA)
+                h('span', { style: { color: 'var(--text-3)', whiteSpace: 'nowrap', wordBreak: 'keep-all' } }, legA)
               ),
-              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap' } },
+              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } },
                 h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorB, flexShrink: '0' } }),
-                h('span', { style: { color: 'var(--text-3)' } }, legB)
+                h('span', { style: { color: 'var(--text-3)', whiteSpace: 'nowrap', wordBreak: 'keep-all' } }, legB)
               )
             )
           ),
@@ -2196,10 +2243,11 @@
               fontSize: '11px',
               color: 'var(--text-2)',
               whiteSpace: 'nowrap',
-              flexShrink: '1',
+              flexShrink: '0',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
-              textAlign: 'right'
+              textAlign: 'right',
+              wordBreak: 'keep-all'
             }
           }, defaultFmt(latest))
         );
@@ -2237,30 +2285,30 @@
         T('内存', 'RAM'), 'CPU',
         'var(--chart-1)', 'var(--chart-2)',
         'memPct', 'cpuPct', '%',
-        (s) => `内存: ${s.memPct || 0}% · CPU: ${s.cpuPct || 0}%`,
+        (s) => `内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`,
         (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`,
         'gradCpuRam'
       );
 
       const cardDiskIO = createMonitorCard(
         'fp-chart-card-disk',
-        T('磁盘 I/O 速率', 'Disk I/O Rate'),
+        T('磁盘 I/O', 'Disk I/O'),
         T('读', 'Read'), T('写', 'Write'),
         '#38bdf8', '#f43f5e',
         'diskR', 'diskW', 'MB/s',
-        (s) => `读: ${s.diskR || 0} MB/s · 写: ${s.diskW || 0} MB/s`,
-        (s) => `读 ${s.diskR || 0}M / 写 ${s.diskW || 0}M`,
+        (s) => `读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`,
+        (s) => `读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`,
         'gradDiskIO'
       );
 
       const cardNetIO = createMonitorCard(
         'fp-chart-card-net',
-        T('网络吞吐速率', 'Network Throughput'),
+        T('网络吞吐', 'Network'),
         T('下行', 'Down'), T('上行', 'Up'),
         '#10b981', '#a855f7',
         'netIn', 'netOut', 'KB/s',
-        (s) => `↓ ${s.netIn || 0} KB/s · ↑ ${s.netOut || 0} KB/s`,
-        (s) => `↓ ${s.netIn || 0}K / ↑ ${s.netOut || 0}K`,
+        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
+        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`,
         'gradNetIO'
       );
 
@@ -2677,10 +2725,18 @@
     renderPager();
     renderTable();
     /* 每页条数改了：就地重排当前表格，不重建页面 */
-    App._onPageSize = () => {
-      PAGE_SIZE = UI.pageSize();
-      S.page = 1;
-      applyFilter();
+    App._onPageSize = (v) => {
+      PAGE_SIZE = Number(v) || UI.pageSize();
+      if (currentTab === 'apps') {
+        S.page = 1;
+        applyFilter();
+      } else if (currentTab === 'startup') {
+        StartupState.page = 1;
+        applyStartupFilter();
+      } else if (currentTab === 'procs') {
+        ProcState.page = 1;
+        applyProcFilter();
+      }
     };
     // 先让页面壳完成一帧绘制，再发数据请求：切页动画不被读取列表拖住。
     // 引擎调用已搬到后台线程，这里只是把首帧让给动画。
@@ -3363,6 +3419,8 @@
 
     return function unmount() {
       liveJump = null;
+      stopLiveMonitoring();
+      if (window.App) window.App._onPageSize = null;
       setActions();
     };
   }

@@ -315,19 +315,24 @@
     return sec;
   }
 
-  function table({ columns, rows, rowKey }) {
+  function table({ columns, rows, rowKey, className = '' }) {
     const head = h('thead', null, h('tr', null,
-      ...columns.map((c) => h('th', { class: c.align === 'right' ? 'num' : '', style: c.width ? { width: c.width } : null }, c.label))
+      ...columns.map((c) => h('th', {
+        class: (c.align === 'right' ? 'num' : '') + (c.className ? ' ' + c.className : ''),
+        style: c.width ? { width: c.width } : null
+      }, c.label || c.title || ''))
     ));
     const body = h('tbody', null,
       ...rows.map((row, i) => h('tr', { dataset: { key: rowKey ? rowKey(row, i) : i } },
         ...columns.map((c) => {
           const v = c.render ? c.render(row, i) : row[c.key];
-          return h('td', { class: c.align === 'right' ? 'num' : '' }, v === undefined || v === null ? '' : v);
+          return h('td', {
+            class: (c.align === 'right' ? 'num' : '') + (c.className ? ' ' + c.className : '')
+          }, v === undefined || v === null ? '' : v);
         })
       ))
     );
-    return h('table', { class: 'table' }, head, body);
+    return h('table', { class: 'table' + (className ? ' ' + className : '') }, head, body);
   }
 
   /* ---------- 右键菜单 ---------- */
@@ -345,6 +350,7 @@
     if (!items || !items.length) return;
     const box = h('div', { class: 'ctx-menu', role: 'menu' });
     items.forEach((it) => {
+      if (!it) return;
       if (it.sep) { box.appendChild(h('div', { class: 'sep' })); return; }
       if (it.header) { box.appendChild(h('div', { class: 'label' }, it.header)); return; }
       box.appendChild(h('div', {

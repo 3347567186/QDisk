@@ -18,6 +18,7 @@
 
   window.API = {
     engine,
+    engineCall: engine,
     pickFolder: (start) => invoke('pick_folder', { start: start || null }),
     saveText: (name, content) => invoke('save_text', { name, content }),
     reveal: (path) => invoke('reveal', { path }),

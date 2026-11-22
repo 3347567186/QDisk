@@ -93,13 +93,15 @@
     async setPageSize(n) {
       const sizes = [15, 30, 60, 100, 200];
       const v = sizes.includes(Number(n)) ? Number(n) : 15;
-      if (v === UI.state.pageSize) return;
       UI.state.pageSize = v;
       this.cfg = { ...(this.cfg || {}), page_size: v };
       try { await API.configSet({ page_size: v }); } catch { /* ignore */ }
       /* 页面自己就地重渲染：直接 navigate 会因为「已在这一页」而提前返回，
          强制重挂载又会清空页面状态（例如扫描结果），所以交给页面接管。 */
-      if (typeof App._onPageSize === 'function') { App._onPageSize(v); return; }
+      if (typeof App._onPageSize === 'function') {
+        try { App._onPageSize(v); } catch (e) { console.error(e); }
+        return;
+      }
       await navigate(this.current, false);
     },
     async setPowerMode(mode) {
