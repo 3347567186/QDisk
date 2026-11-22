@@ -269,15 +269,16 @@
     const srcBar = h('div', { class: 'src-bar', hidden: true });
     /* 入口的形象统一：这里也放史蒂夫，不再用线框图标 */
     const askMark = window.SteveAvatar
-      ? window.SteveAvatar.el({ size: 24, variant: 'btn' })
+      ? window.SteveAvatar.el({ size: 18, variant: 'btn' })
       : icon('spark');
     const btnAsk = h('button', {
-      class: 'btn ghost',
+      class: 'btn ghost ask-ai-btn',
       title: T('让助手看看这些文件该怎么分', 'Ask the assistant how these files should be sorted')
     }, askMark, T('问助手', 'Ask AI'));
     btnAsk.onclick = () => {
       if (window.SteveAvatar) {
-        window.SteveAvatar.spin(askMark);
+        if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(askMark);
+        else window.SteveAvatar.spin(askMark);
       }
       window.AIDrawer.open({
         title: T('问助手 · 整理', 'Ask AI · Tidy'),
@@ -1058,7 +1059,10 @@
        回答里的分类规则来自引擎的 rules.explain，不是模型猜的 */
     function askWhy(question, note) {
       if (!window.AIDrawer) return;
-      if (window.SteveAvatar) window.SteveAvatar.spin(askMark);
+      if (window.SteveAvatar) {
+        if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(askMark);
+        else window.SteveAvatar.spin(askMark);
+      }
       window.AIDrawer.open({
         title: T('问助手 · 为什么', 'Ask AI · Why'),
         question: question,

@@ -849,7 +849,7 @@
     const en = (o.label && o.label[1]) || 'Ask AI';
     const tip = o.title || T('让助手分析当前页面并给出可执行方案', 'Ask AI to analyze this view and suggest actions');
     const mark = window.SteveAvatar
-      ? window.SteveAvatar.el({ size: 20, variant: 'btn' })
+      ? window.SteveAvatar.el({ size: 18, variant: 'btn' })
       : icon('spark', 14);
     return h('button', {
       class: 'btn ghost ask-ai-btn',
@@ -857,11 +857,15 @@
       title: tip,
       'aria-label': tip,
       onclick: () => {
-        if (window.SteveAvatar && mark) window.SteveAvatar.spin(mark);
+        if (window.SteveAvatar && mark) {
+          if (typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(mark);
+          else window.SteveAvatar.spin(mark);
+        }
         if (window.AIDrawer) {
           window.AIDrawer.open({
             title: tip,
             question: o.question || '',
+            suggestions: Array.isArray(o.suggestions) ? o.suggestions : null,
             ctx: typeof o.ctx === 'function' ? o.ctx : (() => (o.ctx || {}))
           });
         } else {

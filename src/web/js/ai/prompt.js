@@ -236,6 +236,9 @@
     '不要在回答里复述「当前强度/温度」，界面已经显示给用户了。'
   ].join('\n');
 
+  const SUGGEST_ACTIONS = ['organize', 'delete', 'archive', 'check', 'apps', 'rules', 'migrate', 'cache', 'shots', 'search', 'log', 'settings', 'none'];
+  const SUGGEST_PIPE = SUGGEST_ACTIONS.join('|');
+
   const FORMAT = [
     '【输出格式·最高优先级】',
     '只输出一个 JSON 对象。第一个字符必须是 {，最后一个字符必须是 }。',
@@ -243,7 +246,7 @@
     '三选一，不允许出现第四种形状：',
     '要查一样：{"thought":"一句话说明为什么查","tool":"工具名","args":{...}}',
     '要同时查几样（最多 3 个，必须互不依赖）：{"thought":"一句话","tools":[{"tool":"工具名","args":{...}},{"tool":"工具名","args":{...}}]}',
-    '能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|apps|rules|migrate|cache|shots|search|log|settings|none","paths":["完整路径"],"why":"理由"}]}',
+    `能回答了：{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"${SUGGEST_PIPE}","paths":["完整路径"],"why":"理由"}]}`,
     '要改一样东西（只在提示词里列出了 propose_action 时可用）：{"thought":"一句话","tool":"propose_action","args":{"action":"动作名","args":{...},"reason":"给用户看的一句话"}}',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
@@ -303,7 +306,7 @@
     '【输出格式·最高优先级】',
     '需要查东西时，直接调用提供的工具（function calling），不要用 JSON 文字描述工具调用。',
     '能回答时，只输出一个 JSON 对象，第一个字符必须是 {，最后一个字符必须是 }：',
-    '{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"organize|delete|archive|check|apps|rules|migrate|cache|shots|search|log|settings|none","paths":["完整路径"],"why":"理由"}]}',
+    `{"answer":"回答正文","evidence":[{"tool":"工具名"}],"suggest":[{"action":"${SUGGEST_PIPE}","paths":["完整路径"],"why":"理由"}]}`,
     '不要代码块围栏，不要解释，JSON 前后不要有任何文字。',
     '工具结果里若带 next_offset，说明还有下一页：要接着看就再调一次，带上 offset=那个数字（其余参数不变）。',
     '回答要求：中文，结论先行，能用列表就用列表（每行以「· 」开头）。长度以「把话说清」为准，一般 300 字内，需要解释是什么、能不能清时可以到 500 字 —— 不要为了省字数把结论砍成一句话。',
@@ -428,7 +431,7 @@
     return bits.length ? '【上下文】' + bits.join(' · ') : '';
   }
 
-  const API = { TOOLS, PAGE_TOOLS, systemPrompt, contextLine, toolText, setCatalog, OUTPUT_REMINDER, FORMAT, FORMAT_NATIVE, EFFORT, toolSchema, jsonType };
+  const API = { TOOLS, PAGE_TOOLS, SUGGEST_ACTIONS, systemPrompt, contextLine, toolText, setCatalog, OUTPUT_REMINDER, FORMAT, FORMAT_NATIVE, EFFORT, toolSchema, jsonType };
   root.AIPrompt = API;
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
 })(typeof window !== 'undefined' ? window : globalThis);

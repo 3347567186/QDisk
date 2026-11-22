@@ -262,22 +262,6 @@
         h('span', { class: 'set-cap-text', text }),
         tail || null);
 
-      const SETTINGS_NAV = [
-        ['appearance', '外观', 'Appearance'],
-        ['behavior', '行为', 'Behavior'],
-        ['defaults', '默认值', 'Defaults'],
-        ['performance', '性能', 'Performance'],
-        ['schedule', '定时', 'Schedule'],
-        ['assistant', 'AI 助手', 'AI Assistant'],
-        ['maintenance', '维护', 'Maintenance']
-      ];
-
-      const navAskBtn = UI.askBtn({
-        title: T('问助手 · 设置与模型', 'Ask AI · Settings'),
-        question: T('帮我检查当前软件设置或免费 AI 模型配置。', 'Help me check current app settings or free AI model configuration.'),
-        ctx: () => ({ page: '设置', section: state.openId, mode: state.mode })
-      });
-
       /* ---------- 顶层 ---------- */
       function paint() {
         root.textContent = '';
@@ -290,21 +274,6 @@
         state.modelModal = null;
         if (staleModal) { try { staleModal.close(); } catch (e) { /* 已经关了 */ } }
         const holder = h('div', { class: 'stack' });
-        const navBar = h('div', { class: 'set-nav-bar', role: 'navigation', 'aria-label': T('设置分组跳转', 'Settings sections') },
-          ...SETTINGS_NAV.map(([id, zh, en]) => h('button', {
-            type: 'button',
-            class: 'set-nav-pill' + (state.openId === id ? ' active' : ''),
-            onclick: () => {
-              state.openId = id;
-              paint();
-              const sec = root.querySelector('[data-section="' + id + '"]');
-              if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: 'start', behavior: 'smooth' });
-            }
-          }, T(zh, en))),
-          h('span', { class: 'spacer' }),
-          navAskBtn
-        );
-        holder.appendChild(navBar);
         holder.appendChild(secAppearance(holder));
         holder.appendChild(secBehavior(holder));
         holder.appendChild(secDefaults(holder));

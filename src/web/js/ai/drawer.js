@@ -22,6 +22,13 @@
     current.panel.classList.remove('in');
     const c = current;
     current = null;
+    if (c.onEsc) {
+      document.removeEventListener('keydown', c.onEsc);
+      c.onEsc = null;
+    }
+    if (c.chat && c.chat.setSuggestions) {
+      try { c.chat.setSuggestions(null); } catch (e) { /* 清理建议失败不影响关闭 */ }
+    }
     /* 轮询必须跟着抽屉一起停：抽屉关了没人看，再每 700ms 查一次
        只是白跑；而且回调里拿 current.chat 判断归属，关掉后也点不动。 */
     if (c.busyTimer) {
@@ -126,12 +133,10 @@
       panel.classList.add('in');
     });
     mask.addEventListener('click', close);
-    document.addEventListener('keydown', function esc(e) {
-      if (e.key === 'Escape') {
-        close();
-        document.removeEventListener('keydown', esc);
-      }
-    });
+    const onEsc = function (e) {
+      if (e.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', onEsc);
 
     /* 历史列表的两个状态必须在 obtain 之前声明：
        attach 里会同步补发一次 notifySessions，而 onSessions 回调第一句就是
@@ -215,7 +220,7 @@
       onBusy: (snap) => { renderBusyBar(snap); },
       onSessions: () => { histRows = null; if (histOpen) setHist(true); }
     });
-    current = { mask, panel, body, chat, busyTimer: 0 };
+    current = { mask, panel, body, chat, busyTimer: 0, onEsc };
     /* 主动拉一次：attach 里那次补发发生在 open() 把 current 赋上之前，
        而 renderBusyBar 的点击回调用 current.chat 判断「现场在不在」，
        那一次通知里点按钮会直接 return。这里在 current 就位后再拉一遍，
@@ -355,11 +360,22 @@
       const r = chat.boot();
       if (r && typeof r.catch === 'function') r.catch(() => { /* 起不来也别拦住打开 */ });
     } catch (e) { /* 同上 */ }
-    if (options.question) {
-      setTimeout(() => chat.ask(options.question), 120);
-    } else {
-      chat.focus();
+    /* 入口不再直接把提示词发出去：转换成可点击的建议提示词，
+       由用户决定是直接发送（点击）还是改完再问（右键填入输入框）。 */
+    const initialSuggestions = [];
+    const seenSug = new Set();
+    const pushSug = (q) => {
+      const s = String(q || '').trim();
+      if (!s || seenSug.has(s)) return;
+      seenSug.add(s);
+      initialSuggestions.push(s);
+    };
+    if (options.question) pushSug(options.question);
+    if (Array.isArray(options.suggestions)) options.suggestions.forEach(pushSug);
+    if (chat.setSuggestions) {
+      chat.setSuggestions(initialSuggestions, { contextual: true });
     }
+    chat.focus();
     return chat;
   }
 

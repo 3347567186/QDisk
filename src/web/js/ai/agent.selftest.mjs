@@ -176,6 +176,46 @@ const fakeApi = {
         matched: { name: 'a.pdf', ext: '.pdf', cat: '03_文档', why: '按扩展名 .pdf 归到 03_文档' }
       };
     }
+    if (method === 'cache.list') {
+      return {
+        total_size: 2162688205,
+        groups: [
+          {
+            key: 'sys',
+            name: '系统缓存',
+            level: 'safe',
+            items: [
+              { name: 'Zero Temp', path: 'C:\\Temp\\Empty', size: 0, exists: true },
+              { name: 'Windows Temp', path: 'C:\\Windows\\Temp', size: 1288490189, exists: true }
+            ]
+          },
+          {
+            key: 'browser',
+            name: '浏览器缓存',
+            level: 'safe',
+            items: [
+              { name: 'Edge Cache', path: 'C:\\Users\\Tester\\AppData\\Local\\Microsoft\\Edge\\Cache', size: 349910016, exists: true }
+            ]
+          },
+          {
+            key: 'dev',
+            name: '开发构建缓存',
+            level: 'caution',
+            items: [
+              { name: 'npm', path: 'C:\\Users\\Tester\\AppData\\Local\\npm-cache', size: 524288000, exists: true }
+            ]
+          }
+        ]
+      };
+    }
+    if (method === 'shots.scan') {
+      return {
+        size: 26214400,
+        items: [
+          { path: 'C:\\Users\\Tester\\Pictures\\Screenshots\\shot1.png', size: 2097152, mtime: Math.floor(Date.now() / 1000) - 45 * 86400, shot: true }
+        ]
+      };
+    }
     throw new Error('未知方法：' + method);
   },
   historyList: async () => [{ file: 'h1.json', time: '2026-11-17 10:00:00', folder: 'D:\\Downloads', moved: 7, created: 2 }]
@@ -1812,6 +1852,143 @@ for (const c of CASES) {
     bad.push('账号级 daily limit 后仍在同域循环探测：' + hitHosts.join(','));
   }
   results.push({ id: 'G63', group: '免费池', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G64 缓存页闭环与 suggest 动作全量兼容（0 次输出不符合约定重试） */
+{
+  const bad = [];
+  const notices = [];
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('clean_candidates', { kind: 'cache' }),
+      answer({
+        answer: '可以安全清理的系统缓存共 1.2 GB，浏览器缓存共 333.7 MB，合计 1.53 GB。',
+        evidence: [{ tool: 'clean_candidates' }],
+        suggest: [{ action: 'cache', paths: [], why: '去清缓存' }]
+      })
+    ]),
+    tools,
+    prompt,
+    settings
+  });
+  const res = await agent.run({
+    userText: '帮我看看当前扫描到的缓存分组，哪些可以安全清理？',
+    ctx: { page: 'cache' },
+    onEvent: (ev) => { if (ev && ev.type === 'notice') notices.push(ev); }
+  });
+  if (!res.ok) bad.push('缓存页问答失败');
+  if (notices.some((n) => /输出不符合约定/.test(String(n.message || '')))) {
+    bad.push('意外触发了输出不符合约定重试：' + notices.map((n) => n.message).join(' | '));
+  }
+  if (!(res.evidence || []).some((e) => e.tool === 'clean_candidates')) bad.push('缺少 clean_candidates 依据');
+  if (!(res.suggest || []).some((s) => s.action === 'cache')) bad.push('缺少 cache 跳转建议');
+
+  const direct = await tools.clean_candidates.run({ kind: 'cache' });
+  if (!/1\.5\s*GB/.test(String(direct && direct.safe_size || ''))) {
+    bad.push('clean_candidates safe_size 异常：' + String(direct && direct.safe_size));
+  }
+  const dsug = direct && direct.suggest_items && direct.suggest_items[0];
+  if (!dsug || dsug.action !== 'cache') {
+    bad.push('clean_candidates 未附带 action=cache 的 suggest_items');
+  } else if (!Array.isArray(dsug.paths) || dsug.paths[0] !== 'C:\\Windows\\Temp') {
+    bad.push('suggest_items 未按非零体积优先排序（应跳过 0 字节项）：' + JSON.stringify(dsug && dsug.paths));
+  }
+
+  const n1 = agentApi.normalizeSuggest({ action: 'clean_cache', path: 'C:\\Windows\\Temp', why: '清缓存' });
+  if (!n1.length || n1[0].action !== 'cache' || n1[0].paths[0] !== 'C:\\Windows\\Temp') {
+    bad.push('normalizeSuggest 单对象/别名规范化失败：' + JSON.stringify(n1));
+  }
+  const n2 = agentApi.normalizeSuggest([
+    { action: 'shots', paths: ['C:\\Shots'], why: '去清截图' },
+    { action: 'search', paths: ['D:\\iso'], why: '搜一下' },
+    { action: 'unknown_act', paths: ['C:\\Windows\\Temp'], why: '核对' },
+    { action: 'unknown_act', paths: [], why: '空路径应丢弃' }
+  ]);
+  if (n2.length !== 3 || n2[0].action !== 'shots' || n2[1].action !== 'search' || n2[2].action !== 'check') {
+    bad.push('normalizeSuggest 多动作/未知动作降级异常：' + JSON.stringify(n2));
+  }
+  results.push({ id: 'G64', group: '缓存闭环', pass: bad.length === 0, why: bad.join('；'), tools: 'clean_candidates', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G65 JSON 提取与 validateStep 容错边界 */
+{
+  const bad = [];
+  const guidPrefix = '已找到 CLSID {8A69D345-D564-4210-810C-000000000000}\n{"answer":"已读取标识。"}';
+  const rGuid = agentApi.extractJson(guidPrefix);
+  if (!rGuid || !rGuid.obj || rGuid.obj.answer !== '已读取标识。') {
+    bad.push('extractJson 未跳过 Windows GUID：' + JSON.stringify(rGuid));
+  }
+  const yamlInner = JSON.stringify({
+    answer: '建议规则如下：\n```yaml\ncategories:\n  - 03_文档\n```',
+    suggest: [{ action: 'rules', paths: [], why: '预览规则' }]
+  });
+  const rYaml = agentApi.extractJson(yamlInner);
+  if (!rYaml || !rYaml.obj || !/categories/.test(String(rYaml.obj.answer || ''))) {
+    bad.push('extractJson 被正文内嵌 yaml 代码围栏破坏：' + JSON.stringify(rYaml));
+  }
+  const allCtxTools = Object.keys(tools);
+  const v1 = agentApi.validateStep({ answer: '可以安全清理。', tools: [] }, allCtxTools, []);
+  const v2 = agentApi.validateStep({ answer: '可以安全清理。', tool: '' }, allCtxTools, []);
+  const v3 = agentApi.validateStep({ answer: 'a'.repeat(2000) }, allCtxTools, []);
+  const v4 = agentApi.validateStep({ answer: 'ok', suggest: { action: 'cache', paths: 'C:\\Windows\\Temp', why: '清理' } }, allCtxTools, []);
+  if (!v1.ok) bad.push('validateStep 拒绝了空 tools 数组+answer：' + v1.error);
+  if (!v2.ok) bad.push('validateStep 拒绝了空 tool 字符串+answer：' + v2.error);
+  if (!v3.ok) bad.push('validateStep 拒绝了 2000 字纯文本 answer：' + v3.error);
+  if (!v4.ok || !v4.suggest || v4.suggest[0].action !== 'cache' || v4.suggest[0].paths[0] !== 'C:\\Windows\\Temp') {
+    bad.push('validateStep 单对象/字符串 paths 的 suggest 规范化失败：' + JSON.stringify(v4));
+  }
+  schemaTotal += 1;
+  if (v1.ok && v2.ok && v3.ok && v4.ok) schemaOk += 1;
+  results.push({ id: 'G65', group: '容错边界', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
+/* G66 loose 降级保留合法 evidence/suggest，重试 notice 带 transient: true */
+{
+  const bad = [];
+  const notices = [];
+  const badTwice = answer({
+    answer: 'D:\\Downloads 共 4 项，包括 a.iso。',
+    evidence: [{ tool: 'list_dir' }, { tool: 'disk_free' }],
+    suggest: [{ action: 'cache', paths: [], why: '去清缓存' }]
+  });
+  const agent = createAgent({
+    transport: scripted([
+      toolStep('list_dir', { dir: 'D:\\Downloads' }),
+      badTwice,
+      badTwice
+    ]),
+    tools,
+    prompt,
+    settings
+  });
+  const res = await agent.run({
+    userText: '看看 D:\\Downloads 里有什么',
+    ctx: { page: 'tools', dir: 'D:\\Downloads' },
+    onEvent: (ev) => { if (ev && ev.type === 'notice') notices.push(ev); }
+  });
+  const retryNotices = notices.filter((n) => /输出不符合约定|改一次/.test(String(n.message || '')));
+  if (!retryNotices.length) bad.push('未发出输出不符合约定重试提示');
+  if (retryNotices.some((n) => n.transient !== true)) bad.push('重试提示缺少 transient: true 标记');
+  if (!res.ok) bad.push('loose 降级未能正常返回结果');
+  const evTools = (res.evidence || []).map((e) => e.tool);
+  if (!evTools.includes('list_dir') || evTools.includes('disk_free')) {
+    bad.push('loose 降级未保留真实 evidence 并剔除伪造项：' + JSON.stringify(evTools));
+  }
+  if (!(res.suggest || []).some((s) => s.action === 'cache')) {
+    bad.push('loose 降级丢失了合法 suggest：' + JSON.stringify(res.suggest));
+  }
+  results.push({ id: 'G66', group: '降级保真', pass: bad.length === 0, why: bad.join('；'), tools: 'list_dir', steps: res.usage ? res.usage.steps : 0 });
+}
+
+/* G67 unsourcedSizes 合法两项分组汇总不误报，仍拦截虚构体积 */
+{
+  const bad = [];
+  const hay = JSON.stringify({ groups: [{ size: '1.2 GB' }, { size: '333.7 MB' }] });
+  const sumBad = agentApi.unsourcedSizes('可安全清理合计 1.53 GB（系统 1.2 GB + 浏览器 333.7 MB）', hay);
+  if (sumBad.length) bad.push('误报了合法两项分组汇总 1.53 GB：' + JSON.stringify(sumBad));
+  const fakeBad = agentApi.unsourcedSizes('可释放 500 GB', hay);
+  if (!fakeBad.length) bad.push('未拦截虚构体积 500 GB');
+  results.push({ id: 'G67', group: '数字同源', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
 }
 
 const passCount = results.filter((r) => r.pass).length;

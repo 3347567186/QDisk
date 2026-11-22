@@ -669,6 +669,8 @@
       /* 档位就在输入框那排「标准」旁边：改完立刻落盘，底栏那句话跟着变 */
       onModeChange: (k) => { setMode(k); }
     });
+    const suggestBar = h('div', { class: 'ai-suggest-prompts', hidden: true });
+    shell.appendChild(suggestBar);
     shell.appendChild(composer.el);
 
     /* 底栏只留一句人话：档位本体已经挪到输入框那排，
@@ -789,8 +791,25 @@
       return (AIStore && AIStore.FALLBACK_CTX) || 1000000;
     }
 
+    let emptyShown = true;
+    let customSuggestions = null;
+
     function setEmpty(show) {
+      emptyShown = !!show;
       emptyBox.hidden = !show;
+      renderSuggestBar();
+    }
+
+    function setSuggestions(list, opts) {
+      const items = Array.isArray(list) ? list.map((x) => String(x || '').trim()).filter(Boolean) : [];
+      const contextual = !!(opts && opts.contextual);
+      if (!items.length && !contextual) {
+        customSuggestions = null;
+      } else {
+        customSuggestions = { list: items.slice(0, 4), contextual };
+      }
+      if (emptyShown) renderEmpty();
+      renderSuggestBar();
     }
 
     function pageEmptySamples(ctx) {
@@ -844,20 +863,122 @@
       return ['最近什么最占空间？', 'D:\\Downloads 里有什么大文件？', '有哪些空文件夹或陈年缓存可以清掉？', '哪些程序和自启项占用了磁盘或内存？'];
     }
 
+    function resolveSuggestions(ctx) {
+      const base = pageEmptySamples(ctx);
+      if (!customSuggestions || !customSuggestions.list || !customSuggestions.list.length) return base;
+      const out = [];
+      const seen = new Set();
+      const push = (q) => {
+        const s = String(q || '').trim();
+        if (!s || seen.has(s)) return;
+        seen.add(s);
+        out.push(s);
+      };
+      customSuggestions.list.forEach(push);
+      base.forEach(push);
+      return out;
+    }
+
+    function renderSuggestBar() {
+      suggestBar.innerHTML = '';
+      if (emptyShown || !compact || !customSuggestions || (!customSuggestions.list.length && !customSuggestions.contextual)) {
+        suggestBar.hidden = true;
+        return;
+      }
+      const ctx = typeof ctxProvider === 'function' ? (ctxProvider() || {}) : {};
+      const all = resolveSuggestions(ctx).slice(0, 3);
+      if (!all.length) {
+        suggestBar.hidden = true;
+        return;
+      }
+      suggestBar.hidden = false;
+      const head = h('div', { class: 'ai-suggest-prompts-head' },
+        h('span', { class: 'ai-suggest-prompts-title' },
+          UIx.icon('spark', 12),
+          h('span', {}, T('建议提问', 'Suggested prompts'))
+        ),
+        h('button', {
+          class: 'ai-suggest-prompts-close',
+          type: 'button',
+          title: T('收起建议', 'Dismiss suggestions'),
+          'aria-label': T('收起建议', 'Dismiss suggestions'),
+          onclick: () => setSuggestions(null)
+        }, UIx.icon('close', 11))
+      );
+      const listEl = h('div', { class: 'ai-suggest-prompts-list' });
+      all.forEach((q) => {
+        listEl.appendChild(h('button', {
+          class: 'ai-sp-chip',
+          type: 'button',
+          title: q + '\n' + T('点击发送 · 右键填入输入框编辑', 'Click to send · Right-click to edit'),
+          onclick: () => {
+            if (activePane && activePane.state && activePane.state.running) {
+              composer.setValue(q);
+              composer.focus();
+              return;
+            }
+            setSuggestions(null);
+            ask({ text: q });
+          },
+          oncontextmenu: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            composer.setValue(q);
+            composer.focus();
+          }
+        }, q));
+      });
+      suggestBar.appendChild(head);
+      suggestBar.appendChild(listEl);
+    }
+
     function renderEmpty() {
+      if (emptyBox.querySelectorAll) {
+        emptyBox.querySelectorAll('.steve').forEach((n) => {
+          if (n && n._steve && typeof n._steve.destroy === 'function') n._steve.destroy();
+        });
+      }
       emptyBox.innerHTML = '';
       const ctx = typeof ctxProvider === 'function' ? (ctxProvider() || {}) : {};
-      const all = pageEmptySamples(ctx);
-      const samples = compact ? all.slice(0, 2) : all.slice(0, 4);
+      const all = resolveSuggestions(ctx);
+      const hasCustom = !!(customSuggestions && customSuggestions.list && customSuggestions.list.length);
+      const samples = compact ? all.slice(0, hasCustom ? 3 : 2) : all.slice(0, 4);
       const grid = h('div', { class: 'ai-empty-grid' });
       samples.forEach((q) => {
-        grid.appendChild(h('button', { class: 'ai-empty-card', onclick: () => ask({ text: q }) },
-          h('span', { class: 'ai-empty-q' }, q)
-        ));
+        grid.appendChild(h('button', {
+          class: 'ai-empty-card',
+          type: 'button',
+          title: T('点击发送 · 右键填入输入框编辑', 'Click to send · Right-click to edit'),
+          onclick: () => {
+            setSuggestions(null);
+            ask({ text: q });
+          },
+          oncontextmenu: (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            composer.setValue(q);
+            composer.focus();
+          }
+        }, h('span', { class: 'ai-empty-q' }, q)));
       });
+      const heroMark = window.SteveAvatar ? window.SteveAvatar.el({ size: 32, variant: 'hero' }) : UIx.icon('spark');
+      const heroIc = h('div', {
+        class: 'ai-empty-ic',
+        role: 'button',
+        tabindex: '0',
+        title: T('点一下史蒂夫打个招呼', 'Click Steve to say hi'),
+        onclick: () => {
+          if (window.SteveAvatar && typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(heroMark);
+        },
+        onkeydown: (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            if (window.SteveAvatar && typeof window.SteveAvatar.click === 'function') window.SteveAvatar.click(heroMark);
+          }
+        }
+      }, heroMark);
       emptyBox.appendChild(h('div', { class: 'ai-empty-head' },
-        h('div', { class: 'ai-empty-ic' },
-          window.SteveAvatar ? window.SteveAvatar.el({ size: 38, variant: 'hero' }) : UIx.icon('spark')),
+        heroIc,
         h('div', {},
           h('div', { class: 'ai-empty-title' }, T('问我这台电脑上的文件', 'Ask about the files on this PC')),
           h('div', { class: 'ai-empty-sub' }, T('我会真的去查目录、签名、已安装程序，再给结论', 'I look at directories, signatures and installed apps, then answer'))
@@ -1531,6 +1652,13 @@
       let c = tgt.current || null;
       if (!c) c = startAnswer(null, tgt);
       if (!c) return;
+      /* 收尾时清除重试期间产生的临时提示（如「输出不符合约定，正在让模型改一次」），
+         避免重试恢复正常后仍把过程告警残留在回答上方 */
+      if (c.extra && c.extra.children) {
+        Array.from(c.extra.children).forEach((ch) => {
+          if (ch && ch.classList && ch.classList.contains('transient')) ch.remove();
+        });
+      }
       /* 过程组落定：计数定格、等待行收掉、折回一行。
          停止与失败也用同一行计数——「想到哪、查到哪」本身就是信息。 */
       if (c.pg) {
@@ -1685,14 +1813,24 @@
     }
 
     /* 提示行也认 pane：后台会话的「已排队」提示必须落在它自己的消息区里，
-       否则用户在新会话里看到一句不属于这里的话。 */
-    function addNotice(message, level, pane) {
+       否则用户在新会话里看到一句不属于这里的话。transient=true 表示过渡提示，finishAnswer 自动清理。 */
+    function addNotice(message, level, pane, opts) {
       const tgt = pane || activePane;
       if (!tgt) return;
       let c = tgt.current || null;
       if (!c) c = startAnswer(null, tgt);
       if (!c) return;
-      c.extra.appendChild(h('div', { class: 'ai-notice ' + (level || 'info') }, message));
+      const transient = !!(opts && opts.transient);
+      if (transient) {
+        if (c.extra && c.extra.children) {
+          Array.from(c.extra.children).forEach((ch) => {
+            if (ch && ch.classList && ch.classList.contains('transient')) ch.remove();
+          });
+        }
+      }
+      c.extra.appendChild(h('div', {
+        class: 'ai-notice ' + (level || 'info') + (transient ? ' transient' : '')
+      }, message));
       scrollEnd(false, tgt);
     }
 
@@ -1772,6 +1910,7 @@
          但如果已经有别的会话在飞，这一次不能静默丢掉——塞进队列并给出提示，
          否则用户点了发送什么都没发生（bug1 的另一半）。 */
       if (!q && !(payload.attachments || []).length) return;
+      if (isVisible(pane)) setSuggestions(null);
       if (inFlight) {
         if (inFlight.pane === pane || st.running) return;
         enqueueTurn(pane, payload);
@@ -1957,7 +2096,7 @@
                 c.pg.addThought(ev.text);
               }
             } else if (ev.type === 'notice') {
-              addNotice(ev.message, ev.level, pane);
+              addNotice(ev.message, ev.level, pane, { transient: !!ev.transient });
             }
           }
         });
@@ -2490,8 +2629,10 @@
          它就不再往界面写了——抽屉关一次再打开，等于那一轮白跑。 */
       destroyed = false;
       /* 空状态文案按新宿主的宽度重画（compact 的示例问题只有两条） */
+      if (!compact) customSuggestions = null;
       renderEmpty();
       setEmpty(!(msgs && msgs.children.length));
+      renderSuggestBar();
       /* 跟随器盯的是「容器 + 滚动条」：shell 换过位置，旧的观测对象
          可能已经脱离文档，重建一次比修它便宜也可靠。 */
       rebuildFollow();
@@ -2525,6 +2666,7 @@
       ask,
       retry: retryLast,
       composer,
+      setSuggestions,
       /* 换宿主 / 摘界面：整页与抽屉共用同一个现场靠这两个 */
       attach: attach,
       detach: detach,

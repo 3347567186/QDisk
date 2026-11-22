@@ -208,17 +208,21 @@
      语言切换会重建导航，旧头像要先停掉自己的渲染循环再丢弃。 */
   function navMark(item) {
     if (item.id === 'ai' && window.SteveAvatar) {
-      return window.SteveAvatar.el({ size: 42, variant: 'nav' });
+      return window.SteveAvatar.el({ size: 28, variant: 'nav' });
     }
     return icon(item.icon);
   }
 
-  /* 点 AI 入口：整颗头转一圈，再在原地炸一发像素粒子 */
+  /* 点 AI 入口：体素反馈动画 + 视口内安全爆裂 + 斯蒂夫声音 */
   function goNav(item, mark) {
     navigate(item.id);
     if (item.id === 'ai' && window.SteveAvatar) {
-      window.SteveAvatar.spin(mark);
-      window.SteveAvatar.burst(mark);
+      if (typeof window.SteveAvatar.click === 'function') {
+        window.SteveAvatar.click(mark);
+      } else {
+        window.SteveAvatar.spin(mark);
+        window.SteveAvatar.burst(mark);
+      }
     }
   }
 

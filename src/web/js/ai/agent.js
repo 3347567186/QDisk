@@ -53,7 +53,83 @@
   /** 用户点「停止」时统一用这个错误穿出去：上层据此返回「已停止」而不是「调用失败」 */
   const abortError = () => Object.assign(new Error('已停止'), { code: 'aborted' });
 
-  const SUGGEST_ACTIONS = ['organize', 'delete', 'archive', 'check', 'rules', 'migrate', 'apps', 'log', 'settings', 'none'];
+  const CANONICAL_SUGGEST = (root.AIPrompt && Array.isArray(root.AIPrompt.SUGGEST_ACTIONS) && root.AIPrompt.SUGGEST_ACTIONS.length)
+    ? root.AIPrompt.SUGGEST_ACTIONS
+    : ['organize', 'delete', 'archive', 'check', 'apps', 'rules', 'migrate', 'cache', 'shots', 'search', 'log', 'settings', 'none'];
+  const SUGGEST_ACTIONS = CANONICAL_SUGGEST;
+
+  const SUGGEST_ALIAS = {
+    clean: 'cache',
+    cleanup: 'cache',
+    clean_cache: 'cache',
+    clean_caches: 'cache',
+    caches: 'cache',
+    clear_cache: 'cache',
+    screenshot: 'shots',
+    screenshots: 'shots',
+    clean_shots: 'shots',
+    shot: 'shots',
+    logs: 'log',
+    read_logs: 'log',
+    app: 'apps',
+    procs: 'apps',
+    process: 'apps',
+    processes: 'apps',
+    startup: 'apps',
+    uninstall: 'apps',
+    leftovers: 'apps',
+    browse: 'check',
+    open: 'check',
+    view: 'check',
+    inspect: 'check',
+    tools: 'check',
+    dir: 'check',
+    folder: 'check',
+    space: 'check',
+    scan: 'check',
+    remove: 'delete',
+    trash: 'delete',
+    del: 'delete',
+    compress: 'archive',
+    extract: 'archive',
+    zip: 'archive',
+    unzip: 'archive',
+    move: 'migrate',
+    copy: 'migrate',
+    rule: 'rules',
+    yaml: 'rules',
+    find: 'search',
+    index: 'search',
+    config: 'settings',
+    setting: 'settings'
+  };
+
+  function normalizeSuggest(rawSuggest, allowedActions) {
+    const allowed = Array.isArray(allowedActions) && allowedActions.length ? allowedActions : SUGGEST_ACTIONS;
+    const list = Array.isArray(rawSuggest)
+      ? rawSuggest
+      : (rawSuggest && typeof rawSuggest === 'object' ? [rawSuggest] : []);
+    const out = [];
+    for (const s of list.slice(0, 5)) {
+      if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
+      let action = String(s.action || '').trim().toLowerCase();
+      if (SUGGEST_ALIAS[action]) action = SUGGEST_ALIAS[action];
+      let paths = [];
+      if (Array.isArray(s.paths)) {
+        paths = s.paths.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()).slice(0, 20);
+      } else if (typeof s.paths === 'string' && s.paths.trim()) {
+        paths = [s.paths.trim()];
+      } else if (typeof s.path === 'string' && s.path.trim()) {
+        paths = [s.path.trim()];
+      }
+      if (!allowed.includes(action)) {
+        if (paths.length > 0) action = 'check';
+        else continue;
+      }
+      out.push({ action, paths, why: String(s.why || '').slice(0, 120) });
+    }
+    return out;
+  }
 
   /* ---------------- 输出解析 ---------------- */
 
@@ -81,48 +157,94 @@
     return node;
   }
 
-  function extractJson(text) {
-    let s = String(text || '').trim();
-    if (!s) return { error: '模型返回了空内容' };
-    const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fence) s = fence[1].trim();
-    const start = s.search(/[{]/);
-    if (start < 0) return { error: '模型没有输出 JSON 对象' };
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < s.length; i += 1) {
-      const c = s[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (c === '\\') esc = true;
-        else if (c === '"') inStr = false;
-        continue;
-      }
-      if (c === '"') { inStr = true; continue; }
-      if (c === '{') depth += 1;
-      else if (c === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          let raw = s.slice(start, i + 1);
-          let obj = null;
-          try {
-            obj = JSON.parse(raw);
-          } catch (e0) {
+  function scanJsonObjects(s) {
+    const firstStart = s.search(/[{]/);
+    if (firstStart < 0) return { error: '模型没有输出 JSON 对象' };
+    let scanFrom = firstStart;
+    let lastErr = null;
+    let fallbackObj = null;
+    while (scanFrom >= 0 && scanFrom < s.length) {
+      const start = s.indexOf('{', scanFrom);
+      if (start < 0) break;
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      let closed = false;
+      for (let i = start; i < s.length; i += 1) {
+        const c = s[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === '\\') esc = true;
+          else if (c === '"') inStr = false;
+          continue;
+        }
+        if (c === '"') { inStr = true; continue; }
+        if (c === '{') depth += 1;
+        else if (c === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            closed = true;
+            const raw = s.slice(start, i + 1);
+            let obj = null;
+            let parseErr = null;
             try {
-              obj = JSON.parse(fixEscapes(raw));
-            } catch (e1) {
-              return { error: 'JSON 解析失败：' + (e0 && e0.message ? e0.message : e0) };
+              obj = JSON.parse(raw);
+            } catch (e0) {
+              parseErr = e0;
+              try {
+                obj = JSON.parse(fixEscapes(raw));
+                parseErr = null;
+              } catch (e1) {
+                parseErr = e0;
+              }
             }
+            if (!parseErr && obj && typeof obj === 'object' && !Array.isArray(obj)) {
+              const repaired = repairStrings(obj);
+              const isStep = Object.prototype.hasOwnProperty.call(repaired, 'answer')
+                || Object.prototype.hasOwnProperty.call(repaired, 'tool')
+                || Object.prototype.hasOwnProperty.call(repaired, 'tools')
+                || Object.prototype.hasOwnProperty.call(repaired, 'thought');
+              if (isStep) return { obj: repaired };
+              if (!fallbackObj) fallbackObj = repaired;
+              scanFrom = i + 1;
+              break;
+            }
+            if (!parseErr) {
+              lastErr = { error: '输出的不是 JSON 对象' };
+            } else {
+              lastErr = { error: 'JSON 解析失败：' + (parseErr && parseErr.message ? parseErr.message : parseErr) };
+            }
+            scanFrom = start + 1;
+            break;
           }
-          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-            return { error: '输出的不是 JSON 对象' };
-          }
-          return { obj: repairStrings(obj) };
         }
       }
+      if (!closed) {
+        if (!lastErr) lastErr = { error: 'JSON 没有闭合' };
+        scanFrom = start + 1;
+      }
     }
-    return { error: 'JSON 没有闭合' };
+    if (fallbackObj) return { obj: fallbackObj };
+    return lastErr || { error: 'JSON 没有闭合' };
+  }
+
+  function extractJson(text) {
+    const s = String(text || '').trim();
+    if (!s) return { error: '模型返回了空内容' };
+    /* 先剥离整段外包围栏（如 ```json ... ```），不要盲目正则匹配正文内部的 ```yaml 代码块 */
+    if (s.startsWith('```')) {
+      const stripped = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+      const inner = scanJsonObjects(stripped);
+      if (!inner.error) return inner;
+    }
+    const direct = scanJsonObjects(s);
+    if (!direct.error) return direct;
+    const jsonFence = s.match(/```json\s*([\s\S]*?)```/i);
+    if (jsonFence) {
+      const fenced = scanJsonObjects(jsonFence[1].trim());
+      if (!fenced.error) return fenced;
+    }
+    return direct;
   }
 
   /** 弱模型（glm-4-flash 这类）会把回答直接写成散文，或者用户明确要求输出代码块/YAML时
@@ -184,7 +306,22 @@
   };
 
   function checkArgs(tool, args) {
-    if (args === undefined) return { ok: true, args: {} };
+    if (args === undefined || args === null) return { ok: true, args: {} };
+    if (typeof args === 'string') {
+      const trimmed = args.trim();
+      if (!trimmed) return { ok: true, args: {} };
+      if (trimmed.startsWith('{')) {
+        try {
+          args = JSON.parse(trimmed);
+        } catch (e0) {
+          try {
+            args = JSON.parse(fixEscapes(trimmed));
+          } catch (e1) {
+            return { ok: false, error: 'args 必须是 JSON 对象' };
+          }
+        }
+      }
+    }
     if (!args || typeof args !== 'object' || Array.isArray(args)) {
       return { ok: false, error: 'args 必须是 JSON 对象' };
     }
@@ -225,15 +362,22 @@
   }
 
   /** 校验一步输出；ctxTools 决定白名单，calledTools 用于校验 evidence 真实性 */
-  function validateStep(obj, ctxTools, calledTools) {
+  function validateStep(obj, ctxTools, calledTools, allowedSuggest) {
     if (!obj || typeof obj !== 'object') return { ok: false, error: '不是 JSON 对象' };
-    const hasTool = Object.prototype.hasOwnProperty.call(obj, 'tool') && obj.tool !== null && obj.tool !== undefined;
-    const hasAnswer = Object.prototype.hasOwnProperty.call(obj, 'answer') && obj.answer !== null && obj.answer !== undefined;
-    const hasBatch = Array.isArray(obj.tools);
+    const hasTool = typeof obj.tool === 'string'
+      ? obj.tool.trim().length > 0
+      : (obj.tool !== null && obj.tool !== undefined && obj.tool !== false);
+    const hasBatch = Array.isArray(obj.tools) && obj.tools.length > 0;
+    const hasEmptyBatch = Array.isArray(obj.tools) && obj.tools.length === 0;
+    const hasAnswer = obj.answer !== null && obj.answer !== undefined && String(obj.answer).trim().length > 0;
     if (hasTool && hasAnswer) return { ok: false, error: 'tool 与 answer 只能出现一个' };
     if (hasBatch && hasAnswer) return { ok: false, error: 'tools 与 answer 只能出现一个' };
     if (hasBatch && hasTool) return { ok: false, error: 'tool 与 tools 只能出现一个' };
-    if (!hasTool && !hasAnswer && !hasBatch) return { ok: false, error: '必须包含 tool、tools 或 answer' };
+    if (!hasTool && !hasAnswer && !hasBatch) {
+      if (hasEmptyBatch) return { ok: false, error: 'tools 不能是空数组' };
+      if (Object.prototype.hasOwnProperty.call(obj, 'answer')) return { ok: false, error: 'answer 不能为空' };
+      return { ok: false, error: '必须包含 tool、tools 或 answer' };
+    }
 
     /* 一步多个互不依赖的查询：{"tools":[{tool,args},...]}
        执行上仍是顺序的（引擎调用本来就是串行的），省的是模型往返与整段重发。 */
@@ -273,30 +417,20 @@
     const answer = String(obj.answer || '').trim();
     if (!answer) return { ok: false, error: 'answer 不能为空' };
     if (answer.length > 32000) return { ok: false, error: 'answer 太长（超过 32000 字）' };
-    if (!answer.includes('```') && answer.length > REPLY_MAX_CHARS * 2) return { ok: false, error: 'answer 太长（超过 1200 字）' };
+    if (!answer.includes('```') && answer.length > 8000) return { ok: false, error: 'answer 太长（超过 8000 字）' };
 
     const called = new Set(calledTools || []);
     const evidence = [];
-    if (Array.isArray(obj.evidence)) {
-      for (const ev of obj.evidence) {
-        const t = ev && typeof ev === 'object' ? String(ev.tool || '') : String(ev || '');
-        if (!t) continue;
-        if (!called.has(t)) {
-          return { ok: false, error: `evidence 引用了没有调用过的工具：${t}` };
-        }
-        evidence.push({ tool: t });
+    const rawEv = Array.isArray(obj.evidence) ? obj.evidence : [];
+    for (const ev of rawEv) {
+      const t = ev && typeof ev === 'object' ? String(ev.tool || '') : String(ev || '');
+      if (!t) continue;
+      if (!called.has(t)) {
+        return { ok: false, error: `evidence 引用了没有调用过的工具：${t}` };
       }
+      evidence.push({ tool: t });
     }
-    const suggest = [];
-    if (Array.isArray(obj.suggest)) {
-      for (const s of obj.suggest.slice(0, 5)) {
-        if (!s || typeof s !== 'object') continue;
-        const action = String(s.action || '').toLowerCase();
-        if (!SUGGEST_ACTIONS.includes(action)) return { ok: false, error: `suggest.action 只能是 ${SUGGEST_ACTIONS.join(' / ')}` };
-        const paths = Array.isArray(s.paths) ? s.paths.filter((p) => typeof p === 'string').slice(0, 20) : [];
-        suggest.push({ action, paths, why: String(s.why || '').slice(0, 120) });
-      }
-    }
+    const suggest = normalizeSuggest(obj.suggest, allowedSuggest);
     return { ok: true, kind: 'answer', answer, evidence, suggest, thought: String(obj.thought || '').slice(0, 200) };
   }
 
@@ -506,11 +640,31 @@
   function unsourcedSizes(answer, hay) {
     const have = sizeTokens(hay);
     if (!have.length) return [];
+    const sample = have.slice(0, 24);
     const bad = [];
+    const matchesSum = (v) => {
+      for (let i = 0; i < sample.length; i += 1) {
+        for (let j = i + 1; j < sample.length; j += 1) {
+          const s2 = sample[i] + sample[j];
+          if (Math.abs(s2 - v) <= Math.max(2048, s2 * 0.025)) return true;
+        }
+      }
+      if (sample.length <= 14) {
+        for (let i = 0; i < sample.length; i += 1) {
+          for (let j = i + 1; j < sample.length; j += 1) {
+            for (let k = j + 1; k < sample.length; k += 1) {
+              const s3 = sample[i] + sample[j] + sample[k];
+              if (Math.abs(s3 - v) <= Math.max(2048, s3 * 0.025)) return true;
+            }
+          }
+        }
+      }
+      return false;
+    };
     sizeTokens(answer).forEach((v) => {
       /* 容差 2%：显示层会四舍五入成一位小数（3.3 GB），
-         不能因为这一点点误差就把真数据判成编的。 */
-      const hit = have.some((h) => Math.abs(h - v) <= Math.max(1024, h * 0.02));
+         同时允许模型如实给出工具已返回的两三项体积求和（如 1.2 GB + 333.7 MB = 1.53 GB）。 */
+      const hit = have.some((h) => Math.abs(h - v) <= Math.max(1024, h * 0.02)) || matchesSum(v);
       if (!hit && !bad.some((b) => Math.abs(b - v) <= Math.max(1024, v * 0.02))) bad.push(v);
     });
     return bad;
@@ -777,6 +931,9 @@
     const tools = deps.tools;
     const prompt = deps.prompt;
     const settings = deps.settings || {};
+    const allowedSuggest = (prompt && Array.isArray(prompt.SUGGEST_ACTIONS) && prompt.SUGGEST_ACTIONS.length)
+      ? prompt.SUGGEST_ACTIONS
+      : SUGGEST_ACTIONS;
 
     const maxSteps = Number(settings.maxSteps) || DEFAULT_MAX_STEPS;
     /* 压缩阈值跟着「模型窗口」走，跟思考强度无关：
@@ -1209,6 +1366,7 @@
               onEvent({
                 type: 'notice',
                 level: 'warn',
+                transient: true,
                 message: '模型 ' + Math.round(spent / 1000) + ' 秒还没回完，已自动放宽等待时间重试'
               });
             }
@@ -1274,6 +1432,7 @@
               onEvent({
                 type: 'notice',
                 level: 'warn',
+                transient: true,
                 message: '接口暂时不可用（HTTP ' + res.status + '），' + Math.round(wait / 1000) + ' 秒后自动重试'
               });
             }
@@ -1419,7 +1578,7 @@
               args = raw ? JSON.parse(raw) : {};
             } catch (e) {
               if (onEvent) {
-                onEvent({ type: 'notice', level: 'warn', message: '模型给出的工具参数不是合法 JSON，已让它重发' });
+                onEvent({ type: 'notice', level: 'warn', transient: true, message: '模型给出的工具参数不是合法 JSON，已让它重发' });
               }
               args = null;
             }
@@ -1485,9 +1644,12 @@
           const userPrompt = realUser ? realUser.content : '';
           const direct = extractDirectCode(content, userPrompt);
           if (direct) {
-            const sv = validateStep(direct, ctxTools, calledTools);
+            const sv = validateStep(direct, ctxTools, calledTools, allowedSuggest);
             if (sv.ok) {
               markSuccessCandidate();
+              if (!sv.evidence.length && calledTools.length) {
+                sv.evidence = [...new Set(calledTools)].map((t) => ({ tool: t }));
+              }
               return Object.assign({ usage, raw: direct, salvaged: true }, sv);
             }
           }
@@ -1497,7 +1659,7 @@
             grewTokens += 1;
             tokenCap = Math.min(MAX_REPLY_TOKENS, tokenCap * 2);
             remember({ maxTokens: tokenCap });
-            if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型这次没回正文（可能把预算全花在思考上），已加大长度重试' });
+            if (onEvent) onEvent({ type: 'notice', level: 'warn', transient: true, message: '模型这次没回正文（可能把预算全花在思考上），已加大长度重试' });
             continue;
           }
           /* 空响应兜底：免费 slug 有时 HTTP 200 返回空正文且无 tool_calls，冷却并切换备用模型 */
@@ -1536,7 +1698,7 @@
                 content: '上次输出达到长度上限被截断了。请更简短：answer 不超过 150 字，suggest 最多 3 条，只输出一个完整的 JSON 对象。'
               });
             }
-            if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出太长被截断，正在放宽长度重试' });
+            if (onEvent) onEvent({ type: 'notice', level: 'warn', transient: true, message: '输出太长被截断，正在放宽长度重试' });
             continue;
           }
           /* 学到的「这个模型根本不吐 JSON」就直接兜底，不再白花一次修复调用 */
@@ -1547,25 +1709,28 @@
               role: 'user',
               content: `你的输出不符合要求：${parsed.error}。只输出一个 JSON 对象，形如 {"tool":"...","args":{...}} 或 {"answer":"..."}。`
             });
-            if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出格式不对，正在让模型改一次' });
+            if (onEvent) onEvent({ type: 'notice', level: 'warn', transient: true, message: '输出格式不对，正在让模型改一次' });
             continue;
           }
           /* 改了一次还是纯散文（glm-4-flash 这类弱模型根本不认 JSON 约定）：
              与其抛错让整轮作废，不如把这段文字当回答显示 —— 用户要的是答案 */
           const prose = salvageProse(content);
           if (prose) {
-            const sv = validateStep(prose, ctxTools, calledTools);
+            const sv = validateStep(prose, ctxTools, calledTools, allowedSuggest);
             if (sv.ok) {
               markSuccessCandidate();
               /* 记下来：这个模型不认 JSON，下一轮直接按散文兜，省一次调用 */
               remember({ noJson: true });
+              if (!sv.evidence.length && calledTools.length) {
+                sv.evidence = [...new Set(calledTools)].map((t) => ({ tool: t }));
+              }
               if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '模型没按 JSON 输出，已按普通回答显示' });
               return Object.assign({ usage, raw: prose, salvaged: true }, sv);
             }
           }
           throw Object.assign(new Error('模型输出无法解析：' + parsed.error), { code: 'bad_output' });
         }
-        const v = validateStep(parsed.obj, ctxTools, calledTools);
+        const v = validateStep(parsed.obj, ctxTools, calledTools, allowedSuggest);
         if (!v.ok) {
           if (v.kind === 'forbidden') {
             // 越权不走修复重试：把「工具不存在」回给模型，让它自己换工具
@@ -1574,19 +1739,31 @@
           }
           if (repairLeft > 0) {
             repairLeft -= 1;
+            const calledHint = calledTools.length ? `；本轮实际调用过的工具仅有：${[...new Set(calledTools)].join('、')}` : '；本轮尚未调用任何工具';
             messages.push({ role: 'assistant', content: JSON.stringify(parsed.obj) });
-            messages.push({ role: 'user', content: `你的输出不符合要求：${v.error}。请修正后重新输出一个 JSON 对象。` });
-            if (onEvent) onEvent({ type: 'notice', level: 'warn', message: '输出不符合约定，正在让模型改一次' });
+            messages.push({ role: 'user', content: `你的输出不符合要求：${v.error}${calledHint}。请修正后重新输出一个 JSON 对象。` });
+            if (onEvent) onEvent({ type: 'notice', level: 'warn', transient: true, message: '输出不符合约定，正在让模型改一次' });
             continue;
           }
-          /* 修了一次仍不合约定：能提取出回答就照常给，别让整轮作废 */
+          /* 修了一次仍不合约定：保留合法的 evidence / suggest，别丢掉已查到的依据与入口 */
           if (typeof parsed.obj.answer === 'string' && parsed.obj.answer.trim()) {
             markSuccessCandidate();
+            const rawAns = parsed.obj.answer.trim();
+            const cap = rawAns.includes('```') ? 32000 : 8000;
+            const calledSet = new Set(calledTools || []);
+            const keptEvidence = [];
+            if (Array.isArray(parsed.obj.evidence)) {
+              for (const ev of parsed.obj.evidence) {
+                const t = ev && typeof ev === 'object' ? String(ev.tool || '') : String(ev || '');
+                if (t && calledSet.has(t) && !keptEvidence.some((x) => x.tool === t)) keptEvidence.push({ tool: t });
+              }
+            }
+            const keptSuggest = normalizeSuggest(parsed.obj.suggest, allowedSuggest);
             return {
               kind: 'answer',
-              answer: parsed.obj.answer.trim().slice(0, 1200),
-              evidence: [],
-              suggest: [],
+              answer: rawAns.slice(0, cap),
+              evidence: keptEvidence,
+              suggest: keptSuggest,
               usage,
               loose: true
             };
@@ -2081,6 +2258,8 @@
     createAgent,
     buildCandidates,
     validateStep,
+    normalizeSuggest,
+    SUGGEST_ACTIONS,
     extractJson,
     compressHistory,
     extractSessionFacts,

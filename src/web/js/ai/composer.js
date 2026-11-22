@@ -326,10 +326,7 @@
     attachBtn.setAttribute('aria-label', T('添加附件', 'Add attachment'));
     attachBtn.appendChild(icon('paperclip', 14));
 
-    const permWrap = el('div');
-    permWrap.style.position = 'relative';
-    permWrap.style.display = 'inline-flex';
-    permWrap.style.maxWidth = '100%';
+    const permWrap = el('div', 'dac-ctrl-wrap');
     const permBtn = el('button', 'dac-perm dac-perm-btn');
     permBtn.type = 'button';
     permBtn.setAttribute('aria-haspopup', 'menu');
@@ -347,10 +344,7 @@
 
     /* 第二枚胶囊：动手档位。样式与「标准」同一套（.dac-perm），
        只是换了图标与文案，菜单里多一句「这档会发生什么」。 */
-    const modeWrap = el('div');
-    modeWrap.style.position = 'relative';
-    modeWrap.style.display = 'inline-flex';
-    modeWrap.style.maxWidth = '100%';
+    const modeWrap = el('div', 'dac-ctrl-wrap');
     const modeBtn = el('button', 'dac-perm dac-agent-mode');
     modeBtn.type = 'button';
     modeBtn.setAttribute('aria-haspopup', 'menu');
@@ -366,7 +360,7 @@
     left.appendChild(modeWrap);
 
     /* 容量环 */
-    const capBtn = el('button', 'dac-cap');
+    const capBtn = el('button', 'dac-cap is-empty');
     capBtn.type = 'button';
     capBtn.title = T('上下文占用', 'Context usage');
     const NS = 'http://www.w3.org/2000/svg';
@@ -395,11 +389,7 @@
     capBtn.appendChild(svg);
 
     /* 模型胶囊 + 菜单 */
-    const pillWrap = el('div');
-    pillWrap.style.position = 'relative';
-    pillWrap.style.display = 'flex';
-    pillWrap.style.height = '32px';
-    pillWrap.style.alignItems = 'center';
+    const pillWrap = el('div', 'dac-pill-wrap');
 
     const pill = el('button', 'dac-pill');
     pill.type = 'button';

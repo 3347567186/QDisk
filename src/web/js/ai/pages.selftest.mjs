@@ -32,8 +32,11 @@ class FakeStyle {
   removeProperty(k) { delete this[k]; }
 }
 
-class FakeElement {
+class FakeNode {}
+
+class FakeElement extends FakeNode {
   constructor(tagName) {
+    super();
     this.tagName = tagName ? tagName.toUpperCase() : 'DIV';
     this.classList = new FakeClassList();
     this.children = [];
@@ -50,15 +53,21 @@ class FakeElement {
     this.height = 100;
     this.parent = null;
   }
+  get parentNode() { return this.parent; }
   appendChild(child) {
-    if (child) child.parent = this;
+    if (child) {
+      if (child.parent && child.parent !== this && typeof child.parent.removeChild === 'function') {
+        child.parent.removeChild(child);
+      }
+      child.parent = this;
+    }
     this.children.push(child);
     return child;
   }
   removeChild(child) {
     const idx = this.children.indexOf(child);
     if (idx >= 0) this.children.splice(idx, 1);
-    if (child) child.parent = null;
+    if (child && child.parent === this) child.parent = null;
     return child;
   }
   remove() {
@@ -132,12 +141,10 @@ class FakeElement {
   get textContent() { return this._textContent; }
   set textContent(v) { this._textContent = String(v); }
   get innerHTML() { return this._innerHTML; }
-  set innerHTML(v) { this._innerHTML = String(v); }
+  set innerHTML(v) { this._innerHTML = String(v); if (!v) this.children = []; }
   get className() { return this.classList.toString(); }
   set className(v) { this.classList = new FakeClassList(); if (v) v.split(/\s+/).forEach(c => c && this.classList.add(c)); }
 }
-
-class FakeNode {}
 
 const storage = {};
 const fakeLocalStorage = {
@@ -383,5 +390,109 @@ try {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载 & CSS 令牌校验通过）`);
+// 真实递归节点检索（FakeElement.querySelectorAll 无匹配时会返回 5 个占位 div，不可用于否定断言）
+function findNodes(rootNode, pred, out = []) {
+  if (!rootNode) return out;
+  if (pred(rootNode)) out.push(rootNode);
+  if (Array.isArray(rootNode.children)) {
+    for (const ch of rootNode.children) findNodes(ch, pred, out);
+  }
+  return out;
+}
+
+// 回归 1：设置页移除顶部快速导航条（.set-nav-bar）与 AI 入口（.ask-ai-btn），同时保留 AI 助手配置手风琴
+{
+  const holder = new FakeElement('div');
+  const beforeInt = activeIntervals.size;
+  const ret = await sandbox.Pages.settings.mount(holder);
+  if (findNodes(holder, (n) => n.classList && n.classList.contains('set-nav-bar')).length !== 0) {
+    console.error('[设置页回归] 顶部快速导航条 .set-nav-bar 仍被渲染');
+    process.exit(1);
+  }
+  if (findNodes(holder, (n) => n.classList && n.classList.contains('ask-ai-btn')).length !== 0) {
+    console.error('[设置页回归] 设置页仍残留 AI 入口 .ask-ai-btn');
+    process.exit(1);
+  }
+  const assistantSecs = findNodes(
+    holder,
+    (n) => (n.attributes && n.attributes['data-section'] === 'assistant') || (n.dataset && n.dataset.section === 'assistant')
+  );
+  if (!assistantSecs.length) {
+    console.error('[设置页回归] 未保留 AI 助手配置手风琴 [data-section="assistant"]');
+    process.exit(1);
+  }
+  sandbox.Pages.settings.jump({ section: 'assistant' });
+  if (typeof ret === 'function') ret();
+  if (typeof sandbox.Pages.settings.unmount === 'function') sandbox.Pages.settings.unmount();
+  if (activeIntervals.size > beforeInt) {
+    console.error('[设置页回归] unmount 后残留定时器');
+    process.exit(1);
+  }
+}
+
+// 回归 2：SteveAvatar 3D 渲染、点击动作、音效合成与粒子动画安全生命周期
+{
+  const st = sandbox.SteveAvatar.el({ size: 28, variant: 'nav' });
+  sandbox.SteveAvatar.click(st);
+  sandbox.SteveAvatar.sound(0);
+  sandbox.SteveAvatar.burst(st, 'happy');
+  if (!st || !st._steve || typeof st._steve.destroy !== 'function') {
+    console.error('[SteveAvatar 回归] 未挂载 _steve 控制器或 destroy 方法');
+    process.exit(1);
+  }
+  st._steve.destroy();
+}
+
+// 回归 3：AIDrawer 打开仅生成建议提示词（绝不 120ms 自动发送），关闭严格回收 keydown Esc 监听与 busyTimer
+{
+  const scene = sandbox.AIChat.scene();
+  if (!scene) {
+    console.error('[AIDrawer 回归] 未获取到共享聊天现场 AIChat.scene()');
+    process.exit(1);
+  }
+  const origAsk = scene.ask;
+  let askCalls = 0;
+  scene.ask = (...a) => {
+    askCalls += 1;
+    return origAsk.apply(scene, a);
+  };
+  const beforeKey = (docListeners.get('keydown') || []).length;
+  const beforeInt = activeIntervals.size;
+  sandbox.AIDrawer.open({
+    question: '帮我看看当前缓存',
+    suggestions: ['还有哪些大文件？'],
+    ctx: () => ({ page: 'cache' })
+  });
+  await new Promise((r) => setTimeout(r, 160));
+  scene.ask = origAsk;
+  if (askCalls !== 0) {
+    console.error(`[AIDrawer 回归] 打开抽屉后仍自动触发了 chat.ask (${askCalls} 次)`);
+    process.exit(1);
+  }
+  const nodeText = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(nodeText).join('');
+    return s;
+  };
+  const sugNodes = findNodes(
+    sandbox.document.body,
+    (n) => n.classList && (n.classList.contains('ai-sp-chip') || n.classList.contains('ai-empty-q'))
+      && nodeText(n).includes('帮我看看当前缓存')
+  );
+  if (!sugNodes.length) {
+    console.error('[AIDrawer 回归] 打开抽屉后未渲染传入的建议提示词「帮我看看当前缓存」');
+    process.exit(1);
+  }
+  sandbox.AIDrawer.close();
+  const afterKey = (docListeners.get('keydown') || []).length;
+  const afterInt = activeIntervals.size;
+  if (afterKey !== beforeKey || afterInt !== beforeInt) {
+    console.error(`[AIDrawer 回归] close 后资源未回收: keydown=${afterKey - beforeKey}, intervals=${afterInt - beforeInt}`);
+    process.exit(1);
+  }
+  await new Promise((r) => setTimeout(r, 200));
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉建议提示词校验通过）`);
 process.exit(0);

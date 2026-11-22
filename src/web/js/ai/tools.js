@@ -884,26 +884,71 @@
               age: fmtAge(it.mtime),
               shot: it.shot === true
             }));
-            return pageFit({ kind, days, total: items.length, size: fmtBytes(r && r.size) }, items, 0, 25);
+            const res = pageFit({ kind, days, total: items.length, size: fmtBytes(r && r.size) }, items, 0, 25);
+            if (res && typeof res === 'object' && items.length > 0) {
+              res.suggest_items = [{
+                action: 'shots',
+                paths: items.slice(0, 6).map((x) => x.path),
+                why: '前往清理截图页预览并清理过期截图'
+              }];
+            }
+            return res;
           }
           const r = await withTimeout(API.engine('cache.list', { include_custom: true }), 15000, '读取缓存清单');
           const out = [];
+          const safeItems = [];
+          const otherItems = [];
+          let safeBytes = 0;
           for (const g of (r && r.groups) || []) {
             const its = (g.items || []).filter((it) => it.exists !== false);
             if (!its.length) continue;
             const paths = [];
             for (const it of its) {
-              for (const p of (it.paths || (it.path ? [it.path] : []))) paths.push(p);
+              const lv = it.level || g.level || 'caution';
+              const sz = Number(it.size) || 0;
+              if (lv === 'safe') safeBytes += sz;
+              for (const p of (it.paths || (it.path ? [it.path] : []))) {
+                paths.push(p);
+                if (lv === 'safe') safeItems.push({ path: p, size: sz });
+                else otherItems.push({ path: p, size: sz });
+              }
             }
             out.push({
               group: g.name || g.title || g.key || '',
-              level: its[0] && its[0].level,
+              level: g.level || (its[0] && its[0].level) || '',
               paths: paths.slice(0, 6),
               count: paths.length,
               size: fmtBytes(its.reduce((n, it) => n + (Number(it.size) || 0), 0))
             });
           }
-          return fit({ kind, total_size: fmtBytes(r && r.total_size), groups: out.slice(0, 8) }, CAP);
+          const res = fit({
+            kind,
+            total_size: fmtBytes(r && r.total_size),
+            safe_size: fmtBytes(safeBytes),
+            groups: out.slice(0, 8)
+          }, CAP);
+          if (res && typeof res === 'object' && out.length > 0) {
+            const nonZeroSafe = safeItems.filter((x) => x.size > 0).sort((a, b) => b.size - a.size);
+            const pool = nonZeroSafe.length
+              ? nonZeroSafe
+              : (safeItems.length ? safeItems : otherItems.sort((a, b) => b.size - a.size));
+            const seen = new Set();
+            const pick = [];
+            for (const item of pool) {
+              if (!item.path || seen.has(item.path)) continue;
+              seen.add(item.path);
+              pick.push(item.path);
+              if (pick.length >= 6) break;
+            }
+            res.suggest_items = [{
+              action: 'cache',
+              paths: pick,
+              why: safeItems.length
+                ? '前往清理缓存页一键勾选并安全清理推荐缓存（可释放 ' + fmtBytes(safeBytes) + '）'
+                : '前往清理缓存页核对并选择需要清理的缓存项'
+            }];
+          }
+          return res;
         },
         summary: (args, r) => `清理候选 ${args.kind || 'cache'} · ${(r.groups || []).length} 组`
       },

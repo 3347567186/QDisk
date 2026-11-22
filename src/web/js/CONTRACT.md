@@ -49,8 +49,8 @@ window.Pages.shots = {
 - 页面排版必须归属以下三大标准骨架之一，禁止散装全宽堆叠或未登记临时类名：
   1. **骨架 I · 分段定高工作台**：`.wb-bar` + `.wb-tabs` + `.wb-tab` + `.wb-pane` + `.card.stretch-card`（如 `tools`、`apps`、`shots`、`cache`、`archive`、`search`）。
   2. **骨架 II · 双栏主从工作台**：`.split-wb` / `.split-wb.master-detail`（左栏编辑器/清单，右栏 `.log-viewer-pre`/预演面板；如 `rules`、`log`、`migrate`），窄屏 `<= 980px` 自动降级单列。
-  3. **骨架 III · 紧凑流式配置工作台**：`.set-nav-bar` + `.set-nav-pill` + `.set-card` + `.set-row`（`settings`）。
-- 全部 12 个页面（除 `ai` 整页对话外）在 `mount(root)` 内必须调用 `UI.setActions(..., UI.askBtn({...}))` 挂载顶栏 AI 副驾入口；`mount(root)` 必须返回 `unmount()` 并在其中清理定时器、`document` 监听、`App._onPageSize` 与 `UI.setActions()`；同时导出 `jump(payload)` 接收来自 AI / 页间跳转的上下文。
+  3. **骨架 III · 紧凑流式配置工作台**：`.set-card` + `.set-row`（`settings`，已移除 `.set-nav-bar` 与设置页 AI 入口）。
+- 全部业务页（不含 `ai` 整页对话与 `settings` 设置页）在 `mount(root)` 内按需调用 `UI.setActions()` 与面板内 `UI.askBtn({...})` 挂载 AI 副驾入口；`mount(root)` 必须返回 `unmount()` 并在其中清理定时器、`document` 监听、`App._onPageSize` 与 `UI.setActions()`；同时导出 `jump(payload)` 接收来自 AI / 页间跳转的上下文。
 
 ### 折叠区块
 
@@ -173,4 +173,4 @@ $py='E:\AI\DeepSeekHarness多插件版\home\dsh-runtimes\dsh-primary-runtime\dep
 - **apps**：已安装程序 / 启动项管理 / 后台进程（`process.list`/`process.close`）/ 空间透视与系统画像（`system.performance` + 4 KPI 卡），切页销毁 0 定时器与监听器泄漏，顶栏 `UI.askBtn`、支持 `jump({ tab, status, filter })`。
 - **migrate**：合顶命令与目标目录条 + 平衡双栏（来源 vs 选项）、`planSlot`/`resultSlot` 局刷不丢输入焦点、顶栏 `UI.askBtn`、支持 `jump({ sources, destination })`。
 - **log**：骨架 II 主从双栏（`.split-wb.master-detail` 文件清单 + `.log-viewer-pre` 尾部查看器 + 引擎诊断与操作历史双列）、顶栏 `UI.askBtn`、支持 `jump({ file })`。
-- **settings**：骨架 III 吸顶分组快速跳转条（`.set-nav-bar`）+ 7 个手风琴分组、顶栏 `UI.askBtn`、支持 `jump({ section })`。
+- **settings**：骨架 III 7 个手风琴分组（含 AI 助手模型/端点/密钥/权限配置，移除顶部 `.set-nav-bar` 与设置页 AI 入口）、支持 `jump({ section })`。
