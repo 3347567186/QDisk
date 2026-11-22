@@ -322,6 +322,7 @@
 
     const btnRefresh = btn('刷新', 'Refresh', 'ghost no-label-swap', 'refresh', () => loadApps(true));
     btnRefresh.style.minWidth = '68px';
+    const btnOrphan = btn('排查孤立残留', 'Scan orphans', 'ghost sm', 'scan', () => scanOrphanLeftovers());
     const pageInput = h('input', {
       class: 'input sm pg-input',
       type: 'text',
@@ -475,7 +476,6 @@
         S.page = 1;
         GlobalAppsCache.appsPage = 1;
         updateSortChips();
-    syncLeftoverPanel(S.selected || null);
         applyFilter();
       });
       sortChips[id] = b;
@@ -504,7 +504,7 @@
         h('span', { class: 'hint' },
           T('右键行有更多操作 · 点击排序按钮可升降序切换', 'Right-click row for actions · Click sort button to toggle order'))
       ),
-      // 第一行：搜索过滤 + 视图切换 (全部/桌面/系统) + 刷新
+      // 第一行：搜索过滤 + 视图切换 (全部/桌面/系统) + 刷新 + 孤立残留排查
       h('div', { class: 'toolbar' },
         filterInput,
         h('div', { class: 'seg' },
@@ -512,7 +512,8 @@
           viewBtn('desktop', '桌面应用', 'Desktop apps'),
           viewBtn('store', '系统应用', 'System apps')
         ),
-        btnRefresh
+        btnRefresh,
+        btnOrphan
       ),
       // 第二行：数据统计 + 排序分段控件 + 分页
       h('div', { class: 'toolbar wrap' },
@@ -534,39 +535,7 @@
       actionMsg
     );
 
-    /* ---------------- 第三块：残留清理（与卸载深度配合） ---------------- */
-    const loTargetBox = h('div', { class: 'lo-target-box' });
-    const loSummary = h('div', { class: 'muted small' });
-    const loList = h('div', { class: 'stack' });
-    const loResult = h('div', { class: 'stack' });
 
-    const btnRescan = btn('重新扫描', 'Rescan', 'ghost sm no-label-swap', 'refresh', () => {
-      const target = S.leftoverApp || S.selected;
-      if (target) scanLeftovers(target);
-      else toast(T('请先选择一个程序', 'Select a program first'), 'warn');
-    });
-    btnRescan.style.minWidth = '68px';
-    const btnCheckAll = btn('全选', 'Select all', 'ghost sm', 'check', () => setAllChecks(true));
-    const btnNone = btn('全不选', 'Select none', 'ghost sm', 'close', () => setAllChecks(false));
-    const btnCleanup = btn('清理选中', 'Clean selected', 'danger', 'trash', cleanup);
-    btnCleanup.disabled = true;
-
-    const loToolbar = h('div', { class: 'toolbar', style: { display: 'none' } },
-      btnRescan, btnCheckAll, btnNone,
-      h('span', { class: 'spacer' }),
-      btnCleanup
-    );
-
-    const loSection = section(T('残留清理', 'Leftovers'),
-      h('div', { class: 'stack' },
-        loTargetBox,
-        loSummary,
-        loToolbar,
-        loList,
-        loResult
-      ),
-      { open: false, hint: T('卸载后自动联动扫描 · 注册表项清理前会自动备份', 'Auto-links after uninstall · Registry keys are backed up') }
-    );
 
     /* ================================================================
        顶级领域分类 Tab 切换器：严格物理隔离【软件本体】/【开机自启动】/【空间画像】
@@ -2801,7 +2770,6 @@
 
       updateAdminDisplay();
       mainCard.style.display = tab === 'apps' ? '' : 'none';
-      loSection.style.display = tab === 'apps' ? '' : 'none';
       startupCard.style.display = tab === 'startup' ? '' : 'none';
       procsCard.style.display = tab === 'procs' ? '' : 'none';
       footprintCard.style.display = tab === 'footprint' ? '' : 'none';
@@ -2845,23 +2813,22 @@
     root.appendChild(topTabBar);
     root.appendChild(adminBar);
     root.appendChild(mainCard);
-    root.appendChild(loSection);
     root.appendChild(startupCard);
     root.appendChild(procsCard);
     root.appendChild(footprintCard);
 
-    /* 右键菜单：对齐 Geek Uninstaller 的完整动作集 */
+    /* 右键菜单：对齐现代化深度卸载与残留清理工作流 */
     attachMenu(tableBox, (e) => {
       const tr = e.target.closest('tbody tr[data-key]');
       if (tr) {
         const it = S.visible[Number(tr.dataset.key)];
         if (!it) return [];
-        // Appx 应用只有「卸载 / 打开目录 / 复制」这几件事可做
+        // Appx 商店应用
         if (it.source === 'store') {
           return [
             { header: it.name || '' },
-            { label: T('卸载应用', 'Uninstall app'), icon: 'trash',
-              danger: true, action: () => uninstallOne(it) },
+            { label: T('🚀 深度卸载与残留清理', '🚀 Deep uninstall & clean'), icon: 'trash',
+              danger: true, action: () => openUninstallWizard(it, 'prepare') },
             { label: T('打开安装目录', 'Open install folder'), icon: 'folder',
               disabled: !it.install_path, action: () => openInstallDir(it) },
             { sep: true },
@@ -2872,9 +2839,11 @@
         }
         return [
           { header: it.name || '' },
-          { label: T('卸载（系统卸载器）', 'Uninstall (system uninstaller)'), icon: 'trash',
-            danger: true, disabled: !it.uninstall, action: () => uninstallOne(it) },
-          { label: T('强制删除（目录 + 注册表）', 'Force remove (files + registry)'), icon: 'trash',
+          { label: T('🚀 深度卸载与残留清理（推荐）', '🚀 Deep uninstall & clean (Recommended)'), icon: 'trash',
+            danger: true, action: () => openUninstallWizard(it, 'prepare') },
+          { label: T('🔍 仅扫描并清理残留', '🔍 Scan & clean leftovers only'), icon: 'scan',
+            action: () => openUninstallWizard(it, 'scan') },
+          { label: T('⚡ 强制删除（目录 + 注册表）', '⚡ Force remove (files + registry)'), icon: 'trash',
             danger: true, action: () => forceRemove(it) },
           { label: T('删除条目（只删注册表项）', 'Delete entry (registry only)'), icon: 'close',
             action: () => deleteEntry(it) },
@@ -2885,7 +2854,6 @@
           { label: T('程序网站', 'Program website'), icon: 'external',
             disabled: !it.url, action: () => openSite(it) },
           { sep: true },
-          { label: T('扫描残留', 'Scan leftovers'), icon: 'scan', action: () => scanLeftovers(it) },
           { label: T('通过谷歌搜索', 'Search on Google'), icon: 'search',
             action: () => googleSearch(it) },
           { sep: true },
@@ -2906,7 +2874,6 @@
 
     // 统一初始化当前活跃 Tab 的数据流与视图呈现（消灭单独分支导致的未过滤与空白状态）
     switchTab(currentTab);
-    syncLeftoverPanel(S.selected || null);
 
     /* 每页条数改了：就地重排当前表格，不重建页面 */
     App._onPageSize = (v) => {
@@ -3147,7 +3114,6 @@
       S.page = 1;
       GlobalAppsCache.appsSortAsc = S.sortAsc;
       updateSortChips();
-    syncLeftoverPanel(S.selected || null);
       applyFilter();
     }
 
@@ -3235,21 +3201,17 @@
             align: 'right',
             label: T('操作', 'Actions'),
             render: (a) => {
-              const bTrash = iconBtn('卸载', 'Uninstall', 'trash', () => {
+              const bTrash = iconBtn('深度卸载', 'Deep uninstall', 'trash', () => {
                 select(a);
-                uninstallOne(a);
+                openUninstallWizard(a, 'prepare');
               }, true);
-              if (!a.uninstall) {
-                bTrash.disabled = true;
-                bTrash.title = T('没有可用的卸载程序', 'No uninstaller available');
-              }
-              const bScan = iconBtn('扫描残留', 'Scan leftovers', 'scan', () => {
+              const bScan = iconBtn('仅清理残留', 'Clean leftovers only', 'scan', () => {
                 select(a);
-                scanLeftovers(a);
+                openUninstallWizard(a, 'scan');
               });
               if (a.source === 'store') {
                 bScan.disabled = true;
-                bScan.title = T('商店应用由系统沙盒管理，无需扫描残留', 'Store apps are managed by system sandbox');
+                bScan.title = T('商店应用由系统沙盒管理，点击深度卸载即可', 'Store app managed by sandbox; click Deep uninstall');
               }
               const bFolder = iconBtn('打开安装目录', 'Open install folder', 'folder', () => openInstallDir(a));
               if (!a.install_path) {
@@ -3303,7 +3265,6 @@
       const tbl = tableBox.querySelector('table');
       if (tbl) applySelection(tbl);
       renderStatLine();
-      syncLeftoverPanel(it, false);
     }
 
     function renderPager() {
@@ -3350,65 +3311,10 @@
       openPath(target.install_path);
     }
 
-    /* ---------------- 卸载 / 强制删除 / 删条目 / 注册表 / 官网 ---------------- */
+    /* ---------------- 深度卸载与残留清理工作流 ---------------- */
     async function uninstallOne(it) {
       if (!it) return;
-      if (it.source === 'store') {
-        const yes = await confirm({
-          title: T('卸载应用', 'Uninstall app'),
-          body: T('将卸载「' + it.name + '」（Microsoft Store 应用，仅当前用户）。',
-            'Uninstall "' + it.name + '" for the current user only.'),
-          ok: T('卸载', 'Uninstall'),
-          danger: true
-        });
-        if (!yes) return;
-        try {
-          await API.removeStoreApp(it.package, true);
-          toast(T('已卸载：', 'Uninstalled: ') + it.name, 'ok');
-          S.store = [];
-          S.storeLoaded = false;
-          await ensureStore();
-          GlobalAppsCache.store = S.store;
-          GlobalAppsCache.storeLoaded = true;
-          applyFilter();
-        } catch (e) {
-          toast(errText(e), 'error');
-        }
-        return;
-      }
-      if (!it.uninstall_cmd && !it.quiet_cmd) {
-        toast(T('这个程序没有自带卸载器，可用「强制删除」', 'No uninstaller; use Force remove'), 'warn');
-        return;
-      }
-      const yes = await confirm({
-        title: T('卸载程序', 'Uninstall program'),
-        body: T('将启动「' + it.name + '」自带的卸载程序，请在弹出的窗口里完成卸载。',
-          'The uninstaller for "' + it.name + '" will start; finish it in its own window.'),
-        ok: T('启动卸载程序', 'Launch uninstaller'),
-        danger: true
-      });
-      if (!yes) return;
-      if (S.uninstalling) return;
-      S.uninstalling = true;
-      try {
-        const r = await API.engine('apps.uninstall', {
-          name: it.name, version: it.version || '', confirm: true, mode: 'auto'
-        });
-        actionMsg.hidden = false;
-        actionMsg.textContent = T('已启动卸载程序：', 'Uninstaller started: ') + (it.name || '');
-        toast(r && r.started === false
-          ? T('卸载器没能启动，试试「强制删除」', 'Uninstaller failed to start; try Force remove')
-          : T('已启动系统卸载程序，已联动打开下方残留清理', 'System uninstaller started; leftovers scanner ready'), 'ok');
-        select(it);
-        if (loSection._toggle) loSection._toggle(true);
-        else loSection.classList.add('open');
-        syncLeftoverPanel(it, true);
-        try { loSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
-      } catch (e) {
-        toast(errText(e), 'error');
-      } finally {
-        S.uninstalling = false;
-      }
+      openUninstallWizard(it, 'prepare');
     }
 
     async function forceRemove(it) {
@@ -3424,7 +3330,7 @@
       const res = await busy(() => API.engine('apps.force_remove', {
         name: it.name, version: it.version || '', confirm: true
       }), T('正在删除…', 'Removing…'), 'apps');
-      if (!res) return; // busy 吞了异常时别再报「已删除」
+      if (!res) return;
       const failed = (res && res.failed) || [];
       if (failed.length) {
         toast(T('部分内容没能删除：', 'Some items failed: ') +
@@ -3500,306 +3406,608 @@
         .catch((e) => toast(errText(e), 'error'));
     }
 
-    /* ---------------- 残留清理深度联动 ---------------- */
-    function syncLeftoverPanel(app, isUninstalling = false) {
-      loTargetBox.innerHTML = '';
-      if (!app) {
-        loTargetBox.appendChild(h('div', {
-          class: 'lo-target-card',
-          style: { justifyContent: 'space-between', color: 'var(--text-3)' }
-        },
-          h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
-            icon('info', 16),
-            h('span', null, T('在上方列表中点击选中任意软件，或卸载后自动关联并扫描残留。',
-              'Select any app above, or uninstall it to automatically link and scan leftovers.'))
-          )
-        ));
-        loSummary.textContent = '';
-        loToolbar.style.display = 'none';
-        loList.innerHTML = '';
-        loResult.innerHTML = '';
-        return;
+    /* ================================================================
+       智能深度卸载与残留清理全流程工作台（Smart Deep Uninstaller & Leftover Wizard）
+       彻底推翻旧版底部折叠面板，打造真正一流的卸载与残留清理一体化闭环向导
+       ================================================================ */
+    let activeWizard = null;
+
+    async function openUninstallWizard(app, initialPhase = 'prepare') {
+      if (!app) return;
+      if (activeWizard) {
+        try { activeWizard.close(); } catch (_) {}
+        activeWizard = null;
       }
 
-      if (isUninstalling) {
-        const guideBanner = h('div', { class: 'lo-uninstall-banner' },
-          icon('activity', 18),
-          h('div', { style: { flex: '1', minWidth: '0' } },
-            h('div', { style: { fontWeight: '600', fontSize: 'var(--fs-body)' } },
-              T(`已启动「${app.name}」的系统卸载向导`, `Uninstaller started for "${app.name}"`)),
-            h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '2px' } },
-              T('请在系统窗口完成卸载。完成后点击右侧按钮，一键扫描并清理注册表与磁盘残留。',
-                'Finish uninstall in system window, then click button to scan and clean leftovers.'))
-          ),
-          h('button', {
-            class: 'btn primary',
-            onclick: () => scanLeftovers(app)
-          }, icon('scan', 14), T('已完成卸载，扫描残留', 'Uninstall done, scan leftovers'))
-        );
-        loTargetBox.appendChild(guideBanner);
-      }
+      let currentStep = initialPhase === 'scan' ? 2 : 1; // 1: 准备, 2: 勘探, 3: 审查, 4: 报告
+      let isUninstallerLaunched = false;
+      let isCleaning = false;
+      let leftoversData = null;
+      let checkedDirs = new Set();
+      let checkedRegs = new Set();
+      let cleanupReport = null;
 
-      const appCard = h('div', { class: 'lo-target-card' },
-        h('div', { class: 'app-icon-wrap' }, appIcon(app)),
-        h('div', { class: 'app-info' },
-          h('div', { class: 'app-name-row' },
-            h('span', { class: 'app-name' }, app.name),
-            app.version ? h('span', { class: 'badge' }, app.version) : null
-          ),
-          h('div', { class: 'app-sub mono ellipsis', title: app.install_path || app.publisher || '' },
-            app.install_path || app.publisher || T('系统注册表条目', 'System registry entry'))
-        ),
-        h('button', {
-          class: 'btn sm primary',
-          onclick: () => scanLeftovers(app)
-        }, icon('scan', 13), T('扫描此程序残留', 'Scan leftovers'))
-      );
-      loTargetBox.appendChild(appCard);
-
-      // 如果当前选中的正是之前已扫描的软件，恢复结果
-      if (S.leftoverApp && keyOf(S.leftoverApp) === keyOf(app) && S.leftovers) {
-        loToolbar.style.display = '';
-        renderLeftovers();
-      } else {
-        loToolbar.style.display = 'none';
-        loList.innerHTML = '';
-        loSummary.textContent = '';
-      }
-    }
-
-    async function scanLeftovers(itArg) {
-      const it = itArg || S.selected;
-      if (!it) {
-        toast(T('请先选择一个程序', 'Select a program first'), 'warn');
-        return;
-      }
-      const mySeq = ++S.loSeq;
-      if (loSection._toggle) loSection._toggle(true);
-      else loSection.classList.add('open');
-      setBtnBusy(btnRescan, true, '扫描中…', 'Scanning…');
-      loSummary.textContent = T('正在深度扫描「' + it.name + '」的安装目录、AppData 与注册表残留…',
-        'Scanning install folders, AppData and registry for "' + it.name + '"…');
-      loList.replaceChildren(skeleton(4, 'apps'));
-      loResult.innerHTML = '';
-      try {
-        const r = await API.engine('apps.leftovers', {
-          name: it.name,
-          version: it.version || ''
-        });
-        if (mySeq !== S.loSeq) return; // 慢响应回来时用户已换目标，别覆盖新面板
-        S.leftovers = r || { name: it.name, dirs: [], regs: [], blocked: [] };
-        S.leftoverApp = it;
-        loToolbar.style.display = '';
-        // 智能全选所有安全残留项，避免空壳感
-        S.checkDirs = new Set((S.leftovers.dirs || []).map((_, i) => i));
-        S.checkRegs = new Set((S.leftovers.regs || []).map((_, i) => i));
-        renderLeftovers();
-      } catch (e) {
-        if (mySeq !== S.loSeq) return;
-        S.leftovers = null;
-        S.leftoverApp = it;
-        loSummary.textContent = '';
-        loList.replaceChildren(empty(T('扫描失败', 'Scan failed'), errText(e)));
-        btnCleanup.disabled = true;
-        loToolbar.style.display = 'none';
-        toast(errText(e), 'error');
-      } finally {
-        setBtnBusy(btnRescan, false);
-      }
-    }
-
-    function renderLeftovers() {
-      loList.innerHTML = '';
-      refreshCleanupBtn();
-      const L = S.leftovers;
-      if (!L) {
-        loList.appendChild(empty(T('尚未扫描', 'Not scanned yet'),
-          T('选中程序后点「扫描残留」', 'Select a program and scan for leftovers')));
-        return;
-      }
-      const dirs = Array.isArray(L.dirs) ? L.dirs : [];
-      const regs = Array.isArray(L.regs) ? L.regs : [];
-      const blocked = Array.isArray(L.blocked) ? L.blocked : [];
-      const name = L.name || (S.leftoverApp && S.leftoverApp.name) || '';
-
-      if (!dirs.length && !regs.length) {
-        loSummary.textContent = name;
-        loList.appendChild(empty(T('没有发现残留', 'No leftovers found'),
-          T('这个程序的安装目录与注册表项已清理干净', 'Nothing left behind by this program')));
-        return;
-      }
-
-      loSummary.textContent = T(
-        name + '：发现 ' + fmtCount(dirs.length) + ' 个目录、' + fmtCount(regs.length) + ' 个注册表项' +
-        (blocked.length ? '，' + fmtCount(blocked.length) + ' 项被占用' : ''),
-        name + ': ' + fmtCount(dirs.length) + ' folder(s), ' + fmtCount(regs.length) +
-        ' registry key(s)' + (blocked.length ? ', ' + fmtCount(blocked.length) + ' in use' : ''));
-
-      if (dirs.length) {
-        loList.appendChild(h('div', { class: 'stack' },
-          h('div', { class: 'small muted' }, T('目录', 'Folders')),
-          h('div', { class: 'list' }, ...dirs.map((d, i) => h('div', { class: 'list-item' },
-            h('label', { class: 'check', style: { flex: '1', minWidth: '0' } },
-              h('input', {
-                type: 'checkbox',
-                checked: S.checkDirs.has(i),
-                onchange: (e) => {
-                  if (e.target.checked) S.checkDirs.add(i);
-                  else S.checkDirs.delete(i);
-                  refreshCleanupBtn();
-                }
-              }),
-              h('span', { class: 'mono ellipsis', style: { minWidth: '0' }, title: d }, d)
-            ),
-            iconBtn('打开目录', 'Open folder', 'external', () => openPath(d))
-          )))
-        ));
-      }
-      if (regs.length) {
-        loList.appendChild(h('div', { class: 'stack' },
-          h('div', { class: 'small muted' }, T('注册表项', 'Registry keys')),
-          h('div', { class: 'list' }, ...regs.map((r, i) => {
-            const label = String(r.hive || '') + '\\' + String(r.key || '');
-            return h('div', { class: 'list-item' },
-              h('label', { class: 'check', style: { flex: '1', minWidth: '0' } },
-                h('input', {
-                  type: 'checkbox',
-                  checked: S.checkRegs.has(i),
-                  onchange: (e) => {
-                    if (e.target.checked) S.checkRegs.add(i);
-                    else S.checkRegs.delete(i);
-                    refreshCleanupBtn();
-                  }
-                }),
-                h('span', { class: 'mono ellipsis', style: { minWidth: '0' }, title: label }, label)
-              ),
-              iconBtn('复制注册表路径', 'Copy registry path', 'copy', () => copyText(label))
-            );
-          }))
-        ));
-      }
-      if (blocked.length) {
-        loList.appendChild(h('div', { class: 'row wrap' },
-          h('span', { class: 'badge warn' }, T('被占用', 'In use')),
-          h('span', { class: 'small muted ellipsis', style: { maxWidth: '560px' },
-            title: blocked.join('\n') },
-            T(fmtCount(blocked.length) + ' 项被系统占用，本次不能清理',
-              fmtCount(blocked.length) + ' item(s) are in use and cannot be cleaned now'))
-        ));
-      }
-    }
-
-    function setAllChecks(on) {
-      const L = S.leftovers;
-      if (!L) return;
-      S.checkDirs = on ? new Set((L.dirs || []).map((_, i) => i)) : new Set();
-      S.checkRegs = on ? new Set((L.regs || []).map((_, i) => i)) : new Set();
-      renderLeftovers();
-    }
-
-    function refreshCleanupBtn() {
-      const n = S.checkDirs.size + S.checkRegs.size;
-      btnCleanup.disabled = n === 0;
-      btnCleanup._label.textContent = n
-        ? T('清理选中（' + fmtCount(n) + '）', 'Clean ' + fmtCount(n))
-        : T('清理选中', 'Clean selected');
-    }
-
-    async function cleanup() {
-      const L = S.leftovers;
-      if (!L) return;
-      const app = S.leftoverApp || S.selected;
-      const dirs = (L.dirs || []).filter((_, i) => S.checkDirs.has(i));
-      const regs = (L.regs || []).filter((_, i) => S.checkRegs.has(i));
-      if (!dirs.length && !regs.length) {
-        toast(T('请先勾选要清理的残留项', 'Select leftover items first'), 'warn');
-        return;
-      }
-      const yes = await confirm({
-        title: T('清理残留', 'Clean leftovers'),
-        body: T('删除 ' + fmtCount(dirs.length) + ' 个残留目录、' + fmtCount(regs.length) + ' 个注册表项。\n\n注册表项会先导出备份；残留目录是直接删除，不进回收站，删完无法恢复。',
-          'Delete ' + fmtCount(dirs.length) + ' folder(s) and ' + fmtCount(regs.length) +
-          ' registry key(s).\n\nRegistry keys are exported first; leftover folders are deleted permanently, not moved to the recycle bin.'),
-        ok: T('永久清理', 'Clean permanently'),
-        danger: true
-      });
-      if (!yes) return;
-
-      setBtnBusy(btnCleanup, true, '清理中…', 'Cleaning…');
-      const r = await busy(
-        () => API.engine('apps.cleanup', {
-          name: (app && app.name) || L.name,
-          version: (app && app.version) || '',
-          dirs: dirs,
-          regs: regs,
-          confirm: true
-        }),
-        T('正在清理残留…', 'Cleaning leftovers…')
-      );
-      setBtnBusy(btnCleanup, false);
-      refreshCleanupBtn();
-      if (!r) return;
-
-      const removedDirs = Array.isArray(r.removed_dirs) ? r.removed_dirs : [];
-      const removedRegs = Array.isArray(r.removed_regs) ? r.removed_regs : [];
-      // 引擎返回实际删除项，按返回值从列表里摘掉，避免重扫
-      S.leftovers.dirs = (L.dirs || []).filter((d) => !removedDirs.includes(d));
-      const removedKeys = new Set(removedRegs.map((x) => String(x.hive || '') + '\\' + String(x.key || '')));
-      S.leftovers.regs = (L.regs || []).filter((x) =>
-        !removedKeys.has(String(x.hive || '') + '\\' + String(x.key || '')));
-      S.checkDirs = new Set();
-      S.checkRegs = new Set();
-      renderLeftovers();
-      renderCleanupResult(r);
-      const failed = Array.isArray(r.failed) ? r.failed.length : 0;
-      if (!failed) {
-        toast(T('残留已全部清理完毕', 'All leftovers cleaned'), 'ok');
-        if (!S.leftovers.dirs.length && !S.leftovers.regs.length) {
-          if (app) {
-            S.items = S.items.filter((x) => keyOf(x) !== keyOf(app));
-            GlobalAppsCache.apps = S.items;
-            applyFilter();
-            renderStatLine();
-          }
-          loToolbar.style.display = 'none';
+      const mask = h('div', {
+        class: 'modal-mask',
+        onclick: (e) => {
+          if (e.target === mask && currentStep !== 2 && !isCleaning) wizardModal.close();
         }
-      } else {
-        toast(T('清理完成，有 ' + fmtCount(failed) + ' 项失败',
-          'Cleaned with ' + fmtCount(failed) + ' failure(s)'), 'warn');
-      }
-    }
+      });
+      const wizardBox = h('div', {
+        class: 'modal uninstall-wizard-modal',
+        role: 'dialog',
+        'aria-modal': 'true'
+      });
+      mask.appendChild(wizardBox);
+      document.getElementById('modal-root').appendChild(mask);
 
-    function renderCleanupResult(r) {
-      loResult.innerHTML = '';
-      const removedDirs = Array.isArray(r.removed_dirs) ? r.removed_dirs : [];
-      const removedRegs = Array.isArray(r.removed_regs) ? r.removed_regs : [];
-      loResult.appendChild(h('div', { class: 'row wrap' },
-        h('span', { class: 'badge ok' },
-          T('已清理 ' + fmtCount(removedDirs.length + removedRegs.length) + ' 项',
-            fmtCount(removedDirs.length + removedRegs.length) + ' removed')),
-        h('span', { class: 'muted small' },
-          T('目录 ' + fmtCount(removedDirs.length) + ' 个 · 注册表 ' + fmtCount(removedRegs.length) + ' 项',
-            fmtCount(removedDirs.length) + ' folder(s), ' + fmtCount(removedRegs.length) + ' key(s)'))
-      ));
-      if (r.backup_dir) {
-        loResult.appendChild(h('div', { class: 'row' },
-          h('span', { class: 'muted small' }, T('注册表备份', 'Registry backup')),
-          h('span', { class: 'mono ellipsis', style: { maxWidth: '460px' }, title: r.backup_dir },
-            r.backup_dir),
-          btn('打开', 'Open', 'ghost sm', 'external', () => openPath(r.backup_dir))
+      function closeWizard() {
+        mask.classList.add('closing');
+        wizardBox.classList.add('closing');
+        setTimeout(() => mask.remove(), 190);
+        activeWizard = null;
+      }
+      const wizardModal = { close: closeWizard };
+      activeWizard = wizardModal;
+
+      const onEsc = (e) => {
+        if (e.key === 'Escape' && currentStep !== 2 && !isCleaning) {
+          closeWizard();
+        }
+      };
+      document.addEventListener('keydown', onEsc);
+      const origClose = wizardModal.close;
+      wizardModal.close = () => {
+        document.removeEventListener('keydown', onEsc);
+        origClose();
+      };
+
+      const headEl = h('div', { class: 'wizard-head' });
+      const bodyEl = h('div', { class: 'wizard-body' });
+      const footEl = h('div', { class: 'wizard-foot' });
+      wizardBox.appendChild(headEl);
+      wizardBox.appendChild(bodyEl);
+      wizardBox.appendChild(footEl);
+
+      function renderHead() {
+        headEl.innerHTML = '';
+        const titleRow = h('div', { class: 'wizard-title-row' },
+          h('div', { class: 'wizard-title' },
+            icon('trash', 16),
+            T('深度卸载与残留清理工作台', 'Deep Uninstall & Leftover Cleaning')
+          ),
+          iconBtn('关闭', 'Close', 'close', () => closeWizard())
+        );
+
+        const steps = [
+          { num: 1, zh: '准备卸载', en: 'Prepare' },
+          { num: 2, zh: '痕迹勘探', en: 'Scan traces' },
+          { num: 3, zh: '残留审查', en: 'Review & clean' },
+          { num: 4, zh: '彻底抹除', en: 'Completed' }
+        ];
+
+        const stepEls = [];
+        steps.forEach((s, idx) => {
+          const isDone = currentStep > s.num;
+          const isActive = currentStep === s.num;
+          const stepDiv = h('div', { class: 'wizard-step' + (isActive ? ' active' : '') + (isDone ? ' done' : '') },
+            h('div', { class: 'wizard-step-dot' }, isDone ? icon('check', 12) : String(s.num)),
+            h('span', null, T(s.zh, s.en))
+          );
+          stepEls.push(stepDiv);
+          if (idx < steps.length - 1) {
+            stepEls.push(h('div', { class: 'wizard-step-line' + (currentStep > s.num ? ' done' : '') }));
+          }
+        });
+
+        const stepsBar = h('div', { class: 'wizard-steps' }, ...stepEls);
+        headEl.appendChild(titleRow);
+        headEl.appendChild(stepsBar);
+      }
+
+      function renderHeroCard() {
+        const iconWrap = h('div', { class: 'app-icon-wrap' }, appIcon(app));
+        const sizeVal = (Number(app.size) || 0) || ((Number(app.size_kb) || 0) * 1024);
+        const heroInfo = h('div', { class: 'wizard-hero-info' },
+          h('div', { class: 'wizard-hero-name' },
+            h('span', { class: 'ellipsis' }, app.name),
+            app.version ? h('span', { class: 'badge' }, app.version) : null,
+            sizeVal > 0 ? h('span', { class: 'badge ghost' }, fmtBytes(sizeVal)) : null
+          ),
+          h('div', { class: 'wizard-hero-sub mono ellipsis', title: app.install_path || app.publisher || '' },
+            app.install_path
+              ? `${T('安装目录', 'Path')}: ${app.install_path}`
+              : (app.publisher ? `${T('发行商', 'Publisher')}: ${app.publisher}` : T('Windows 系统注册条目', 'System registered entry'))
+          )
+        );
+        return h('div', { class: 'wizard-hero-card' }, iconWrap, heroInfo);
+      }
+
+      function renderBody() {
+        bodyEl.innerHTML = '';
+        bodyEl.appendChild(renderHeroCard());
+
+        if (currentStep === 1) {
+          renderPhase1();
+        } else if (currentStep === 2) {
+          renderPhase2();
+        } else if (currentStep === 3) {
+          renderPhase3();
+        } else if (currentStep === 4) {
+          renderPhase4();
+        }
+      }
+
+      // Step 1: 准备卸载
+      function renderPhase1() {
+        const isStore = app.source === 'store';
+        const hasUninstaller = !!(app.uninstall_cmd || app.quiet_cmd);
+
+        let banner;
+        let actionBtn;
+        let altAction = null;
+
+        if (isStore) {
+          banner = h('div', { class: 'wizard-status-banner info' },
+            icon('info', 18),
+            h('div', { style: { flex: '1', minWidth: '0' } },
+              h('div', { style: { fontWeight: '600' } }, T('Windows 应用商店组件', 'Windows Store Package')),
+              h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '3px' } },
+                T('此软件由系统沙盒环境托管。点击下方按钮将调用 PowerShell 安全移除，随后将扫描用户数据残留。',
+                  'Managed by Windows sandbox. Click below to remove via PowerShell, then scan leftover data.'))
+            )
+          );
+          actionBtn = btn('移除此商店应用并扫描残留', 'Uninstall Store app & scan', 'primary', 'trash', async () => {
+            try {
+              setBtnBusy(actionBtn, true, '正在卸载…', 'Uninstalling…');
+              await API.removeStoreApp(app.package, true);
+              toast(T('已完成商店应用基础卸载，正在勘探残留…', 'Store app removed, scanning traces…'), 'ok');
+              goToStep(2);
+            } catch (e) {
+              toast(errText(e), 'error');
+            } finally {
+              setBtnBusy(actionBtn, false);
+            }
+          });
+        } else if (!hasUninstaller) {
+          banner = h('div', { class: 'wizard-status-banner' },
+            icon('shield', 18),
+            h('div', { style: { flex: '1', minWidth: '0' } },
+              h('div', { style: { fontWeight: '600' } }, T('无自带卸载程序（强力粉碎模式）', 'No built-in uninstaller (Force mode)')),
+              h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '3px' } },
+                T('该软件未注册系统卸载命令（常见于绿色软件、残留项或卸载器丢失）。向导将直接对该软件的安装目录与全部注册表项进行深度痕迹勘探与强力清除。',
+                  'No uninstaller registered. The wizard will deeply scan install folders and registry keys for forced cleanup.'))
+            )
+          );
+          actionBtn = btn('开始深度痕迹勘探与强力清除', 'Start deep trace scan & force clean', 'primary', 'scan', () => {
+            goToStep(2);
+          });
+        } else {
+          // 具备官方卸载器
+          if (!isUninstallerLaunched) {
+            banner = h('div', { class: 'wizard-status-banner info' },
+              icon('activity', 18),
+              h('div', { style: { flex: '1', minWidth: '0' } },
+                h('div', { style: { fontWeight: '600' } }, T('阶段一：运行官方卸载向导', 'Phase 1: Run official uninstaller')),
+                h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '3px' } },
+                  T('首先启动软件自带的卸载程序，请在系统弹出的窗口中操作完成。官方卸载完成后，向导将无缝承接进行深层残留扫除。',
+                    'Launch official uninstaller first. After it finishes in system window, wizard will deeply clean leftovers.'))
+              )
+            );
+            actionBtn = btn('启动官方卸载向导', 'Launch official uninstaller', 'primary', 'trash', async () => {
+              try {
+                setBtnBusy(actionBtn, true, '正在启动…', 'Launching…');
+                const r = await API.engine('apps.uninstall', {
+                  name: app.name, version: app.version || '', confirm: true, mode: 'auto'
+                });
+                if (r && r.started === false) {
+                  toast(T('官方卸载程序未响应，可直接跳过', 'Uninstaller failed to start; you can skip'), 'warn');
+                } else {
+                  toast(T('已启动系统卸载窗口，请完成卸载', 'Uninstaller launched, please finish in window'), 'ok');
+                }
+                isUninstallerLaunched = true;
+                renderBody();
+              } catch (e) {
+                toast(errText(e), 'error');
+              } finally {
+                setBtnBusy(actionBtn, false);
+              }
+            });
+            altAction = h('a', {
+              class: 'small muted',
+              style: { cursor: 'pointer', textDecoration: 'underline' },
+              onclick: () => goToStep(2)
+            }, T('跳过官方卸载，直接扫描残留', 'Skip official uninstaller, scan leftovers directly'));
+          } else {
+            banner = h('div', { class: 'wizard-status-banner' },
+              icon('activity', 18),
+              h('div', { style: { flex: '1', minWidth: '0' } },
+                h('div', { style: { fontWeight: '600', color: 'var(--accent)' } }, T('官方卸载程序正在运行中…', 'Official uninstaller is running…')),
+                h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '3px' } },
+                  T('请在弹出的系统窗口中按照提示完成卸载。完成官方卸载后，点击下方按钮开始深度排查其遗留在电脑中的文件与注册表残留。',
+                    'Finish uninstallation in the system window. When done, click the button below to scan all remaining files and registry keys.'))
+              )
+            );
+            actionBtn = btn('已完成卸载，开始深度勘探残留', 'Done uninstalling, scan leftover traces', 'primary', 'scan', () => {
+              goToStep(2);
+            });
+            altAction = h('a', {
+              class: 'small muted',
+              style: { cursor: 'pointer', textDecoration: 'underline' },
+              onclick: () => goToStep(2)
+            }, T('官方卸载器卡死？直接扫描残留', 'Uninstaller frozen? Scan leftovers directly'));
+          }
+        }
+
+        bodyEl.appendChild(banner);
+        if (altAction) {
+          bodyEl.appendChild(h('div', { class: 'row', style: { justifyContent: 'flex-end', marginTop: '6px' } }, altAction));
+        }
+
+        footEl.innerHTML = '';
+        footEl.appendChild(h('div', { class: 'wizard-foot-left' },
+          h('span', null, T('卸载前建议关闭该程序的所有后台进程', 'Close background processes before uninstalling'))
+        ));
+        footEl.appendChild(h('div', { class: 'wizard-foot-right' },
+          btn('取消', 'Cancel', 'ghost', null, () => closeWizard()),
+          actionBtn
         ));
       }
-      const failed = Array.isArray(r.failed) ? r.failed : [];
-      if (failed.length) {
-        loResult.appendChild(h('div', { class: 'small' },
-          T('失败 ' + fmtCount(failed.length) + ' 项', fmtCount(failed.length) + ' failed')));
-        loResult.appendChild(h('div', { class: 'list' }, ...failed.map((f) => h('div', { class: 'list-item' },
-          h('div', { class: 'stack', style: { minWidth: '0' } },
-            h('div', { class: 'mono small ellipsis', title: f.target || '' }, f.target || ''),
-            h('div', { class: 'small', style: { color: 'var(--danger)' } }, f.why || '')
+
+      // Step 2: 痕迹勘探中
+      async function renderPhase2() {
+        const scanBox = h('div', { class: 'wizard-status-banner info' },
+          icon('scan', 20),
+          h('div', { style: { flex: '1', minWidth: '0' } },
+            h('div', { style: { fontWeight: '600' } }, T('阶段二：全盘深层痕迹勘探中…', 'Phase 2: Deep leftover trace exploration…')),
+            h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.85, marginTop: '3px' } },
+              T(`正在多维排查「${app.name}」在 Program Files、AppData、LocalLow、以及 HKLM / HKCU 注册表分区的孤立项…`,
+                `Scanning Program Files, AppData, LocalLow, and HKLM/HKCU registry keys for "${app.name}"…`))
           )
-        ))));
+        );
+        bodyEl.appendChild(scanBox);
+        bodyEl.appendChild(skeleton(3, 'apps'));
+
+        footEl.innerHTML = '';
+        footEl.appendChild(h('div', { class: 'wizard-foot-left' },
+          h('span', null, T('正在分析磁盘扇区与注册表关联树…', 'Analyzing disk and registry tree…'))
+        ));
+        const btnCancelScan = btn('取消', 'Cancel', 'ghost', null, () => closeWizard());
+        footEl.appendChild(h('div', { class: 'wizard-foot-right' }, btnCancelScan));
+
+        try {
+          const r = await API.engine('apps.leftovers', {
+            name: app.name,
+            version: app.version || ''
+          });
+          leftoversData = r || { name: app.name, dirs: [], regs: [], blocked: [] };
+          checkedDirs = new Set((leftoversData.dirs || []).map((_, i) => i));
+          checkedRegs = new Set((leftoversData.regs || []).map((_, i) => i));
+          goToStep(3);
+        } catch (e) {
+          bodyEl.innerHTML = '';
+          bodyEl.appendChild(renderHeroCard());
+          bodyEl.appendChild(empty(T('勘探残留失败', 'Scan traces failed'), errText(e)));
+          footEl.innerHTML = '';
+          footEl.appendChild(h('div', { class: 'wizard-foot-left' }, null));
+          footEl.appendChild(h('div', { class: 'wizard-foot-right' },
+            btn('返回上一步', 'Back', 'ghost', null, () => goToStep(1)),
+            btn('重试勘探', 'Retry scan', 'primary', 'refresh', () => renderPhase2())
+          ));
+        }
       }
+
+      // Step 3: 残留审查与决策
+      function renderPhase3() {
+        const dirs = (leftoversData && leftoversData.dirs) || [];
+        const regs = (leftoversData && leftoversData.regs) || [];
+        const blocked = (leftoversData && leftoversData.blocked) || [];
+
+        // 场景 A：无任何残留
+        if (!dirs.length && !regs.length) {
+          const cleanBox = h('div', { class: 'wizard-report-box' },
+            h('div', { class: 'wizard-report-icon' }, icon('check', 28)),
+            h('div', { style: { fontSize: 'var(--fs-title)', fontWeight: '700', color: 'var(--ok)' } },
+              T('太棒了！未发现任何残留痕迹', 'Awesome! No leftover traces found')),
+            h('div', { class: 'muted small', style: { maxWidth: '440px', lineHeight: '1.6' } },
+              T(`该程序的安装目录、AppData 与注册表项均已彻底干净，无需额外清理。前台列表已为您自动移除该软件。`,
+                `All folders and registry keys for "${app.name}" are completely clean. App list has been updated.`))
+          );
+          bodyEl.appendChild(cleanBox);
+
+          removeAppFromState(app);
+
+          footEl.innerHTML = '';
+          footEl.appendChild(h('div', { class: 'wizard-foot-left' }, null));
+          footEl.appendChild(h('div', { class: 'wizard-foot-right' },
+            btn('完成并关闭', 'Done & close', 'primary', 'check', () => closeWizard())
+          ));
+          return;
+        }
+
+        // 场景 B：存在残留
+        const summaryBanner = h('div', { class: 'wizard-status-banner ok' },
+          icon('shield', 18),
+          h('div', { style: { flex: '1', minWidth: '0' } },
+            h('div', { style: { fontWeight: '600' } },
+              T(`勘探完毕：发现 ${fmtCount(dirs.length)} 个残留目录、${fmtCount(regs.length)} 个注册表项`,
+                `Scan completed: ${fmtCount(dirs.length)} folder(s), ${fmtCount(regs.length)} registry key(s)`)),
+            h('div', { style: { fontSize: 'var(--fs-tiny)', opacity: 0.9, marginTop: '3px' } },
+              T('已为您智能全选所有高信度残留项。注册表项将在清理前自动导出备份，防止误删。',
+                'High-confidence items are pre-selected. Registry entries will be automatically backed up.'))
+          )
+        );
+        bodyEl.appendChild(summaryBanner);
+
+        // 磁盘残留分组
+        if (dirs.length) {
+          const groupHead = h('div', { class: 'wizard-group-head' },
+            h('span', null, T(`📁 磁盘残留目录 (${dirs.length})`, `📁 Residual Folders (${dirs.length})`)),
+            h('span', { class: 'muted small' }, T('点击右侧可在资源管理器中查看', 'Click folder icon to inspect'))
+          );
+          const groupList = h('div', { class: 'wizard-group-list' },
+            ...dirs.map((d, i) => {
+              const chk = h('input', {
+                type: 'checkbox',
+                checked: checkedDirs.has(i),
+                onchange: (e) => {
+                  if (e.target.checked) checkedDirs.add(i);
+                  else checkedDirs.delete(i);
+                  updateCleanBtnState();
+                }
+              });
+              return h('div', { class: 'wizard-item-row' },
+                h('label', null,
+                  chk,
+                  h('span', { class: 'mono ellipsis', title: d }, d)
+                ),
+                iconBtn('在文件夹中打开', 'Open folder', 'folder', () => openPath(d))
+              );
+            })
+          );
+          bodyEl.appendChild(h('div', { class: 'wizard-group' }, groupHead, groupList));
+        }
+
+        // 注册表残留分组
+        if (regs.length) {
+          const groupHead = h('div', { class: 'wizard-group-head' },
+            h('span', null, T(`🔑 注册表残留键值 (${regs.length})`, `🔑 Registry Keys (${regs.length})`)),
+            h('span', { class: 'muted small' }, T('清理前自动导出至数据备份区', 'Auto-backed up before removal'))
+          );
+          const groupList = h('div', { class: 'wizard-group-list' },
+            ...regs.map((r, i) => {
+              const label = String(r.hive || '') + '\\' + String(r.key || '');
+              const chk = h('input', {
+                type: 'checkbox',
+                checked: checkedRegs.has(i),
+                onchange: (e) => {
+                  if (e.target.checked) checkedRegs.add(i);
+                  else checkedRegs.delete(i);
+                  updateCleanBtnState();
+                }
+              });
+              return h('div', { class: 'wizard-item-row' },
+                h('label', null,
+                  chk,
+                  h('span', { class: 'mono ellipsis', title: label }, label)
+                ),
+                iconBtn('复制注册表路径', 'Copy path', 'copy', () => copyText(label))
+              );
+            })
+          );
+          bodyEl.appendChild(h('div', { class: 'wizard-group' }, groupHead, groupList));
+        }
+
+        if (blocked.length) {
+          bodyEl.appendChild(h('div', { class: 'row wrap' },
+            h('span', { class: 'badge warn' }, T('被系统占用', 'In use')),
+            h('span', { class: 'small muted ellipsis', style: { maxWidth: '560px' }, title: blocked.join('\n') },
+              T(`${fmtCount(blocked.length)} 项被占用，将在下次重启后自动清理`,
+                `${fmtCount(blocked.length)} item(s) locked; will be cleaned on reboot`))
+          ));
+        }
+
+        renderFootStep3();
+      }
+
+      let btnCleanExec = null;
+      function updateCleanBtnState() {
+        if (!btnCleanExec) return;
+        const total = checkedDirs.size + checkedRegs.size;
+        btnCleanExec.disabled = total === 0;
+        btnCleanExec._label.textContent = total
+          ? T(`彻底抹除选中残留 (${total})`, `Clean selected (${total})`)
+          : T('彻底抹除选中残留', 'Clean selected');
+      }
+
+      function renderFootStep3() {
+        footEl.innerHTML = '';
+        const leftWrap = h('div', { class: 'wizard-foot-left' },
+          btn('全选', 'Select all', 'ghost sm', 'check', () => {
+            const dirs = (leftoversData && leftoversData.dirs) || [];
+            const regs = (leftoversData && leftoversData.regs) || [];
+            checkedDirs = new Set(dirs.map((_, i) => i));
+            checkedRegs = new Set(regs.map((_, i) => i));
+            renderBody();
+          }),
+          btn('全不选', 'Select none', 'ghost sm', 'close', () => {
+            checkedDirs = new Set();
+            checkedRegs = new Set();
+            renderBody();
+          }),
+          btn('重新扫描', 'Rescan', 'ghost sm', 'refresh', () => goToStep(2))
+        );
+
+        btnCleanExec = btn('彻底抹除选中残留', 'Clean selected', 'danger', 'trash', async () => {
+          await executeCleanup();
+        });
+        updateCleanBtnState();
+
+        const rightWrap = h('div', { class: 'wizard-foot-right' },
+          btn('暂不清理', 'Skip', 'ghost', null, () => closeWizard()),
+          btnCleanExec
+        );
+        footEl.appendChild(leftWrap);
+        footEl.appendChild(rightWrap);
+      }
+
+      async function executeCleanup() {
+        const dirs = (leftoversData.dirs || []).filter((_, i) => checkedDirs.has(i));
+        const regs = (leftoversData.regs || []).filter((_, i) => checkedRegs.has(i));
+        if (!dirs.length && !regs.length) return;
+
+        try {
+          isCleaning = true;
+          setBtnBusy(btnCleanExec, true, '正在抹除…', 'Cleaning…');
+          const r = await API.engine('apps.cleanup', {
+            name: app.name,
+            version: app.version || '',
+            dirs: dirs,
+            regs: regs,
+            confirm: true
+          });
+          cleanupReport = r || {};
+          removeAppFromState(app);
+          goToStep(4);
+        } catch (e) {
+          toast(errText(e), 'error');
+        } finally {
+          isCleaning = false;
+          if (btnCleanExec) setBtnBusy(btnCleanExec, false);
+        }
+      }
+
+      // Step 4: 成果报告
+      function renderPhase4() {
+        const removedDirs = (cleanupReport && cleanupReport.removed_dirs) || [];
+        const removedRegs = (cleanupReport && cleanupReport.removed_regs) || [];
+        const backupDir = cleanupReport && cleanupReport.backup_dir;
+        const failed = (cleanupReport && cleanupReport.failed) || [];
+
+        const reportBox = h('div', { class: 'wizard-report-box' },
+          h('div', { class: 'wizard-report-icon' }, icon('check', 28)),
+          h('div', { style: { fontSize: 'var(--fs-title)', fontWeight: '700', color: 'var(--ok)' } },
+            T('残留已全部清除，软件已从系统彻底抹除！', 'Leftovers cleaned! Program completely purged')),
+          h('div', { class: 'muted small', style: { maxWidth: '440px' } },
+            T(`「${app.name}」的所有关联文件与注册表键已安全抹除，列表已实时剔除，系统恢复洁净。`,
+              `All traces of "${app.name}" have been permanently removed. App list updated.`)),
+          h('div', { class: 'wizard-report-stats' },
+            h('div', { class: 'wizard-report-stat-item' },
+              h('span', { class: 'wizard-report-stat-num' }, String(removedDirs.length)),
+              h('span', { class: 'wizard-report-stat-label' }, T('已清理磁盘目录', 'Folders removed'))
+            ),
+            h('div', { style: { width: '1px', height: '24px', background: 'var(--line)' } }),
+            h('div', { class: 'wizard-report-stat-item' },
+              h('span', { class: 'wizard-report-stat-num' }, String(removedRegs.length)),
+              h('span', { class: 'wizard-report-stat-label' }, T('已清除注册表项', 'Keys removed'))
+            )
+          )
+        );
+        bodyEl.appendChild(reportBox);
+
+        if (backupDir) {
+          const backupRow = h('div', { class: 'wizard-status-banner info', style: { alignItems: 'center' } },
+            icon('shield', 18),
+            h('div', { style: { flex: '1', minWidth: '0' } },
+              h('div', { style: { fontWeight: '600' } }, T('注册表项安全备份位置', 'Registry Backup Location')),
+              h('div', { class: 'mono small ellipsis', style: { opacity: 0.85, marginTop: '2px' }, title: backupDir }, backupDir)
+            ),
+            btn('打开备份文件夹', 'Open folder', 'ghost sm', 'folder', () => openPath(backupDir))
+          );
+          bodyEl.appendChild(backupRow);
+        }
+
+        if (failed.length) {
+          const failGroup = h('div', { class: 'wizard-group' },
+            h('div', { class: 'wizard-group-head', style: { color: 'var(--danger)' } },
+              T(`部分项目未能清除 (${failed.length})`, `Items failed to clean (${failed.length})`)
+            ),
+            h('div', { class: 'wizard-group-list' },
+              ...failed.map((f) => h('div', { class: 'wizard-item-row' },
+                h('span', { class: 'mono ellipsis', title: f.target || '' }, f.target || ''),
+                h('span', { class: 'small', style: { color: 'var(--danger)' } }, f.why || '')
+              ))
+            )
+          );
+          bodyEl.appendChild(failGroup);
+        }
+
+        footEl.innerHTML = '';
+        footEl.appendChild(h('div', { class: 'wizard-foot-left' }, null));
+        footEl.appendChild(h('div', { class: 'wizard-foot-right' },
+          btn('完成并关闭向导', 'Done & close', 'primary', 'check', () => closeWizard())
+        ));
+      }
+
+      function goToStep(s) {
+        currentStep = s;
+        renderHead();
+        renderBody();
+      }
+
+      function removeAppFromState(targetApp) {
+        if (!targetApp) return;
+        S.items = S.items.filter((x) => keyOf(x) !== keyOf(targetApp));
+        S.store = S.store.filter((x) => keyOf(x) !== keyOf(targetApp));
+        GlobalAppsCache.apps = S.items;
+        GlobalAppsCache.store = S.store;
+        applyFilter();
+        renderStatLine();
+      }
+
+      renderHead();
+      renderBody();
+    }
+
+    /* 拓展功能：排查已卸载软件的孤立残留 */
+    async function scanOrphanLeftovers() {
+      const inputEl = h('input', {
+        class: 'input grow',
+        type: 'text',
+        placeholder: T('输入已卸载软件名（如 百度网盘、WPS、迅雷…）', 'Type uninstalled app name (e.g. BaiduNetdisk, Thunder…)'),
+        style: { minWidth: '240px' }
+      });
+
+      const commonOrphans = ['百度网盘', '迅雷', '搜狗输入法', 'TeamViewer', 'WPS Office', '鲁大师', '优酷', '爱奇艺'];
+      let orphanModal = null;
+      function startOrphanScan(name) {
+        const q = String(name || inputEl.value).trim();
+        if (!q) {
+          toast(T('请输入要排查的软件名称', 'Enter an app name to scan'), 'warn');
+          return;
+        }
+        if (orphanModal) orphanModal.close();
+        openUninstallWizard({ name: q }, 'scan');
+      }
+
+      const chips = commonOrphans.map((name) =>
+        h('button', {
+          class: 'chip',
+          type: 'button',
+          onclick: () => {
+            inputEl.value = name;
+            startOrphanScan(name);
+          }
+        }, name)
+      );
+
+      orphanModal = modal({
+        title: T('排查已卸载软件的孤立残留', 'Scan Orphaned App Traces'),
+        wide: true,
+        body: h('div', { class: 'stack', style: { gap: '14px' } },
+          h('div', { class: 'small muted' },
+            T('用于深度清理过去通过其他方式卸载后、遗留在 AppData、ProgramData 或注册表中的陈年孤立残留项。',
+              'Detect and purge leftover files/registry keys from previously uninstalled applications.')),
+          h('div', { class: 'row', style: { gap: '8px' } },
+            inputEl,
+            btn('深度排查', 'Deep Scan', 'primary', 'scan', () => startOrphanScan())
+          ),
+          h('div', { class: 'small muted', style: { marginTop: '4px' } }, T('常见高残留软件快捷排查：', 'Quick candidates:')),
+          h('div', { class: 'row wrap', style: { gap: '6px' } }, ...chips)
+        ),
+        buttons: [{ id: 'close', label: T('关闭', 'Close'), kind: 'ghost' }]
+      });
+      setTimeout(() => inputEl.focus(), 50);
     }
 
     /* 第四块不存在：残留内容合并进 loSection，保持顶层 3 块 */

@@ -7920,13 +7920,14 @@ def _engine_startup_delete(params):
     return {"ok": True, "name": name, "deleted": True}
 
 
-def _engine_process_is_running(proc_name):
-    """判断指定名称的进程当前是否正在运行（纯 ctypes 工具快照，微秒级极速，不占主线程）。"""
-    if os.name != "nt":
-        return False
+if os.name == "nt":
     import ctypes
     from ctypes import wintypes
+
     TH32CS_SNAPPROCESS = 0x00000002
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
 
     class _PE32W(ctypes.Structure):
         _fields_ = [
@@ -7942,37 +7943,85 @@ def _engine_process_is_running(proc_name):
             ("szExeFile", wintypes.WCHAR * 260)
         ]
 
+    class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    try:
+        _k32_proc = ctypes.windll.kernel32
+        _k32_proc.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        _k32_proc.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        _k32_proc.CloseHandle.argtypes = [wintypes.HANDLE]
+        _k32_proc.CloseHandle.restype = wintypes.BOOL
+        _k32_proc.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PE32W)]
+        _k32_proc.Process32FirstW.restype = wintypes.BOOL
+        _k32_proc.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PE32W)]
+        _k32_proc.Process32NextW.restype = wintypes.BOOL
+        _k32_proc.OpenProcess.restype = wintypes.HANDLE
+        _k32_proc.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        _k32_proc.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        _k32_proc.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+    except Exception:
+        _k32_proc = None
+
+    try:
+        _psapi_proc = ctypes.windll.psapi
+        _psapi_proc.GetProcessMemoryInfo.restype = wintypes.BOOL
+        _psapi_proc.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_PROCESS_MEMORY_COUNTERS),
+            wintypes.DWORD,
+        ]
+    except Exception:
+        _psapi_proc = None
+else:
+    _PE32W = None
+    _PROCESS_MEMORY_COUNTERS = None
+    _k32_proc = None
+    _psapi_proc = None
+
+
+def _engine_process_is_running(proc_name):
+    """判断指定名称的进程当前是否正在运行（纯 ctypes 工具快照，微秒级极速，不占主线程）。"""
+    if os.name != "nt" or not _k32_proc or not _PE32W:
+        return False
+
     target = proc_name.lower()
     if not target.endswith(".exe"):
         target += ".exe"
 
     try:
-        kernel32 = ctypes.windll.kernel32
-        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PE32W)]
-        kernel32.Process32FirstW.restype = wintypes.BOOL
-        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PE32W)]
-        kernel32.Process32NextW.restype = wintypes.BOOL
-
-        h_snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        h_snap = _k32_proc.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
         if not h_snap or h_snap == -1 or h_snap == (1 << (8 * ctypes.sizeof(wintypes.HANDLE))) - 1:
             return False
         pe = _PE32W()
         pe.dwSize = ctypes.sizeof(_PE32W)
         found = False
         try:
-            if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+            if _k32_proc.Process32FirstW(h_snap, ctypes.byref(pe)):
                 while True:
                     if pe.szExeFile.lower() == target:
                         found = True
                         break
-                    if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                    if not _k32_proc.Process32NextW(h_snap, ctypes.byref(pe)):
                         break
         finally:
-            kernel32.CloseHandle(h_snap)
+            _k32_proc.CloseHandle(h_snap)
         return found
     except Exception:
         return False
@@ -8077,44 +8126,8 @@ def _engine_process_list(params=None):
     aggregate = _engine_get(params, "aggregate", True, bool)
     search = _engine_get(params, "search", "", str).strip().lower()
 
-    if os.name != "nt":
-        return {"items": [], "total_count": 0, "total_memory": 0, "running": False}
-
-    import ctypes
-    from ctypes import wintypes
-
-    TH32CS_SNAPPROCESS = 0x00000002
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    PROCESS_QUERY_INFORMATION = 0x0400
-    PROCESS_VM_READ = 0x0010
-
-    class _PE32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", wintypes.LONG),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", wintypes.WCHAR * 260)
-        ]
-
-    class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-        _fields_ = [
-            ("cb", wintypes.DWORD),
-            ("PageFaultCount", wintypes.DWORD),
-            ("PeakWorkingSetSize", ctypes.c_size_t),
-            ("WorkingSetSize", ctypes.c_size_t),
-            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-            ("PagefileUsage", ctypes.c_size_t),
-            ("PeakPagefileUsage", ctypes.c_size_t),
-        ]
+    if os.name != "nt" or not _k32_proc or not _PE32W:
+        return {"items": [], "total_count": 0, "total_memory": 0, "raw_count": 0}
 
     _SYS_PROTECTED = {
         "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
@@ -8122,73 +8135,76 @@ def _engine_process_list(params=None):
         "runtimebroker", "taskmgr", "system", "idle", "winlogon", "sihost", "fontdrvhost"
     }
 
-    hSnap = ctypes.windll.kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if not hSnap or hSnap == -1:
-        return {"items": [], "total_count": 0, "total_memory": 0}
+    hSnap = _k32_proc.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not hSnap or hSnap == -1 or hSnap == (1 << (8 * ctypes.sizeof(wintypes.HANDLE))) - 1:
+        return {"items": [], "total_count": 0, "total_memory": 0, "raw_count": 0}
 
     pe = _PE32W()
     pe.dwSize = ctypes.sizeof(_PE32W)
-    ok = ctypes.windll.kernel32.Process32FirstW(hSnap, ctypes.byref(pe))
 
     raw_procs = []
     total_memory = 0
 
-    while ok:
-        pid = int(pe.th32ProcessID)
-        name = str(pe.szExeFile)
-        threads = int(pe.cntThreads)
-        mem_size = 0
-        exe_path = ""
+    try:
+        if _k32_proc.Process32FirstW(hSnap, ctypes.byref(pe)):
+            while True:
+                pid = int(pe.th32ProcessID)
+                name = str(pe.szExeFile)
+                threads = int(pe.cntThreads)
+                mem_size = 0
+                exe_path = ""
 
-        # 获取物理内存工作集
-        hProcMem = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
-        if hProcMem:
-            try:
-                mem = _PROCESS_MEMORY_COUNTERS()
-                mem.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
-                if ctypes.windll.psapi.GetProcessMemoryInfo(hProcMem, ctypes.byref(mem), mem.cb):
-                    mem_size = int(mem.WorkingSetSize)
-            except Exception:
-                pass
-            finally:
-                ctypes.windll.kernel32.CloseHandle(hProcMem)
+                # 获取物理内存工作集
+                if _psapi_proc:
+                    hProcMem = _k32_proc.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+                    if hProcMem:
+                        try:
+                            mem = _PROCESS_MEMORY_COUNTERS()
+                            mem.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
+                            if _psapi_proc.GetProcessMemoryInfo(hProcMem, ctypes.byref(mem), mem.cb):
+                                mem_size = int(mem.WorkingSetSize)
+                        except Exception:
+                            pass
+                        finally:
+                            _k32_proc.CloseHandle(hProcMem)
 
-        # 获取可执行文件路径
-        hProcPath = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if hProcPath:
-            try:
-                buf = ctypes.create_unicode_buffer(1024)
-                size = wintypes.DWORD(1024)
-                if ctypes.windll.kernel32.QueryFullProcessImageNameW(hProcPath, 0, buf, ctypes.byref(size)):
-                    exe_path = str(buf.value)
-            except Exception:
-                pass
-            finally:
-                ctypes.windll.kernel32.CloseHandle(hProcPath)
+                # 获取可执行文件路径
+                hProcPath = _k32_proc.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                if hProcPath:
+                    try:
+                        buf = ctypes.create_unicode_buffer(1024)
+                        size = wintypes.DWORD(1024)
+                        if _k32_proc.QueryFullProcessImageNameW(hProcPath, 0, buf, ctypes.byref(size)):
+                            exe_path = str(buf.value)
+                    except Exception:
+                        pass
+                    finally:
+                        _k32_proc.CloseHandle(hProcPath)
 
-        clean = name.lower()
-        if clean.endswith(".exe"):
-            clean = clean[:-4]
-        is_system = clean in _SYS_PROTECTED or pid <= 4
+                clean = name.lower()
+                if clean.endswith(".exe"):
+                    clean = clean[:-4]
+                is_system = clean in _SYS_PROTECTED or pid <= 4
 
-        icon_src = exe_path if exe_path else ""
-        icon = app_icon_cached(icon_src) if icon_src else ""
+                icon_src = exe_path if exe_path else ""
+                icon = app_icon_cached(icon_src) if icon_src else ""
 
-        total_memory += mem_size
-        raw_procs.append({
-            "pid": pid,
-            "name": name,
-            "clean_name": clean,
-            "threads": threads,
-            "memory": mem_size,
-            "exe_path": exe_path,
-            "icon_src": icon_src,
-            "icon": icon,
-            "is_system": is_system
-        })
-        ok = ctypes.windll.kernel32.Process32NextW(hSnap, ctypes.byref(pe))
-
-    ctypes.windll.kernel32.CloseHandle(hSnap)
+                total_memory += mem_size
+                raw_procs.append({
+                    "pid": pid,
+                    "name": name,
+                    "clean_name": clean,
+                    "threads": threads,
+                    "memory": mem_size,
+                    "exe_path": exe_path,
+                    "icon_src": icon_src,
+                    "icon": icon,
+                    "is_system": is_system
+                })
+                if not _k32_proc.Process32NextW(hSnap, ctypes.byref(pe)):
+                    break
+    finally:
+        _k32_proc.CloseHandle(hSnap)
 
     if aggregate:
         grouped = {}

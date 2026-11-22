@@ -1391,73 +1391,279 @@ html[data-theme="dark"] .admin-fused-btn.warn .admin-dot {
   flex-shrink: 0;
 }
 
-/* ---------- 残留清理与卸载协同样式 ---------- */
-.lo-target-card {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: 10px 14px;
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  margin-bottom: var(--space-2);
-  transition: all var(--dur-1) var(--ease);
-}
-.lo-target-card .app-icon-wrap {
-  width: 32px;
-  height: 32px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.lo-target-card .app-info {
+/* ---------- 深度卸载与残留清理向导工作台样式 ---------- */
+.modal.uninstall-wizard-modal {
+  width: 90vw;
+  max-width: 780px;
+  max-height: 88vh;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1;
+  padding: 0;
+  overflow: hidden;
+  border-radius: var(--radius-lg, 12px);
+  background: var(--surface-1);
+  box-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.28), 0 0 0 1px var(--line);
 }
-.lo-target-card .app-name-row {
+.wizard-head {
+  padding: 16px 22px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.wizard-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.wizard-title {
+  font-size: var(--fs-title, 16px);
+  font-weight: 700;
+  color: var(--text-1);
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.lo-target-card .app-name {
-  font-weight: 600;
-  font-size: var(--fs-body);
-  color: var(--text-1);
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
 }
-.lo-target-card .app-sub {
-  font-size: var(--fs-tiny);
+.wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-tiny, 11px);
+  color: var(--text-3);
+  transition: all var(--dur-2) var(--ease);
+}
+.wizard-step.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.wizard-step.done {
+  color: var(--ok);
+}
+.wizard-step-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--surface-3, rgba(0,0,0,0.06));
+  color: var(--text-2);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  transition: all var(--dur-2) var(--ease);
+}
+.wizard-step.active .wizard-step-dot {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(217, 119, 87, 0.22);
+}
+.wizard-step.done .wizard-step-dot {
+  background: var(--ok);
+  color: #fff;
+  border-color: var(--ok);
+}
+.wizard-step-line {
+  flex: 1;
+  height: 2px;
+  background: var(--line);
+  min-width: 12px;
+  border-radius: 1px;
+}
+.wizard-step-line.done {
+  background: var(--ok);
+}
+
+.wizard-body {
+  padding: 18px 22px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 280px;
+  max-height: calc(88vh - 150px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.wizard-hero-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--surface-2) 0%, rgba(255,255,255,0.02) 100%);
+  border: 1px solid var(--line);
+}
+.wizard-hero-card .app-icon-wrap {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+}
+.wizard-hero-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+.wizard-hero-name {
+  font-size: var(--fs-body, 14px);
+  font-weight: 700;
+  color: var(--text-1);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wizard-hero-sub {
+  font-size: var(--fs-tiny, 11px);
   color: var(--text-2);
 }
-.lo-uninstall-banner {
+
+.wizard-status-banner {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: 10px 14px;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
   border-radius: var(--radius);
   background: var(--accent-weak);
-  border: 1px solid rgba(217, 119, 87, 0.28);
+  border: 1px solid rgba(217, 119, 87, 0.25);
   color: var(--text-1);
-  margin-bottom: var(--space-2);
-  animation: banner-glow 2s infinite alternate;
 }
-@keyframes banner-glow {
-  from { box-shadow: 0 0 0 0 rgba(217, 119, 87, 0.1); }
-  to { box-shadow: 0 0 0 4px rgba(217, 119, 87, 0.18); }
+.wizard-status-banner.ok {
+  background: rgba(34, 197, 94, 0.08);
+  border-color: rgba(34, 197, 94, 0.25);
 }
-.lo-item-row {
+.wizard-status-banner.info {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+
+.wizard-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-1);
+}
+.wizard-group-head {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-small, 12px);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.wizard-group-list {
+  max-height: 190px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.wizard-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+  font-size: var(--fs-tiny, 11px);
   transition: background var(--dur-1) var(--ease);
 }
-.lo-item-row:hover {
+.wizard-item-row:last-child {
+  border-bottom: none;
+}
+.wizard-item-row:hover {
   background: var(--hover);
+}
+.wizard-item-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+
+.wizard-report-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px 16px;
+  gap: 12px;
+}
+.wizard-report-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--ok);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+.wizard-report-stats {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin: 10px 0;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.wizard-report-stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.wizard-report-stat-num {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+.wizard-report-stat-label {
+  font-size: var(--fs-tiny, 11px);
+  color: var(--text-2);
+}
+
+.wizard-foot {
+  padding: 12px 22px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.wizard-foot-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--fs-tiny, 11px);
+  color: var(--text-3);
+}
+.wizard-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 /* ---------- 工具行 / 时间线 ---------- */

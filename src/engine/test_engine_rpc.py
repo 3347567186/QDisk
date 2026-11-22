@@ -3245,6 +3245,22 @@ class TestProcess(EngineCase):
         self.assertFalse(r2["ok"])
         self.assertIn("非法进程名", r2["error"])
 
+    def test_process_close_then_list_no_ctypes_type_error(self):
+        """回归测试：调用 process.close 后调用 process.list 不得发生 ctypes LP__PE32W 类型冲突。"""
+        # 1. 调用 process.close 触发 _engine_process_is_running
+        r_close = self.rpc_ok("process.close", {"name": "non_existent_app_12345"})
+        self.assertTrue(r_close.get("ok", True))
+        # 2. 紧接着调用 process.list，确保不会由于局部 _PE32W 重新绑定而触发 ctypes TypeError
+        r_list1 = self.rpc_ok("process.list", {"aggregate": True})
+        self.assertIn("items", r_list1)
+        self.assertIsInstance(r_list1["items"], list)
+        self.assertGreater(len(r_list1["items"]), 0)
+        # 3. 再次以 non-aggregate 模式调用
+        r_list2 = self.rpc_ok("process.list", {"aggregate": False})
+        self.assertIn("items", r_list2)
+        self.assertIsInstance(r_list2["items"], list)
+        self.assertGreater(len(r_list2["items"]), 0)
+
 
 class TestSystemPerformance(EngineCase):
     def test_system_performance_metrics(self):
