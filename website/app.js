@@ -12,7 +12,7 @@
   const REPO_SLUG = '3347567186/QDisk';
   const STORAGE_SCHEME = 'qdisk-site-scheme';
   const STORAGE_LANG = 'qdisk-site-lang';
-  const LATEST_URL = `https://github.com/${REPO_SLUG}/releases/latest/download/latest.json`;
+  const API_LATEST_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`;
 
   const COPY = {
     zh: {
@@ -386,7 +386,7 @@
   }
 
   /* ---- Bidirectional Gradual Float-In Scroll Reveal (Down & Up) ---- */
-  const floatEls = Array.from(document.querySelectorAll('.float-in'));
+  const floatEls = Array.from(document.querySelectorAll('.float-in, .float-group'));
   if (!prefersReduced && floatEls.length && 'IntersectionObserver' in window) {
     document.documentElement.classList.add('js-float-ready');
 
@@ -479,39 +479,43 @@
     });
   }
 
-  /* ---- Auto-Hydrate Latest Release Metadata from GitHub latest.json ---- */
+  /* ---- Auto-Hydrate Latest Release Metadata via CORS-Enabled GitHub Releases API ---- */
   function fmtMiB(bytes) {
     const n = Number(bytes) || 0;
     return n > 0 ? (n / (1024 * 1024)).toFixed(1) + ' MB' : '';
   }
 
-  fetch(LATEST_URL, { mode: 'cors' })
+  fetch(API_LATEST_URL, { mode: 'cors', headers: { Accept: 'application/vnd.github+json' } })
     .then((r) => (r.ok ? r.json() : null))
-    .then((m) => {
-      if (!m || !m.version) return;
-      const ver = 'v' + String(m.version).replace(/^v/i, '');
+    .then((rel) => {
+      if (!rel || !rel.tag_name) return;
+      const ver = 'v' + String(rel.tag_name).replace(/^v/i, '');
       currentVer = ver;
+      const assets = Array.isArray(rel.assets) ? rel.assets : [];
+      const exe = assets.find((a) => /setup\.exe$/i.test(a.name || ''));
+      const zip = assets.find((a) => /portable\.zip$/i.test(a.name || ''));
+      const sha = assets.find((a) => /^SHA256SUMS\.txt$/i.test(a.name || ''));
       const setTxt = (id, v) => { const el = document.getElementById(id); if (el && v) el.textContent = v; };
       const setHref = (id, u) => { const el = document.getElementById(id); if (el && u) el.href = u; };
 
       setTxt('dl-exe-ver', ver);
       setTxt('dl-zip-ver', ver);
       setTxt('win-chrome-title', curLang === 'en' ? `QDisk ${ver}` : `轻盘 QDisk ${ver}`);
-      if (m.installer && m.installer.url) {
-        const sz = fmtMiB(m.installer.size);
-        setHref('hero-dl-installer', m.installer.url);
-        setHref('dl-btn-exe', m.installer.url);
+      if (exe && exe.browser_download_url) {
+        const sz = fmtMiB(exe.size);
+        setHref('hero-dl-installer', exe.browser_download_url);
+        setHref('dl-btn-exe', exe.browser_download_url);
         setTxt('hero-exe-size', sz);
-        setTxt('dl-exe-name', m.installer.file + (sz ? ' · ' + sz : ''));
+        setTxt('dl-exe-name', exe.name + (sz ? ' · ' + sz : ''));
       }
-      if (m.portable && m.portable.url) {
-        const sz = fmtMiB(m.portable.size);
-        setHref('hero-dl-portable', m.portable.url);
-        setHref('dl-btn-zip', m.portable.url);
+      if (zip && zip.browser_download_url) {
+        const sz = fmtMiB(zip.size);
+        setHref('hero-dl-portable', zip.browser_download_url);
+        setHref('dl-btn-zip', zip.browser_download_url);
         setTxt('hero-zip-size', sz);
-        setTxt('dl-zip-name', m.portable.file + (sz ? ' · ' + sz : ''));
+        setTxt('dl-zip-name', zip.name + (sz ? ' · ' + sz : ''));
       }
-      setHref('dl-sha-link', `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
+      setHref('dl-sha-link', (sha && sha.browser_download_url) || `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
     })
-    .catch(() => { /* Static v1.43.17 fallback already rendered */ });
+    .catch(() => { /* Static v1.43.18 fallback already rendered */ });
 })();

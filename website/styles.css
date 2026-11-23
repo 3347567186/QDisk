@@ -1223,7 +1223,8 @@ html[lang="en"] .brand-cn { display: none; }
    ============================================================================ */
 @media (prefers-reduced-motion: no-preference) {
   /* Gradual time-eased float-in (activated only when JS sets .js-float-ready so no-JS stays visible) */
-  html.js-float-ready .float-in {
+  html.js-float-ready .float-in,
+  html.js-float-ready .float-group .float-item {
     opacity: 0;
     transform: translateY(48px) scale(0.972);
     filter: blur(5px);
@@ -1234,11 +1235,13 @@ html[lang="en"] .brand-cn { display: none; }
       filter 0.86s ease var(--float-delay, 0ms);
   }
 
-  html.js-float-ready .float-in.from-top {
+  html.js-float-ready .float-in.from-top,
+  html.js-float-ready .float-group.from-top .float-item {
     transform: translateY(-38px) scale(0.98);
   }
 
-  html.js-float-ready .float-in.is-visible {
+  html.js-float-ready .float-in.is-visible,
+  html.js-float-ready .float-group.is-visible .float-item {
     opacity: 1;
     transform: translateY(0) scale(1);
     filter: blur(0);
@@ -1318,7 +1321,8 @@ html[lang="en"] .brand-cn { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .float-in {
+  .float-in,
+  .float-group .float-item {
     opacity: 1 !important;
     transform: none !important;
     filter: none !important;
