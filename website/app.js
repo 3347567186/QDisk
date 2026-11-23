@@ -20,6 +20,7 @@
       'nav.showcase': '核心体验',
       'nav.bench': '实测数据',
       'nav.download': '下载获取',
+      'nav.star': '点 Star',
       'nav.get': '立即下载',
       'hero.title': '零广告、不靠黑盒<br>每一步都能撤回的 <span class="title-accent">Windows 轻盘</span>',
       'hero.sub': '将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 20.7 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。',
@@ -87,6 +88,7 @@
       'nav.showcase': 'Features',
       'nav.bench': 'Benchmarks',
       'nav.download': 'Download',
+      'nav.star': 'Star',
       'nav.get': 'Download',
       'hero.title': 'Zero ads, zero black boxes.<br>The undoable <span class="title-accent">Windows utility</span>.',
       'hero.sub': 'Dry-Run file organization, a 4-tier multi-core Rust archiver, risk-tiered cleanup, and an auditable local AI assistant in one 20.7 MB native app. Every risky action previews first.',
@@ -260,6 +262,12 @@
     const winTitle = document.getElementById('win-chrome-title');
     if (winTitle) {
       winTitle.textContent = curLang === 'en' ? `QDisk ${currentVer}` : `轻盘 QDisk ${currentVer}`;
+    }
+    const starBtn = document.getElementById('header-star-btn');
+    if (starBtn) {
+      const tip = curLang === 'en' ? 'Star QDisk on GitHub' : '在 GitHub 上给 QDisk 点 Star';
+      starBtn.setAttribute('aria-label', tip);
+      starBtn.setAttribute('title', tip);
     }
     const activeTab = document.querySelector('.stage-tabs [role="tab"][aria-selected="true"]');
     updateStageCaption(activeTab);
@@ -514,4 +522,17 @@
       setHref('dl-sha-link', `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
     })
     .catch(() => { /* Static v1.43.18 fallback already rendered */ });
+
+  /* ---- Hydrate GitHub Star Count from Same-Origin repo-meta.json (0 CORS / 0 Rate-Limit) ---- */
+  fetch('./repo-meta.json', { cache: 'no-cache' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((meta) => {
+      const stars = Number(meta && meta.stars) || 0;
+      const countEl = document.getElementById('header-star-count');
+      if (countEl && stars > 0) {
+        countEl.textContent = stars >= 1000 ? (stars / 1000).toFixed(1) + 'k' : String(stars);
+        countEl.hidden = false;
+      }
+    })
+    .catch(() => {});
 })();
