@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem};
 
 mod archive;
+mod updater;
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, State, WindowEvent};
 
@@ -587,7 +588,8 @@ fn app_capabilities() -> Value {
             "aiActions": true,
             "engineMethods": true,
             "archiveCodecs": true,
-            "lifecycleHooks": true
+            "lifecycleHooks": true,
+            "updater": true
         }
     })
 }
@@ -2567,6 +2569,7 @@ fn main() {
             engine: Arc::new(Mutex::new(None)),
         })
         .manage(archive::ArchiveCtx::default())
+        .manage(updater::UpdaterState::default())
         .invoke_handler(tauri::generate_handler![
             engine_call,
             engine_restart,
@@ -2627,7 +2630,15 @@ fn main() {
             archive::archive_rar_install,
             archive::pick_archive,
             archive::pick_files,
-            archive::pick_archive_save
+            archive::pick_archive_save,
+            updater::updater_status,
+            updater::updater_config_get,
+            updater::updater_config_set,
+            updater::updater_check,
+            updater::updater_download,
+            updater::updater_cancel,
+            updater::updater_clear_cache,
+            updater::updater_install
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

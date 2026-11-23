@@ -113,6 +113,19 @@
            secAssistant 整块重建，闭包变量留不住，弹窗就再也关不掉了。 */
         modelModal: null,
         aiKeyShown: false,
+        /* 在线更新状态：完全独立，不影响现有任何设置项 */
+        updStatus: null,
+        updFeedDraft: '',
+        updChannel: 'stable',
+        updAutoCheck: true,
+        updChecking: false,
+        updCheck: (App && App._pendingUpdate) || null,
+        updError: null,
+        updDownloading: false,
+        updCancelling: false,
+        updInstalling: false,
+        updProg: null,
+        updProgDom: null,
         openId: 'appearance'
       };
 
@@ -280,6 +293,7 @@
         holder.appendChild(secPerformance(holder));
         holder.appendChild(secSchedule(holder));
         holder.appendChild(secAssistant(holder));
+        holder.appendChild(secUpdater(holder));
         holder.appendChild(secMaintenance(holder));
         root.appendChild(holder);
         /* 刚拉完模型清单：这一帧画完再把弹窗弹出来，否则清单还没进 DOM */
@@ -2068,6 +2082,418 @@
         }
       }
 
+      /* ---------- 版本与在线更新 ---------- */
+      function fmtSize(n) {
+        if (UI && typeof UI.fmtBytes === 'function') return UI.fmtBytes(Number(n) || 0);
+        const v = Number(n) || 0;
+        if (v >= 1048576) return (v / 1048576).toFixed(1) + ' MB';
+        if (v >= 1024) return (v / 1024).toFixed(1) + ' KB';
+        return v + ' B';
+      }
+
+      function syncUpdaterProgressDom() {
+        const dom = state.updProgDom;
+        if (!dom || !dom.wrap) return;
+        const p = state.updProg;
+        const show = !!(state.updDownloading || (p && (p.phase === 'downloading' || p.phase === 'verifying')));
+        dom.wrap.hidden = !show;
+        if (!show) return;
+        const pct = Math.max(0, Math.min(100, Number(p && p.percent) || 0));
+        dom.fill.style.width = pct + '%';
+        if (state.updCancelling) {
+          dom.meta.textContent = T('正在取消下载并清理临时文件…', 'Cancelling download and cleaning up…');
+        } else if (p && p.phase === 'verifying') {
+          dom.meta.textContent = T('正在校验 SHA-256 完整性与文件头…', 'Verifying SHA-256 integrity…');
+        } else {
+          const dl = fmtSize(p && p.downloaded);
+          const tot = (p && p.total > 0) ? fmtSize(p.total) : T('计算中', '…');
+          const spd = (p && p.speedBps > 0) ? ' · ' + fmtSize(p.speedBps) + '/s' : '';
+          dom.meta.textContent = `${pct}% · ${dl} / ${tot}${spd}`;
+        }
+        dom.cancelBtn.disabled = !!state.updCancelling;
+        dom.cancelBtn.textContent = state.updCancelling ? T('取消中…', 'Cancelling…') : T('取消下载', 'Cancel');
+      }
+
+      function secUpdater(holder) {
+        const st = state.updStatus;
+        const curVer = (st && st.currentVersion) || (state.app && state.app.version) || '—';
+        const kind = (st && st.installKind) || 'portable';
+        const kindLabel = kind === 'installer' ? T('安装版 (NSIS)', 'Installer (NSIS)') : T('便携版 (ZIP)', 'Portable (ZIP)');
+        const chk = state.updCheck;
+        const staged = (chk && chk.staged) || (st && st.staged) || null;
+        const hasNew = !!(chk && chk.hasUpdate);
+        const cacheBytes = Number(st && st.cacheBytes) || 0;
+
+        /* 持久化下载进度区域：收到高频 updater-progress 只就地改样式/文案，不重建取消按钮 */
+        const progFill = h('div', { class: 'upd-prog-fill', style: 'width: 0%' });
+        const progMeta = h('span', { class: 'small muted upd-prog-meta', text: '' });
+        const cancelBtn = h('button', {
+          type: 'button',
+          class: 'btn sm ghost',
+          text: T('取消下载', 'Cancel'),
+          onclick: cancelUpdateDownload
+        });
+        const progWrap = h('div', { class: 'upd-prog', hidden: !state.updDownloading },
+          h('div', { class: 'upd-prog-bar' }, progFill),
+          h('div', { class: 'row upd-prog-row' }, progMeta, h('div', { class: 'spacer' }), cancelBtn)
+        );
+        state.updProgDom = { wrap: progWrap, fill: progFill, meta: progMeta, cancelBtn };
+        syncUpdaterProgressDom();
+
+        const feedInput = h('input', {
+          class: 'input upd-feed-input',
+          type: 'url',
+          value: state.updFeedDraft,
+          placeholder: 'https://your-domain.com/releases/latest.json  或  https://api.github.com/repos/owner/repo/releases/latest',
+          oninput: (e) => { state.updFeedDraft = e.target.value; }
+        });
+
+        const resultCard = (() => {
+          if (state.updError) {
+            return h('div', { class: 'upd-box warn' },
+              h('div', { class: 'upd-box-title', text: T('检查或下载失败', 'Update failed') }),
+              h('div', { class: 'small muted', text: state.updError })
+            );
+          }
+          if (!chk && !staged) return null;
+          if (chk && !hasNew && !staged) {
+            return h('div', { class: 'upd-box ok' },
+              h('div', { class: 'upd-box-title', text: T('当前已是最新版本', 'You are up to date') }),
+              h('div', {
+                class: 'small muted',
+                text: T(`当前版本 v${chk.currentVersion}，远端最新 v${chk.latestVersion}`, `Current v${chk.currentVersion}, latest v${chk.latestVersion}`)
+              })
+            );
+          }
+          const targetVer = (chk && chk.latestVersion) || (staged && staged.version) || '';
+          const pkgKind = (staged && staged.packageKind) || (chk && chk.packageKind) || kind;
+          const pkgSize = (staged && staged.size) || (chk && chk.size) || 0;
+          const pkgSha = (staged && staged.sha256) || (chk && chk.sha256) || '';
+          const isReady = !!(staged && staged.version === targetVer);
+          return h('div', { class: 'upd-box accent' },
+            h('div', { class: 'row wrap upd-box-head' },
+              h('span', { class: 'badge ok', text: T('发现新版本', 'New release') }),
+              h('strong', { class: 'mono', text: 'v' + targetVer }),
+              chk && chk.pubDate ? h('span', { class: 'small muted', text: chk.pubDate }) : null,
+              pkgSize > 0 ? h('span', { class: 'small muted', text: fmtSize(pkgSize) }) : null,
+              h('span', { class: 'badge', text: pkgKind === 'installer' ? T('安装包', 'Installer') : T('便携包', 'Portable') })
+            ),
+            chk && chk.notes ? h('pre', { class: 'upd-notes', text: chk.notes }) : null,
+            pkgSha ? h('div', { class: 'small muted mono upd-sha', text: 'SHA-256: ' + pkgSha }) : null,
+            h('div', { class: 'row wrap upd-acts' },
+              isReady
+                ? h('button', {
+                  type: 'button',
+                  class: 'btn primary sm',
+                  disabled: state.updInstalling || state.updDownloading,
+                  onclick: () => installStagedUpdate(targetVer, pkgKind)
+                }, icon('refresh', 14), h('span', {
+                  text: state.updInstalling ? T('正在准备安装…', 'Preparing…') : T('立即重启并安装更新', 'Restart & install update')
+                }))
+                : h('button', {
+                  type: 'button',
+                  class: 'btn primary sm',
+                  disabled: state.updDownloading || state.updChecking,
+                  onclick: startUpdateDownload
+                }, icon('download', 14), h('span', {
+                  text: state.updDownloading ? T('下载中…', 'Downloading…') : T('下载更新包', 'Download update')
+                })),
+              chk && hasNew && !isReady
+                ? h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  disabled: state.updDownloading,
+                  onclick: () => skipUpdateVersion(targetVer)
+                }, h('span', { text: T('跳过此版本', 'Skip version') }))
+                : null,
+              isReady && staged && staged.path
+                ? h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  onclick: () => reveal(staged.path)
+                }, h('span', { text: T('打开所在文件夹', 'Show in folder') }))
+                : null
+            )
+          );
+        })();
+
+        const body = h('div', { class: 'stack' },
+          h('div', { class: 'set-card' },
+            h('dl', { class: 'kv' },
+              kvRow(T('当前版本', 'Current version'), h('div', { class: 'row wrap' },
+                h('span', { class: 'mono', text: 'v' + curVer }),
+                h('span', { class: 'badge', text: kindLabel })
+              )),
+              kvRow(T('上次检查', 'Last checked'), h('span', {
+                class: 'small muted',
+                text: (st && st.config && st.config.lastCheckAt) || T('从未检查', 'Never')
+              }))
+            )
+          ),
+          h('div', { class: 'set-card' },
+            setRow(T('更新源地址', 'Update feed URL'),
+              h('div', { class: 'stack upd-feed-col' },
+                h('div', { class: 'row upd-feed-row' },
+                  feedInput,
+                  h('button', {
+                    type: 'button',
+                    class: 'btn sm',
+                    disabled: state.updChecking || state.updDownloading,
+                    onclick: saveUpdaterFeed
+                  }, h('span', { text: T('保存源', 'Save') }))
+                ),
+                h('div', {
+                  class: 'small muted',
+                  text: T('支持自建 HTTPS / Gitee / OSS 的 latest.json，或 GitHub Releases API 地址；远端强制 HTTPS + SHA-256 校验。',
+                    'Supports static HTTPS latest.json or GitHub Releases API; enforces HTTPS + SHA-256 verification.')
+                })
+              )
+            ),
+            setRow(T('更新通道', 'Channel'),
+              h('div', { class: 'row wrap' },
+                [
+                  { value: 'stable', zh: '稳定版（推荐）', en: 'Stable (recommended)' },
+                  { value: 'beta', zh: '测试版（含预发布）', en: 'Beta (prereleases)' }
+                ].map((ch) => h('label', { class: 'check' },
+                  h('input', {
+                    type: 'radio',
+                    name: 'set-upd-channel',
+                    checked: state.updChannel === ch.value,
+                    onchange: () => onUpdaterChannel(ch.value)
+                  }),
+                  h('span', { text: T(ch.zh, ch.en) })
+                ))
+              )
+            ),
+            setRow(T('启动时静默检查', 'Auto-check on launch'),
+              h('label', { class: 'check' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: !!state.updAutoCheck,
+                  onchange: (e) => onUpdaterAutoCheck(e.target.checked)
+                }),
+                h('span', { text: T('仅在已配置更新源时后台检查，不阻塞启动', 'Checks silently when a feed URL is configured') })
+              )
+            )
+          ),
+          progWrap,
+          resultCard,
+          h('div', { class: 'action-bar' },
+            h('span', {
+              class: 'small muted',
+              text: cacheBytes > 0
+                ? T('本地更新缓存：', 'Update cache: ') + fmtSize(cacheBytes)
+                : T('更新下载完成后将自动核验 SHA-256，校验通过才允许安装', 'SHA-256 is verified before installation')
+            }),
+            h('div', { class: 'spacer' }),
+            cacheBytes > 0
+              ? h('button', {
+                type: 'button',
+                class: 'btn sm ghost',
+                disabled: state.updDownloading || state.updInstalling,
+                onclick: clearUpdaterCache
+              }, h('span', { text: T('清理缓存', 'Clear cache') }))
+              : null,
+            h('button', {
+              type: 'button',
+              class: 'btn sm primary',
+              disabled: state.updChecking || state.updDownloading,
+              onclick: checkForUpdates
+            }, icon('refresh', 14), h('span', {
+              text: state.updChecking ? T('检查中…', 'Checking…') : T('立即检查更新', 'Check for updates')
+            }))
+          )
+        );
+
+        return section(T('版本与在线更新', 'Version & updates'), body, {
+          open: state.openId === 'updater',
+          hint: hasNew
+            ? T('有新版本 v' + chk.latestVersion, 'Update v' + chk.latestVersion)
+            : T('v' + curVer + ' · 检查与升级', 'v' + curVer + ' · Updates'),
+          id: 'updater',
+          accordion: holder,
+          onToggle: (open) => { if (open) state.openId = 'updater'; }
+        });
+      }
+
+      async function loadUpdater() {
+        if (typeof API.updaterStatus !== 'function') return;
+        try {
+          const st = await API.updaterStatus();
+          state.updStatus = st;
+          state.updDownloading = !!(st && st.busy);
+          if (st && st.config) {
+            state.updFeedDraft = st.config.feedUrl || '';
+            state.updChannel = st.config.channel === 'beta' ? 'beta' : 'stable';
+            state.updAutoCheck = st.config.autoCheck !== false;
+          }
+        } catch (e) { /* 离线或测试环境无此命令时静默忽略 */ }
+      }
+
+      function clearSettingsUpdateDot() {
+        const navBtn = document.querySelector && document.querySelector('.nav-item[data-id="settings"]');
+        if (navBtn && navBtn.classList) navBtn.classList.remove('has-update');
+      }
+
+      async function saveUpdaterFeed() {
+        try {
+          const saved = await API.updaterConfigSet({ feedUrl: state.updFeedDraft.trim() });
+          state.updFeedDraft = (saved && saved.feedUrl) || '';
+          state.updError = null;
+          await loadUpdater();
+          toast(T('更新源地址已保存', 'Update feed URL saved'), 'ok');
+          paint();
+        } catch (e) {
+          toast(errText(e), 'error');
+        }
+      }
+
+      async function onUpdaterChannel(channel) {
+        state.updChannel = channel;
+        try {
+          await API.updaterConfigSet({ channel });
+          await loadUpdater();
+          toast(T('更新通道已切换', 'Update channel saved'), 'ok');
+        } catch (e) {
+          toast(errText(e), 'error');
+        }
+        paint();
+      }
+
+      async function onUpdaterAutoCheck(enabled) {
+        state.updAutoCheck = !!enabled;
+        try {
+          await API.updaterConfigSet({ autoCheck: state.updAutoCheck });
+        } catch (e) {
+          toast(errText(e), 'error');
+        }
+      }
+
+      async function checkForUpdates() {
+        if (state.updChecking || state.updDownloading) return;
+        const url = state.updFeedDraft.trim();
+        if (!url) {
+          toast(T('请先填写在线更新源地址（latest.json 或 GitHub Releases 地址）', 'Enter an update feed URL first'), 'warn');
+          return;
+        }
+        state.updChecking = true;
+        state.updError = null;
+        paint();
+        try {
+          await API.updaterConfigSet({ feedUrl: url, channel: state.updChannel });
+          const res = await API.updaterCheck(url, state.updChannel);
+          state.updCheck = res;
+          if (App) App._pendingUpdate = (res && res.hasUpdate) ? res : null;
+          await loadUpdater();
+          if (res && res.hasUpdate) {
+            toast(T('发现新版本 v' + res.latestVersion, 'New version v' + res.latestVersion + ' available'), 'ok');
+          } else {
+            clearSettingsUpdateDot();
+            toast(T('当前已是最新版本', 'Already up to date'), 'ok');
+          }
+        } catch (e) {
+          state.updError = errText(e);
+          toast(state.updError, 'error');
+        } finally {
+          state.updChecking = false;
+          paint();
+        }
+      }
+
+      async function startUpdateDownload() {
+        const chk = state.updCheck;
+        if (!chk || !chk.hasUpdate || state.updDownloading) return;
+        state.updDownloading = true;
+        state.updCancelling = false;
+        state.updError = null;
+        state.updProg = { phase: 'downloading', downloaded: 0, total: chk.size || 0, speedBps: 0, percent: 0 };
+        paint();
+        try {
+          const staged = await API.updaterDownload({
+            url: chk.downloadUrl,
+            sha256: chk.sha256,
+            size: chk.size,
+            version: chk.latestVersion,
+            fileName: chk.fileName,
+            packageKind: chk.packageKind
+          });
+          state.updCheck = Object.assign({}, chk, { staged });
+          await loadUpdater();
+          toast(T('更新包下载并校验通过，随时可点击安装', 'Update verified and ready to install'), 'ok');
+        } catch (e) {
+          const msg = errText(e);
+          if (!/取消/.test(msg)) {
+            state.updError = msg;
+            toast(msg, 'error');
+          } else {
+            toast(T('已取消更新下载', 'Update download cancelled'), 'info');
+          }
+        } finally {
+          state.updDownloading = false;
+          state.updCancelling = false;
+          state.updProg = null;
+          paint();
+        }
+      }
+
+      async function cancelUpdateDownload() {
+        if (!state.updDownloading || state.updCancelling) return;
+        state.updCancelling = true;
+        syncUpdaterProgressDom();
+        try { await API.updaterCancel(); } catch (e) { /* ignore */ }
+      }
+
+      async function skipUpdateVersion(ver) {
+        try {
+          await API.updaterConfigSet({ ignoredVersion: ver });
+          if (state.updCheck) state.updCheck = Object.assign({}, state.updCheck, { isIgnored: true });
+          if (App) App._pendingUpdate = null;
+          clearSettingsUpdateDot();
+          toast(T(`已跳过 v${ver}，后续不会主动提醒此版本`, `Skipped v${ver}`), 'ok');
+          await loadUpdater();
+          paint();
+        } catch (e) {
+          toast(errText(e), 'error');
+        }
+      }
+
+      async function clearUpdaterCache() {
+        try {
+          await API.updaterClearCache();
+          if (state.updCheck) state.updCheck = Object.assign({}, state.updCheck, { staged: null });
+          await loadUpdater();
+          toast(T('更新缓存已清理', 'Update cache cleared'), 'ok');
+          paint();
+        } catch (e) {
+          toast(errText(e), 'error');
+        }
+      }
+
+      async function installStagedUpdate(ver, pkgKind) {
+        if (state.updInstalling) return;
+        const ok = await confirm({
+          title: T(`安装更新 v${ver}`, `Install update v${ver}`),
+          body: pkgKind === 'portable'
+            ? T('应用将立即退出，自动备份当前便携版程序并替换为新版本（你的配置、历史与数据目录会完整保留），完成后自动重启。',
+              'The app will close, back up current binaries, swap in the new portable build (preserving all user data), and restart.')
+            : T('应用将立即退出并启动新版安装程序完成覆盖升级（你的配置、历史与数据目录会完整保留）。',
+              'The app will close and launch the new installer (preserving all user data).'),
+          ok: T('立即重启更新', 'Restart & update')
+        });
+        if (!ok) return;
+        state.updInstalling = true;
+        paint();
+        try {
+          await API.updaterInstall(false);
+          toast(T('正在退出并启动更新…', 'Restarting to install update…'), 'ok');
+        } catch (e) {
+          state.updInstalling = false;
+          state.updError = errText(e);
+          toast(state.updError, 'error');
+          paint();
+        }
+      }
+
       function secMaintenance(holder) {
         const app = state.app;
         const eng = state.engine;
@@ -2230,12 +2656,27 @@
       bindNavGuard();
       paint();
 
-      await Promise.all([loadConfig(), loadSettings(), loadAutostart(), loadSchedule(), loadAbout(), loadAdmin(), loadAi()]);
+      let unlistenUpd = null;
+      try {
+        if (window.__TAURI__ && window.__TAURI__.event && typeof window.__TAURI__.event.listen === 'function') {
+          unlistenUpd = await window.__TAURI__.event.listen('updater-progress', (ev) => {
+            if (!active || active.root !== root) return;
+            const p = (ev && ev.payload) || null;
+            if (!p) return;
+            state.updProg = p;
+            syncUpdaterProgressDom();
+          });
+        }
+      } catch (e) { /* 非 Tauri 环境跳过事件监听 */ }
+
+      await Promise.all([loadConfig(), loadSettings(), loadAutostart(), loadSchedule(), loadAbout(), loadAdmin(), loadAi(), loadUpdater()]);
       state.loading = false;
       if (state.theme === 'system') await applySystemTheme();
       paint();
 
       return function unmount() {
+        if (unlistenUpd) { try { unlistenUpd(); } catch (e) { /* ignore */ } unlistenUpd = null; }
+        state.updProgDom = null;
         liveJump = null;
         active = null;
         setActions();

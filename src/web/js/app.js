@@ -86,6 +86,22 @@
       await navigate(start, false);
       pollEngine(true);
       this._pollTimer = setInterval(() => pollEngine(false), 15000);
+      /* 启动后延迟 6 秒静默检查一次更新（仅当用户配置了更新源且开启自动检查） */
+      this._updTimer = setTimeout(() => {
+        if (document.hidden || typeof API.updaterStatus !== 'function' || typeof API.updaterCheck !== 'function') return;
+        API.updaterStatus().then((st) => {
+          if (!st || !st.config || !st.config.autoCheck || !st.config.feedUrl) return null;
+          return API.updaterCheck(st.config.feedUrl, st.config.channel);
+        }).then((res) => {
+          if (!res || !res.hasUpdate || res.isIgnored) return;
+          App._pendingUpdate = res;
+          emitAppHook('updater:available', res);
+          const btn = document.querySelector('.nav-item[data-id="settings"]');
+          if (btn) btn.classList.add('has-update');
+          toast(UI.T('发现新版本 v' + res.latestVersion + '，可前往「设置 → 版本与在线更新」升级',
+            'Update v' + res.latestVersion + ' available in Settings'), 'info', 6000);
+        }).catch(() => { /* 离线或网络异常静默吞掉，绝不打扰启动 */ });
+      }, 6000);
       /* 静默：窗口被隐藏/最小化后暂停轮询，按模式延迟退出引擎进程 */
       const onHidden = () => enterIdle(this);
       const onShown = () => leaveIdle(this);
@@ -231,6 +247,7 @@
     document.body.dataset.idle = '1';
     try { API.logLine('info', '静默：进入空闲，模式=' + app.powerMode); } catch { /* ignore */ }
     if (app._pollTimer) { clearInterval(app._pollTimer); app._pollTimer = null; }
+    if (app._updTimer) { clearTimeout(app._updTimer); app._updTimer = null; }
     if (app.powerMode === 'turbo') return;
     const delay = app.powerMode === 'silent' ? 20000 : 120000;
     clearTimeout(app._idleTimer);

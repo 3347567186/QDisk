@@ -42,7 +42,10 @@ param(
   [switch]$TestsOnly,
   [string]$Version,
   [ValidateSet('patch', 'minor', 'major')]
-  [string]$Bump
+  [string]$Bump,
+  [string]$ReleaseBaseUrl = '',
+  [ValidateSet('stable', 'beta')]
+  [string]$Channel = 'stable'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -534,6 +537,12 @@ try {
 
   if ($Bundle)   { Remove-OldReleases 'TidyAssistant_*_x64-setup.exe' }
   if ($Portable) { Remove-OldReleases '*便携版.zip' }
+
+  # 自动同步生成 release\latest.json 与 SHA256SUMS.txt，开箱即可直接发包上线
+  $pubScript = Join-Path $root 'tools\publish-release.ps1'
+  if (($Bundle -or $Portable) -and (Test-Path $pubScript)) {
+    & $pubScript -Version $current -Channel $Channel -BaseUrl $ReleaseBaseUrl
+  }
 
   # 产物自检：版本、二进制、安装包三者必须对得上
   $exe = Join-Path $root 'tidy-assistant.exe'

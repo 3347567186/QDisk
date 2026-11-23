@@ -78,6 +78,25 @@
     archiveCapabilities: () => invoke('archive_capabilities'),
     archiveRarStatus: () => invoke('archive_rar_status'),
     archiveRarInstall: () => invoke('archive_rar_install'),
+    /* 在线更新（检查 / 下载 / 取消 / 安装 / 配置 / 缓存清理） */
+    updaterStatus: () => invoke('updater_status'),
+    updaterConfigGet: () => invoke('updater_config_get'),
+    updaterConfigSet: (patch) => invoke('updater_config_set', { patch }),
+    updaterCheck: (feedUrl, channel) => invoke('updater_check', {
+      feedUrl: feedUrl || null,
+      channel: channel || null
+    }),
+    updaterDownload: (opts) => invoke('updater_download', {
+      url: opts.url,
+      sha256: opts.sha256,
+      size: Number(opts.size || 0),
+      version: opts.version,
+      fileName: opts.fileName,
+      packageKind: opts.packageKind
+    }),
+    updaterCancel: () => invoke('updater_cancel'),
+    updaterClearCache: () => invoke('updater_clear_cache'),
+    updaterInstall: (silent) => invoke('updater_install', { silent: !!silent }),
   logRead: (path, maxBytes) => invoke('log_read', { path, maxBytes: maxBytes || null }),
     logClear: () => invoke('log_clear'),
     logLine: (level, msg) => invoke('log_line', { level, msg }),

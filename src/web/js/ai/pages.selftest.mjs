@@ -1402,5 +1402,184 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.navigate = origNav;
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子与外壳竞态回归全链路校验通过）`);
+// 回归 12：设置页「版本与在线更新」全链路（检查更新 / 持久进度流取消按钮不重建 / 校验就绪安装 / 卸载 0 泄漏）
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const rootSet = new FakeElement('div');
+  const modalRoot = sandbox.document._byId['modal-root'];
+  modalRoot.children = [];
+  const eventHandlers = new Map();
+  const origTauri = sandbox.__TAURI__;
+  const origStatus = sandbox.API.updaterStatus;
+  const origCfgSetU = sandbox.API.updaterConfigSet;
+  const origCheck = sandbox.API.updaterCheck;
+  const origDownload = sandbox.API.updaterDownload;
+  const origCancel = sandbox.API.updaterCancel;
+  const origInstall = sandbox.API.updaterInstall;
+
+  let cancelCalls = 0;
+  let installCalls = 0;
+  let rejectDl = null;
+  let resolveDl = null;
+  let dlCount = 0;
+  const fakeSha = 'a'.repeat(64);
+
+  sandbox.__TAURI__ = Object.assign({}, origTauri || {}, {
+    event: {
+      listen: async (name, fn) => {
+        eventHandlers.set(name, fn);
+        return () => eventHandlers.delete(name);
+      }
+    }
+  });
+  sandbox.API.updaterStatus = async () => ({
+    currentVersion: '1.43.12',
+    installKind: 'portable',
+    busy: false,
+    config: {
+      feedUrl: 'https://releases.example.com/latest.json',
+      channel: 'stable',
+      autoCheck: true,
+      ignoredVersion: '',
+      lastCheckAt: ''
+    },
+    updatesDir: 'D:\\data\\updates',
+    cacheBytes: 0,
+    staged: null
+  });
+  sandbox.API.updaterConfigSet = async (p) => Object.assign({
+    feedUrl: 'https://releases.example.com/latest.json',
+    channel: 'stable',
+    autoCheck: true,
+    ignoredVersion: '',
+    lastCheckAt: ''
+  }, p || {});
+  sandbox.API.updaterCheck = async () => ({
+    currentVersion: '1.43.12',
+    latestVersion: '9.9.9',
+    hasUpdate: true,
+    isIgnored: false,
+    isPrerelease: false,
+    installKind: 'portable',
+    packageKind: 'portable',
+    channel: 'stable',
+    pubDate: '2026-11-23',
+    notes: '红队验证版本更新说明',
+    downloadUrl: 'https://releases.example.com/app.zip',
+    fileName: '整理助手_9.9.9_便携版.zip',
+    size: 25 * 1024 * 1024,
+    sha256: fakeSha,
+    manifestUrl: 'https://releases.example.com/latest.json',
+    staged: null
+  });
+  sandbox.API.updaterDownload = () => new Promise((res, rej) => {
+    dlCount++;
+    resolveDl = res;
+    rejectDl = rej;
+  });
+  sandbox.API.updaterCancel = async () => { cancelCalls++; return true; };
+  sandbox.API.updaterInstall = async () => { installCalls++; return true; };
+
+  const beforeInt = activeIntervals.size;
+  const ret = await sandbox.Pages.settings.mount(rootSet);
+  sandbox.Pages.settings.jump({ section: 'updater' });
+  await new Promise((r) => setTimeout(r, 20));
+
+  const checkBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('立即检查更新'))[0];
+  if (!checkBtn) {
+    console.error('[在线更新回归] 设置页缺少「立即检查更新」按钮');
+    process.exit(1);
+  }
+  clickBtn(checkBtn);
+  await new Promise((r) => setTimeout(r, 30));
+
+  const dlBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('下载更新包'))[0];
+  if (!dlBtn || !txt(rootSet).includes('v9.9.9') || !txt(rootSet).includes('红队验证版本更新说明')) {
+    console.error('[在线更新回归] 检查更新后未展示新版本卡片与下载按钮');
+    process.exit(1);
+  }
+
+  // 开始下载并推送 5 帧高频进度：取消下载按钮必须保持同一 DOM 节点引用（防点击被吞）
+  clickBtn(dlBtn);
+  await new Promise((r) => setTimeout(r, 15));
+  const cancelBtn1 = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n) === '取消下载')[0];
+  const emitUpd = eventHandlers.get('updater-progress');
+  if (!cancelBtn1 || !emitUpd) {
+    console.error('[在线更新回归] 下载中缺少持久化取消按钮或 updater-progress 监听');
+    process.exit(1);
+  }
+  for (let i = 1; i <= 5; i++) {
+    emitUpd({ payload: { phase: 'downloading', downloaded: i * 3 * 1024 * 1024, total: 25 * 1024 * 1024, speedBps: 5 * 1024 * 1024, percent: i * 12, version: '9.9.9' } });
+  }
+  const cancelBtn2 = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n) === '取消下载')[0];
+  const progMeta = findNodes(rootSet, (n) => n.classList && n.classList.contains('upd-prog-meta'))[0];
+  if (cancelBtn2 !== cancelBtn1 || !progMeta || !txt(progMeta).includes('60%')) {
+    console.error(`[在线更新回归] 高频进度流重建了取消按钮或未更新进度: same=${cancelBtn2 === cancelBtn1}, meta=${txt(progMeta)}`);
+    process.exit(1);
+  }
+  clickBtn(cancelBtn2);
+  await new Promise((r) => setTimeout(r, 15));
+  if (cancelCalls !== 1) {
+    console.error('[在线更新回归] 点击取消下载未触发 API.updaterCancel');
+    process.exit(1);
+  }
+  if (rejectDl) rejectDl(new Error('已取消更新下载'));
+  await new Promise((r) => setTimeout(r, 25));
+
+  // 二次下载成功 -> 出现「立即重启并安装更新」按钮 -> 二次确认后调用 updaterInstall
+  const dlBtn2 = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('下载更新包'))[0];
+  clickBtn(dlBtn2);
+  await new Promise((r) => setTimeout(r, 15));
+  if (resolveDl) resolveDl({
+    version: '9.9.9',
+    packageKind: 'portable',
+    fileName: '整理助手_9.9.9_便携版.zip',
+    path: 'D:\\data\\updates\\v9.9.9\\整理助手_9.9.9_便携版.zip',
+    size: 25 * 1024 * 1024,
+    sha256: fakeSha
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  const instBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('立即重启并安装更新'))[0];
+  if (!instBtn || dlCount !== 2) {
+    console.error('[在线更新回归] 下载校验完成后未出现安装按钮');
+    process.exit(1);
+  }
+  clickBtn(instBtn);
+  await new Promise((r) => setTimeout(r, 15));
+  const confirmInst = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('立即重启更新')).pop();
+  clickBtn(confirmInst);
+  await new Promise((r) => setTimeout(r, 25));
+  if (installCalls !== 1) {
+    console.error(`[在线更新回归] 确认安装未触发 API.updaterInstall: calls=${installCalls}`);
+    process.exit(1);
+  }
+
+  if (typeof ret === 'function') ret();
+  if (eventHandlers.has('updater-progress') || activeIntervals.size !== beforeInt) {
+    console.error('[在线更新回归] unmount 后未回收 updater-progress 监听或定时器');
+    process.exit(1);
+  }
+  sandbox.__TAURI__ = origTauri;
+  sandbox.API.updaterStatus = origStatus;
+  sandbox.API.updaterConfigSet = origCfgSetU;
+  sandbox.API.updaterCheck = origCheck;
+  sandbox.API.updaterDownload = origDownload;
+  sandbox.API.updaterCancel = origCancel;
+  sandbox.API.updaterInstall = origInstall;
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子、外壳竞态与在线更新全链路校验通过）`);
 process.exit(0);
