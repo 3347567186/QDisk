@@ -1053,13 +1053,20 @@ pub struct SourceItem {
 
 /// Walk the user's selection and produce archive member names rooted at each
 /// selected item (selecting C:\foo\bar stores it as `bar/...`, not its contents).
-pub fn collect_sources(sources: &[PathBuf], skip: Option<&Path>) -> Result<(Vec<SourceItem>, u64)> {
+pub fn collect_sources(
+    sources: &[PathBuf],
+    skip: Option<&Path>,
+    control: Option<&TaskControl>,
+) -> Result<(Vec<SourceItem>, u64)> {
     use walkdir::WalkDir;
     let mut items = Vec::new();
     let mut used = std::collections::HashSet::new();
     let mut total = 0u64;
 
     for source in sources {
+        if let Some(ctl) = control {
+            ctl.checkpoint(None)?;
+        }
         let source = source.as_path();
         if !source.exists() {
             bail!("路径不存在: {}", source.display());
@@ -1103,6 +1110,9 @@ pub fn collect_sources(sources: &[PathBuf], skip: Option<&Path>) -> Result<(Vec<
                 true
             });
         for entry in walker {
+            if let Some(ctl) = control {
+                ctl.checkpoint(None)?;
+            }
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -1378,6 +1388,12 @@ mod tests {
         assert!(safe_relative(".").is_err());
         assert!(safe_relative("./../evil.txt").is_err());
         assert!(safe_relative("proj/../evil.txt").is_err());
+
+        // 验证 collect_sources 在扫描阶段也能即时响应取消
+        let ctl = TaskControl::default();
+        ctl.request_cancel();
+        let scan_res = collect_sources(&[root.clone()], None, Some(&ctl));
+        assert!(scan_res.is_err() && format!("{}", scan_res.unwrap_err()).contains("取消"));
 
         let _ = fs::remove_dir_all(&root);
     }

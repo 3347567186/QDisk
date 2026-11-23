@@ -641,7 +641,9 @@ pub fn extract_archive(
     let _prio = ThreadPriorityGuard::enter(profile.mode);
     progress.set_mode(profile.mode);
     let kind = detect(path)?;
+    control.checkpoint(Some(progress))?;
     let info = list_archive(path, password)?;
+    control.checkpoint(Some(progress))?;
     if info.needs_rar {
         bail!("RAR 组件尚未安装");
     }

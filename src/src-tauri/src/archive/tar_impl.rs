@@ -502,6 +502,11 @@ impl ParallelGzWriter {
             let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
             let mut expect = 0usize;
             for (seq, res) in &out_rx {
+                if ctl_wr.is_cancelled() {
+                    abort_wr.store(true, Ordering::SeqCst);
+                    failed_wr.store(true, Ordering::SeqCst);
+                    return Err(anyhow::anyhow!("操作已取消"));
+                }
                 match res {
                     Ok(compressed) => {
                         pending.insert(seq, compressed);
@@ -722,7 +727,7 @@ fn append_sources<W: Write>(
     progress: &Arc<Progress>,
     control: &Arc<TaskControl>,
 ) -> Result<(u64, u64)> {
-    let (mut items, total) = collect_sources(sources, Some(dest))?;
+    let (mut items, total) = collect_sources(sources, Some(dest), Some(control))?;
     items.retain(|i| i.path != dest);
     progress.set_totals(items.iter().filter(|i| !i.is_dir).count() as u64, total);
     progress.phase("compress");

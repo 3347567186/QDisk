@@ -97,7 +97,7 @@ pub fn create(
 ) -> Result<CreateReport> {
     let _prio = ThreadPriorityGuard::enter(profile.mode);
     let started = Instant::now();
-    let (mut items, total) = collect_sources(sources, Some(dest))?;
+    let (mut items, total) = collect_sources(sources, Some(dest), Some(control))?;
     items.retain(|i| i.path != dest);
     let file_count = items.iter().filter(|i| !i.is_dir).count() as u64;
     progress.set_totals(file_count, total);
@@ -190,6 +190,11 @@ pub fn create(
             let mut pending: BTreeMap<usize, sevenz_rust2::PreparedBlock> = BTreeMap::new();
             let mut next_write = 0usize;
             for (i, result) in &rx {
+                if control.is_cancelled() {
+                    abort.store(true, Ordering::SeqCst);
+                    failure = Some(anyhow::anyhow!("操作已取消"));
+                    break;
+                }
                 match result {
                     Ok(block) => {
                         pending.insert(i, block);

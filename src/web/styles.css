@@ -2744,7 +2744,7 @@ body[data-idle="1"] *::after {
 
 .arc-progress {
   position: fixed; right: 18px; bottom: 86px; width: 348px; max-width: calc(100vw - 24px);
-  z-index: 65; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  z-index: 75; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
   box-shadow: var(--shadow-2);
 }
 .arc-progress[hidden] { display: none; }
@@ -2767,6 +2767,7 @@ body[data-idle="1"] *::after {
   transition: opacity var(--dur-2) var(--ease), filter var(--dur-2) var(--ease);
 }
 .arc-chart.is-paused { opacity: .72; filter: saturate(.35); }
+.arc-chart-svg { position: absolute; inset: 0; pointer-events: none; }
 .arc-chart svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .arc-chart-meta {
   position: absolute; left: var(--space-2); right: var(--space-2); bottom: 4px;
@@ -2788,6 +2789,7 @@ body[data-idle="1"] *::after {
   border-left-color: var(--danger);
 }
 .arc-progress-acts { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-top: 2px; }
+.arc-chart[hidden], .arc-bar[hidden], .arc-pause-banner[hidden], .arc-progress-acts[hidden] { display: none; }
 
 .arc-create-grid {
   display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 10px;

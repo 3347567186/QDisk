@@ -38,7 +38,7 @@ pub fn create(
 ) -> Result<CreateReport> {
     let _prio = ThreadPriorityGuard::enter(profile.mode);
     let started = Instant::now();
-    let (mut items, total) = collect_sources(sources, Some(dest))?;
+    let (mut items, total) = collect_sources(sources, Some(dest), Some(control))?;
     items.retain(|i| i.path != dest);
     let file_count = items.iter().filter(|i| !i.is_dir).count() as u64;
     progress.set_totals(file_count, total);
@@ -423,6 +423,11 @@ impl ParallelZipWriter {
             let mut pending: BTreeMap<usize, (u64, Vec<u8>)> = BTreeMap::new();
             let mut next_seq = 0usize;
             for (seq, raw_len, res) in &out_rx {
+                if control.is_cancelled() {
+                    abort.store(true, Ordering::SeqCst);
+                    write_err = Some(anyhow::anyhow!("操作已取消"));
+                    break;
+                }
                 match res {
                     Ok(buf) => {
                         pending.insert(seq, (raw_len, buf));
@@ -808,6 +813,11 @@ fn write_small_batch(
         let mut pending: BTreeMap<usize, PreparedSmall> = BTreeMap::new();
         let mut expect = 0usize;
         for (idx, res) in &rx {
+            if control.is_cancelled() {
+                abort.store(true, Ordering::SeqCst);
+                err_out = Some(anyhow::anyhow!("操作已取消"));
+                break;
+            }
             match res {
                 Ok(p) => {
                     pending.insert(idx, p);

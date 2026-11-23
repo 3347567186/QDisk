@@ -146,7 +146,7 @@ class FakeElement extends FakeNode {
   getAttribute(k) { return this.attributes[k]; }
   removeAttribute(k) { delete this.attributes[k]; }
   get textContent() { return this._textContent; }
-  set textContent(v) { this._textContent = String(v); if (v === '') this.children = []; }
+  set textContent(v) { this._textContent = String(v); this.children = []; }
   get innerHTML() { return this._innerHTML; }
   set innerHTML(v) { this._innerHTML = String(v); if (!v) this.children = []; }
   get className() { return this.classList.toString(); }
@@ -828,8 +828,33 @@ function findNodes(rootNode, pred, out = []) {
   });
   const modeTag = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-mode-tag'))[0];
   const pauseBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '暂停')[0];
-  if (!modeTag || txt(modeTag) !== '超线程' || !pauseBtn) {
-    console.error(`[压缩包进度回归] 进度卡缺少档位徽标或暂停按钮: tag=${txt(modeTag)}, pause=${!!pauseBtn}`);
+  const cancelBtnInitial = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '取消')[0];
+  if (!modeTag || txt(modeTag) !== '超线程' || !pauseBtn || !cancelBtnInitial) {
+    console.error(`[压缩包进度回归] 进度卡缺少档位徽标或暂停/取消按钮: tag=${txt(modeTag)}, pause=${!!pauseBtn}, cancel=${!!cancelBtnInitial}`);
+    process.exit(1);
+  }
+
+  // 红队关键校验：连续推送高频进度事件（模拟 90ms 刷新覆盖 mousedown->mouseup 窗口），
+  // 暂停与取消按钮必须保持同一 DOM 节点引用（绝不可 innerHTML 重建销毁按钮导致 click 被吞！）
+  for (let step = 1; step <= 5; step++) {
+    emitProgress({
+      payload: {
+        op: 'extract',
+        phase: 'run',
+        paused: false,
+        mode: 'hyper',
+        files: 120 + step,
+        totalFiles: 500,
+        bytes: (40 + step * 5) * 1024 * 1024,
+        totalBytes: 100 * 1024 * 1024,
+        name: `chunk_${step}.tar`
+      }
+    });
+  }
+  const pauseBtnAfterStream = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '暂停')[0];
+  const cancelBtnAfterStream = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '取消')[0];
+  if (pauseBtnAfterStream !== pauseBtn || cancelBtnAfterStream !== cancelBtnInitial) {
+    console.error('[压缩包红队回归] 高频进度刷新重建了暂停/取消按钮 DOM，真实鼠标点击会被 WebView 吞掉！');
     process.exit(1);
   }
 
@@ -843,24 +868,24 @@ function findNodes(rootNode, pred, out = []) {
       phase: 'run',
       paused: false,
       mode: 'hyper',
-      files: 121,
+      files: 126,
       totalFiles: 500,
-      bytes: 40 * 1024 * 1024,
+      bytes: 65 * 1024 * 1024,
       totalBytes: 100 * 1024 * 1024,
       name: 'big.tar'
     }
   });
-  const pauseBannerMidFlight = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
+  const pauseBannerMidFlight = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner') && !n.hidden)[0];
   if (!pauseBannerMidFlight || !txt(pauseBannerMidFlight).includes('已暂停')) {
     console.error('[压缩包红队回归] 暂停 RPC 在途期收到过期 run 事件导致暂停横幅闪烁消失');
     process.exit(1);
   }
   if (resolvePauseRpc) resolvePauseRpc(true);
   await new Promise((r) => setTimeout(r, 20));
-  const pauseBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
+  const pauseBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner') && !n.hidden)[0];
   const resumeBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '继续')[0];
-  if (pauseCalls !== 1 || !pauseBanner || !txt(pauseBanner).includes('已暂停') || !txt(pauseBanner).includes('40%') || !resumeBtn) {
-    console.error(`[压缩包暂停回归] 暂停态界面状态异常: calls=${pauseCalls}, banner=${txt(pauseBanner)}, resume=${!!resumeBtn}`);
+  if (pauseCalls !== 1 || !pauseBanner || !txt(pauseBanner).includes('已暂停') || !txt(pauseBanner).includes('65%') || resumeBtn !== pauseBtn) {
+    console.error(`[压缩包暂停回归] 暂停态界面状态异常: calls=${pauseCalls}, banner=${txt(pauseBanner)}, sameBtn=${resumeBtn === pauseBtn}`);
     process.exit(1);
   }
 
@@ -875,10 +900,10 @@ function findNodes(rootNode, pred, out = []) {
     process.exit(1);
   }
 
-  // 点击「继续」：恢复执行，移除暂停横幅
+  // 点击「继续」：恢复执行，隐藏暂停横幅（持久化节点 hidden=true）
   clickBtn(resumeBtn);
   await new Promise((r) => setTimeout(r, 20));
-  const pauseBannerAfterResume = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
+  const pauseBannerAfterResume = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner') && !n.hidden)[0];
   if (resumeCalls !== 1 || pauseBannerAfterResume) {
     console.error(`[压缩包恢复回归] 恢复后状态异常: resumeCalls=${resumeCalls}, banner=${!!pauseBannerAfterResume}`);
     process.exit(1);
@@ -888,7 +913,7 @@ function findNodes(rootNode, pred, out = []) {
   const cancelBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '取消')[0];
   clickBtn(cancelBtn);
   await new Promise((r) => setTimeout(r, 20));
-  const cancellingBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner') && n.classList.contains('is-cancelling'))[0];
+  const cancellingBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner') && n.classList.contains('is-cancelling') && !n.hidden)[0];
   if (cancelCalls !== 1 || !cancellingBanner || !txt(cancellingBanner).includes('正在取消')) {
     console.error(`[压缩包取消回归] 取消中提示缺失: cancelCalls=${cancelCalls}, banner=${txt(cancellingBanner)}`);
     process.exit(1);

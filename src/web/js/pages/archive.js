@@ -41,6 +41,7 @@
     paused: false,
     pauseLock: '',
     cancelling: false,
+    cancelSentAt: 0,
     opKind: '',
     activeMode: 'balanced',
     opLabel: '',
@@ -1455,8 +1456,15 @@
     S.speed.t = 0;
     renderProgress();
     try {
-      const ok = await API.archivePause();
-      if (destroyed || !S.busy || S.cancelling) return;
+      let ok = await API.archivePause();
+      // 启动前几毫秒内后端尚未进入 ctx.begin() 时，短延迟重试一次防竞态失手。
+      if (ok === false && !destroyed && S.busy && !S.cancelling) {
+        await new Promise((r) => setTimeout(r, 60));
+        if (!destroyed && S.busy && !S.cancelling && S.paused) {
+          ok = await API.archivePause();
+        }
+      }
+      if (destroyed || !S.busy || S.cancelling) { S.pauseLock = ''; return; }
       S.pauseLock = '';
       if (ok === false) {
         S.paused = false;
@@ -1479,7 +1487,7 @@
     renderProgress();
     try {
       const ok = await API.archiveResume();
-      if (destroyed || !S.busy || S.cancelling) return;
+      if (destroyed || !S.busy || S.cancelling) { S.pauseLock = ''; return; }
       S.pauseLock = '';
       if (ok === false) {
         S.paused = true;
@@ -1497,6 +1505,7 @@
   async function cancelOp() {
     if (!S.busy || S.cancelling) return;
     S.cancelling = true;
+    S.cancelSentAt = Date.now();
     S.paused = false;
     S.pauseLock = '';
     S.speed.t = 0;
@@ -1539,9 +1548,8 @@
     return T(m + ' 分 ' + r + ' 秒', m + 'm ' + r + 's');
   }
 
-  /* 小窗里的速率折线：底板 + 已处理比例的浅色填充 + 速率面积线 + 底部进度线。
-     尺寸写死在 viewBox 里，靠 CSS 铺满 320px 宽的小窗，不额外撑大它。 */
-  function buildSpeedChart(percent) {
+  /* 速率折线 SVG 字符串（仅替换图表内部 svgHost，绝不重建外层卡片与控制按钮 DOM） */
+  function buildSpeedSvg(percent) {
     const st = S.speed;
     const vals = st.samples;
     const W = 296, H = 56, pad = 3;
@@ -1554,7 +1562,7 @@
       ? '0,' + (H - pad) + ' ' + line + ' ' + px(vals.length - 1).toFixed(1) + ',' + (H - pad)
       : '';
     const fillW = (Math.max(0, Math.min(100, percent)) * W / 100).toFixed(1);
-    const svg =
+    return (
       '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
         '<defs><linearGradient id="arcSpeedFill" x1="0" y1="0" x2="0" y2="1">' +
           '<stop offset="0" stop-color="var(--accent)" stop-opacity=".30"/>' +
@@ -1568,29 +1576,62 @@
           : '') +
         '<line x1="0" y1="' + (H - 1) + '" x2="' + fillW + '" y2="' + (H - 1) + '" ' +
           'stroke="var(--accent)" stroke-width="2"/>' +
-      '</svg>';
+      '</svg>'
+    );
+  }
 
-    const p = S.progress;
-    const total = p ? Number(p.totalBytes) || 0 : 0;
-    const done = p ? Number(p.bytes) || 0 : 0;
-    const remain = Math.max(0, total - done);
-    const spd = st.ema > 0 ? fmtBytes(st.ema) + '/s' : '';
-    const eta = (spd && remain > 0) ? T('剩余 ' + fmtDur(remain / st.ema), fmtDur(remain / st.ema) + ' left') : '';
+  /* 持久进度卡 DOM：按钮只创建一次并终身保活，避免 90ms 高频进度推送通过 innerHTML=''
+     在 mousedown 与 mouseup 之间销毁按钮导致浏览器吞掉 click 事件。 */
+  function ensureProgressDom() {
+    if (els.prog && els.prog.host === els.progress) return els.prog;
+    const host = els.progress;
+    host.innerHTML = '';
 
-    const box = h('div', {
-      class: 'arc-chart' + (S.paused ? ' is-paused' : ''),
-      role: 'img',
-      'aria-label': (S.paused ? T('已暂停', 'Paused') : (spd ? T('当前速度 ', 'Speed ') + spd : T('速率图', 'Speed chart')))
+    const titleEl = h('strong', { class: 'ellipsis' }, '');
+    const modeTagEl = h('span', { class: 'arc-mode-tag' }, '');
+    const statEl = h('div', { class: 'small muted' }, '');
+    const topEl = h('div', { class: 'arc-progress-top' },
+      h('div', { class: 'arc-progress-label' }, icon('archive', 15), titleEl, modeTagEl),
+      statEl
+    );
+
+    const svgHost = h('div', { class: 'arc-chart-svg' });
+    const chartLeftEl = h('span', null, '');
+    const chartRightEl = h('span', { class: 'arc-chart-spd' }, '');
+    const chartBox = h('div', { class: 'arc-chart', role: 'img', hidden: true },
+      svgHost,
+      h('div', { class: 'arc-chart-meta' }, chartLeftEl, chartRightEl)
+    );
+
+    const barFill = h('i');
+    const barBox = h('div', { class: 'arc-bar' }, barFill);
+
+    const bannerEl = h('div', { class: 'arc-pause-banner', hidden: true }, '');
+    const nameEl = h('div', { class: 'small muted ellipsis' }, '');
+
+    const toggleBtn = h('button', { type: 'button', class: 'btn ghost sm' }, T('暂停', 'Pause'));
+    toggleBtn.addEventListener('click', () => {
+      if (S.paused) resumeOp();
+      else pauseOp();
     });
-    box.innerHTML = svg;
-    const leftMeta = S.cancelling ? T('正在取消…', 'Cancelling…')
-      : S.paused ? T('已暂停 · 进度已保留', 'Paused · progress held')
-      : (eta || (vals.length ? T('速度', 'Speed') : T('正在准备…', 'Starting…')));
-    const rightMeta = S.paused ? (percent + '%') : (spd || '—');
-    box.appendChild(h('div', { class: 'arc-chart-meta' },
-      h('span', null, leftMeta),
-      h('span', { class: 'arc-chart-spd' }, rightMeta)));
-    return box;
+    const cancelBtn = h('button', { type: 'button', class: 'btn ghost sm' }, T('取消', 'Cancel'));
+    cancelBtn.addEventListener('click', () => cancelOp());
+    const actsEl = h('div', { class: 'arc-progress-acts', hidden: true }, toggleBtn, cancelBtn);
+
+    host.appendChild(topEl);
+    host.appendChild(chartBox);
+    host.appendChild(barBox);
+    host.appendChild(bannerEl);
+    host.appendChild(nameEl);
+    host.appendChild(actsEl);
+
+    els.prog = {
+      host, titleEl, modeTagEl, statEl,
+      chartBox, svgHost, chartLeftEl, chartRightEl,
+      barBox, barFill, bannerEl, nameEl,
+      actsEl, toggleBtn, cancelBtn
+    };
+    return els.prog;
   }
 
   function renderProgress() {
@@ -1599,7 +1640,8 @@
     const show = S.busy || !!p;
     els.progress.hidden = !show;
     if (!show) return;
-    els.progress.innerHTML = '';
+
+    const ui = ensureProgressDom();
     const bytes = p ? Number(p.bytes) || 0 : 0;
     const totalBytes = p ? Number(p.totalBytes) || 0 : 0;
     const files = p ? Number(p.files) || 0 : 0;
@@ -1617,25 +1659,39 @@
       : (S.opLabel || T('正在处理…', 'Working…'));
     const curMode = (p && p.mode) || S.activeMode || S.create.mode || 'balanced';
 
-    els.progress.appendChild(h('div', { class: 'arc-progress-top' },
-      h('div', { class: 'arc-progress-label' },
-        icon('archive', 15),
-        h('strong', { class: 'ellipsis', title: titleName }, titleName),
-        h('span', { class: 'arc-mode-tag' }, modeLabel(curMode))),
-      h('div', { class: 'small muted' },
-        (totalFiles ? fmtCount(files) + ' / ' + fmtCount(totalFiles) : fmtCount(files)) + ' · ' +
-        fmtBytes(bytes) + (totalBytes ? ' / ' + fmtBytes(totalBytes) : ''))
-    ));
-    // 速率折线图：解压与压缩统一拥有折线速度波形、剩余预估时间与实时速率
+    ui.titleEl.textContent = titleName;
+    ui.titleEl.title = titleName;
+    ui.modeTagEl.textContent = modeLabel(curMode);
+    ui.statEl.textContent =
+      (totalFiles ? fmtCount(files) + ' / ' + fmtCount(totalFiles) : fmtCount(files)) + ' · ' +
+      fmtBytes(bytes) + (totalBytes ? ' / ' + fmtBytes(totalBytes) : '');
+
+    // 速率折线图与进度条就地更新（不销毁按钮与外层卡片）
     if (S.speed.samples.length >= 2) {
-      els.progress.appendChild(buildSpeedChart(percent));
+      ui.chartBox.hidden = false;
+      ui.barBox.hidden = true;
+      ui.chartBox.className = 'arc-chart' + (S.paused ? ' is-paused' : '');
+      ui.svgHost.innerHTML = buildSpeedSvg(percent);
+      const remain = Math.max(0, totalBytes - bytes);
+      const spd = S.speed.ema > 0 ? fmtBytes(S.speed.ema) + '/s' : '';
+      const eta = (spd && remain > 0) ? T('剩余 ' + fmtDur(remain / S.speed.ema), fmtDur(remain / S.speed.ema) + ' left') : '';
+      ui.chartLeftEl.textContent = S.cancelling ? T('正在取消…', 'Cancelling…')
+        : S.paused ? T('已暂停 · 进度已保留', 'Paused · progress held')
+        : (eta || (S.speed.samples.length ? T('速度', 'Speed') : T('正在准备…', 'Starting…')));
+      ui.chartRightEl.textContent = S.paused ? (percent + '%') : (spd || '—');
+      ui.chartBox.setAttribute('aria-label',
+        S.paused ? T('已暂停', 'Paused') : (spd ? T('当前速度 ', 'Speed ') + spd : T('速率图', 'Speed chart')));
     } else {
-      els.progress.appendChild(h('div', { class: 'arc-bar' + (S.paused ? ' is-paused' : '') },
-        h('i', { style: { width: (totalBytes || totalFiles) ? percent + '%' : '34%' } })));
+      ui.chartBox.hidden = true;
+      ui.barBox.hidden = false;
+      ui.barBox.className = 'arc-bar' + (S.paused ? ' is-paused' : '');
+      ui.barFill.style.width = (totalBytes || totalFiles) ? (percent + '%') : '34%';
     }
+
     if (S.cancelling) {
-      els.progress.appendChild(h('div', { class: 'arc-pause-banner is-cancelling' },
-        T('正在取消任务并清理未完成文件…', 'Cancelling and cleaning up partial files…')));
+      ui.bannerEl.hidden = false;
+      ui.bannerEl.className = 'arc-pause-banner is-cancelling';
+      ui.bannerEl.textContent = T('正在取消任务并清理未完成文件…', 'Cancelling and cleaning up partial files…');
     } else if (S.paused) {
       const bytePart = totalBytes ? (fmtBytes(bytes) + ' / ' + fmtBytes(totalBytes)) : fmtBytes(bytes);
       const details = [
@@ -1643,29 +1699,34 @@
         totalFiles ? (fmtCount(files) + ' / ' + fmtCount(totalFiles) + T(' 个文件', ' files'))
           : (files ? (fmtCount(files) + T(' 个文件', ' files')) : '')
       ].filter(Boolean).join(T('，', ', '));
-      els.progress.appendChild(h('div', { class: 'arc-pause-banner' },
-        T('已暂停 · 已完成 ' + bytePart + '（' + details + '）· 点击「继续」恢复',
-          'Paused at ' + bytePart + ' (' + details + ') · Click Resume to continue')));
+      ui.bannerEl.hidden = false;
+      ui.bannerEl.className = 'arc-pause-banner';
+      ui.bannerEl.textContent = T(
+        '已暂停 · 已完成 ' + bytePart + '（' + details + '）· 点击「继续」恢复',
+        'Paused at ' + bytePart + ' (' + details + ') · Click Resume to continue'
+      );
+    } else {
+      ui.bannerEl.hidden = true;
+      ui.bannerEl.textContent = '';
     }
+
     const currentName = (p && p.name) ? p.name : phaseText;
-    els.progress.appendChild(h('div', { class: 'small muted ellipsis', title: currentName }, currentName));
+    ui.nameEl.textContent = currentName;
+    ui.nameEl.title = currentName;
+
     const canControl = S.opKind === 'extract' || S.opKind === 'create';
     if (els.cancel) {
       els.cancel.hidden = !(S.busy && canControl);
       els.cancel.disabled = !!S.cancelling;
     }
-    if (S.busy && canControl) {
-      const toggleBtn = h('button', {
-        class: S.paused ? 'btn primary sm' : 'btn ghost sm',
-        disabled: !!S.cancelling
-      }, S.paused ? T('继续', 'Resume') : T('暂停', 'Pause'));
-      toggleBtn.onclick = S.paused ? resumeOp : pauseOp;
-      const cancelBtn = h('button', {
-        class: 'btn ghost sm',
-        disabled: !!S.cancelling
-      }, S.cancelling ? T('取消中…', 'Cancelling…') : T('取消', 'Cancel'));
-      cancelBtn.onclick = cancelOp;
-      els.progress.appendChild(h('div', { class: 'arc-progress-acts' }, toggleBtn, cancelBtn));
+    const showActs = !!(S.busy && canControl);
+    ui.actsEl.hidden = !showActs;
+    if (showActs) {
+      ui.toggleBtn.className = S.paused ? 'btn primary sm' : 'btn ghost sm';
+      ui.toggleBtn.disabled = !!S.cancelling;
+      ui.toggleBtn.textContent = S.paused ? T('继续', 'Resume') : T('暂停', 'Pause');
+      ui.cancelBtn.disabled = !!S.cancelling;
+      ui.cancelBtn.textContent = S.cancelling ? T('取消中…', 'Cancelling…') : T('取消', 'Cancel');
     }
   }
 
@@ -2303,7 +2364,15 @@
             S.paused = false;
             S.pauseLock = '';
             S.speed.t = 0;
-          } else if (!S.cancelling) {
+          } else if (S.cancelling) {
+            // 若用户在任务刚启动的毫秒级窗口点了取消，后端尚未收到或被 reset，超过 250ms 仍在推进时自愈重发一次取消。
+            S.speed.t = 0;
+            const now = Date.now();
+            if (now - S.cancelSentAt > 250) {
+              S.cancelSentAt = now;
+              API.archiveCancel().catch(() => {});
+            }
+          } else {
             const incomingPaused = !!(p.paused || p.phase === 'paused');
             // 暂停/继续 RPC 在途期间，忽略来自 IPC 队列的反向旧状态，消除按钮与横幅闪烁。
             if (S.pauseLock === 'pausing' && !incomingPaused) {
