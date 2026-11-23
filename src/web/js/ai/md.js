@@ -40,28 +40,106 @@
   /* ---------------- 本地路径 ----------------
      只产标签，不做任何文件操作：点击由 AIEntries 接管。
      路径从「已转义的文本」里认出来，属性值因此天然安全（引号已变成 &quot;）。
-     排除 & 是为了不吞掉 &amp; / &quot; 这类实体。 */
-  const RE_ABS_PATH = /(?:[A-Za-z]:[\\/]|\\\\[^\s\\<>"'])[^<>\s&"'`|?*，。；：！？、）】」』]*/;
-  const RE_INLINE_PATH = new RegExp(
-    '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\'&])'
-    + '(?:[^<>\\s&"\'`|?*，。；：！？、）】」』]|(?:[ ][A-Za-z0-9._()\\-]+)+[\\\\/])*'
+     排除 & 是为了不吞掉 &amp; / &quot; 这类实体；
+     排除全角开闭标点与路径体里的冒号，并用前瞻 (?![A-Za-z]:[\\/]) 防止
+     「D:\Temp和C:\Logs」被粘成一条坏路径。 */
+  const PATH_STOP_CHARS = '<>\\s&"\'`|?*，。；：！？、（）【】「」『』《》〈〉—…·';
+  const RE_ABS_PATH = new RegExp(
+    '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\':])[^' + PATH_STOP_CHARS + ':]*'
   );
-  /* 标签 | 前缀字符 | 路径：只处理标签之外的文本段，
-     否则 <a href="https://…"> 里的 s:/ 会被当成盘符。 */
-  const RE_TEXT_PATH = new RegExp('(<[^>]*>)|(^|[^A-Za-z0-9_.\\u0000])(' + RE_INLINE_PATH.source + ')', 'g');
+  const RE_INLINE_PATH = new RegExp(
+    '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\'&:])'
+    + '(?:(?![A-Za-z]:[\\\\/])[^' + PATH_STOP_CHARS + ':]|(?:[ ][A-Za-z0-9._()\\-]+)+[\\\\/])*'
+  );
+  /* 标签 | 路径：只处理标签之外的文本段，且用负向后行断言代替捕获前缀，
+     这样「D:\Temp和C:\Logs」拆掉前段「和」后，紧跟的 C:\Logs 也能紧接着匹配。 */
+  const RE_TEXT_PATH = new RegExp('(<[^>]*>)|(?<![A-Za-z0-9_.\\u0000])(' + RE_INLINE_PATH.source + ')', 'g');
   const CJK_TAIL = /[.,;:!?，。；：、]+$/;
+  const CJK_PUNCT_SPLIT_RE = /[（【「『《》〈〉—…·，。；：！？、）\]」』]/;
+  /* 完整文件名扩展名判定：避免误切 v2中文版.zip、2026.11报告.docx */
+  const LEAF_ENDS_WITH_EXT_RE = /\.(?:7z|3gp|3ds|[A-Za-z][A-Za-z0-9]{0,7})$/;
+  /* 扩展名后紧跟中文自然语言：如 setup.exe是否可删、报告.pdf里的内容、a.7z压缩包 */
+  const EXT_CJK_TAIL_RE = /^(.*?\.(?:7z|3gp|3ds|[A-Za-z][A-Za-z0-9]{0,7}))([\u4e00-\u9fff].*)$/;
+  /* 盘符根目录或尾斜杠后紧跟自然语言：如 D:\里的文件、D:\Downloads\目录下；保留 D:\下载、D:\工作 */
+  const ROOT_PROSE_RE = /^(?:里的|中的|下的|上的|内的|里面|下面|上面|内部|里有|中有|下有|上有|内有|里共|中共|下共|盘里|盘中|盘上|盘下|盘共|盘占|盘约|盘有|盘剩|盘可用|根目录|目录里|目录下|目录中|目录内|文件夹里|文件夹下|文件夹中|文件夹内|路径下|路径中|路径里|共有|一共|合计|总共|约有|大约|大概|超过|占用|占据|占了|剩余|可用|空间|包含|含有|存有|发现|找到|已经|尚未|没有|无法|不能|可以|可能|需要|建议|是否|应该|正在|释放|清理|清空|删除|移除|移动|复制|打开|定位|查看|以及$|和$|与$|或$|及$|等$|里$|中$|下$|上$|内$|盘$|目录$|文件夹$|路径$)/;
+  /* ASCII 目录末段后紧跟中文自然语言：如 Downloads里的文件、Temp目录、AppData下、Temp和；
+     保留合法混名如 PDF报告、Vue项目、PPT模板、AI工具、PDF中文版 */
+  const ASCII_LEAF_CJK_RE = /^([A-Za-z][A-Za-z0-9._()+-]*)([\u4e00-\u9fff].*)$/;
+  const ASCII_PROSE_START_RE = /^(?:里的|中的|下的|上的|内的|里面|下面|上面|内部|里有|中有|下有|上有|内有|里共|中共|下共|目录下|目录中|目录里|目录内|目录|文件夹下|文件夹中|文件夹里|文件夹内|文件夹|路径下|路径中|路径里|路径|位置下|位置里|位置|根目录|分区|磁盘|盘里|盘中|盘上|盘下|盘$|共有|一共|合计|总共|约有|大约|大概|超过|不到|至少|最多|占用|占据|占了|占到|剩余|可用|空间|大小|体积|包含|含有|存有|存在|放着|放了|发现|找到|检测到|扫描到|显示|提示|已经|尚未|还没|没有|无法|不能|不可|可以|可能|需要|建议|推荐|请|是否|应该|最好|尽量|正在|已被|将被|用于|属于|位于|来自|指向|释放|清理|清空|删除|移除|移到|移至|复制到|移动到|备份到|解压到|压缩到|打开|定位|查看|检查|确认|保留|跳过|缓存|日志|备份|文件|压缩包|安装包|大文件|垃圾|残留|碎片|数据|列表|详情|内容|总数|数量|以及|等等|[里中下上内](?:$|[的有面共约存含包找发清删移全都很太占大小多少已未无可谓需是为还也就只0-9])|的|是|有|为|在|了|呢|吗|吧|啊|和|与|或|及|跟|同|到|至|等|共|约|占|可|已|未|无|需|要|会|能|被|把|将|从|向|往|对|给|让|比|较|最|很|都|也|还|就|才|只|并|且|但|而|因|若|如)/;
+  /* 中文目录末段尾部粘连自然语言：如 D:\下载\旧文件目录下、D:\工作资料里的文件；
+     要求前方至少留有目录主体，不误伤 新建文件夹、临时目录、内部资料、清理工具、和平精英 */
+  const CJK_LEAF_PROSE_RE = /^(.+?)((?:目录下|目录中|目录里|目录内|目录共|目录占|目录约|目录有|目录是|目录为|目录可|目录需|目录已|目录含|目录包|文件夹下|文件夹中|文件夹里|文件夹内|文件夹共|文件夹占|文件夹约|文件夹有|文件夹是|路径下|路径中|路径里|路径内|路径是|位置下|位置里|位置中|里的|中的|下的|上的|内的|里面|下面|上面|里有|中有|下有|上有|内有|里共|中共|下共|共有|一共|合计|总共|约有|大约|大概|超过|占用|占据|占了|剩余|可用|包含|含有|存有|放着|放了|发现|找到|已经|尚未|还没|没有|无法|不能|可以|可能|需要|建议|推荐|是否|应该|正在|已被|将被|释放|清理|清空|删除|移除|移到|移至|复制到|移动到|打开|定位|查看|检查|确认|以及|等等).*|[里中下上内]$|[和与或及跟至等])$/;
 
-  function trimPath(p) {
-    let s = p.replace(CJK_TAIL, '');
-    /* 收尾的右括号只有在前面没有对应的左括号时才去掉：
-       C:\Program Files (x86) 该留，见 D:\Downloads) 该去 */
+  function splitPathTail(raw) {
+    let s = String(raw || '');
+    let tail = '';
+    const cutAt = (idx) => {
+      if (idx < 0 || idx >= s.length) return;
+      tail = s.slice(idx) + tail;
+      s = s.slice(0, idx);
+    };
+
+    /* 1. 遇到全角开/闭标点（如 （约 2 GB）、【桌面】、——）立刻截断 */
+    const pIdx = s.search(CJK_PUNCT_SPLIT_RE);
+    if (pIdx > 0) cutAt(pIdx);
+
+    /* 2. 去掉末尾 ASCII / 中文句末标点与不成对的右括号，并保留到 tail */
+    const tp = s.match(CJK_TAIL);
+    if (tp) cutAt(s.length - tp[0].length);
     while (/[)\]}]$/.test(s)) {
       const open = (s.match(/[(\[{]/g) || []).length;
       const close = (s.match(/[)\]}]/g) || []).length;
       if (close <= open) break;
-      s = s.slice(0, -1);
+      cutAt(s.length - 1);
     }
-    return s;
+
+    /* 3. 只针对末段路径做中英文自然语言边界剥离，保护中间目录名 */
+    const lastSep = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+    if (lastSep >= 0) {
+      const prefix = s.slice(0, lastSep + 1);
+      const leaf = s.slice(lastSep + 1);
+      if (leaf) {
+        /* 3a. 盘符根目录或尾斜杠后紧跟中文自然语言：D:\里的文件、D:\Downloads\目录下 */
+        if (ROOT_PROSE_RE.test(leaf)) {
+          cutAt(lastSep + 1);
+          if (s.length > 3 && /[\\/]$/.test(s)) {
+            /* 保留盘符根 D:\ 的反斜杠；非根目录去尾斜杠让链接更干净 */
+            s = s.replace(/[\\/]+$/, '');
+          }
+        } else if (!LEAF_ENDS_WITH_EXT_RE.test(leaf)) {
+          /* 3b. 扩展名后紧跟中文：D:\a\setup.exe是否可删、报告.pdf里的内容 */
+          const extM = leaf.match(EXT_CJK_TAIL_RE);
+          if (extM) {
+            cutAt(prefix.length + extM[1].length);
+          } else {
+            /* 3c. ASCII 末段后紧跟中文自然语言：Downloads里的文件、Temp目录、AppData下 */
+            const ascM = leaf.match(ASCII_LEAF_CJK_RE);
+            if (ascM && ASCII_PROSE_START_RE.test(ascM[2])) {
+              cutAt(prefix.length + ascM[1].length);
+            } else {
+              /* 3d. 中文末段后粘连自然语言：D:\工作资料里的文件、D:\下载\旧文件目录下 */
+              const cjkM = leaf.match(CJK_LEAF_PROSE_RE);
+              if (cjkM) {
+                cutAt(prefix.length + cjkM[1].length);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    /* 4. 二次清理剥离后暴露出的句末标点或多余空格 */
+    const tp2 = s.match(CJK_TAIL);
+    if (tp2) cutAt(s.length - tp2[0].length);
+    return { path: s, tail };
+  }
+
+  function trimPath(p) {
+    return splitPathTail(p).path;
+  }
+
+  function cleanPath(p) {
+    return splitPathTail(String(p || '').trim()).path;
   }
 
   function pathAnchor(p, inner) {
@@ -71,6 +149,7 @@
 
   function asPath(text) {
     const t = String(text || '').trim();
+    if (/^[A-Za-z]:[\\/]$/.test(t)) return t;
     if (t.length < 4) return '';
     if (!/^(?:[A-Za-z]:[\\/]|\\\\[^\\])/.test(t)) return '';
     if (/\s{2,}|[<>"|?*]/.test(t)) return '';
@@ -117,10 +196,15 @@
     });
 
     /* 1. 行内代码：先转义再占位，内部不再解析任何语法。
-       整段就是一个路径时，包成可点标签——安装命令那是代码，路径不是。 */
+       整段就是一个路径时，包成可点标签——安装命令那是代码，路径不是。
+       若模型把自然语言写进了反引号（如 `D:\Downloads目录`），剥离尾部汉字留在链接外。 */
     src = src.replace(/`([^`\n]*)`/g, (m, code) => {
-      const p = asPath(code);
-      if (p) return put(pathAnchor(p, '<code>' + code + '</code>'));
+      const sp = splitPathTail(code);
+      const p = asPath(sp.path);
+      if (p) {
+        if (sp.tail) return put(pathAnchor(p, '<code>' + p + '</code>')) + sp.tail;
+        return put(pathAnchor(p, '<code>' + code + '</code>'));
+      }
       return put('<code>' + code + '</code>');
     });
 
@@ -131,7 +215,7 @@
       /* file:// 链接 = 用户/AI 明确指的本地位置，交给我们自己打开，
          而不是交给浏览器（WebView2 里那一步什么都不会发生） */
       if (/^file:/i.test(href)) {
-        const p = fileUrlToPath(href);
+        const p = cleanPath(fileUrlToPath(href));
         if (asPath(p)) {
           // fileUrlToPath 做了解码与反转义，拼回 HTML 属性前必须重新转义，防二次反转义 XSS
           const safeP = escape(p);
@@ -142,8 +226,11 @@
       if (!SAFE_URL.test(href)) {
         /* [看看](D:\Downloads) 这种写法也常出现：目标是本地位置就做成入口，
            其它协议（javascript:/data:/vbscript:）仍然降级成纯文本 */
-        if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(href) && asPath(href)) {
-          return put(pathAnchor(href, resolve(emphasis(label)) || href));
+        if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(href)) {
+          const p = cleanPath(href);
+          if (asPath(p)) {
+            return put(pathAnchor(p, resolve(emphasis(label)) || p));
+          }
         }
         return label;
       }
@@ -155,12 +242,12 @@
     src = emphasis(src);
 
     /* 3.5 正文里的裸路径：只在标签之外的文本段里认，
-       否则会把 <a href="https://…"> 里的 s:/ 当成盘符链接掉。 */
-    src = src.replace(RE_TEXT_PATH, (m, tag, pre, path) => {
+       剥离出的中文后缀/标点原样留作普通正文，不吞字也不污染 data-path。 */
+    src = src.replace(RE_TEXT_PATH, (m, tag, path) => {
       if (tag) return tag;
-      const p = trimPath(path);
-      if (!asPath(p)) return m;
-      return pre + pathAnchor(p, p);
+      const sp = splitPathTail(path);
+      if (!asPath(sp.path)) return m;
+      return pathAnchor(sp.path, sp.path) + sp.tail;
     });
 
     /* 4. 硬换行：只作用在占位符之外，代码里的换行保持原样 */
@@ -507,7 +594,9 @@
     escape,
     inline,
     blocks: parseBlocks,
-    hasMarkup
+    hasMarkup,
+    splitPathTail,
+    cleanPath
   };
 
   root.AIMd = AIMd;

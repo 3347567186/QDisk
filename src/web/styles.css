@@ -288,16 +288,17 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
   min-width: 0;
 }
 .brand-mark {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 7px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  background: var(--text-1);
-  color: var(--canvas);
+  background: transparent;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18);
 }
-.brand-mark svg { width: 15px; height: 15px; stroke-width: 1.6; }
+.brand-mark svg { width: 26px; height: 26px; display: block; }
 .brand-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; gap: 1px; }
 .brand-text strong { font-size: var(--fs-body); font-weight: 600; letter-spacing: -.01em; }
 .brand-text span {

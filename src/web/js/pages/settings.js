@@ -393,7 +393,7 @@
                 }),
                 h('span', { text: T('开机自动启动', 'Start with Windows') })
               ),
-              T('随 Windows 登录自动运行整理助手', 'Launch the assistant after Windows sign-in')),
+              T('随 Windows 登录自动运行轻盘', 'Launch QDisk after Windows sign-in')),
             setRow(T('权限', 'Privileges'),
               h('div', { class: 'row wrap' },
                 state.admin

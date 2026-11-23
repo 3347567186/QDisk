@@ -270,7 +270,7 @@
     const adminTextBox = h('div', { class: 'admin-content' }, adminTitle, adminDesc);
     const btnAdmin = h('button', {
       class: 'btn-admin-action',
-      title: T('以管理员身份重新启动整理助手', 'Restart TidyAssistant with administrator privileges'),
+      title: T('以管理员身份重新启动轻盘', 'Restart QDisk with administrator privileges'),
       onclick: doRestartAsAdmin
     }, icon('shield', 14), h('span', null, T('以管理员身份重启', 'Restart as admin')));
 
@@ -885,8 +885,8 @@
       if (isDenied) {
         const goAdmin = await confirm({
           title: T('需要管理员权限', 'Administrator Privileges Required'),
-          body: T(`${actionName || '此操作'}涉及系统级（HKLM）注册表或系统启动目录，需要以管理员身份运行才能修改。\n\n是否立即以管理员身份重启整理助手？`,
-            `${actionName || 'This action'} modifies system-level (HKLM) registry or system startup folders, requiring administrator privileges.\n\nRestart TidyAssistant as Administrator now?`),
+          body: T(`${actionName || '此操作'}涉及系统级（HKLM）注册表或系统启动目录，需要以管理员身份运行才能修改。\n\n是否立即以管理员身份重启轻盘？`,
+            `${actionName || 'This action'} modifies system-level (HKLM) registry or system startup folders, requiring administrator privileges.\n\nRestart QDisk as Administrator now?`),
           okText: T('以管理员身份重启', 'Restart as admin')
         });
         if (goAdmin) {
@@ -1136,10 +1136,10 @@
       }
       if (denied > 0) {
         const promptText = cleaned > 0
-          ? T(`已成功清理 ${cleaned} 项失效项，其余 ${denied} 项位于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启整理助手继续清理？`,
-              `Cleaned ${cleaned} items. Remaining ${denied} items are in HKLM registry.\n\nRestart as admin to clean?`)
-          : T(`清理失败：${denied} 项失效项属于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启整理助手？`,
-              `Failed: ${denied} items are in HKLM registry.\n\nRestart as admin?`);
+          ? T(`已成功清理 ${cleaned} 项失效项，其余 ${denied} 项位于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启轻盘继续清理？`,
+              `Cleaned ${cleaned} items. Remaining ${denied} items are in HKLM registry.\n\nRestart QDisk as admin to clean?`)
+          : T(`清理失败：${denied} 项失效项属于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启轻盘？`,
+              `Failed: ${denied} items are in HKLM registry.\n\nRestart QDisk as admin?`);
         const goAdmin = await confirm({
           title: T('需要管理员权限', 'Admin Required'),
           body: promptText,

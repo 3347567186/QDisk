@@ -50,8 +50,8 @@ if (-not (Test-Path $releaseDir)) {
   throw "找不到 release 目录：$releaseDir（请先运行 .\build.ps1 构建产物）"
 }
 
-$instFile = "TidyAssistant_${Version}_x64-setup.exe"
-$portFile = "整理助手_${Version}_便携版.zip"
+$instFile = "QDisk_${Version}_x64-setup.exe"
+$portFile = "QDisk_${Version}_x64-portable.zip"
 $instPath = Join-Path $releaseDir $instFile
 $portPath = Join-Path $releaseDir $portFile
 
@@ -66,11 +66,11 @@ function Get-Sha256Lower([string]$p) {
 }
 
 function Get-NotesFromChangelog([string]$ver, [string]$path) {
-  if (-not (Test-Path $path)) { return "TidyAssistant v$ver 正式发布。" }
+  if (-not (Test-Path $path)) { return "轻盘 QDisk v$ver 正式发布。" }
   $raw = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
   $escaped = [regex]::Escape($ver)
   $m = [regex]::Match($raw, "(?ms)^##\s+${escaped}\b.*?(?=^##\s+|\z)")
-  if (-not $m.Success) { return "TidyAssistant v$ver 正式发布。" }
+  if (-not $m.Success) { return "轻盘 QDisk v$ver 正式发布。" }
   $txt = $m.Value.Trim()
   if ($txt.Length -gt 2400) { $txt = $txt.Substring(0, 2400).TrimEnd() + "`n…" }
   return $txt
@@ -141,12 +141,8 @@ if ($hasInst) {
 if ($hasPort) {
   $sha = Get-Sha256Lower $portPath
   $len = (Get-Item -LiteralPath $portPath).Length
-  # 红队防 404：GitHub Releases 会改写含中文字符的附件名，上传到 GitHub 时统一使用纯 ASCII 文件名
-  $remotePortFile = if (-not $ServeLocal -and $GitHubRepo) {
-    "TidyAssistant_${Version}_x64-portable.zip"
-  } else {
-    $portFile
-  }
+  # 纯 ASCII 文件名，确保 GitHub Releases 下载地址与 latest.json 100% 字节对齐、绝不 404
+  $remotePortFile = "QDisk_${Version}_x64-portable.zip"
   $url = Format-AssetUrl $BaseUrl $remotePortFile
   $manifest['portable'] = [ordered]@{
     file   = $remotePortFile
@@ -175,15 +171,12 @@ if ($UploadGitHub) {
   if ($hasInst) { $files += $instPath }
   $tmpAsciiPort = $null
   if ($hasPort) {
-    # 使用纯 ASCII 临时副本上传，保证 GitHub Releases 下载地址与 latest.json 100% 字节对齐、绝不 404
-    $tmpAsciiPort = Join-Path ([IO.Path]::GetTempPath()) "TidyAssistant_${Version}_x64-portable.zip"
-    Copy-Item -LiteralPath $portPath -Destination $tmpAsciiPort -Force
-    $files += $tmpAsciiPort
+    $files += $portPath
   }
   $tag = "v$Version"
   $tmpBody = Join-Path ([IO.Path]::GetTempPath()) "tidy_release_notes_${Version}.md"
   [IO.File]::WriteAllText($tmpBody, $ReleaseBody + "`n", $enc)
-  $args = @('release', 'create', $tag) + $files + @('--repo', $GitHubRepo, '--title', "TidyAssistant $tag", '--notes-file', $tmpBody)
+  $args = @('release', 'create', $tag) + $files + @('--repo', $GitHubRepo, '--title', "轻盘 QDisk $tag", '--notes-file', $tmpBody)
   if ($Channel -eq 'beta') { $args += '--prerelease' }
   Write-Host "正在上传 Release $tag 到 GitHub ($GitHubRepo)…" -ForegroundColor Cyan
   try {

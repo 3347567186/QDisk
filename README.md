@@ -1,21 +1,23 @@
 <div align="center">
 
-# 整理助手 · TidyAssistant
+<img src="docs/assets/logo.svg" width="88" height="88" alt="轻盘 QDisk Logo" />
+
+# 轻盘 · QDisk
 
 **本地优先、零广告、每步高危动作均可预演与一键撤回的 Windows 文件整理、多核压缩、空间维护与可审计 AI 助手**
 
-[![Official Website](https://img.shields.io/badge/%E5%AE%98%E6%96%B9%E7%BD%91%E7%AB%99-Live%20Site-c84b28?style=for-the-badge)](https://3347567186.github.io/TidyAssistant/)
-[![Download Installer](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E5%AE%89%E8%A3%85%E7%89%88-v1.43.15%20(20.6%20MB)-161614?style=for-the-badge)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-setup.exe)
-[![Download Portable](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E4%BE%BF%E6%90%BA%E7%89%88-ZIP%20(25.0%20MB)-0969da?style=for-the-badge)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-portable.zip)
+[![Official Website](https://img.shields.io/badge/%E5%AE%98%E6%96%B9%E7%BD%91%E7%AB%99-Live%20Site-d44b24?style=for-the-badge)](https://3347567186.github.io/TidyAssistant/)
+[![Download Installer](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E5%AE%89%E8%A3%85%E7%89%88-v1.43.16%20(20.6%20MB)-161614?style=for-the-badge)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe)
+[![Download Portable](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E4%BE%BF%E6%90%BA%E7%89%88-ZIP%20(25.0%20MB)-0969da?style=for-the-badge)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip)
 
 [![Latest Release](https://img.shields.io/github/v/release/3347567186/TidyAssistant?color=2ea043&label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/3347567186/TidyAssistant/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6)](#四安装部署与下载)
-[![Tests](https://img.shields.io/badge/Tests-362%2B%20Passing%20%7C%200%20Warnings-15803d)](#一不靠吹嘘本机功能实测数据)
+[![Tests](https://img.shields.io/badge/Tests-364%2B%20Passing%20%7C%200%20Warnings-15803d)](#一不靠吹嘘本机功能实测数据)
 
 **简体中文** | [English](README.en.md)
 
-**[🌐 访问官方网站](https://3347567186.github.io/TidyAssistant/)** · **[⬇️ 下载安装版 (.exe)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-setup.exe)** · **[📦 下载便携版 (.zip)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-portable.zip)** · **[📋 全部版本与校验](https://github.com/3347567186/TidyAssistant/releases/latest)**
+**[🌐 访问官方网站](https://3347567186.github.io/TidyAssistant/)** · **[⬇️ 下载安装版 (.exe)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe)** · **[📦 下载便携版 (.zip)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip)** · **[📋 全部版本与校验](https://github.com/3347567186/TidyAssistant/releases/latest)**
 
 </div>
 
@@ -23,7 +25,7 @@
 
 ## 一、不靠吹嘘：本机功能实测数据
 
-> **测试环境**：AMD Ryzen 9 5900HX（8 核 16 线程）· Windows 11 x64 · NVMe SSD · TidyAssistant `v1.43.15`（全部为本机实跑采集，非估算值）。
+> **测试环境**：AMD Ryzen 9 5900HX（8 核 16 线程）· Windows 11 x64 · NVMe SSD · 轻盘 QDisk（全部为本机实跑采集，非估算值）。
 
 ### 1. 核心性能与响应实测
 
@@ -33,8 +35,8 @@
 | **1,000 文件整理预演 / 执行 / 撤回** | 1,000 个真实混合下载文件（10 扩展名，5 大分类） | 扫描 **`306.5 ms`** · 移动 **`1.79 s`** · 撤回 **`1.39 s`** | `1000/1000` 精准移动，`1000/1000` 一键原路还原，失败 0 |
 | **10,001 文件索引与模糊检索** | 50 子目录 × 200 文件 + 目标 PDF（30 次 FTS5 查询） | 建库 **`68.4 ms`**（~14.6 万文件/秒）· 检索中位数 **`6.53 ms`** | Rust `indexwalk` + SQLite FTS5，P95 检索延迟 `7.23 ms` |
 | **引擎冷启动 & JSON-RPC 往返** | `tidy.py --engine` 进程冷启 + 20 次热态 `ping` | 冷启含首包 **`224.4 ms`** · 热态往返 **`0.10 ms`** | 长驻引擎零重复冷启开销 |
-| **软件体积极致控制** | `v1.43.15` 正式 Release 产物 | 主程序 **`5.56 MB`** · 安装包 **`20.56 MB`** · 便携包 **`24.99 MB`** | 前端零框架总源码仅 `2.03 MB`（0 `node_modules`） |
-| **全栈自动化测试门禁** | `build.ps1` 每次发包强制执行 | **362+ 项测试全绿** · Release **`0` 警告** | Python 234 项 + Rust 56 项 + JS 7 套（含 72 项 AI 黄金集 & 12 页 0 泄漏） |
+| **软件体积极致控制** | `v1.43.16` 正式 Release 产物 | 主程序 **`5.56 MB`** · 安装包 **`20.6 MB`** · 便携包 **`25.0 MB`** | 前端零框架总源码仅 `2.03 MB`（0 `node_modules`） |
+| **全栈自动化测试门禁** | `build.ps1` 每次发包强制执行 | **364+ 项测试全绿** · Release **`0` 警告** | Python 234 项 + Rust 58 项 + JS 7 套（含 72 项 AI 黄金集、35 项路径防粘连与 12 页 0 泄漏） |
 
 ### 2. Rust 多核压缩内核四档动态性能实测（64 MB 混合集：75% JSON + 25% PNG，32 文件）
 
@@ -57,7 +59,7 @@
 
 ![AI 助手运行时界面](docs/assets/screenshots/01-ai-assistant.png)
 
-- **过程完全透明**：推理原文、本地调用的工具名、参数与耗时（`14ms / 68ms`）全部可展开核查，并自动做**体积与路径同源反幻觉校验**。
+- **过程完全透明**：推理原文、本地调用的工具名、参数与耗时（`14ms / 68ms`）全部可展开核查，自动做**体积与路径同源反幻觉校验**，并在前后端双端精准剥离路径尾部的粘连汉字与全角标点（跳转不丢正文、不报目标不存在）。
 - **四档可控权限**：`只读` / `确认`（写动作全变审批卡片，勾选才执行）/ `自动`（可撤销动作 3 秒可停）/ `放手`（永久删除仍需输入确认词）。
 - **真正秒停**：Rust 层 `AI_CANCEL_EPOCH` + `ACTIVE_AI_HANDLES` 跨线程直关 WinHTTP 句柄（实测 `0.31 ms`），前端同步打断 429/5xx 退避睡眠，绝不白烧 Token。
 
@@ -98,9 +100,9 @@
 ## 四、安装、部署与下载
 
 - **🌐 官方网站**：https://3347567186.github.io/TidyAssistant/
-- **⬇️ 安装版（推荐，20.6 MB）**：[TidyAssistant_1.43.15_x64-setup.exe](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-setup.exe)
-- **📦 便携版（免安装，25.0 MB）**：[TidyAssistant_1.43.15_x64-portable.zip](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-portable.zip)（解压至纯英文路径即用）
-- **🔐 校验与历史版本**：[GitHub Releases](https://github.com/3347567186/TidyAssistant/releases/latest) · [SHA256SUMS.txt](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/SHA256SUMS.txt)
+- **⬇️ 安装版（推荐，20.6 MB）**：[QDisk_1.43.16_x64-setup.exe](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe)
+- **📦 便携版（免安装，25.0 MB）**：[QDisk_1.43.16_x64-portable.zip](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip)（解压至纯英文路径即用）
+- **🔐 校验与历史版本**：[GitHub Releases](https://github.com/3347567186/TidyAssistant/releases/latest) · [SHA256SUMS.txt](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/SHA256SUMS.txt)
 
 > 支持 **Windows 10 / 11 (x64)**；所有配置、规则与撤回记录独立保存在 `%LOCALAPPDATA%\整理助手数据`，内置官方 GitHub Releases 零配置在线更新（自动核验 SHA-256，便携版失败自动回滚）。私有化/内网部署详见 [发包与在线更新指南](docs/01-当前版/发包与在线更新指南.md)。
 
@@ -120,7 +122,7 @@ node src/web/js/ai/scope.selftest.mjs
 node src/web/js/ai/agent.selftest.mjs
 node src/web/js/ai/pages.selftest.mjs
 
-# Python 引擎单测（234 项） & Rust 核心单测（56 项）
+# Python 引擎单测（234 项） & Rust 核心单测（58 项）
 python -m unittest discover -s src/engine/tests -v
 cargo test --release --manifest-path src/src-tauri/Cargo.toml
 

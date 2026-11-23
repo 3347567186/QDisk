@@ -560,7 +560,7 @@
     state.lang = lang === 'en-US' ? 'en-US' : 'zh-CN';
     document.documentElement.lang = state.lang;
     const I18N = {
-      'app.name': ['整理助手', 'Tidy Assistant'],
+      'app.name': ['轻盘', 'QDisk'],
       'app.slogan': ['按类型收纳，一步到位', 'Sorted by type, in one pass'],
       'status.connecting': ['正在连接引擎…', 'Connecting engine…']
     };

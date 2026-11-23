@@ -142,9 +142,27 @@
 
   /* 1.42.9 起：目录在应用内浏览（Space Tools → DirView），不再默认打开 Explorer。
      这解决了「AI 给的路径一点就跳出软件」的核心体验问题。
-     文件仍然用系统默认程序打开——应用内没有编辑器。 */
+     文件仍然用系统默认程序打开——应用内没有编辑器。
+     1.43.16：点击跳转前先经 Rust 真机存在性解析（精确命中优先；仅当原路径不存在时
+     才剥离粘连汉字/标点做真实存在性兜底），兼顾旧历史消息与奇异中文目录名。 */
+  async function resolveForJump(raw) {
+    let path = stripSlash(expand(raw));
+    if (!path) return '';
+    if (API && typeof API.resolvePath === 'function') {
+      try {
+        const hit = await API.resolvePath(path);
+        if (hit && typeof hit === 'string') return stripSlash(hit);
+      } catch (e) { /* 非 Tauri / 测试环境静默降级 */ }
+    }
+    if (root.AIMd && typeof root.AIMd.cleanPath === 'function') {
+      const cleaned = stripSlash(root.AIMd.cleanPath(path));
+      if (cleaned && isAbs(cleaned)) return cleaned;
+    }
+    return path;
+  }
+
   async function open(p, opts) {
-    const path = stripSlash(expand(p));
+    const path = await resolveForJump(p);
     if (!path) return { ok: false };
     const o = opts || {};
     if (extOf(path) && EXEC_EXT.indexOf(extOf(path)) >= 0) {
@@ -173,7 +191,7 @@
   }
 
   async function reveal(p) {
-    const path = stripSlash(expand(p));
+    const path = await resolveForJump(p);
     if (!path) return { ok: false };
     try {
       await API.reveal(path);
@@ -347,15 +365,18 @@
   }
 
   /* 正文里出现的路径（AI 常把位置写在句子里）。AIMd 已经把它们渲染成
-     .md-path；这个函数给「纯文本回放」用，保持两条路一致。 */
-  const RE_PATH = /(?:[A-Za-z]:[\\/]|\\\\[^\\\s])[^\s<>"'`|?*，。；：！？、）】」』]*/g;
+     .md-path；这个函数给「纯文本回放」用，复用 AIMd.splitPathTail 保持两条路完全一致。 */
+  const RE_PATH = /(?:[A-Za-z]:[\\/]|\\\\[^\\\s<>'"&:])(?:(?![A-Za-z]:[\\/])[^\s<>"'`|?*:，。；：！？、（）【】「」『』《》〈〉—…·])*/g;
 
   function fromText(text) {
     const out = [];
     const seen = new Set();
+    const clean = (s) => (root.AIMd && typeof root.AIMd.cleanPath === 'function')
+      ? root.AIMd.cleanPath(s)
+      : s.replace(/[.,;:!?)\]}]+$/, '');
     String(text || '').replace(RE_PATH, (m) => {
-      const p = stripSlash(m.replace(/[.,;:!?)\]}]+$/, ''));
-      if (p.length < 4) return m;
+      const p = stripSlash(clean(m));
+      if (!p || (!/^[A-Za-z]:[\\/]$/.test(p) && p.length < 4)) return m;
       const k = p.toLowerCase();
       if (!seen.has(k)) { seen.add(k); const e = entry(p, null, 'text'); if (e) out.push(e); }
       return m;

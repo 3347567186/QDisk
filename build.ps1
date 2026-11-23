@@ -229,7 +229,7 @@ function Build-App {
   if ($Bundle) {
     $nsis = Join-Path $target 'x86_64-pc-windows-gnu\release\bundle\nsis'
     # 只认当前版本号的产物：目录里可能残留旧版本（tauri 不会清理），拿错就会把旧包当新包发
-    $pkg = Get-ChildItem (Join-Path $nsis "TidyAssistant_${current}_x64-setup.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
+    $pkg = Get-ChildItem (Join-Path $nsis "QDisk_${current}_x64-setup.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $pkg) {
       # 只有目录里根本没有当前版本时才回退；回退到别的版本会把旧包当新包发，所以直接报错
       $latest = Get-ChildItem "$nsis\*.exe" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -256,7 +256,7 @@ function Build-Portable {
   Remove-Item (Join-Path $stage '引擎\数据位置.json') -Force -ErrorAction SilentlyContinue   # 运行时会重建，别把本机数据目录带给别人
 
   @"
-整理助手 $current 便携版
+轻盘 · QDisk $current 便携版
 =====================
 直接双击 tidy-assistant.exe 即可运行，无需安装。
 数据目录：%LOCALAPPDATA%\整理助手数据（配置、日志、WebView2 缓存、整理历史）
@@ -265,7 +265,7 @@ function Build-Portable {
 RAR：首次打开 RAR 时会自动下载官方 UnRAR64.dll 并校验，需要联网；许可见 THIRD_PARTY.md。
 "@ | Set-Content (Join-Path $stage '使用说明.txt') -Encoding UTF8
 
-  $zip = Join-Path $root "release\整理助手_${current}_便携版.zip"
+  $zip = Join-Path $root "release\QDisk_${current}_x64-portable.zip"
   New-Item -ItemType Directory -Force -Path (Join-Path $root 'release') | Out-Null
   Remove-Item $zip -Force -ErrorAction SilentlyContinue
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
@@ -535,8 +535,8 @@ try {
   if ($appBuilt) { Build-App }
   if ($Portable) { Build-Portable }
 
-  if ($Bundle)   { Remove-OldReleases 'TidyAssistant_*_x64-setup.exe' }
-  if ($Portable) { Remove-OldReleases '*便携版.zip' }
+  if ($Bundle)   { Remove-OldReleases 'QDisk_*_x64-setup.exe'; Remove-OldReleases 'TidyAssistant_*_x64-setup.exe' }
+  if ($Portable) { Remove-OldReleases 'QDisk_*_x64-portable.zip'; Remove-OldReleases '*便携版.zip' }
 
   # 自动同步生成 release\latest.json 与 SHA256SUMS.txt，开箱即可直接发包上线
   $pubScript = Join-Path $root 'tools\publish-release.ps1'
@@ -552,12 +552,12 @@ try {
   }
   $releases = @()
   if ($Bundle) {
-    $pkg = Join-Path $root ("release\TidyAssistant_{0}_x64-setup.exe" -f $current)
+    $pkg = Join-Path $root ("release\QDisk_{0}_x64-setup.exe" -f $current)
     if (-not (Test-Path $pkg)) { throw "安装包缺失：$pkg" }
     $releases += @{ name = (Split-Path $pkg -Leaf); sha256 = (Get-TidyFileSha256 $pkg) }
   }
   if ($Portable) {
-    $zip = Join-Path $root ("release\整理助手_{0}_便携版.zip" -f $current)
+    $zip = Join-Path $root ("release\QDisk_{0}_x64-portable.zip" -f $current)
     if (-not (Test-Path $zip)) { throw "便携包缺失：$zip" }
     $releases += @{ name = (Split-Path $zip -Leaf); sha256 = (Get-TidyFileSha256 $zip) }
   }

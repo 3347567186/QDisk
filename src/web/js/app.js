@@ -536,7 +536,7 @@
     const title = page && page.title ? UI.T(page.title[0], page.title[1]) : UI.T(item.zh, item.en);
     document.getElementById('page-title').textContent = title;
     document.getElementById('page-sub').textContent = '';
-    document.title = title + ' · ' + UI.T('整理助手', 'Tidy Assistant');
+    document.title = title + ' · ' + UI.T('轻盘', 'QDisk');
   }
 
   /* 切页反馈：只在挂载真的变慢时出现，避免快页面闪一下进度条 */

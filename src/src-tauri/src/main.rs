@@ -440,6 +440,219 @@ fn save_text(name: String, content: String) -> Result<Option<String>, String> {
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
+fn is_cjk_or_fullwidth(c: char) -> bool {
+    let cp = c as u32;
+    (0x4E00..=0x9FFF).contains(&cp)
+        || (0x3400..=0x4DBF).contains(&cp)
+        || (0x3000..=0x303F).contains(&cp)
+        || (0xFF00..=0xFFEF).contains(&cp)
+        || matches!(c, '—' | '…' | '·')
+}
+
+fn is_cjk_punct_stopper(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '）'
+            | '【'
+            | '】'
+            | '「'
+            | '」'
+            | '『'
+            | '』'
+            | '《'
+            | '》'
+            | '〈'
+            | '〉'
+            | '—'
+            | '…'
+            | '·'
+            | '，'
+            | '。'
+            | '；'
+            | '：'
+            | '！'
+            | '？'
+            | '、'
+    )
+}
+
+fn trim_unbalanced_and_punct(input: &str) -> &str {
+    let mut s = input
+        .trim()
+        .trim_matches(|c| matches!(c, '`' | '\'' | '"'))
+        .trim();
+    s = s.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+    while let Some(last) = s.chars().last() {
+        if !matches!(last, ')' | ']' | '}') {
+            break;
+        }
+        let opens = s.chars().filter(|c| matches!(c, '(' | '[' | '{')).count();
+        let closes = s.chars().filter(|c| matches!(c, ')' | ']' | '}')).count();
+        if closes <= opens {
+            break;
+        }
+        s = &s[..s.len() - last.len_utf8()];
+    }
+    s.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'))
+}
+
+fn trim_nonroot_sep(s: &str) -> &str {
+    if s.len() > 3 && (s.ends_with('\\') || s.ends_with('/')) {
+        s.trim_end_matches(['\\', '/'])
+    } else {
+        s
+    }
+}
+
+/// 存在性优先的本地路径解析兜底：
+/// 1. 只要原路径在磁盘上真实存在，直接原样返回（绝不误伤任何带汉字后缀的真实目录/文件）；
+/// 2. 仅当原路径不存在时，按「中文标点 → 扩展名边界 → ASCII 末段粘连汉字 → 中文末段自然语言后缀」
+///    逐级剥离尾部粘连，且只放行磁盘上真实存在的候选路径（绝不跨 `\` 静默回退到父目录，
+///    除非尾段本身就是纯中文介词/目录提示词如 `D:\Downloads\里的文件`）。
+fn resolve_existing_local_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let exact = PathBuf::from(trimmed);
+    if exact.exists() {
+        return Some(exact);
+    }
+
+    // 1. 剥离包裹引号、全角标点后缀与不平衡右括号
+    let mut s = trim_unbalanced_and_punct(trimmed);
+    if let Some(idx) = s.find(is_cjk_punct_stopper) {
+        if idx > 0 {
+            s = trim_unbalanced_and_punct(&s[..idx]);
+        }
+    }
+    if !s.is_empty() {
+        let cand = PathBuf::from(s);
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+
+    // 2. 仅在最后一个路径分隔符之后的末段做语义边界剥离
+    let last_sep = s.rfind(['\\', '/'])?;
+    let prefix = &s[..=last_sep];
+    let leaf = &s[last_sep + 1..];
+    if leaf.is_empty() {
+        let p = trim_nonroot_sep(prefix);
+        let cand = PathBuf::from(p);
+        return cand.exists().then_some(cand);
+    }
+
+    // 2a. 尾斜杠后紧跟纯中文介词/提示词（如 D:\里的文件、D:\Downloads\目录下）
+    const ROOT_PROSE_PREFIXES: &[&str] = &[
+        "里的", "中的", "下的", "上的", "内的", "里面", "下面", "上面", "内部", "里有",
+        "中有", "下有", "盘里", "盘中", "盘上", "盘下", "根目录", "目录下", "目录中",
+        "目录里", "文件夹下", "文件夹中", "文件夹里", "路径下", "共有", "一共", "占用",
+        "占据", "约有", "大约", "包含", "可以", "需要", "建议", "是否", "已经", "没有",
+        "目录", "文件夹", "路径", "里", "中", "下", "上", "内", "盘",
+    ];
+    if ROOT_PROSE_PREFIXES.iter().any(|p| leaf.starts_with(p)) {
+        let base = trim_nonroot_sep(prefix);
+        let cand = PathBuf::from(base);
+        if cand.exists() {
+            return Some(cand);
+        }
+    }
+
+    // 2b. 文件扩展名后紧跟汉字/全角字符（如 setup.exe是否可删、报告.pdf里的内容、a.7z压缩包）
+    for (dot_idx, ch) in leaf.char_indices() {
+        if ch != '.' || dot_idx == 0 {
+            continue;
+        }
+        let rest = &leaf[dot_idx + 1..];
+        let mut ext_end = 0usize;
+        for (i, rc) in rest.char_indices() {
+            if rc.is_ascii_alphanumeric() {
+                ext_end = i + rc.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if ext_end == 0 || ext_end > 8 || ext_end >= rest.len() {
+            continue;
+        }
+        let ext = &rest[..ext_end];
+        let after = &rest[ext_end..];
+        let valid_ext = ext.eq_ignore_ascii_case("7z")
+            || ext.eq_ignore_ascii_case("3gp")
+            || ext.eq_ignore_ascii_case("3ds")
+            || ext.as_bytes()[0].is_ascii_alphabetic();
+        if valid_ext && after.chars().next().is_some_and(is_cjk_or_fullwidth) {
+            let candidate = format!("{prefix}{}", &leaf[..dot_idx + 1 + ext_end]);
+            let pb = PathBuf::from(&candidate);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
+
+    // 2c. ASCII 末段后紧跟汉字（如 Downloads里的文件、Temp缓存、AppData目录）
+    if leaf.as_bytes().first().is_some_and(|b| b.is_ascii_alphanumeric()) {
+        if let Some(cjk_idx) = leaf.find(is_cjk_or_fullwidth) {
+            if cjk_idx > 0 {
+                let stem = trim_unbalanced_and_punct(&leaf[..cjk_idx]);
+                if !stem.is_empty() {
+                    let candidate = format!("{prefix}{stem}");
+                    let pb = PathBuf::from(&candidate);
+                    if pb.exists() {
+                        return Some(pb);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2d. 中文末段尾部粘连自然语言后缀（如 D:\工作资料目录下、D:\下载\旧文件里的文件）
+    const CJK_PROSE_MARKERS: &[&str] = &[
+        "目录下", "目录中", "目录里", "目录内", "文件夹下", "文件夹中", "文件夹里",
+        "文件夹内", "路径下", "路径中", "路径里", "位置下", "位置里", "里的", "中的",
+        "下的", "上的", "内的", "里面", "下面", "上面", "里有", "中有", "下有", "共有",
+        "一共", "合计", "约有", "大约", "占用", "占据", "包含", "含有", "可以", "需要",
+        "建议", "是否", "已经", "没有", "无法", "清理", "删除", "移动", "打开", "定位",
+        "目录", "文件夹", "路径", "以及", "等等",
+    ];
+    for marker in CJK_PROSE_MARKERS {
+        if let Some(idx) = leaf.find(marker) {
+            if idx > 0 {
+                let stem = trim_unbalanced_and_punct(&leaf[..idx]);
+                if !stem.is_empty() {
+                    let candidate = format!("{prefix}{stem}");
+                    let pb = PathBuf::from(&candidate);
+                    if pb.exists() {
+                        return Some(pb);
+                    }
+                }
+            }
+        }
+    }
+    // 末段以单个连接词/方位词结尾（如 D:\下载和、D:\工作里）
+    if let Some((idx, last_ch)) = leaf.char_indices().next_back() {
+        if idx > 0 && matches!(last_ch, '里' | '中' | '下' | '上' | '内' | '和' | '与' | '或' | '及' | '跟' | '至' | '等') {
+            let candidate = format!("{prefix}{}", &leaf[..idx]);
+            let pb = PathBuf::from(&candidate);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
+
+    None
+}
+
+#[tauri::command]
+fn resolve_local_path(path: String) -> Option<String> {
+    let raw = path.trim();
+    if raw.is_empty() || raw.chars().any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20) {
+        return None;
+    }
+    resolve_existing_local_path(raw).map(|p| p.to_string_lossy().to_string())
+}
+
 /// 在资源管理器里定位一个位置：目录就打开它，文件就选中它。
 /// 同样先检查存在性——「定位了一个不存在的东西」等于没定位。
 #[tauri::command]
@@ -451,15 +664,14 @@ fn reveal(path: String) -> Result<(), String> {
     if raw.chars().any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20) {
         return Err("路径里有不能用的字符".into());
     }
-    let p = PathBuf::from(&raw);
-    if !p.exists() {
-        return Err(format!("这个位置已经不在了：{raw}"));
-    }
+    let p = resolve_existing_local_path(&raw)
+        .ok_or_else(|| format!("这个位置已经不在了：{raw}"))?;
+    let target = p.to_string_lossy().to_string();
     let mut cmd = Command::new("explorer.exe");
     if p.is_dir() {
-        cmd.arg(&raw);
+        cmd.arg(&target);
     } else {
-        cmd.arg(format!("/select,{raw}"));
+        cmd.arg(format!("/select,{target}"));
     }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -471,7 +683,7 @@ fn reveal(path: String) -> Result<(), String> {
 enum OpenTarget {
     Url,
     SafeShell,
-    LocalPath,
+    LocalPath(PathBuf),
 }
 
 /// 严格校验 open_path 目标，拒绝危险协议与控制字符；放行安全网页、白名单回收站 shell URI 与已存在的本地路径。
@@ -509,10 +721,9 @@ fn validate_open_target(raw: &str) -> Result<OpenTarget, String> {
             }
         }
     }
-    if !Path::new(raw).exists() {
-        return Err(format!("这个位置已经不在了：{raw}"));
-    }
-    Ok(OpenTarget::LocalPath)
+    let resolved = resolve_existing_local_path(raw)
+        .ok_or_else(|| format!("这个位置已经不在了：{raw}"))?;
+    Ok(OpenTarget::LocalPath(resolved))
 }
 
 #[cfg(target_os = "windows")]
@@ -533,11 +744,14 @@ extern "system" {
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
     let raw = path.trim().to_string();
-    let _kind = validate_open_target(&raw)?;
+    let target = match validate_open_target(&raw)? {
+        OpenTarget::LocalPath(pb) => pb.to_string_lossy().to_string(),
+        OpenTarget::Url | OpenTarget::SafeShell => raw,
+    };
     #[cfg(target_os = "windows")]
     {
         let op: Vec<u16> = "open\0".encode_utf16().collect();
-        let file: Vec<u16> = raw.encode_utf16().chain(std::iter::once(0)).collect();
+        let file: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
         const SW_SHOWNORMAL: i32 = 1;
         let rc = unsafe {
             ShellExecuteW(
@@ -550,7 +764,7 @@ fn open_path(path: String) -> Result<(), String> {
             )
         };
         if rc <= 32 {
-            return Err(format!("打不开（ShellExecute 错误码 {rc}）：{raw}"));
+            return Err(format!("打不开（ShellExecute 错误码 {rc}）：{target}"));
         }
     }
     Ok(())
@@ -2713,6 +2927,7 @@ fn main() {
             save_text,
             reveal,
             open_path,
+            resolve_local_path,
             app_info,
             app_capabilities,
             is_admin,
@@ -2778,7 +2993,7 @@ fn main() {
             let tidy_dl = MenuItem::with_id(app, "tidy_downloads", "整理下载文件夹", true, None::<&str>)?;
             let open_data = MenuItem::with_id(app, "open_data", "打开数据目录", true, None::<&str>)?;
             let open_logs = MenuItem::with_id(app, "open_logs", "打开日志目录", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出整理助手", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出轻盘", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
                 &[
@@ -2793,7 +3008,7 @@ fn main() {
             )?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("整理助手")
+                .tooltip("轻盘 · QDisk")
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
@@ -3139,6 +3354,55 @@ mod shell_tests {
         );
         let _ = srv2.join();
         assert_eq!(ok_res, Ok((200, "ok".to_string())));
+    }
+
+    #[test]
+    fn resolve_existing_local_path_rescues_glued_cjk_and_preserves_real_cjk_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "qdisk_path_rescue_{}_{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let downloads = root.join("Downloads");
+        let work_dir = root.join("工作资料");
+        let real_cjk_suffix = root.join("Temp缓存");
+        let real_temp = root.join("Temp");
+        let setup_exe = root.join("setup.exe");
+        let zh_pdf = work_dir.join("2026年报告.pdf");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::fs::create_dir_all(&real_cjk_suffix).unwrap();
+        std::fs::create_dir_all(&real_temp).unwrap();
+        std::fs::write(&setup_exe, b"bin").unwrap();
+        std::fs::write(&zh_pdf, b"pdf").unwrap();
+
+        // 1. ASCII 目录后粘连中文自然语言 / 全角括号 -> 精确兜底到真实目录
+        let glued1 = format!("{}里的文件", downloads.display());
+        assert_eq!(resolve_existing_local_path(&glued1), Some(downloads.clone()));
+        let glued2 = format!("{}（约 2 GB）", downloads.display());
+        assert_eq!(resolve_existing_local_path(&glued2), Some(downloads.clone()));
+        let glued3 = format!("{}\\目录下", downloads.display());
+        assert_eq!(resolve_existing_local_path(&glued3), Some(downloads.clone()));
+
+        // 2. 扩展名后粘连汉字 -> 精确兜底到真实文件
+        let glued_exe = format!("{}是否可删", setup_exe.display());
+        assert_eq!(resolve_existing_local_path(&glued_exe), Some(setup_exe.clone()));
+        let glued_pdf = format!("{}里的内容", zh_pdf.display());
+        assert_eq!(resolve_existing_local_path(&glued_pdf), Some(zh_pdf.clone()));
+
+        // 3. 中文目录后粘连自然语言 -> 精确兜底到真实中文目录
+        let glued_zh = format!("{}目录下", work_dir.display());
+        assert_eq!(resolve_existing_local_path(&glued_zh), Some(work_dir.clone()));
+
+        // 4. 若带汉字后缀的目录本身真实存在，必须原样命中，绝不误切到 Temp
+        let exact_cjk = real_cjk_suffix.to_string_lossy().to_string();
+        assert_eq!(resolve_existing_local_path(&exact_cjk), Some(real_cjk_suffix.clone()));
+
+        // 5. 真正不存在的子目录必须返回 None，绝不静默回退到父目录
+        let missing = format!("{}\\不存在的子目录", downloads.display());
+        assert_eq!(resolve_existing_local_path(&missing), None);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

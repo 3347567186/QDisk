@@ -23,6 +23,7 @@
     saveText: (name, content) => invoke('save_text', { name, content }),
     reveal: (path) => invoke('reveal', { path }),
     openPath: (path) => invoke('open_path', { path }),
+    resolvePath: (path) => invoke('resolve_local_path', { path }),
     configGet: () => invoke('config_get'),
     configSet: (patch) => invoke('config_set', { patch }),
     appInfo: () => invoke('app_info'),

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>整理助手 TidyAssistant — 本地优先、零广告、可撤回的 Windows 桌面效率工具</title>
-  <meta name="description" content="完全本地运行、零广告、每一步高危动作均可预演与一键撤回的 Windows 文件整理、四档并发压缩包、安全清理与可审计 AI 助手。">
+  <title>轻盘 QDisk — 本地优先、零广告、可撤回的 Windows 桌面整理工具</title>
+  <meta name="description" content="轻盘 QDisk：完全本地运行、零广告、每一步高危动作均可预演与一键撤回的 Windows 文件整理、Rust 四档并发压缩包、安全清理与可审计 AI 助手。">
   <meta name="color-scheme" content="light dark">
   <script>
     try {
@@ -14,28 +14,31 @@
       }
     } catch (e) {}
   </script>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23161614'/%3E%3Cpath d='M7 11a2.5 2.5 0 0 1 2.5-2.5h4.2l2.3 2.3h6.5A2.5 2.5 0 0 1 25 13.3v8.2A2.5 2.5 0 0 1 22.5 24h-13A2.5 2.5 0 0 1 7 21.5V11Z' fill='none' stroke='%23FAF9F5' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M12 16.5h8M12 19.5h5' stroke='%23EC6B47' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+  <link rel="icon" type="image/png" sizes="256x256" href="assets/icon-256.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="site-header">
+  <!-- Fixed Scroll-Driven Progress Hairline -->
+  <div id="scroll-progress" class="scroll-progress"></div>
+
+  <!-- Sticky Shrinking Glass Header -->
+  <header class="site-header" id="site-header">
     <div class="container header-inner">
-      <a class="brand" href="#top" aria-label="TidyAssistant Home">
+      <a class="brand" href="#top" aria-label="轻盘 QDisk Home">
         <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-            <path d="M8 12h8M8 15h5" stroke="var(--accent)"/>
-          </svg>
+          <img src="assets/logo.svg" alt="" width="34" height="34" decoding="async">
         </span>
-        <span class="brand-name" data-i18n="brand">整理助手</span>
-        <span class="brand-tag">TidyAssistant</span>
+        <span class="brand-name" data-i18n="brand">轻盘</span>
+        <span class="brand-tag">QDisk</span>
       </a>
 
       <nav class="site-nav" aria-label="Primary">
-        <a href="#benchmarks" data-i18n="nav.bench">实测数据</a>
-        <a href="#highlights" data-i18n="nav.features">核心亮点</a>
-        <a href="#architecture" data-i18n="nav.arch">自研与开发</a>
-        <a href="#download" data-i18n="nav.download">下载安装</a>
+        <a href="#benchmarks" data-section="benchmarks" data-i18n="nav.bench">实测数据</a>
+        <a href="#playground" data-section="playground" data-i18n="nav.play">交互体验</a>
+        <a href="#highlights" data-section="highlights" data-i18n="nav.features">核心亮点</a>
+        <a href="#architecture" data-section="architecture" data-i18n="nav.arch">自研与开发</a>
+        <a href="#download" data-section="download" data-i18n="nav.download">下载安装</a>
       </nav>
 
       <div class="header-actions">
@@ -64,92 +67,133 @@
   <main id="top">
     <!-- Hero Section -->
     <section class="hero">
+      <div class="hero-grid-bg" aria-hidden="true"></div>
+      <div class="hero-orb hero-orb-a" aria-hidden="true"></div>
+      <div class="hero-orb hero-orb-b" aria-hidden="true"></div>
+
       <div class="container">
         <div class="hero-copy">
-          <a class="ver-pill" id="hero-release-pill" href="https://github.com/3347567186/TidyAssistant/releases/latest" target="_blank" rel="noopener">
-            <span class="ver-dot" aria-hidden="true"></span>
-            <span id="hero-ver-text">v1.43.15</span>
-            <span class="ver-sep">·</span>
-            <span data-i18n="hero.badge">Windows 10/11 x64 · MIT 开源 · 零广告</span>
-          </a>
+          <div class="hero-emblem-row stagger-1">
+            <a class="ver-pill" id="hero-release-pill" href="https://github.com/3347567186/TidyAssistant/releases/latest" target="_blank" rel="noopener">
+              <span class="ver-dot" aria-hidden="true"></span>
+              <span id="hero-ver-text">v1.43.16</span>
+              <span class="ver-sep">·</span>
+              <span data-i18n="hero.badge">Windows 10/11 x64 · MIT 开源 · 零广告</span>
+            </a>
+          </div>
 
-          <h1 class="hero-title" data-i18n="hero.title">
-            不弹广告、不靠黑盒、<br>每一步都能撤回的 Windows 桌面整理工具
+          <h1 class="hero-title stagger-2" data-i18n="hero.title">
+            不弹广告、不靠黑盒、<br>每一步都能撤回的 <span class="title-accent">Windows 轻盘工具</span>
           </h1>
 
-          <p class="hero-sub" data-i18n="hero.sub">
+          <p class="hero-sub stagger-3" data-i18n="hero.sub">
             将智能文件整理、Rust 四档并发压缩内核、分级 C 盘清理与可审计本地 AI 助手装进 20.6 MB 原生桌面客户端。所有高危操作先预演再落盘，全部数据留在本机。
           </p>
 
-          <div class="hero-cta">
-            <a class="btn primary lg" id="hero-dl-installer" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-setup.exe">
+          <div class="hero-cta stagger-4">
+            <a class="btn primary lg glow-btn" id="hero-dl-installer" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg>
               <span data-i18n="hero.dlExe">下载安装版</span>
               <span class="btn-meta" id="hero-exe-size">20.6 MB</span>
             </a>
-            <a class="btn secondary lg" id="hero-dl-portable" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-portable.zip">
+            <a class="btn secondary lg" id="hero-dl-portable" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip">
               <span data-i18n="hero.dlZip">便携免安装版</span>
               <span class="btn-meta" id="hero-zip-size">25.0 MB</span>
             </a>
             <a class="btn ghost lg" href="https://github.com/3347567186/TidyAssistant" target="_blank" rel="noopener">
               <span data-i18n="hero.viewCode">查看 GitHub 源码</span>
-              <span aria-hidden="true">→</span>
+              <span class="arrow-shift" aria-hidden="true">→</span>
             </a>
           </div>
 
-          <div class="hero-trust">
-            <span data-i18n="hero.trust1">✓ 5.56 MB 原生主程序</span>
-            <span data-i18n="hero.trust2">✓ 0.31 ms 对话真停止</span>
-            <span data-i18n="hero.trust3">✓ SHA-256 强制校验更新</span>
-            <span data-i18n="hero.trust4">✓ 362+ 项自动化测试 0 警告</span>
+          <div class="hero-trust stagger-5">
+            <span class="trust-chip" data-i18n="hero.trust1">✓ 5.56 MB 原生主程序</span>
+            <span class="trust-chip" data-i18n="hero.trust2">✓ 0.31 ms 对话真停止</span>
+            <span class="trust-chip" data-i18n="hero.trust3">✓ SHA-256 强制校验更新</span>
+            <span class="trust-chip" data-i18n="hero.trust4">✓ 362+ 项自动化测试 0 警告</span>
           </div>
         </div>
 
         <!-- Interactive App Showcase -->
-        <div class="stage-wrap">
+        <div class="stage-wrap stagger-5">
           <div class="stage-tabs" role="tablist" aria-label="Application runtime views">
-            <button type="button" role="tab" id="tab-ai" aria-selected="true" tabindex="0" data-panel="panel-ai" data-i18n="tabs.ai">AI 助手</button>
-            <button type="button" role="tab" id="tab-org" aria-selected="false" tabindex="-1" data-panel="panel-org" data-i18n="tabs.org">智能整理</button>
-            <button type="button" role="tab" id="tab-arc" aria-selected="false" tabindex="-1" data-panel="panel-arc" data-i18n="tabs.arc">高速压缩</button>
-            <button type="button" role="tab" id="tab-cache" aria-selected="false" tabindex="-1" data-panel="panel-cache" data-i18n="tabs.cache">安全清理</button>
-            <button type="button" role="tab" id="tab-tools" aria-selected="false" tabindex="-1" data-panel="panel-tools" data-i18n="tabs.tools">大文件溯源</button>
+            <button type="button" role="tab" id="tab-ai" aria-selected="true" tabindex="0" data-panel="panel-ai" data-cap-zh="透明查证 · 毫秒真停止 · 路径不粘连汉字" data-cap-en="Auditable tools · 0.31 ms stop · Clean path links" data-i18n="tabs.ai">AI 助手</button>
+            <button type="button" role="tab" id="tab-org" aria-selected="false" tabindex="-1" data-panel="panel-org" data-cap-zh="先 Dry-Run 预演 · 保护源码仓库 · 1.39s 一键撤回" data-cap-en="Dry-Run preview · Code repo guard · 1.39s full Undo" data-i18n="tabs.org">智能整理</button>
+            <button type="button" role="tab" id="tab-arc" aria-selected="false" tabindex="-1" data-panel="panel-arc" data-cap-zh="7 大格式 · 四档动态多核 · 分块级真暂停" data-cap-en="7 formats · 4-tier adaptive cores · Chunk pause" data-i18n="tabs.arc">高速压缩</button>
+            <button type="button" role="tab" id="tab-cache" aria-selected="false" tabindex="-1" data-panel="panel-cache" data-cap-zh="安全/谨慎分层隔离 · 绝不误删聊天记录与文档" data-cap-en="Safe vs Careful tiers · Never touches personal docs" data-i18n="tabs.cache">安全清理</button>
+            <button type="button" role="tab" id="tab-tools" aria-selected="false" tabindex="-1" data-panel="panel-tools" data-cap-zh="10,001 文件 6.53ms 检索 · 数字签名一键溯源" data-cap-en="6.53 ms FTS5 lookup · Authenticode publisher audit" data-i18n="tabs.tools">大文件溯源</button>
           </div>
 
-          <div class="stage-frame">
+          <div class="stage-frame spotlight-card" id="stage-frame">
             <div class="window-chrome" aria-hidden="true">
-              <span class="win-title">TidyAssistant v1.43.15 — Windows 11 x64</span>
+              <span class="win-brand-mini">
+                <img src="assets/logo.svg" alt="" width="16" height="16">
+                <span class="win-title" id="win-chrome-title">轻盘 QDisk v1.43.16 — Windows 11 x64</span>
+              </span>
+              <span class="win-caption-pill" id="stage-caption">透明查证 · 毫秒真停止 · 路径不粘连汉字</span>
               <span class="win-dots"><i></i><i></i><i></i></span>
             </div>
 
             <div class="stage-panels">
               <div role="tabpanel" id="panel-ai" aria-labelledby="tab-ai" tabindex="0">
                 <div class="panel-inner">
-                  <img id="img-ai" src="assets/screenshots/01-ai-assistant.png" alt="TidyAssistant AI Assistant runtime UI" width="2560" height="1640" fetchpriority="high" decoding="async">
+                  <img id="img-ai" src="assets/screenshots/01-ai-assistant.png" alt="QDisk AI Assistant runtime UI" width="2560" height="1640" fetchpriority="high" decoding="async">
                 </div>
               </div>
               <div role="tabpanel" id="panel-org" aria-labelledby="tab-org" hidden="until-found">
                 <div class="panel-inner">
-                  <img src="assets/screenshots/02-organize.png" alt="TidyAssistant File Organizer dry-run preview" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <img src="assets/screenshots/02-organize.png" alt="QDisk File Organizer dry-run preview" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
                 </div>
               </div>
               <div role="tabpanel" id="panel-arc" aria-labelledby="tab-arc" hidden="until-found">
                 <div class="panel-inner">
-                  <img src="assets/screenshots/03-archive.png" alt="TidyAssistant multi-core archive manager" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <img src="assets/screenshots/03-archive.png" alt="QDisk multi-core archive manager" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
                 </div>
               </div>
               <div role="tabpanel" id="panel-cache" aria-labelledby="tab-cache" hidden="until-found">
                 <div class="panel-inner">
-                  <img src="assets/screenshots/04-cache.png" alt="TidyAssistant risk-tiered cache cleaner" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <img src="assets/screenshots/04-cache.png" alt="QDisk risk-tiered cache cleaner" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
                 </div>
               </div>
               <div role="tabpanel" id="panel-tools" aria-labelledby="tab-tools" hidden="until-found">
                 <div class="panel-inner">
-                  <img src="assets/screenshots/05-space-tools.png" alt="TidyAssistant large file scanner and digital signature inspector" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <img src="assets/screenshots/05-space-tools.png" alt="QDisk large file scanner and digital signature inspector" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
                 </div>
               </div>
             </div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- Continuous Telemetry Ribbon (WCAG 2.2.2 Pause/Play Control) -->
+    <section class="marquee-band" aria-label="Engineering metrics ticker">
+      <div class="marquee-shell">
+        <div class="marquee-viewport" id="marquee-viewport">
+          <div class="marquee-track">
+            <div class="marquee-group">
+              <span class="m-chip"><i class="dot-accent"></i><strong>0.31 ms</strong> <span data-i18n="mq.m1">WinHTTP 真断连</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>304.3 MB/s</strong> <span data-i18n="mq.m2">Rust 多核 ZIP 打包</span></span>
+              <span class="m-chip"><i class="dot-accent"></i><strong>3,844 MB/s</strong> <span data-i18n="mq.m3">高性能档热缓存解压</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>6.53 ms</strong> <span data-i18n="mq.m4">万级文件 FTS5 检索</span></span>
+              <span class="m-chip"><i class="dot-accent"></i><strong>1.39 s</strong> <span data-i18n="mq.m5">1,000 文件一键撤回</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>0 node_modules</strong> <span data-i18n="mq.m6">纯原生零打包前端</span></span>
+              <span class="m-chip"><i class="dot-accent"></i><strong>SHA-256</strong> <span data-i18n="mq.m7">双形态在线更新强制校验</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>MIT</strong> <span data-i18n="mq.m8">零广告 · 零遥测 · 开源可审</span></span>
+            </div>
+            <div class="marquee-group" aria-hidden="true">
+              <span class="m-chip"><i class="dot-accent"></i><strong>0.31 ms</strong> <span data-i18n="mq.m1">WinHTTP 真断连</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>304.3 MB/s</strong> <span data-i18n="mq.m2">Rust 多核 ZIP 打包</span></span>
+              <span class="m-chip"><i class="dot-accent"></i><strong>3,844 MB/s</strong> <span data-i18n="mq.m3">高性能档热缓存解压</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>6.53 ms</strong> <span data-i18n="mq.m4">万级文件 FTS5 检索</span></span>
+              <span class="m-chip"><i class="dot-accent"></i><strong>1.39 s</strong> <span data-i18n="mq.m5">1,000 文件一键撤回</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>0 node_modules</strong> <span data-i18n="mq.m6">纯原生零打包前端</span></span>
+              <span class="m-chip"><i class="dot-accent"></i><strong>SHA-256</strong> <span data-i18n="mq.m7">双形态在线更新强制校验</span></span>
+              <span class="m-chip"><i class="dot-ok"></i><strong>MIT</strong> <span data-i18n="mq.m8">零广告 · 零遥测 · 开源可审</span></span>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="marquee-ctrl" id="marquee-toggle" data-i18n="mq.pause">暂停滚动</button>
       </div>
     </section>
 
@@ -160,79 +204,85 @@
           <p class="eyebrow" data-i18n="bench.eyebrow">REAL BENCHMARKS · 实测而非宣传</p>
           <h2 data-i18n="bench.title">不靠口号，用本机实测数据说话</h2>
           <p class="section-desc" data-i18n="bench.desc">
-            以下所有指标均在 AMD Ryzen 9 5900HX（8 核 16 线程）· Windows 11 x64 · NVMe SSD · TidyAssistant v1.43.15 上实机跑测取得，源码仓库可直接复现。
+            以下所有指标均在 AMD Ryzen 9 5900HX（8 核 16 线程）· Windows 11 x64 · NVMe SSD · 轻盘 QDisk 上实机跑测取得，源码仓库可直接复现。
           </p>
         </div>
 
         <div class="kpi-grid reveal">
-          <article class="kpi-card">
-            <div class="kpi-num">0.31 <span class="kpi-unit">ms</span></div>
+          <article class="kpi-card spotlight-card">
+            <div class="kpi-num"><span class="count-up" data-val="0.31" data-dec="2">0.31</span> <span class="kpi-unit">ms</span></div>
             <div class="kpi-label" data-i18n="bench.k1Title">AI 对话阻塞停止中位数</div>
             <p class="kpi-meta" data-i18n="bench.k1Meta">5 次挂起 Socket 实测（239–323 µs），跨线程直接关闭 WinHTTP 句柄，告别 60–300s 卡死。</p>
           </article>
-          <article class="kpi-card">
-            <div class="kpi-num">304.3 <span class="kpi-unit">MB/s</span></div>
+          <article class="kpi-card spotlight-card">
+            <div class="kpi-num"><span class="count-up" data-val="304.3" data-dec="1">304.3</span> <span class="kpi-unit">MB/s</span></div>
             <div class="kpi-label" data-i18n="bench.k2Title">Rust 多核 ZIP 压缩峰值</div>
             <p class="kpi-meta" data-i18n="bench.k2Meta">64 MB 混合集（75% JSON + 25% PNG）实测，相对节约档（21.2 MB/s）提速 14.4 倍。</p>
           </article>
-          <article class="kpi-card">
-            <div class="kpi-num">6.53 <span class="kpi-unit">ms</span></div>
+          <article class="kpi-card spotlight-card">
+            <div class="kpi-num"><span class="count-up" data-val="6.53" data-dec="2">6.53</span> <span class="kpi-unit">ms</span></div>
             <div class="kpi-label" data-i18n="bench.k3Title">10,001 文件 FTS5 检索中位数</div>
             <p class="kpi-meta" data-i18n="bench.k3Meta">Rust indexwalk 建库仅 68.4 ms（约 14.6 万文件/秒），30 次检索 P95 仅 7.23 ms。</p>
           </article>
-          <article class="kpi-card">
-            <div class="kpi-num">1.39 <span class="kpi-unit">s</span></div>
+          <article class="kpi-card spotlight-card">
+            <div class="kpi-num"><span class="count-up" data-val="1.39" data-dec="2">1.39</span> <span class="kpi-unit">s</span></div>
             <div class="kpi-label" data-i18n="bench.k4Title">1,000 文件全量一键撤回</div>
             <p class="kpi-meta" data-i18n="bench.k4Meta">扫描预演 306.5 ms · 整理移动 1.79 s · 一键撤回 1,000/1,000 零损还原。</p>
           </article>
         </div>
 
-        <!-- 4-Tier Archive Speed Visual Comparison -->
+        <!-- 4-Tier Archive Speed Interactive Comparison -->
         <div class="bench-split reveal">
-          <div class="bench-panel">
+          <div class="bench-panel spotlight-card" id="bench-chart-card">
             <div class="panel-head">
-              <h3 data-i18n="bench.chartTitle">压缩内核四档动态性能阶梯实测（64 MB 混合集）</h3>
-              <span class="mono-pill">ZIP · 32 × 2 MB</span>
+              <div>
+                <h3 data-i18n="bench.chartTitle">压缩内核四档动态性能阶梯实测（64 MB 混合集）</h3>
+                <span class="panel-sub mono">ZIP · 32 × 2 MB (75% JSON + 25% PNG)</span>
+              </div>
+              <div class="seg-switch" role="group" aria-label="Archive benchmark dataset">
+                <button type="button" class="seg-btn active" data-bench-mode="create" data-i18n="bench.modeCreate">ZIP 压缩</button>
+                <button type="button" class="seg-btn" data-bench-mode="extract" data-i18n="bench.modeExtract">ZIP 解压</button>
+              </div>
             </div>
-            <div class="bar-list">
+            <div class="bar-list" id="bench-bars">
               <div class="bar-row">
                 <div class="bar-meta">
                   <span data-i18n="bench.mSaver">节约 · 1 线程 · 35%/25% 占空</span>
-                  <strong class="mono">21.2 MB/s · 3,025.6 ms</strong>
+                  <strong class="mono" id="bm-val-0">21.2 MB/s · 3,025.6 ms</strong>
                 </div>
-                <div class="bar-track"><div class="bar-fill muted" style="--pct: 7%"></div></div>
+                <div class="bar-track"><div class="bar-fill muted" id="bm-bar-0" style="--scale: 0.07"></div></div>
               </div>
               <div class="bar-row">
                 <div class="bar-meta">
                   <span data-i18n="bench.mBal">平衡 · 6 线程 · 65%/50% 占空</span>
-                  <strong class="mono">91.9 MB/s · 696.3 ms (4.3×)</strong>
+                  <strong class="mono" id="bm-val-1">91.9 MB/s · 696.3 ms (4.3×)</strong>
                 </div>
-                <div class="bar-track"><div class="bar-fill warm" style="--pct: 30.2%"></div></div>
+                <div class="bar-track"><div class="bar-fill warm" id="bm-bar-1" style="--scale: 0.302"></div></div>
               </div>
               <div class="bar-row">
                 <div class="bar-meta">
                   <span data-i18n="bench.mPerf">高性能 · 10 线程 · 85%/75% 占空</span>
-                  <strong class="mono">304.3 MB/s · 210.3 ms (14.4×)</strong>
+                  <strong class="mono" id="bm-val-2">304.3 MB/s · 210.3 ms (14.4×)</strong>
                 </div>
-                <div class="bar-track"><div class="bar-fill accent" style="--pct: 100%"></div></div>
+                <div class="bar-track"><div class="bar-fill accent" id="bm-bar-2" style="--scale: 1"></div></div>
               </div>
               <div class="bar-row">
                 <div class="bar-meta">
                   <span data-i18n="bench.mHyper">超线程 · 16 线程 · 100% 满核零限速</span>
-                  <strong class="mono">272.3 MB/s · 235.1 ms (12.8×)</strong>
+                  <strong class="mono" id="bm-val-3">272.3 MB/s · 235.1 ms (12.8×)</strong>
                 </div>
-                <div class="bar-track"><div class="bar-fill ink" style="--pct: 89.5%"></div></div>
+                <div class="bar-track"><div class="bar-fill ink" id="bm-bar-3" style="--scale: 0.895"></div></div>
               </div>
             </div>
-            <p class="bench-note" data-i18n="bench.chartNote">
-              * 注：64 MB 极短任务下 16 线程建池开销略高于 10 线程；GB 级大文件场景下超线程档位零限速吃满全部逻辑核心。同集解压（含页缓存）达 852.6 → 2,998.6 → 3,844.1 MB/s。
+            <p class="bench-note" id="bench-mode-note" data-i18n="bench.chartNote">
+              * 注：64 MB 极短任务下 16 线程建池开销略高于 10 线程；GB 级大文件场景下超线程档位零限速吃满全部逻辑核心。点击右上角可切换查看同集解压实测。
             </p>
           </div>
 
-          <div class="bench-panel">
+          <div class="bench-panel spotlight-card">
             <div class="panel-head">
               <h3 data-i18n="bench.tableTitle">工程体积、响应与测试门禁实测</h3>
-              <span class="mono-pill">v1.43.15</span>
+              <span class="mono-pill" id="bench-ver-pill">v1.43.16</span>
             </div>
             <div class="metric-table">
               <div class="m-row"><span data-i18n="bench.r1">原生外壳体积 (tidy-assistant.exe)</span><strong class="mono">5.56 MB</strong></div>
@@ -241,15 +291,95 @@
               <div class="m-row"><span data-i18n="bench.r4">本地引擎冷启动 / 热态 RPC 往返</span><strong class="mono">224.4 ms / 0.10 ms</strong></div>
               <div class="m-row"><span data-i18n="bench.r5">1,000 文件扫描预演 / 整理 / 撤回</span><strong class="mono">306 ms / 1.79 s / 1.39 s</strong></div>
               <div class="m-row"><span data-i18n="bench.r6">10,001 文件索引建库 / 检索中位数</span><strong class="mono">68.4 ms / 6.53 ms</strong></div>
-              <div class="m-row"><span data-i18n="bench.r7">Python / Rust / JS 自动化测试门禁</span><strong class="mono">234 + 56 + 7 套 · 0 警告</strong></div>
+              <div class="m-row"><span data-i18n="bench.r7">Python / Rust / JS 自动化测试门禁</span><strong class="mono">234 + 58 + 7 套 · 0 警告</strong></div>
             </div>
           </div>
         </div>
       </div>
     </section>
 
+    <!-- Interactive Playground Section -->
+    <section class="section alt-bg" id="playground">
+      <div class="container">
+        <div class="section-head reveal">
+          <p class="eyebrow" data-i18n="play.eyebrow">INTERACTIVE SANDBOX · 亲手试一试</p>
+          <h2 data-i18n="play.title">把安全闸门、0.31 ms 瞬停与路径洁净，先在这里点一遍</h2>
+          <p class="section-desc" data-i18n="play.desc">
+            无需下载即可体验轻盘 QDisk 最核心的三项工程护栏：四档 AI 权限闸门、跨线程 WinHTTP 秒级断连，以及 v1.43.16 全新升级的中文粘连路径精准识别。
+          </p>
+        </div>
+
+        <div class="play-grid reveal">
+          <!-- Interactive Card 1: 4-Tier Permission Gate -->
+          <article class="play-card spotlight-card">
+            <div class="play-head">
+              <span class="play-tag">AI SAFETY GATE</span>
+              <h3 data-i18n="play.gTitle">四档可控权限闸门模拟</h3>
+            </div>
+            <div class="mode-pills" role="group" aria-label="AI permission tiers">
+              <button type="button" class="mode-pill" data-gate="readonly" data-i18n="play.mRead">只读</button>
+              <button type="button" class="mode-pill active" data-gate="confirm" data-i18n="play.mConfirm">确认</button>
+              <button type="button" class="mode-pill" data-gate="auto" data-i18n="play.mAuto">自动</button>
+              <button type="button" class="mode-pill warn" data-gate="full" data-i18n="play.mFull">放手</button>
+            </div>
+            <div class="gate-preview" id="gate-preview">
+              <div class="gate-status-row">
+                <span class="gate-badge" id="gate-badge">需人工确认</span>
+                <span class="mono gate-rule" id="gate-rule">propose_action → 审批卡片</span>
+              </div>
+              <p class="gate-desc" id="gate-desc">AI 提出清理 C:\Windows\Temp（1.42 GB）时，先渲染只读预演与目标明细，必须由你亲手点击「确认执行」才落盘。</p>
+              <div class="gate-matrix">
+                <div class="gm-item">
+                  <span data-i18n="play.opMove">可撤回整理 / 移动</span>
+                  <strong class="mono" id="gm-move">弹窗审批</strong>
+                </div>
+                <div class="gm-item">
+                  <span data-i18n="play.opTrash">移入回收站清理</span>
+                  <strong class="mono" id="gm-trash">弹窗审批</strong>
+                </div>
+                <div class="gm-item">
+                  <span data-i18n="play.opPerm">不可逆删除 / 卸载</span>
+                  <strong class="mono" id="gm-perm">强制手点</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Interactive Card 2: Instant 0.31ms Abort + Glued CJK Path Hygiene -->
+          <article class="play-card spotlight-card">
+            <div class="play-head">
+              <span class="play-tag ok">WINHTTP ABORT &amp; PATH HYGIENE</span>
+              <h3 data-i18n="play.sTitle">0.31 ms 真停止 + 路径防汉字粘连</h3>
+            </div>
+
+            <div class="sim-terminal">
+              <div class="sim-top">
+                <span class="sim-state" id="sim-state">待命 · 点击右侧按钮测试阻塞打断</span>
+                <div class="sim-btns">
+                  <button type="button" class="sim-btn primary" id="sim-start" data-i18n="play.btnRun">模拟阻塞推理</button>
+                  <button type="button" class="sim-btn danger" id="sim-stop" disabled data-i18n="play.btnStop">立即停止</button>
+                </div>
+              </div>
+              <div class="sim-log mono" id="sim-log">
+                <span class="dim">$ ai_cancel_epoch = 42 · handle_table = 0 active</span>
+              </div>
+            </div>
+
+            <div class="path-demo">
+              <div class="path-demo-label" data-i18n="play.pathLabel">v1.43.16 路径切分实效（粘连汉字自动剥离，绝不丢失正文与目标）：</div>
+              <div class="path-demo-raw mono">清理D:\Downloads里的文件和D:\a\setup.exe是否可删</div>
+              <div class="path-demo-arrow" aria-hidden="true">↓</div>
+              <div class="path-demo-out">
+                <span>清理</span><span class="path-chip">D:\Downloads</span><span>里的文件和</span><span class="path-chip">D:\a\setup.exe</span><span>是否可删</span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
     <!-- Core 4 Highlights -->
-    <section class="section alt-bg" id="highlights">
+    <section class="section" id="highlights">
       <div class="container">
         <div class="section-head reveal">
           <p class="eyebrow" data-i18n="feat.eyebrow">FOUR CORE PILLARS · 只讲硬核重点</p>
@@ -257,17 +387,17 @@
         </div>
 
         <div class="pillar-grid">
-          <article class="pillar-card reveal">
+          <article class="pillar-card spotlight-card reveal">
             <div class="pillar-badge">01</div>
             <h3 data-i18n="feat.p1Title">可审计本地 AI 助手：透明查证 + 0.31ms 真停止</h3>
-            <p data-i18n="feat.p1Desc">自带密钥直连 DeepSeek / OpenAI / Ollama 等任意兼容端点。每一步推理原文、本地工具调用与毫秒耗时全部展开可查；体积和路径自动同源核对防幻觉；所有写/删动作走四档权限审批卡片，点停止 0.31ms 底层断连不烧 Token。</p>
+            <p data-i18n="feat.p1Desc">自带密钥直连 DeepSeek / OpenAI / Ollama 等任意兼容端点。每一步推理原文、本地工具调用与毫秒耗时全部展开可查；体积、路径自动同源核对且智能切分粘连汉字；所有写/删动作走四档权限审批卡片，点停止 0.31ms 底层断连不烧 Token。</p>
             <ul class="pillar-list">
               <li data-i18n="feat.p1L1">只读 / 确认 / 自动 / 放手四档可控权限</li>
-              <li data-i18n="feat.p1L2">多备用端点自动容灾 + 断点续跑</li>
+              <li data-i18n="feat.p1L2">双端路径防汉字粘连 + 真实磁盘存在性兜底</li>
             </ul>
           </article>
 
-          <article class="pillar-card reveal">
+          <article class="pillar-card spotlight-card reveal">
             <div class="pillar-badge">02</div>
             <h3 data-i18n="feat.p2Title">先预演再落盘的智能整理 + 一键精准撤回</h3>
             <p data-i18n="feat.p2Desc">扫描即预演，先看分类清单与跳过原因再执行。底层自动保护代码仓库（检测源码/配置自动拦截）、系统目录与下载中临时文件；1,000 文件 1.79 秒归位，不满意 1.39 秒原路撤回。</p>
@@ -277,7 +407,7 @@
             </ul>
           </article>
 
-          <article class="pillar-card reveal">
+          <article class="pillar-card spotlight-card reveal">
             <div class="pillar-badge">03</div>
             <h3 data-i18n="feat.p3Title">Rust 多核零广告压缩包内核</h3>
             <p data-i18n="feat.p3Desc">原生支持 ZIP / 7Z / RAR / TAR / TAR.GZ / BZ2 / XZ 浏览、双击内置预览、解压与打包。按本机 CPU 核数动态阶梯调速，支持分块级真暂停/秒取消、同名覆盖或并存重命名，以及单槽原子撤回。</p>
@@ -287,7 +417,7 @@
             </ul>
           </article>
 
-          <article class="pillar-card reveal">
+          <article class="pillar-card spotlight-card reveal">
             <div class="pillar-badge">04</div>
             <h3 data-i18n="feat.p4Title">C 盘安全清理、大文件签名溯源与事务迁移</h3>
             <p data-i18n="feat.p4Desc">缓存按「安全可重建 / 谨慎复核」分层标注，绝不误删聊天记录与文档；大文件直读数字签名与发行商；跨盘数据迁移带哈希校验与事务日志，按需提权、平时零特权运行。</p>
@@ -301,33 +431,54 @@
     </section>
 
     <!-- Architecture & Secondary Development -->
-    <section class="section" id="architecture">
+    <section class="section alt-bg" id="architecture">
       <div class="container">
         <div class="section-head reveal">
-          <p class="eyebrow" data-i18n="arch.eyebrow">ARCHITECTURE & EXTENSIBILITY · 自研底座与二次开发</p>
+          <p class="eyebrow" data-i18n="arch.eyebrow">ARCHITECTURE &amp; EXTENSIBILITY · 自研底座与二次开发</p>
           <h2 data-i18n="arch.title">自研了什么、用了什么开源组件、如何二次开发</h2>
           <p class="section-desc" data-i18n="arch.desc">
             拒绝套壳拼凑：三层清晰分层、零前端打包依赖，并在四层均预留标准注册表，新增页面、AI 工具、RPC 命令或压缩格式都无需魔改核心代码。
           </p>
         </div>
 
+        <!-- Visual 3-Layer Flow Strip -->
+        <div class="arch-flow reveal" aria-label="Three-layer system architecture">
+          <div class="arch-node spotlight-card">
+            <span class="arch-step mono">LAYER 01</span>
+            <strong data-i18n="arch.l1t">零框架前端 (WebView2)</strong>
+            <span class="arch-meta" data-i18n="arch.l1m">2.03 MB 原生 JS/CSS · 0 node_modules · App.registerPage</span>
+          </div>
+          <div class="arch-connector" aria-hidden="true"><span>IPC</span></div>
+          <div class="arch-node spotlight-card">
+            <span class="arch-step mono">LAYER 02</span>
+            <strong data-i18n="arch.l2t">Rust 原生外壳 (Tauri v2)</strong>
+            <span class="arch-meta" data-i18n="arch.l2m">5.56 MB · 多核压缩 / WinHTTP 0.31ms 断连 / 更新器</span>
+          </div>
+          <div class="arch-connector" aria-hidden="true"><span>RPC 0.10ms</span></div>
+          <div class="arch-node spotlight-card">
+            <span class="arch-step mono">LAYER 03</span>
+            <strong data-i18n="arch.l3t">本地引擎 + indexwalk</strong>
+            <span class="arch-meta" data-i18n="arch.l3m">Dry-Run / Undo / SQLite FTS5 / 146k 文件/秒遍历</span>
+          </div>
+        </div>
+
         <div class="stack-grid reveal">
-          <div class="stack-card">
+          <div class="stack-card spotlight-card">
             <h3 data-i18n="arch.selfTitle">核心自研模块</h3>
             <ul class="stack-list">
               <li><strong>Rust 并发压缩内核</strong> — <span data-i18n="arch.s1">4 档动态 WorkPacer、分块暂停取消、防逃逸与单槽撤回</span></li>
               <li><strong>WinHTTP 真断连网关</strong> — <span data-i18n="arch.s2">AI_CANCEL_EPOCH + RAII 句柄表，0.31ms 跨线程中止</span></li>
               <li><strong>零新增依赖更新引擎</strong> — <span data-i18n="arch.s3">installer / portable 双形态、仓库锁仓与失败自动回滚</span></li>
-              <li><strong>本地 AI Agent 与闸门</strong> — <span data-i18n="arch.s4">Tools/JSON 自动降级、数字路径反幻觉与审批提案卡</span></li>
+              <li><strong>本地 AI Agent 与闸门</strong> — <span data-i18n="arch.s4">Tools/JSON 自动降级、路径防粘连与四档审批提案卡</span></li>
               <li><strong>事务整理引擎 + indexwalk</strong> — <span data-i18n="arch.s5">Dry-Run / 一键撤回 / SQLite FTS5 / Rust 高速遍历</span></li>
             </ul>
           </div>
 
-          <div class="stack-card">
+          <div class="stack-card spotlight-card">
             <h3 data-i18n="arch.ossTitle">使用的开源技术栈</h3>
             <ul class="stack-list">
-              <li><strong>Tauri v2 & Rust</strong> — <span data-i18n="arch.o1">原生 WebView2 外壳、托盘、单实例与 IPC Channel</span></li>
-              <li><strong>windows-sys & sha2</strong> — <span data-i18n="arch.o2">WinHTTP TLS、ShellExecuteW、线程优先级与 SHA-256</span></li>
+              <li><strong>Tauri v2 &amp; Rust</strong> — <span data-i18n="arch.o1">原生 WebView2 外壳、托盘、单实例与 IPC Channel</span></li>
+              <li><strong>windows-sys &amp; sha2</strong> — <span data-i18n="arch.o2">WinHTTP TLS、ShellExecuteW、线程优先级与 SHA-256</span></li>
               <li><strong>静态链接压缩 Crates</strong> — <span data-i18n="arch.o3">zip / sevenz-rust2 / lzma-rust2 / flate2(zlib-rs) / bzip2 / tar</span></li>
               <li><strong>Python 3.11 + SQLite FTS5</strong> — <span data-i18n="arch.o4">规则引擎、缓存分析与全文索引（单文件封装）</span></li>
               <li><strong>按需官方 UnRAR64.dll</strong> — <span data-i18n="arch.o5">不随包分发，首次打开 RAR 时双重 SHA-256 校验提取</span></li>
@@ -335,7 +486,7 @@
           </div>
         </div>
 
-        <div class="dev-box reveal">
+        <div class="dev-box spotlight-card reveal">
           <div class="dev-head">
             <div>
               <h3 data-i18n="arch.devTitle">3 条命令开始二次开发与全量门禁验证</h3>
@@ -351,39 +502,39 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
     </section>
 
     <!-- Download Section -->
-    <section class="section alt-bg" id="download">
+    <section class="section" id="download">
       <div class="container">
         <div class="section-head reveal">
-          <p class="eyebrow" data-i18n="dl.eyebrow">DOWNLOAD & VERIFY · 立即获取</p>
-          <h2 data-i18n="dl.title">选择适合你的版本，30 秒上手</h2>
+          <p class="eyebrow" data-i18n="dl.eyebrow">DOWNLOAD &amp; VERIFY · 立即获取</p>
+          <h2 data-i18n="dl.title">选择适合你的轻盘 QDisk，30 秒上手</h2>
           <p class="section-desc" data-i18n="dl.desc">
-            全部配置、整理规则与撤回记录独立保存在 <code>%LOCALAPPDATA%\整理助手数据</code>，升级或重装永不覆盖个人数据。
+            全部配置、整理规则与撤回记录独立保存在 <code>%LOCALAPPDATA%\整理助手数据</code>，从旧版升级或重装永不覆盖个人数据。
           </p>
         </div>
 
         <div class="dl-grid reveal">
-          <article class="dl-card featured">
+          <article class="dl-card featured spotlight-card">
             <div class="dl-top">
               <span class="dl-tag" data-i18n="dl.rec">推荐 · 日常主力</span>
-              <span class="mono" id="dl-exe-ver">v1.43.15</span>
+              <span class="mono" id="dl-exe-ver">v1.43.16</span>
             </div>
             <h3 data-i18n="dl.exeTitle">Windows 安装版 (NSIS x64)</h3>
-            <p data-i18n="dl.exeDesc">标准一键安装，带开始菜单快捷方式与干净卸载；后续在软件设置页一键校验 SHA-256 覆盖升级。</p>
-            <div class="dl-file mono" id="dl-exe-name">TidyAssistant_1.43.15_x64-setup.exe · 20.6 MB</div>
-            <a class="btn primary full" id="dl-btn-exe" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-setup.exe" data-i18n="dl.exeBtn">
+            <p data-i18n="dl.exeDesc">标准一键安装，配备全新轻盘 QDisk 高清图标、开始菜单快捷方式与干净卸载；后续在设置页一键校验 SHA-256 升级。</p>
+            <div class="dl-file mono" id="dl-exe-name">QDisk_1.43.16_x64-setup.exe · 20.6 MB</div>
+            <a class="btn primary full glow-btn" id="dl-btn-exe" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe" data-i18n="dl.exeBtn">
               下载安装版 (.exe)
             </a>
           </article>
 
-          <article class="dl-card">
+          <article class="dl-card spotlight-card">
             <div class="dl-top">
               <span class="dl-tag subtle" data-i18n="dl.port">免安装 · U 盘随身</span>
-              <span class="mono" id="dl-zip-ver">v1.43.15</span>
+              <span class="mono" id="dl-zip-ver">v1.43.16</span>
             </div>
             <h3 data-i18n="dl.zipTitle">Windows 便携版 (Portable ZIP)</h3>
             <p data-i18n="dl.zipDesc">解压至纯英文目录即可直接运行；软件内更新自动备份旧版并原子替换，异常自动回滚零损坏。</p>
-            <div class="dl-file mono" id="dl-zip-name">TidyAssistant_1.43.15_x64-portable.zip · 25.0 MB</div>
-            <a class="btn secondary full" id="dl-btn-zip" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/TidyAssistant_1.43.15_x64-portable.zip" data-i18n="dl.zipBtn">
+            <div class="dl-file mono" id="dl-zip-name">QDisk_1.43.16_x64-portable.zip · 25.0 MB</div>
+            <a class="btn secondary full" id="dl-btn-zip" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip" data-i18n="dl.zipBtn">
               下载便携版 (.zip)
             </a>
           </article>
@@ -392,7 +543,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
         <div class="dl-foot reveal">
           <a href="https://github.com/3347567186/TidyAssistant/releases" target="_blank" rel="noopener" data-i18n="dl.allReleases">全部历史版本 (GitHub Releases)</a>
           <span>·</span>
-          <a id="dl-sha-link" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.15/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt</a>
+          <a id="dl-sha-link" href="https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt</a>
           <span>·</span>
           <a href="https://github.com/3347567186/TidyAssistant/blob/main/THIRD_PARTY.md" target="_blank" rel="noopener" data-i18n="dl.thirdParty">第三方许可声明</a>
         </div>
@@ -400,10 +551,23 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
     </section>
   </main>
 
+  <!-- Fixed Floating Section Quick-Dock -->
+  <aside class="quick-dock" id="quick-dock" aria-label="Quick navigation">
+    <a href="#benchmarks" class="dock-item" data-section="benchmarks" data-i18n="nav.bench">实测数据</a>
+    <a href="#playground" class="dock-item" data-section="playground" data-i18n="nav.play">交互体验</a>
+    <a href="#highlights" class="dock-item" data-section="highlights" data-i18n="nav.features">核心亮点</a>
+    <a href="#architecture" class="dock-item" data-section="architecture" data-i18n="nav.arch">自研与开发</a>
+    <a href="#download" class="dock-cta" data-i18n="nav.get">立即下载</a>
+    <button type="button" class="dock-top" id="back-to-top" aria-label="Back to top" title="回到顶部">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+    </button>
+  </aside>
+
   <footer class="site-footer">
     <div class="container footer-inner">
       <div class="footer-left">
-        <strong>TidyAssistant</strong>
+        <img src="assets/logo.svg" alt="" width="24" height="24" loading="lazy">
+        <strong>轻盘 · QDisk</strong>
         <span data-i18n="foot.note">开源于 MIT 协议 · 本地优先、零遥测、零广告</span>
       </div>
       <div class="footer-links">
