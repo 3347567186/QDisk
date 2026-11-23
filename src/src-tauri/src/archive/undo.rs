@@ -10,8 +10,17 @@ use serde::Serialize;
 
 use super::util::{is_reparse, metadata_filetime, safe_relative, Overwrite};
 
-pub const MAX_UNDO_RECORDS: usize = 5;
-const CROSS_DRIVE_BACKUP_CAP: u64 = 512 * 1024 * 1024;
+/// 仅保留最近 1 次操作的可撤回记录，杜绝多次大文件覆盖造成磁盘体积膨胀。
+#[allow(dead_code)]
+pub const MAX_UNDO_RECORDS: usize = 1;
+/// 同盘覆盖走 O(1) rename（零拷贝开销），但总备份仍封顶 1 GiB，防止超大文件长期占满磁盘。
+const SAME_DRIVE_BACKUP_CAP: u64 = 1024 * 1024 * 1024;
+/// 跨盘覆盖需实际复制（如 D: -> C: AppData），严格封顶总计 128 MiB、单文件 64 MiB，兼顾性能与系统盘空间。
+const CROSS_DRIVE_BACKUP_CAP: u64 = 128 * 1024 * 1024;
+const CROSS_DRIVE_SINGLE_FILE_CAP: u64 = 64 * 1024 * 1024;
+/// 内存账本上限：超过 5 万个新建文件或 2 万个新建目录自动放弃追踪，防极端巨包撑爆内存。
+const MAX_TRACKED_FILES: usize = 50_000;
+const MAX_TRACKED_DIRS: usize = 20_000;
 static UNDO_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,6 +53,7 @@ pub struct UndoRecord {
     pub op: String,
     pub root_dir: PathBuf,
     pub backup_dir: Option<PathBuf>,
+    pub backup_bytes: u64,
     pub backup_incomplete: bool,
     created_files: Vec<CreatedFile>,
     created_dirs: Vec<PathBuf>,
@@ -71,22 +81,53 @@ struct UndoInner {
     overwritten_set: HashSet<String>,
     backup_dir_created: bool,
     backup_counter: u64,
+    same_drive_bytes: u64,
     cross_drive_bytes: u64,
+    backup_bytes: u64,
     backup_incomplete: bool,
+    tracking_overflow: bool,
 }
 
 /// 线程安全的归档操作账本：追踪本次解压/压缩真正新建的文件、新建目录与覆盖前备份，
-/// 用于事后安全撤回或中途取消/报错回滚。
+/// 用于事后安全撤回或中途取消/报错回滚。受同盘/跨盘体积上限与条目数上限双重约束。
 pub struct UndoTracker {
     id: String,
     op: &'static str,
     root_dir: PathBuf,
     backup_dir: PathBuf,
+    same_drive_cap: u64,
+    cross_drive_cap: u64,
+    cross_drive_single_cap: u64,
+    max_tracked_files: usize,
+    max_tracked_dirs: usize,
     inner: Mutex<UndoInner>,
 }
 
 impl UndoTracker {
     pub fn new(op: &'static str, root_dir: PathBuf, data_dir: &Path) -> Self {
+        Self::with_caps(
+            op,
+            root_dir,
+            data_dir,
+            SAME_DRIVE_BACKUP_CAP,
+            CROSS_DRIVE_BACKUP_CAP,
+            CROSS_DRIVE_SINGLE_FILE_CAP,
+            MAX_TRACKED_FILES,
+            MAX_TRACKED_DIRS,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_caps(
+        op: &'static str,
+        root_dir: PathBuf,
+        data_dir: &Path,
+        same_drive_cap: u64,
+        cross_drive_cap: u64,
+        cross_drive_single_cap: u64,
+        max_tracked_files: usize,
+        max_tracked_dirs: usize,
+    ) -> Self {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -100,6 +141,11 @@ impl UndoTracker {
             op,
             root_dir,
             backup_dir,
+            same_drive_cap,
+            cross_drive_cap,
+            cross_drive_single_cap,
+            max_tracked_files,
+            max_tracked_dirs,
             inner: Mutex::new(UndoInner {
                 created_files: Vec::new(),
                 created_file_set: HashSet::new(),
@@ -109,8 +155,11 @@ impl UndoTracker {
                 overwritten_set: HashSet::new(),
                 backup_dir_created: false,
                 backup_counter: 0,
+                same_drive_bytes: 0,
                 cross_drive_bytes: 0,
+                backup_bytes: 0,
                 backup_incomplete: false,
+                tracking_overflow: false,
             }),
         }
     }
@@ -119,6 +168,11 @@ impl UndoTracker {
     /// 绝不误记用户原本就存在的目录。
     pub fn ensure_dir(&self, dir: &Path) -> Result<()> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.tracking_overflow {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("无法创建目录 {}", dir.display()))?;
+            return Ok(());
+        }
         let mut missing = Vec::new();
         let mut cur = Some(dir);
         let stop_at = self.root_dir.parent();
@@ -142,6 +196,10 @@ impl UndoTracker {
             fs::create_dir_all(dir)
                 .with_context(|| format!("无法创建目录 {}", dir.display()))?;
             for m in missing {
+                if g.created_dirs.len() >= self.max_tracked_dirs {
+                    trip_overflow(&mut g);
+                    break;
+                }
                 let key = norm_key(&m);
                 if g.created_dir_set.insert(key) {
                     g.created_dirs.push(m);
@@ -151,7 +209,7 @@ impl UndoTracker {
         Ok(())
     }
 
-    /// 写入目标文件前准备：确保父目录存在；若为覆盖已有普通文件，则先备份原文件。
+    /// 写入目标文件前准备：确保父目录存在；若为覆盖已有普通文件，在体积上限内先备份原文件。
     pub fn prepare_file_write(&self, target: &Path, policy: Overwrite) -> Result<()> {
         if let Some(parent) = target.parent() {
             self.ensure_dir(parent)?;
@@ -164,14 +222,21 @@ impl UndoTracker {
         }
         let key = norm_key(target);
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if g.overwritten_set.contains(&key) || g.created_file_set.contains(&key) {
-            // 同一次任务内部已覆盖/创建过该路径（如大小写冲突后写覆盖前写），保留最初备份即可。
+        if g.tracking_overflow || g.overwritten_set.contains(&key) || g.created_file_set.contains(&key) {
+            // 超限后跳过后续备份 I/O；同一次任务内部已覆盖/创建过该路径则保留最初备份。
             return Ok(());
         }
         g.overwritten_set.insert(key);
         let file_len = meta.len();
         let same_vol = same_volume(target, &self.backup_dir);
-        if !same_vol && g.cross_drive_bytes.saturating_add(file_len) > CROSS_DRIVE_BACKUP_CAP {
+        if same_vol {
+            if g.same_drive_bytes.saturating_add(file_len) > self.same_drive_cap {
+                g.backup_incomplete = true;
+                return Ok(());
+            }
+        } else if file_len > self.cross_drive_single_cap
+            || g.cross_drive_bytes.saturating_add(file_len) > self.cross_drive_cap
+        {
             g.backup_incomplete = true;
             return Ok(());
         }
@@ -185,11 +250,18 @@ impl UndoTracker {
         g.backup_counter += 1;
         let backup_path = self.backup_dir.join(format!("b_{}", g.backup_counter));
         let backed = if same_vol {
-            fs::rename(target, &backup_path).is_ok()
+            if fs::rename(target, &backup_path).is_ok() {
+                g.same_drive_bytes = g.same_drive_bytes.saturating_add(file_len);
+                g.backup_bytes = g.backup_bytes.saturating_add(file_len);
+                true
+            } else {
+                false
+            }
         } else {
             match fs::copy(target, &backup_path) {
                 Ok(copied) => {
                     g.cross_drive_bytes = g.cross_drive_bytes.saturating_add(copied);
+                    g.backup_bytes = g.backup_bytes.saturating_add(copied);
                     true
                 }
                 Err(_) => {
@@ -213,7 +285,11 @@ impl UndoTracker {
     pub fn record_created_file(&self, path: &Path) {
         let key = norm_key(path);
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if g.overwritten_set.contains(&key) {
+        if g.tracking_overflow || g.overwritten_set.contains(&key) {
+            return;
+        }
+        if g.created_files.len() >= self.max_tracked_files {
+            trip_overflow(&mut g);
             return;
         }
         if g.created_file_set.insert(key) {
@@ -241,8 +317,30 @@ impl UndoTracker {
     }
 
     /// 任务成功完成后固化为不可变 `UndoRecord`，捕获新建文件的大小与修改时间指纹。
+    /// 若条目数超上限（`tracking_overflow`），则立即清空备份目录并返回空记录，确保不留残留且不给半成品撤回。
     pub fn finalize(&self) -> UndoRecord {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.tracking_overflow {
+            let had_dir = g.backup_dir_created;
+            g.backup_dir_created = false;
+            g.backups.clear();
+            g.created_files.clear();
+            g.created_dirs.clear();
+            if had_dir {
+                let _ = fs::remove_dir_all(&self.backup_dir);
+            }
+            return UndoRecord {
+                id: self.id.clone(),
+                op: self.op.to_string(),
+                root_dir: self.root_dir.clone(),
+                backup_dir: None,
+                backup_bytes: 0,
+                backup_incomplete: false,
+                created_files: Vec::new(),
+                created_dirs: Vec::new(),
+                backups: Vec::new(),
+            };
+        }
         let mut created_files = Vec::with_capacity(g.created_files.len());
         for p in g.created_files.drain(..) {
             if let Ok(meta) = fs::symlink_metadata(&p) {
@@ -274,12 +372,25 @@ impl UndoTracker {
             op: self.op.to_string(),
             root_dir: self.root_dir.clone(),
             backup_dir,
+            backup_bytes: g.backup_bytes,
             backup_incomplete: g.backup_incomplete,
             created_files,
             created_dirs,
             backups,
         }
     }
+}
+
+fn trip_overflow(g: &mut UndoInner) {
+    g.tracking_overflow = true;
+    g.created_files.clear();
+    g.created_files.shrink_to_fit();
+    g.created_file_set.clear();
+    g.created_file_set.shrink_to_fit();
+    g.created_dirs.clear();
+    g.created_dirs.shrink_to_fit();
+    g.created_dir_set.clear();
+    g.created_dir_set.shrink_to_fit();
 }
 
 pub fn execute_undo(record: UndoRecord) -> Result<UndoReport> {
@@ -294,7 +405,7 @@ pub fn execute_undo(record: UndoRecord) -> Result<UndoReport> {
     if record.backup_incomplete {
         report
             .warnings
-            .push("部分跨盘超大覆盖文件未做备份，已保留现状以防数据丢失".into());
+            .push("部分超大覆盖文件超出撤回备份上限（同盘 1 GB / 跨盘 128 MB），已保留现状以防数据丢失".into());
     }
 
     // 1. 还原被覆盖的原文件
@@ -640,5 +751,75 @@ mod tests {
         assert!(!map.contains_key("proj (2)"));
         assert!(!map.contains_key("."));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn same_drive_cap_and_tracking_overflow_protect_disk_and_ram() {
+        // 子场景 A：同盘覆盖体积超过上限 -> 不产生备份文件、标记 backup_incomplete，撤回保留被覆盖文件
+        let root_a = temp_dir("cap_same");
+        let data_a = root_a.join("_data");
+        let out_a = root_a.join("out");
+        fs::create_dir_all(&out_a).unwrap();
+        let big = out_a.join("big.bin");
+        fs::write(&big, vec![b'O'; 128]).unwrap();
+
+        let tr_a = UndoTracker::with_caps(
+            "extract",
+            out_a.clone(),
+            &data_a,
+            64,   // same_drive_cap = 64B，小于 128B 的 big.bin
+            64,
+            32,
+            100,
+            100,
+        );
+        tr_a.prepare_file_write(&big, Overwrite::Overwrite).unwrap();
+        fs::write(&big, vec![b'N'; 128]).unwrap();
+        tr_a.record_created_file(&big);
+        let rec_a = tr_a.finalize();
+        assert!(rec_a.backup_incomplete, "超同盘上限必须标记 backup_incomplete");
+        assert_eq!(rec_a.backup_bytes, 0, "超限文件不得写入备份目录");
+        assert!(rec_a.backup_dir.is_none(), "未产生备份时不得创建备份目录");
+        assert!(rec_a.is_empty(), "无其他可撤回项时记录应为空");
+        // 即使强行执行撤回，也不得删除未备份的被覆盖文件
+        let urep_a = execute_undo(rec_a).unwrap();
+        assert_eq!(urep_a.removed_files, 0);
+        assert_eq!(fs::read(&big).unwrap(), vec![b'N'; 128]);
+        let _ = fs::remove_dir_all(&root_a);
+
+        // 子场景 B：新建文件数量超出 max_tracked_files -> 触发 tracking_overflow，finalize 立刻清空备份目录返回空记录
+        let root_b = temp_dir("cap_overflow");
+        let data_b = root_b.join("_data");
+        let out_b = root_b.join("out");
+        fs::create_dir_all(&out_b).unwrap();
+        let existing = out_b.join("exist.txt");
+        fs::write(&existing, b"old-exist").unwrap();
+
+        let tr_b = UndoTracker::with_caps(
+            "extract",
+            out_b.clone(),
+            &data_b,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            2, // max_tracked_files = 2
+            100,
+        );
+        tr_b.prepare_file_write(&existing, Overwrite::Overwrite).unwrap();
+        fs::write(&existing, b"new-exist").unwrap();
+        for i in 0..3 {
+            let p = out_b.join(format!("f{i}.txt"));
+            fs::write(&p, b"x").unwrap();
+            tr_b.record_created_file(&p);
+        }
+        let rec_b = tr_b.finalize();
+        assert!(rec_b.is_empty(), "超条目上限后 finalize 必须返回空记录以防半成品撤回");
+        assert!(rec_b.backup_dir.is_none());
+        assert_eq!(rec_b.backup_bytes, 0);
+        assert!(
+            !data_b.join("archive_undo").join(&rec_b.id).exists(),
+            "超条目上限后必须立即删除已产生的备份目录"
+        );
+        let _ = fs::remove_dir_all(&root_b);
     }
 }

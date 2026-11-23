@@ -2358,6 +2358,7 @@ fn main() {
             archive::archive_extract,
             archive::archive_create,
             archive::archive_undo,
+            archive::archive_undo_discard,
             archive::archive_pause,
             archive::archive_resume,
             archive::archive_cancel,
@@ -2515,7 +2516,12 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                handle.state::<archive::ArchiveCtx>().clear_undo();
+            }
+        });
 }
 

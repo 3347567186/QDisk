@@ -7,7 +7,7 @@ mod undo;
 mod util;
 mod zip_impl;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,7 +63,8 @@ pub struct ArchiveCtx {
     busy: Arc<AtomicBool>,
     active_progress: Arc<Mutex<Option<Arc<Progress>>>>,
     preview_dir: Arc<Mutex<Option<PathBuf>>>,
-    undo_history: Arc<Mutex<VecDeque<undo::UndoRecord>>>,
+    /// 仅保留最近 1 次操作的可撤回记录，杜绝多次大文件备份滚雪球膨胀。
+    last_undo: Arc<Mutex<Option<undo::UndoRecord>>>,
 }
 
 pub struct OpGuard {
@@ -93,20 +94,59 @@ impl ArchiveCtx {
     }
 
     fn push_undo(&self, record: undo::UndoRecord) {
-        if let Ok(mut hist) = self.undo_history.lock() {
-            hist.push_back(record);
-            while hist.len() > undo::MAX_UNDO_RECORDS {
-                if let Some(old) = hist.pop_front() {
-                    old.cleanup_backup_dir();
-                }
+        let evicted = if let Ok(mut slot) = self.last_undo.lock() {
+            slot.replace(record)
+        } else {
+            None
+        };
+        if let Some(old) = evicted {
+            old.cleanup_backup_dir();
+        }
+    }
+
+    /// 立即清空当前可撤回记录并删除磁盘上的备份目录（新任务开写前或应用退出时调用）。
+    pub fn clear_undo(&self) {
+        let evicted = if let Ok(mut slot) = self.last_undo.lock() {
+            slot.take()
+        } else {
+            None
+        };
+        if let Some(old) = evicted {
+            old.cleanup_backup_dir();
+        }
+    }
+
+    /// 按需丢弃指定（或当前唯一）可撤回记录并释放备份空间；若 ID 已过期则不误删新记录。
+    pub fn discard_undo(&self, id: Option<&str>) -> bool {
+        let evicted = if let Ok(mut slot) = self.last_undo.lock() {
+            let matched = match (slot.as_ref(), id) {
+                (Some(_), None) => true,
+                (Some(r), Some(target)) => r.id == target,
+                (None, _) => false,
+            };
+            if matched {
+                slot.take()
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(old) = evicted {
+            old.cleanup_backup_dir();
+            true
+        } else {
+            false
         }
     }
 
     fn take_undo(&self, id: &str) -> Option<undo::UndoRecord> {
-        let mut hist = self.undo_history.lock().ok()?;
-        let pos = hist.iter().position(|r| r.id == id)?;
-        hist.remove(pos)
+        let mut slot = self.last_undo.lock().ok()?;
+        if slot.as_ref().is_some_and(|r| r.id == id) {
+            slot.take()
+        } else {
+            None
+        }
     }
 }
 
@@ -181,6 +221,7 @@ pub struct ExtractReport {
     pub undo_id: Option<String>,
     pub can_undo: bool,
     pub backup_incomplete: bool,
+    pub backup_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -195,6 +236,7 @@ pub struct CreateReport {
     pub undo_id: Option<String>,
     pub can_undo: bool,
     pub backup_incomplete: bool,
+    pub backup_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -634,6 +676,11 @@ pub fn extract_archive(
         HashMap::new()
     };
 
+    // 校验通过即将开始写入：先释放上一次操作的撤回备份，确保磁盘峰值永远不超过 1 份。
+    if let Some(c) = ctx {
+        c.clear_undo();
+    }
+
     let tracker = Arc::new(UndoTracker::new(
         "extract",
         out_dir.to_path_buf(),
@@ -710,13 +757,15 @@ pub fn extract_archive(
         Ok(mut report) => {
             let record = tracker.finalize();
             let incomplete = record.backup_incomplete;
+            let backup_bytes = record.backup_bytes;
+            report.backup_incomplete = incomplete;
             if let Some(c) = ctx {
                 if !record.is_empty() {
                     let id = record.id.clone();
                     c.push_undo(record);
                     report.undo_id = Some(id);
                     report.can_undo = true;
-                    report.backup_incomplete = incomplete;
+                    report.backup_bytes = backup_bytes;
                 } else {
                     record.cleanup_backup_dir();
                 }
@@ -751,6 +800,10 @@ pub fn create_archive(
     }
     if util::is_reparse(dest) {
         bail!("目标路径为符号链接或重解析点，禁止直接覆盖");
+    }
+    // 校验通过即将开始写入：先释放上一次操作的撤回备份，确保磁盘峰值永远不超过 1 份。
+    if let Some(c) = ctx {
+        c.clear_undo();
     }
     let profile = PerfProfile::from_mode(mode);
     let _prio = ThreadPriorityGuard::enter(profile.mode);
@@ -810,6 +863,7 @@ pub fn create_archive(
 
     let record = tracker.finalize();
     let incomplete = record.backup_incomplete;
+    let backup_bytes = record.backup_bytes;
     let (undo_id, can_undo) = if let Some(c) = ctx {
         if !record.is_empty() {
             let id = record.id.clone();
@@ -834,6 +888,7 @@ pub fn create_archive(
         undo_id,
         can_undo,
         backup_incomplete: incomplete,
+        backup_bytes,
     })
 }
 
@@ -945,6 +1000,17 @@ pub async fn archive_undo(
     .map_err(util::io_err);
     drop(guard);
     result
+}
+
+#[tauri::command]
+pub async fn archive_undo_discard(
+    state: State<'_, ArchiveCtx>,
+    undo_id: Option<String>,
+) -> Result<bool, String> {
+    let ctx = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || ctx.discard_undo(undo_id.as_deref()))
+        .await
+        .map_err(|e| format!("清理撤回备份失败: {e}"))
 }
 
 #[tauri::command]
@@ -1448,6 +1514,93 @@ mod tests {
         let u2 = undo::execute_undo(rec2).unwrap();
         assert_eq!(u2.restored_files, 1);
         assert_eq!(fs::read(&dest).unwrap(), b"OLD-ARCHIVE-SIGNATURE-12345");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn single_slot_eviction_and_discard_guard() {
+        let root = PathBuf::from("D:\\Builds\\tidy-mod-tests")
+            .join(format!("single_slot_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), b"v1").unwrap();
+
+        let dest1 = root.join("one.zip");
+        let dest2 = root.join("two.zip");
+        fs::write(&dest1, b"OLD-ONE-BYTES").unwrap();
+        fs::write(&dest2, b"OLD-TWO-BYTES").unwrap();
+
+        let ctx = ArchiveCtx::default();
+        let p1 = Arc::new(Progress::detached());
+        let c1 = Arc::new(TaskControl::default());
+        let r1 = create_archive(
+            Some(&ctx),
+            &[src.join("a.txt")],
+            &dest1,
+            "zip",
+            "balanced",
+            None,
+            &p1,
+            &c1,
+        )
+        .unwrap();
+        let id1 = r1.undo_id.expect("首次操作应生成 undo_id");
+        assert!(r1.backup_bytes > 0, "覆盖旧包应记录 backup_bytes");
+        let bdir1 = data_dir_for_rar().join("archive_undo").join(&id1);
+        assert!(bdir1.exists(), "首次覆盖备份目录应存在");
+
+        // 执行第二次操作：必须立即淘汰 id1 并删除其磁盘备份目录，只保留最近 1 次
+        let p2 = Arc::new(Progress::detached());
+        let c2 = Arc::new(TaskControl::default());
+        let r2 = create_archive(
+            Some(&ctx),
+            &[src.join("a.txt")],
+            &dest2,
+            "zip",
+            "balanced",
+            None,
+            &p2,
+            &c2,
+        )
+        .unwrap();
+        let id2 = r2.undo_id.expect("第二次操作应生成新 undo_id");
+        assert_ne!(id1, id2);
+        assert!(!bdir1.exists(), "新操作开写前必须清理上一次备份目录防体积膨胀");
+        assert!(ctx.take_undo(&id1).is_none(), "过期 id1 不得再被取出");
+
+        // 用过期 id1 调用 discard_undo 不得误删当前有效的 id2
+        let bdir2 = data_dir_for_rar().join("archive_undo").join(&id2);
+        assert!(bdir2.exists());
+        assert!(!ctx.discard_undo(Some(&id1)), "过期 ID 丢弃应返回 false 且不动新记录");
+        assert!(bdir2.exists(), "id2 备份应完好保留");
+
+        // 用有效 id2 调用 discard_undo 立即释放磁盘备份
+        assert!(ctx.discard_undo(Some(&id2)));
+        assert!(!bdir2.exists(), "收起/丢弃当前撤回后必须立即删除磁盘备份目录");
+        assert!(ctx.take_undo(&id2).is_none());
+
+        // 验证 clear_undo（应用退出清理钩子）同样立即删除磁盘备份
+        fs::write(&dest2, b"OLD-TWO-AGAIN").unwrap();
+        let p3 = Arc::new(Progress::detached());
+        let c3 = Arc::new(TaskControl::default());
+        let r3 = create_archive(
+            Some(&ctx),
+            &[src.join("a.txt")],
+            &dest2,
+            "zip",
+            "balanced",
+            None,
+            &p3,
+            &c3,
+        )
+        .unwrap();
+        let id3 = r3.undo_id.unwrap();
+        let bdir3 = data_dir_for_rar().join("archive_undo").join(&id3);
+        assert!(bdir3.exists());
+        ctx.clear_undo();
+        assert!(!bdir3.exists(), "应用退出 clear_undo 必须清光备份目录");
 
         let _ = fs::remove_dir_all(&root);
     }

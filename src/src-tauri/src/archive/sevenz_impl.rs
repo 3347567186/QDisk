@@ -244,6 +244,7 @@ pub fn create(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     })
 }
 
@@ -376,6 +377,7 @@ fn extract_with_budget(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     };
     let mut stopped = false;
     let mut fatal_err: Option<anyhow::Error> = None;

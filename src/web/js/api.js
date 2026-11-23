@@ -65,6 +65,7 @@
       }),
     archiveCheckCreateConflict: (dest) => invoke('archive_check_create_conflict', { dest }),
     archiveUndo: (undoId) => invoke('archive_undo', { undoId }),
+    archiveUndoDiscard: (undoId) => invoke('archive_undo_discard', { undoId: undoId || null }),
     archivePause: () => invoke('archive_pause'),
     archiveResume: () => invoke('archive_resume'),
     archiveCancel: () => invoke('archive_cancel'),

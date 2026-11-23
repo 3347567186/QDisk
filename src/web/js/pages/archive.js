@@ -53,6 +53,7 @@
     report: null,
     lastCreate: null,
     lastExtract: null,
+    activeUndoId: null,
     undoBusy: false,
     /* 列表渲染状态：行模型按目录缓存，视口外的行不建 DOM（虚拟滚动） */
     rowsByCwd: new Map(),
@@ -1275,8 +1276,23 @@
     return parts.length ? parts.join(' · ') : T('未发现需要变更的文件', 'Nothing to revert');
   }
 
+  function discardUndoIfActive(record) {
+    if (!record || !record.undoId || record.undone || record.undoId !== S.activeUndoId) return;
+    const id = record.undoId;
+    S.activeUndoId = null;
+    if (typeof API.archiveUndoDiscard === 'function') {
+      API.archiveUndoDiscard(id).catch(() => {});
+    }
+  }
+
   async function runUndo(record, kind) {
     if (!record || !record.undoId || record.undone || S.undoBusy) return;
+    if (record.undoId !== S.activeUndoId) {
+      toast(T('仅保留最近一次操作的可撤回记录，该记录已过期', 'Only the most recent operation can be undone'), 'warn');
+      renderLastExtract();
+      renderLastCreate();
+      return;
+    }
     if (S.busy) {
       toast(T('当前有任务正在运行，请稍后再撤回', 'Wait for the running task to finish before undoing'), 'warn');
       return;
@@ -1289,11 +1305,16 @@
       record.undone = true;
       record.undoReport = urep;
       record.undoSummary = formatUndoSummary(urep);
+      if (S.activeUndoId === record.undoId) S.activeUndoId = null;
       const label = kind === 'create' ? T('已撤回压缩：', 'Reverted compression: ') : T('已撤回解压：', 'Reverted extraction: ');
       const hasWarn = Array.isArray(urep.warnings) && urep.warnings.length > 0;
       toast(label + record.undoSummary + (hasWarn ? `（${urep.warnings[0]}）` : ''), hasWarn ? 'warn' : 'ok', 6500);
     } catch (e) {
-      toast(errText(e), 'error');
+      const msg = errText(e);
+      if (/未找到可撤回记录/.test(msg) && S.activeUndoId === record.undoId) {
+        S.activeUndoId = null;
+      }
+      toast(msg, 'error');
     } finally {
       S.undoBusy = false;
       renderLastExtract();
@@ -1310,21 +1331,31 @@
     if (!r) return;
     const open = h('button', { class: 'btn ghost sm' }, icon('folder', 14), T('打开文件夹', 'Open folder'));
     open.onclick = () => API.openPath(r.outDir).catch((e) => toast(errText(e), 'error'));
-    const undoBtn = (r.canUndo && r.undoId)
+    const isCurrentUndo = !!(r.canUndo && r.undoId && r.undoId === S.activeUndoId);
+    const undoBtn = (r.undone || isCurrentUndo)
       ? h('button', {
           class: 'btn ghost sm',
-          disabled: !!(r.undone || S.undoBusy || S.busy)
+          disabled: !!(r.undone || S.undoBusy || S.busy),
+          title: r.undone ? '' : T('仅保留最近 1 次操作可撤回，下次操作、收起或关闭软件自动清理备份', 'Only the latest operation is undoable; backups clear automatically')
         }, icon('undo', 14), r.undone ? T('已撤回', 'Reverted') : (S.undoBusy ? T('撤回中…', 'Undoing…') : T('撤回解压', 'Undo extract')))
       : null;
     if (undoBtn && !r.undone) undoBtn.onclick = () => runUndo(r, 'extract');
-    const hide = h('button', { class: 'btn ghost sm icon', title: T('收起', 'Dismiss'), 'aria-label': T('收起', 'Dismiss') }, icon('close', 14));
-    hide.onclick = () => { S.lastExtract = null; renderLastExtract(); };
+    const hide = h('button', { class: 'btn ghost sm icon', title: T('收起并释放撤回缓存', 'Dismiss and clear undo cache'), 'aria-label': T('收起', 'Dismiss') }, icon('close', 14));
+    hide.onclick = () => {
+      discardUndoIfActive(r);
+      S.lastExtract = null;
+      renderLastExtract();
+      renderLastCreate();
+    };
     const title = r.undone
       ? T('已撤回解压：', 'Reverted extract: ') + (r.archiveName || baseName(r.outDir))
       : T('已解压：', 'Extracted: ') + (r.archiveName || baseName(r.outDir));
+    const cacheNote = (!r.undone && isCurrentUndo && r.backupBytes > 0)
+      ? (' · ' + T('撤回备份 ', 'Undo backup ') + fmtBytes(r.backupBytes))
+      : '';
     const sub = r.undone
       ? (r.undoSummary || r.outDir)
-      : (T('文件 ', 'Files ') + fmtCount(r.files) + ' · ' + T('目录 ', 'Folders ') + fmtCount(r.dirs) + ' · ' + fmtBytes(r.bytes) + ' · ' + r.outDir);
+      : (T('文件 ', 'Files ') + fmtCount(r.files) + ' · ' + T('目录 ', 'Folders ') + fmtCount(r.dirs) + ' · ' + fmtBytes(r.bytes) + cacheNote + ' · ' + r.outDir);
     box.appendChild(h('div', { class: 'arc-last-card' + (r.undone ? ' is-undone' : '') },
       h('span', { class: 'arc-last-ic' }, icon(r.undone ? 'undo' : 'export', 18)),
       h('div', { class: 'arc-last-text' },
@@ -1377,7 +1408,9 @@
         undone: false,
         undoSummary: ''
       });
+      S.activeUndoId = (report.canUndo && report.undoId) ? report.undoId : null;
       renderLastExtract();
+      renderLastCreate();
       const body = h('div', { class: 'arc-report' },
         h('div', null, T('解压完成', 'Extraction complete')),
         h('div', { class: 'small muted' },
@@ -1386,7 +1419,7 @@
           fmtBytes(report.bytes) + (report.skipped ? ' · ' + T('跳过 ', 'Skipped ') + fmtCount(report.skipped) : '')),
         h('div', { class: 'small muted ellipsis' }, report.outDir),
         report.backupIncomplete
-          ? h('div', { class: 'small muted' }, T('注：部分跨盘覆盖文件超出 512 MB 备份上限，撤回时将予以保留。', 'Note: some cross-drive overwritten files exceeded the 512 MB backup limit and will be kept on undo.'))
+          ? h('div', { class: 'small muted' }, T('注：部分超大覆盖文件超出撤回备份上限（同盘 1 GB / 跨盘 128 MB），撤回时将保留现状。', 'Note: some large overwritten files exceeded the undo backup cap (1 GB same-drive / 128 MB cross-drive) and will be kept on undo.'))
           : null
       );
       const modalBtns = [{ id: 'close', label: T('关闭', 'Close'), kind: 'ghost' }];
@@ -1407,6 +1440,7 @@
       if (picked.openAfter) API.openPath(report.outDir).catch(() => {});
     } catch (e) {
       const wasCancelling = S.cancelling;
+      S.activeUndoId = null;
       endOp();
       const msg = errText(e);
       if (wasCancelling || /操作已取消/.test(msg)) toast(T('任务已取消', 'Task cancelled'), 'info');
@@ -1798,22 +1832,32 @@
       ? h('button', { class: 'btn ghost sm' }, icon('folder', 14), T('在文件夹中显示', 'Show in folder'))
       : null;
     if (show) show.onclick = () => API.reveal(r.path).catch((e) => toast(errText(e), 'error'));
-    const undoBtn = (r.canUndo && r.undoId)
+    const isCurrentUndo = !!(r.canUndo && r.undoId && r.undoId === S.activeUndoId);
+    const undoBtn = (r.undone || isCurrentUndo)
       ? h('button', {
           class: 'btn ghost sm',
-          disabled: !!(r.undone || S.undoBusy || S.busy)
+          disabled: !!(r.undone || S.undoBusy || S.busy),
+          title: r.undone ? '' : T('仅保留最近 1 次操作可撤回，下次操作、收起或关闭软件自动清理备份', 'Only the latest operation is undoable; backups clear automatically')
         }, icon('undo', 14), r.undone ? T('已撤回', 'Reverted') : (S.undoBusy ? T('撤回中…', 'Undoing…') : T('撤回压缩', 'Undo compress')))
       : null;
     if (undoBtn && !r.undone) undoBtn.onclick = () => runUndo(r, 'create');
-    const hide = h('button', { class: 'btn ghost sm icon', title: T('收起', 'Dismiss'), 'aria-label': T('收起', 'Dismiss') }, icon('close', 14));
-    hide.onclick = () => { S.lastCreate = null; renderLastCreate(); };
+    const hide = h('button', { class: 'btn ghost sm icon', title: T('收起并释放撤回缓存', 'Dismiss and clear undo cache'), 'aria-label': T('收起', 'Dismiss') }, icon('close', 14));
+    hide.onclick = () => {
+      discardUndoIfActive(r);
+      S.lastCreate = null;
+      renderLastCreate();
+      renderLastExtract();
+    };
     const title = r.undone
       ? T('已撤回压缩：', 'Reverted archive: ') + baseName(r.path)
       : T('已创建：', 'Created: ') + baseName(r.path);
+    const cacheNote = (!r.undone && isCurrentUndo && r.backupBytes > 0)
+      ? (' · ' + T('撤回备份 ', 'Undo backup ') + fmtBytes(r.backupBytes))
+      : '';
     const sub = r.undone
       ? (r.undoSummary || r.path)
       : (fmtBytes(r.packed) + ' · ' + fmtCount(r.files) + T(' 个文件', ' files') +
-          ' · ' + ((r.elapsedMs || 0) / 1000).toFixed(1) + ' s');
+          ' · ' + ((r.elapsedMs || 0) / 1000).toFixed(1) + ' s' + cacheNote);
     box.appendChild(h('div', { class: 'arc-last-card' + (r.undone ? ' is-undone' : '') },
       h('span', { class: 'arc-last-ic' }, icon(r.undone ? 'undo' : 'archive', 18)),
       h('div', { class: 'arc-last-text' },
@@ -2084,7 +2128,9 @@
       endOp();
       S.report = report;
       S.lastCreate = Object.assign({}, report, { undone: false, undoSummary: '' });
+      S.activeUndoId = (report.canUndo && report.undoId) ? report.undoId : null;
       renderLastCreate();
+      renderLastExtract();
       // 创建完的压缩包是从待压缩列表里「出货」了：清掉列表，避免再点一次生成重复包
       S.create.sources = [];
       S.create.dest = '';
@@ -2098,7 +2144,7 @@
           fmtBytes(report.packed) + ' · ' + fmtCount(report.files) + T(' 个文件', ' files') + ' · ' + ((report.elapsedMs || 0) / 1000).toFixed(1) + ' s'),
         h('div', { class: 'small muted ellipsis', title: report.path }, report.path),
         report.backupIncomplete
-          ? h('div', { class: 'small muted' }, T('注：原压缩包超出跨盘 512 MB 备份上限，撤回时将保留现状。', 'Note: original archive exceeded the 512 MB cross-drive backup limit.'))
+          ? h('div', { class: 'small muted' }, T('注：原压缩包超出撤回备份上限（同盘 1 GB / 跨盘 128 MB），撤回时将保留现状。', 'Note: original archive exceeded the undo backup cap (1 GB same-drive / 128 MB cross-drive) and will be kept on undo.'))
           : null
       );
       const modalBtns = [
@@ -2122,6 +2168,7 @@
       });
     } catch (e) {
       const wasCancelling = S.cancelling;
+      S.activeUndoId = null;
       endOp();
       const msg = errText(e);
       if (wasCancelling || /操作已取消/.test(msg)) toast(T('任务已取消', 'Task cancelled'), 'info');

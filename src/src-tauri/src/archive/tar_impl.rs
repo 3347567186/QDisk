@@ -163,6 +163,7 @@ pub fn extract(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     };
     let budget = Budget::for_extraction();
     for (idx, item) in ar.entries().context("TAR 读取失败")?.enumerate() {
@@ -365,6 +366,7 @@ pub fn extract_single(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     })
 }
 
@@ -409,6 +411,7 @@ pub fn create_tar(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     })
 }
 
@@ -705,6 +708,7 @@ pub fn create_tgz(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     })
 }
 

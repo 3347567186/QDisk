@@ -948,12 +948,14 @@ function findNodes(rootNode, pred, out = []) {
   const origCheckExt = sandbox.API.archiveCheckExtractConflicts;
   const origCheckCre = sandbox.API.archiveCheckCreateConflict;
   const origUndo = sandbox.API.archiveUndo;
+  const origDiscard = sandbox.API.archiveUndoDiscard;
   const origPickFiles = sandbox.API.pickFiles;
   const origOpenPath = sandbox.API.openPath;
 
   let capturedExtract = null;
   let capturedCreate = null;
   const undoCalls = [];
+  const discardCalls = [];
 
   sandbox.API.configGet = async () => ({ archive_mode: 'balanced', archive_extract_dir: 'D:\\下载', archive_extract_open: false, archive_create_dir: 'D:\\下载' });
   sandbox.API.configSet = async () => {};
@@ -993,11 +995,15 @@ function findNodes(rootNode, pred, out = []) {
   });
   sandbox.API.archiveCreate = async (sources, dest, format, mode) => {
     capturedCreate = { sources, dest, format, mode };
-    return { path: dest, format, files: 1, bytes: 128, packed: 96, elapsedMs: 40, undoId: 'u-cre-99', canUndo: true, backupIncomplete: false };
+    return { path: dest, format, files: 1, bytes: 128, packed: 96, elapsedMs: 40, undoId: 'u-cre-99', canUndo: true, backupIncomplete: false, backupBytes: 4096 };
   };
   sandbox.API.archiveUndo = async (undoId) => {
     undoCalls.push(undoId);
     return { op: undoId.includes('cre') ? 'create' : 'extract', removedFiles: 1, removedDirs: 1, restoredFiles: 0, skipped: 0, warnings: [] };
+  };
+  sandbox.API.archiveUndoDiscard = async (undoId) => {
+    discardCalls.push(undoId);
+    return true;
   };
 
   const beforeKey = (docListeners.get('keydown') || []).length;
@@ -1026,24 +1032,17 @@ function findNodes(rootNode, pred, out = []) {
     process.exit(1);
   }
 
-  // 关掉完成弹窗，点页面顶部的「撤回解压」并验证防连点
+  // 关掉完成弹窗，确认解压页顶部出现「撤回解压」（此时暂不撤回，验证后续创建压缩包会令其自动失效，只保留最近 1 次）
   const closeDoneBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
   if (closeDoneBtn) clickBtn(closeDoneBtn);
   await new Promise((r) => setTimeout(r, 30));
-  const undoExtBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回解压'))[0];
-  if (!undoExtBtn) {
+  const undoExtBtnBefore = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回解压'))[0];
+  if (!undoExtBtnBefore) {
     console.error('[压缩包撤回回归] 解压完成后顶部卡片缺少「撤回解压」按钮');
     process.exit(1);
   }
-  clickBtn(undoExtBtn);
-  await new Promise((r) => setTimeout(r, 30));
-  const revertedExtBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('已撤回'))[0];
-  if (undoCalls.length !== 1 || undoCalls[0] !== 'u-ext-99' || !revertedExtBtn) {
-    console.error(`[压缩包撤回回归] 解压撤回状态异常: calls=${JSON.stringify(undoCalls)}, reverted=${!!revertedExtBtn}`);
-    process.exit(1);
-  }
 
-  // B: 切到「创建压缩包」-> 添加文件 -> 点「开始创建」-> 冲突弹窗选「二者并存」-> 验证改名与撤回压缩
+  // B: 切到「创建压缩包」-> 添加文件 -> 点「开始创建」-> 冲突弹窗选「二者并存」-> 验证改名、跨页单槽撤回联动与收起释放缓存
   const createTab = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('创建压缩包'))[0];
   clickBtn(createTab);
   const addFilesBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('添加文件'))[0];
@@ -1068,15 +1067,55 @@ function findNodes(rootNode, pred, out = []) {
   const closeCreateDone = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
   if (closeCreateDone) clickBtn(closeCreateDone);
   await new Promise((r) => setTimeout(r, 30));
-  const undoCreBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回压缩'))[0];
-  if (!undoCreBtn) {
-    console.error('[压缩包撤回回归] 压缩完成后顶部卡片缺少「撤回压缩」按钮');
+
+  // 红队单槽校验：压缩完成后（u-cre-99 成为唯一可撤回项），旧解压卡片上的「撤回解压」必须自动消失，且创建卡片显示备份体积
+  const staleUndoExtBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回解压'))[0];
+  if (staleUndoExtBtn) {
+    console.error('[压缩包单槽撤回回归] 新压缩完成后旧解压卡片仍残留过期的「撤回解压」按钮');
     process.exit(1);
   }
-  clickBtn(undoCreBtn);
+  const createCardText = txt(findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-last-card')).pop());
+  if (!createCardText.includes('撤回备份')) {
+    console.error(`[压缩包单槽撤回回归] 覆盖备份体积未展示在状态卡上: ${createCardText}`);
+    process.exit(1);
+  }
+
+  // 点击创建卡片的「收起」按钮：必须触发 archiveUndoDiscard('u-cre-99') 立即释放磁盘缓存
+  const dismissCreateBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && typeof n.getAttribute === 'function' && n.getAttribute('aria-label') === '收起').pop();
+  if (!dismissCreateBtn) {
+    console.error('[压缩包单槽撤回回归] 创建状态卡缺少收起按钮');
+    process.exit(1);
+  }
+  clickBtn(dismissCreateBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  if (discardCalls.length !== 1 || discardCalls[0] !== 'u-cre-99') {
+    console.error(`[压缩包单槽撤回回归] 收起卡片未触发 archiveUndoDiscard 释放备份: ${JSON.stringify(discardCalls)}`);
+    process.exit(1);
+  }
+
+  // C: 再做一次解压并执行真实撤回（验证撤回按钮完整闭环 + 防连点）
+  const openTab = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('浏览与解压'))[0];
+  if (openTab) clickBtn(openTab);
+  clickBtn(extractAllBtn);
+  const startExtBtn2 = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始解压')).pop();
+  clickBtn(startExtBtn2);
   await new Promise((r) => setTimeout(r, 30));
-  if (undoCalls.length !== 2 || undoCalls[1] !== 'u-cre-99') {
-    console.error(`[压缩包撤回回归] 压缩撤回未正确触发: calls=${JSON.stringify(undoCalls)}`);
+  const coexistBtn2 = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('二者并存')).pop();
+  clickBtn(coexistBtn2);
+  await new Promise((r) => setTimeout(r, 40));
+  const closeDoneBtn2 = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  if (closeDoneBtn2) clickBtn(closeDoneBtn2);
+  await new Promise((r) => setTimeout(r, 30));
+  const undoExtBtn2 = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回解压'))[0];
+  if (!undoExtBtn2) {
+    console.error('[压缩包撤回回归] 二次解压后缺少「撤回解压」按钮');
+    process.exit(1);
+  }
+  clickBtn(undoExtBtn2);
+  await new Promise((r) => setTimeout(r, 30));
+  const revertedExtBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('已撤回'))[0];
+  if (undoCalls.length !== 1 || undoCalls[0] !== 'u-ext-99' || !revertedExtBtn) {
+    console.error(`[压缩包撤回回归] 解压撤回状态异常: calls=${JSON.stringify(undoCalls)}, reverted=${!!revertedExtBtn}`);
     process.exit(1);
   }
 
@@ -1089,6 +1128,7 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.archiveCheckExtractConflicts = origCheckExt;
   sandbox.API.archiveCheckCreateConflict = origCheckCre;
   sandbox.API.archiveUndo = origUndo;
+  sandbox.API.archiveUndoDiscard = origDiscard;
   sandbox.API.pickFiles = origPickFiles;
   sandbox.API.openPath = origOpenPath;
   await new Promise((r) => setTimeout(r, 220));

@@ -125,6 +125,7 @@ fn create_sequential(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     })
 }
 
@@ -947,6 +948,7 @@ fn create_parallel(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     })
 }
 
@@ -1085,6 +1087,7 @@ fn extract_sequential(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     };
     let budget = Budget::for_extraction();
     let declared: u64 = selected
@@ -1405,6 +1408,7 @@ fn extract_parallel(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     }))
 }
 

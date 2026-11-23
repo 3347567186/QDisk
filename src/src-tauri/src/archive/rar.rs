@@ -532,6 +532,7 @@ pub fn extract(
         undo_id: None,
         can_undo: false,
         backup_incomplete: false,
+        backup_bytes: 0,
     };
     let mut index = 0usize;
     loop {
