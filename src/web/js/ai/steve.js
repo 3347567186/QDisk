@@ -368,8 +368,8 @@
     }
   }
 
-  Avatar.prototype.bindButtonHover = function () {
-    const btn = this.el.closest ? this.el.closest('button') : null;
+  Avatar.prototype.bindButtonHover = function (explicitBtn) {
+    const btn = explicitBtn || (this.el.closest ? this.el.closest('button') : null);
     if (!btn || btn === this._hoverEl) return;
     if (this._hoverEl && this._hoverEl.removeEventListener) {
       this._hoverEl.removeEventListener('pointerenter', this._onEnter);

@@ -306,11 +306,10 @@
     { zh: '系统', en: 'System', ids: ['apps', 'migrate', 'log', 'settings'] }
   ];
 
-  /* AI 项不用线框图标：放一颗体素头像当入口。
-     语言切换会重建导航，旧头像要先停掉自己的渲染循环再丢弃。 */
+  /* AI 项采用独立指令卡：内嵌 22px 立体头像槽，兼容语言切换时销毁旧循环 */
   function navMark(item) {
     if (item.id === 'ai' && window.SteveAvatar) {
-      return window.SteveAvatar.el({ size: 28, variant: 'nav' });
+      return window.SteveAvatar.el({ size: 22, variant: 'nav' });
     }
     return icon(item.icon);
   }
@@ -344,13 +343,35 @@
         placed.add(item.id);
         const mark = navMark(item);
         const labelText = UI.T(item.zh, item.en);
+        if (item.id === 'ai') {
+          const btn = h('button', {
+            class: 'nav-item nav-ai-card' + (item.id === app.current ? ' active' : ''),
+            dataset: { id: item.id, icon: item.icon },
+            'aria-label': labelText,
+            onclick: () => goNav(item, mark)
+          },
+            h('span', { class: 'ai-nav-badge', 'aria-hidden': 'true' },
+              mark,
+              h('span', { class: 'ai-nav-pip' })
+            ),
+            h('span', { class: 'ai-nav-meta' },
+              h('span', { class: 'lbl' }, labelText),
+              h('span', { class: 'ai-nav-sub' }, UI.T('查盘 · 问诊', 'Local AI'))
+            ),
+            h('span', { class: 'ai-nav-arrow', 'aria-hidden': 'true' })
+          );
+          box.appendChild(btn);
+          if (mark && mark._steve && typeof mark._steve.bindButtonHover === 'function') {
+            mark._steve.bindButtonHover(btn);
+          }
+          return;
+        }
         box.appendChild(h('button', {
           class: 'nav-item' + (item.id === app.current ? ' active' : ''),
           dataset: { id: item.id, icon: item.icon },
           'aria-label': labelText,
-          title: item.id === 'ai' ? labelText : undefined,
           onclick: () => goNav(item, mark)
-        }, mark, item.id === 'ai' ? null : h('span', { class: 'lbl' }, labelText)));
+        }, mark, h('span', { class: 'lbl' }, labelText)));
       });
       nav.appendChild(box);
     });

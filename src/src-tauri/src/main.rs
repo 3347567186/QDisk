@@ -837,6 +837,14 @@ extern "system" {
     fn GetWindowRect(hwnd: isize, r: *mut RECT) -> i32;
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn GetAsyncKeyState(vk: i32) -> i16;
+    fn GetSystemMetrics(n_index: i32) -> i32;
+    fn LoadImageW(hinst: isize, name: *const u16, img_type: u32, cx: i32, cy: i32, fu_load: u32) -> isize;
+    fn SendMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+}
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetModuleHandleW(lp_module_name: *const u16) -> isize;
 }
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -860,6 +868,60 @@ const SWP_NOSIZE: u32 = 0x0001;
 const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const VK_LBUTTON: i32 = 0x01;
+#[cfg(target_os = "windows")]
+const WM_SETICON: u32 = 0x0080;
+#[cfg(target_os = "windows")]
+const ICON_SMALL: usize = 0;
+#[cfg(target_os = "windows")]
+const ICON_BIG: usize = 1;
+#[cfg(target_os = "windows")]
+const IMAGE_ICON: u32 = 1;
+#[cfg(target_os = "windows")]
+const LR_DEFAULTCOLOR: u32 = 0x0000;
+#[cfg(target_os = "windows")]
+const LR_SHARED: u32 = 0x8000;
+#[cfg(target_os = "windows")]
+const SM_CXICON: i32 = 11;
+#[cfg(target_os = "windows")]
+const SM_CYICON: i32 = 12;
+#[cfg(target_os = "windows")]
+const SM_CXSMICON: i32 = 49;
+#[cfg(target_os = "windows")]
+const SM_CYSMICON: i32 = 50;
+/// `tauri_build` 将 `icon.ico` 写入 PE 资源 ID `32512`（`IDI_APPLICATION`）。
+#[cfg(target_os = "windows")]
+const PE_APP_ICON_ID: usize = 32512;
+
+/// 同步主窗口任务栏与 Alt+Tab 图标：先走 Tauri `set_icon` 兜底，
+/// 再从本进程 PE 资源按系统 DPI 精确加载大/小 DIB 图标发 `WM_SETICON`，
+/// 绕过 Windows Shell 旧快捷方式与图标缓存残留。
+fn sync_window_taskbar_icon(window: &tauri::WebviewWindow, fallback: Option<&tauri::image::Image<'_>>) {
+    if let Some(ic) = fallback {
+        let _ = window.set_icon(ic.clone());
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(raw) = window.hwnd() {
+        let hwnd = raw.0 as isize;
+        unsafe {
+            let hinst = GetModuleHandleW(std::ptr::null());
+            if hinst != 0 {
+                let res_id = PE_APP_ICON_ID as *const u16;
+                let big_w = GetSystemMetrics(SM_CXICON).max(32);
+                let big_h = GetSystemMetrics(SM_CYICON).max(32);
+                let h_big = LoadImageW(hinst, res_id, IMAGE_ICON, big_w, big_h, LR_DEFAULTCOLOR | LR_SHARED);
+                if h_big != 0 {
+                    SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_big);
+                }
+                let sm_w = GetSystemMetrics(SM_CXSMICON).max(16);
+                let sm_h = GetSystemMetrics(SM_CYSMICON).max(16);
+                let h_sm = LoadImageW(hinst, res_id, IMAGE_ICON, sm_w, sm_h, LR_DEFAULTCOLOR | LR_SHARED);
+                if h_sm != 0 {
+                    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_sm);
+                }
+            }
+        }
+    }
+}
 
 /// 自绘标题栏拖动：在后台线程里跟随鼠标移动窗口。
 /// 不走 WM_NCLBUTTONDOWN，避免无边框窗口上原生 caption 拖动不生效。
@@ -3047,6 +3109,9 @@ fn main() {
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
+            if let Some(w) = app.get_webview_window("main") {
+                sync_window_taskbar_icon(&w, app.default_window_icon());
+            }
             tray.build(app)?;
             append_log("info", "应用启动");
 
@@ -3403,6 +3468,43 @@ mod shell_tests {
         assert_eq!(resolve_existing_local_path(&missing), None);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bundled_app_icon_has_dib_and_png_frames_for_windows_taskbar() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let ico_path = manifest_dir.join("icons").join("icon.ico");
+        let bytes = std::fs::read(&ico_path).expect("icons/icon.ico must exist");
+        assert!(bytes.len() > 22, "icon.ico too small");
+        let rsv = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let typ = u16::from_le_bytes([bytes[2], bytes[3]]);
+        let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        assert_eq!(rsv, 0);
+        assert_eq!(typ, 1);
+        assert!(count >= 7, "expected at least 7 multi-DPI icon frames, got {count}");
+        let mut sizes = Vec::new();
+        for i in 0..count {
+            let base = 6 + i * 16;
+            let w = if bytes[base] == 0 { 256u32 } else { bytes[base] as u32 };
+            let sz = u32::from_le_bytes([bytes[base + 8], bytes[base + 9], bytes[base + 10], bytes[base + 11]]) as usize;
+            let off = u32::from_le_bytes([bytes[base + 12], bytes[base + 13], bytes[base + 14], bytes[base + 15]]) as usize;
+            assert!(off + sz <= bytes.len(), "frame {i} out of bounds");
+            if w <= 128 {
+                // 32-bit DIB BITMAPINFOHEADER starts with biSize = 40 (0x28 00 00 00)
+                assert_eq!(&bytes[off..off + 4], &[40, 0, 0, 0], "size {w} must be DIB for Win32 Taskbar compatibility");
+            } else {
+                assert_eq!(&bytes[off..off + 4], b"\x89PNG", "256px frame must be PNG");
+            }
+            sizes.push(w);
+        }
+        for req in [16u32, 24, 32, 48, 64, 128, 256] {
+            assert!(sizes.contains(&req), "missing {req}px taskbar icon frame");
+        }
+        for png in ["32x32.png", "128x128.png", "128x128@2x.png", "icon.png"] {
+            let p = manifest_dir.join("icons").join(png);
+            let data = std::fs::read(&p).unwrap_or_else(|_| panic!("missing {png}"));
+            assert!(data.starts_with(b"\x89PNG"), "{png} must be valid PNG");
+        }
     }
 }
 

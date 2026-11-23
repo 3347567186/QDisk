@@ -87,6 +87,16 @@ class FakeElement extends FakeNode {
     }
     return false;
   }
+  closest(sel) {
+    let cur = this;
+    while (cur) {
+      if (sel.startsWith('.') && cur.classList && cur.classList.contains(sel.slice(1))) return cur;
+      if (sel.startsWith('#') && cur.id === sel.slice(1)) return cur;
+      if (cur.tagName && cur.tagName.toLowerCase() === sel.toLowerCase()) return cur;
+      cur = cur.parent || cur.parentNode || null;
+    }
+    return null;
+  }
   replaceChildren(...nodes) {
     this.children = nodes;
     nodes.forEach(n => { if (n) n.parent = this; });
@@ -1778,5 +1788,69 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.aiCancel = origCancel;
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子、外壳竞态、在线更新与 AI 权限切换/即时停止全链路校验通过）`);
+// 回归 14（红队对抗审查）：[Q]Disk 品牌联合标志 + 侧栏 AI 指令卡边界条件与生命周期防泄漏
+{
+  const indexHtml = fs.readFileSync(path.join(root, 'src/web/index.html'), 'utf8');
+  const stylesCss = fs.readFileSync(path.join(root, 'src/web/styles.css'), 'utf8');
+  const appJs = fs.readFileSync(path.join(root, 'src/web/js/app.js'), 'utf8');
+
+  if (!indexHtml.includes('brand-lockup') || !indexHtml.includes('brand-disk') || !indexHtml.includes('disk-i-dot')) {
+    console.error('[红队回归 14] src/web/index.html 缺少 [Q]Disk 品牌联合锁排结构');
+    process.exit(1);
+  }
+  if (!stylesCss.includes('html[lang^="en"] .brand-cn { display: none; }') || !stylesCss.includes('.app.collapsed .brand-lockup { display: none; }')) {
+    console.error('[红队回归 14] 品牌锁排缺少英文去重隐藏或折叠隐藏规则');
+    process.exit(1);
+  }
+  if (!appJs.includes('nav-ai-card') || !appJs.includes('bindButtonHover') || !appJs.includes('ai-nav-pip')) {
+    console.error('[红队回归 14] 侧栏 AI 入口缺少指令卡、bindButtonHover 或纯装饰强调点');
+    process.exit(1);
+  }
+  if (/nav-ai-card[\s\S]{0,240}title\s*:/.test(appJs)) {
+    console.error('[红队回归 14] 侧栏 AI 指令卡仍含原生 title 属性，将与折叠轨 navTip 产生双重气泡冲突');
+    process.exit(1);
+  }
+  if (!stylesCss.includes('body[data-motion="off"] .nav-item[data-id="ai"]') || !stylesCss.includes('.app.collapsed .nav-item[data-id="ai"] {\n  width: 100%;')) {
+    console.error('[红队回归 14] 侧栏 AI 指令卡缺少 data-motion=off 降级或折叠态 width: 100% 防裁切约束');
+    process.exit(1);
+  }
+
+  // 运行态校验：按钮悬停绑定到整卡、navTip 文案不被副标题污染、销毁零泄漏
+  const liveBefore = sandbox.SteveAvatar.count();
+  const mark = sandbox.SteveAvatar.el({ size: 22, variant: 'nav' });
+  const lbl = sandbox.UI.h('span', { class: 'lbl' }, 'AI 助手');
+  const sub = sandbox.UI.h('span', { class: 'ai-nav-sub' }, '查盘 · 问诊');
+  const badge = sandbox.UI.h('span', { class: 'ai-nav-badge' }, mark, sandbox.UI.h('span', { class: 'ai-nav-pip' }));
+  const btn = sandbox.UI.h('button', { class: 'nav-item nav-ai-card', dataset: { id: 'ai' }, 'aria-label': 'AI 助手' },
+    badge,
+    sandbox.UI.h('span', { class: 'ai-nav-meta' }, lbl, sub),
+    sandbox.UI.h('span', { class: 'ai-nav-arrow' })
+  );
+  sandbox.document.body.appendChild(btn);
+  mark._steve.bindButtonHover();
+  if (mark._steve._hoverEl !== btn) {
+    console.error('[红队回归 14] bindButtonHover 未将 Steve 悬停事件绑定至整张 AI 指令卡按钮');
+    process.exit(1);
+  }
+  const readTxt = (n) => {
+    if (!n) return '';
+    if (typeof n === 'string') return n;
+    let s = String(n._textContent || n.nodeValue || '');
+    if (Array.isArray(n.children)) s += n.children.map(readTxt).join('');
+    return s;
+  };
+  const foundLbl = findNodes(btn, (n) => n.classList && n.classList.contains('lbl'))[0];
+  if (!foundLbl || readTxt(foundLbl).trim() !== 'AI 助手') {
+    console.error('[红队回归 14] AI 指令卡 .lbl 文案异常（可能被副标题污染导致 navTip 错乱）');
+    process.exit(1);
+  }
+  mark._steve.destroy();
+  btn.remove();
+  if (sandbox.SteveAvatar.count() !== liveBefore) {
+    console.error(`[红队回归 14] AI 指令卡销毁后存在 SteveAvatar 实例泄漏: ${sandbox.SteveAvatar.count()} vs ${liveBefore}`);
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子、外壳竞态、在线更新、AI 权限切换/即时停止与 [Q]Disk 侧栏红队回归全链路校验通过）`);
 process.exit(0);

@@ -32,7 +32,7 @@
 <div class="rz rz-sw" data-resize="sw"></div>
 <div class="app" id="app">
   <aside class="sidebar">
-    <div class="brand">
+    <div class="brand" aria-label="轻盘 QDisk" title="轻盘 · QDisk">
       <div class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 64 64" width="26" height="26" fill="none" xmlns="http://www.w3.org/2000/svg">
           <defs>
@@ -57,8 +57,9 @@
           <line x1="36.5" y1="36.5" x2="49.5" y2="49.5" stroke="url(#qd-tail)" stroke-width="7.2" stroke-linecap="round"/>
         </svg>
       </div>
-      <div class="brand-text">
-        <strong data-i18n="app.name">轻盘</strong>
+      <div class="brand-lockup">
+        <span class="brand-disk" aria-hidden="true">D<span class="disk-i"><i class="disk-i-dot"></i><i class="disk-i-stem"></i></span>sk</span>
+        <span class="brand-cn" data-i18n="app.name">轻盘</span>
       </div>
     </div>
     <nav class="nav" id="nav"></nav>

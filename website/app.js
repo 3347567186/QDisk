@@ -21,9 +21,8 @@
       'nav.bench': '实测数据',
       'nav.download': '下载获取',
       'nav.get': '立即下载',
-      'hero.badge': 'Win10/11 · MIT 开源 · 零广告',
       'hero.title': '零广告、不靠黑盒<br>每一步都能撤回的 <span class="title-accent">Windows 轻盘</span>',
-      'hero.sub': '将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 20.6 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。',
+      'hero.sub': '将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 20.7 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。',
       'hero.dlExe': '下载安装版',
       'hero.dlZip': '便携免安装版',
       'tabs.ai': 'AI 助手',
@@ -89,9 +88,8 @@
       'nav.bench': 'Benchmarks',
       'nav.download': 'Download',
       'nav.get': 'Download',
-      'hero.badge': 'Win10/11 x64 · MIT Open Source · Zero Ads',
       'hero.title': 'Zero ads, zero black boxes.<br>The undoable <span class="title-accent">Windows utility</span>.',
-      'hero.sub': 'Dry-Run file organization, a 4-tier multi-core Rust archiver, risk-tiered cleanup, and an auditable local AI assistant in one 20.6 MB native app. Every risky action previews first.',
+      'hero.sub': 'Dry-Run file organization, a 4-tier multi-core Rust archiver, risk-tiered cleanup, and an auditable local AI assistant in one 20.7 MB native app. Every risky action previews first.',
       'hero.dlExe': 'Download Installer',
       'hero.dlZip': 'Portable ZIP',
       'tabs.ai': 'AI Assistant',
@@ -170,6 +168,7 @@
 
   let curLang = 'zh';
   let curBenchMode = 'create';
+  let currentVer = 'v1.43.18';
 
   /* ---- Two-State Color Scheme Toggle (modern-web-guidance: dark-mode-toggle) ---- */
   const metaScheme = document.querySelector('meta[name="color-scheme"]');
@@ -260,8 +259,7 @@
 
     const winTitle = document.getElementById('win-chrome-title');
     if (winTitle) {
-      const ver = (document.getElementById('hero-ver-text')?.textContent || 'v1.43.17').trim();
-      winTitle.textContent = curLang === 'en' ? `QDisk ${ver}` : `轻盘 QDisk ${ver}`;
+      winTitle.textContent = curLang === 'en' ? `QDisk ${currentVer}` : `轻盘 QDisk ${currentVer}`;
     }
     const activeTab = document.querySelector('.stage-tabs [role="tab"][aria-selected="true"]');
     updateStageCaption(activeTab);
@@ -387,89 +385,85 @@
     sections.forEach((s) => secObs.observe(s));
   }
 
-  /* ---- Bidirectional Scroll Fallback (ONLY when native CSS Scroll-Driven Animations are unavailable) ---- */
-  if (!hasNativeView && !prefersReduced) {
-    document.documentElement.classList.add('sda-fallback');
+  /* ---- Bidirectional Gradual Float-In Scroll Reveal (Down & Up) ---- */
+  const floatEls = Array.from(document.querySelectorAll('.float-in'));
+  if (!prefersReduced && floatEls.length && 'IntersectionObserver' in window) {
+    document.documentElement.classList.add('js-float-ready');
+
+    function revealVisibleNow() {
+      const vh = window.innerHeight || 800;
+      const atBottom = (window.scrollY || 0) + vh >= document.documentElement.scrollHeight - 48;
+      floatEls.forEach((el) => {
+        const r = el.getBoundingClientRect();
+        if ((r.top < vh * 0.98 && r.bottom > 12) || (atBottom && r.top < vh + 40)) {
+          el.classList.remove('from-top');
+          el.classList.add('is-visible');
+        }
+      });
+    }
+
+    const floatObs = new IntersectionObserver((entries) => {
+      const vh = window.innerHeight || 800;
+      const atBottom = (window.scrollY || 0) + vh >= document.documentElement.scrollHeight - 48;
+      entries.forEach((entry) => {
+        const el = entry.target;
+        if (entry.isIntersecting) {
+          el.classList.add('is-visible');
+          el.classList.remove('from-top');
+          return;
+        }
+        // Reset only once outside viewport beyond transform travel (64px > 48px) to prevent edge oscillation
+        const r = entry.boundingClientRect;
+        if (atBottom && r.top < vh + 40 && r.bottom > 0) {
+          el.classList.add('is-visible');
+          el.classList.remove('from-top');
+        } else if (r.top > vh + 64) {
+          el.classList.remove('is-visible', 'from-top');
+        } else if (r.bottom < -64) {
+          el.classList.remove('is-visible');
+          el.classList.add('from-top');
+        }
+      });
+    }, { threshold: 0.06, rootMargin: '0px 0px -2% 0px' });
+
+    floatEls.forEach((el) => floatObs.observe(el));
+    requestAnimationFrame(revealVisibleNow);
+    window.addEventListener('scroll', () => {
+      if ((window.scrollY || 0) + (window.innerHeight || 800) >= document.documentElement.scrollHeight - 48) {
+        revealVisibleNow();
+      }
+    }, { passive: true });
+    window.addEventListener('resize', revealVisibleNow, { passive: true });
+    window.addEventListener('hashchange', () => setTimeout(revealVisibleNow, 120));
+  }
+
+  /* ---- Fallback Hero Stage Unfold when native CSS Scroll-Driven Animations are unavailable ---- */
+  if (!hasNativeScroll && !prefersReduced) {
     const heroCopy = document.querySelector('[data-scroll-hero="copy"]');
     const stageFrame = document.getElementById('stage-frame');
-    const stories = Array.from(document.querySelectorAll('[data-scroll-story]'));
-    const reveals = Array.from(document.querySelectorAll('.scroll-reveal, .scroll-card'));
-    const endReveals = Array.from(document.querySelectorAll('.scroll-reveal-end'));
-
     const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
     const lerp = (a, b, t) => a + (b - a) * t;
     let rafId = 0;
 
-    function coverRatio(rect, vh) {
-      return clamp((vh - rect.top) / (vh + rect.height), 0, 1);
-    }
-
-    function updateFallbackMotion() {
+    function updateHeroFallback() {
       rafId = 0;
-      const vh = window.innerHeight || 800;
       const y = window.scrollY || 0;
-
       if (heroCopy) {
-        const t = clamp((y - 40) / 480, 0, 1);
-        heroCopy.style.transform = `translateY(${(-42 * t).toFixed(1)}px) scale(${lerp(1, 0.96, t).toFixed(4)})`;
-        heroCopy.style.opacity = lerp(1, 0.18, t).toFixed(3);
+        const t = clamp((y - 40) / 460, 0, 1);
+        heroCopy.style.transform = `translateY(${(-38 * t).toFixed(1)}px) scale(${lerp(1, 0.965, t).toFixed(4)})`;
+        heroCopy.style.opacity = lerp(1, 0.2, t).toFixed(3);
       }
       if (stageFrame) {
         const t = clamp(y / 420, 0, 1);
-        stageFrame.style.transform = `rotateX(${lerp(7, 0, t).toFixed(2)}deg) scale(${lerp(0.95, 1, t).toFixed(4)}) translateY(${lerp(18, 0, t).toFixed(1)}px)`;
+        stageFrame.style.transform = `rotateX(${lerp(7.5, 0, t).toFixed(2)}deg) scale(${lerp(0.945, 1, t).toFixed(4)}) translateY(${lerp(18, 0, t).toFixed(1)}px)`;
       }
-
-      stories.forEach((band) => {
-        const p = coverRatio(band.getBoundingClientRect(), vh);
-        const copy = band.querySelector('.story-copy');
-        const vis = band.querySelector('.story-visual');
-        const inset = band.querySelector('.media-inset');
-
-        const enterT = clamp(p / 0.28, 0, 1);
-        const exitT = clamp((p - 0.74) / 0.26, 0, 1);
-        const op = p < 0.28 ? enterT : (p > 0.74 ? lerp(1, 0.25, exitT) : 1);
-
-        if (copy) {
-          const cy = p < 0.28 ? lerp(58, 0, enterT) : (p > 0.74 ? lerp(0, -40, exitT) : 0);
-          copy.style.opacity = op.toFixed(3);
-          copy.style.transform = `translateY(${cy.toFixed(1)}px)`;
-        }
-        if (vis) {
-          const vy = p < 0.3 ? lerp(80, 0, clamp(p / 0.3, 0, 1)) : (p > 0.72 ? lerp(0, -32, clamp((p - 0.72) / 0.28, 0, 1)) : 0);
-          const vs = p < 0.3 ? lerp(0.92, 1, clamp(p / 0.3, 0, 1)) : (p > 0.72 ? lerp(1, 0.96, clamp((p - 0.72) / 0.28, 0, 1)) : 1);
-          vis.style.opacity = Math.max(0.08, op).toFixed(3);
-          vis.style.transform = `translateY(${vy.toFixed(1)}px) scale(${vs.toFixed(4)})`;
-        }
-        if (inset) {
-          inset.style.transform = `translateY(${lerp(42, -30, p).toFixed(1)}px)`;
-        }
-      });
-
-      reveals.forEach((el) => {
-        const p = coverRatio(el.getBoundingClientRect(), vh);
-        const enterT = clamp(p / 0.26, 0, 1);
-        const exitT = clamp((p - 0.78) / 0.22, 0, 1);
-        const op = p < 0.26 ? enterT : (p > 0.78 ? lerp(1, 0.3, exitT) : 1);
-        const dy = p < 0.26 ? lerp(42, 0, enterT) : (p > 0.78 ? lerp(0, -24, exitT) : 0);
-        const sc = p < 0.26 ? lerp(0.95, 1, enterT) : (p > 0.78 ? lerp(1, 0.97, exitT) : 1);
-        el.style.opacity = op.toFixed(3);
-        el.style.transform = `translateY(${dy.toFixed(1)}px) scale(${sc.toFixed(4)})`;
-      });
-
-      endReveals.forEach((el) => {
-        const rect = el.getBoundingClientRect();
-        const enterT = clamp((vh - rect.top) / Math.max(220, rect.height * 0.75), 0, 1);
-        el.style.opacity = enterT.toFixed(3);
-        el.style.transform = `translateY(${lerp(44, 0, enterT).toFixed(1)}px) scale(${lerp(0.96, 1, enterT).toFixed(4)})`;
-      });
     }
 
     const requestTick = () => {
-      if (!rafId) rafId = requestAnimationFrame(updateFallbackMotion);
+      if (!rafId) rafId = requestAnimationFrame(updateHeroFallback);
     };
     window.addEventListener('scroll', requestTick, { passive: true });
-    window.addEventListener('resize', requestTick, { passive: true });
-    updateFallbackMotion();
+    updateHeroFallback();
   }
 
   /* ---- Copy Dev Commands ---- */
@@ -496,10 +490,10 @@
     .then((m) => {
       if (!m || !m.version) return;
       const ver = 'v' + String(m.version).replace(/^v/i, '');
+      currentVer = ver;
       const setTxt = (id, v) => { const el = document.getElementById(id); if (el && v) el.textContent = v; };
       const setHref = (id, u) => { const el = document.getElementById(id); if (el && u) el.href = u; };
 
-      setTxt('hero-ver-text', ver);
       setTxt('dl-exe-ver', ver);
       setTxt('dl-zip-ver', ver);
       setTxt('win-chrome-title', curLang === 'en' ? `QDisk ${ver}` : `轻盘 QDisk ${ver}`);

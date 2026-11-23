@@ -29,8 +29,10 @@
         <span class="brand-mark" aria-hidden="true">
           <img src="assets/logo.svg" alt="" width="30" height="30" decoding="async">
         </span>
-        <span class="brand-name" data-i18n="brand">轻盘</span>
-        <span class="brand-tag">QDisk</span>
+        <span class="brand-lockup">
+          <span class="brand-disk" aria-hidden="true">D<span class="disk-i"><i class="disk-i-dot"></i><i class="disk-i-stem"></i></span>sk</span>
+          <span class="brand-cn" data-i18n="brand">轻盘</span>
+        </span>
       </a>
 
       <nav class="site-nav" aria-label="Primary">
@@ -68,30 +70,23 @@
 
       <div class="container">
         <div class="hero-copy" data-scroll-hero="copy">
-          <a class="ver-pill" id="hero-release-pill" href="https://github.com/3347567186/QDisk/releases/latest" target="_blank" rel="noopener">
-            <span class="ver-dot" aria-hidden="true"></span>
-            <span class="mono" id="hero-ver-text">v1.43.17</span>
-            <span class="ver-sep" aria-hidden="true">/</span>
-            <span data-i18n="hero.badge">Win10/11 · MIT 开源 · 零广告</span>
-          </a>
-
           <h1 class="hero-title" data-i18n="hero.title">
             零广告、不靠黑盒<br>每一步都能撤回的 <span class="title-accent">Windows 轻盘</span>
           </h1>
 
           <p class="hero-sub" data-i18n="hero.sub">
-            将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 20.6 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。
+            将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 20.7 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。
           </p>
 
           <div class="hero-cta">
-            <a class="btn primary lg" id="hero-dl-installer" href="https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-setup.exe">
+            <a class="btn primary lg" id="hero-dl-installer" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-setup.exe">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg>
               <span data-i18n="hero.dlExe">下载安装版</span>
-              <span class="btn-meta mono" id="hero-exe-size">20.6 MB</span>
+              <span class="btn-meta mono" id="hero-exe-size">20.7 MB</span>
             </a>
-            <a class="btn secondary lg" id="hero-dl-portable" href="https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-portable.zip">
+            <a class="btn secondary lg" id="hero-dl-portable" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-portable.zip">
               <span data-i18n="hero.dlZip">便携免安装版</span>
-              <span class="btn-meta mono" id="hero-zip-size">25.0 MB</span>
+              <span class="btn-meta mono" id="hero-zip-size">25.1 MB</span>
             </a>
           </div>
         </div>
@@ -109,7 +104,7 @@
             <div class="window-chrome" aria-hidden="true">
               <span class="win-brand">
                 <img src="assets/logo.svg" alt="" width="15" height="15">
-                <span id="win-chrome-title">轻盘 QDisk v1.43.17</span>
+                <span id="win-chrome-title">轻盘 QDisk v1.43.18</span>
               </span>
               <span class="win-caption" id="stage-caption">透明查证 · 0.31 ms 真停止 · 四档权限审批</span>
               <span class="win-dots"><i></i><i></i><i></i></span>
@@ -134,18 +129,18 @@
       </div>
     </section>
 
-    <!-- Act II: Editorial Feature Storytelling (Bidirectional Scroll Parallax & Depth) -->
+    <!-- Act II: Editorial Feature Storytelling (Gradual Float-In + Parallax) -->
     <section class="section showcase-section" id="showcase">
       <div class="container">
-        <div class="section-head scroll-reveal">
+        <div class="section-head float-in">
           <p class="eyebrow" data-i18n="story.eyebrow">CRAFTED FOR CLARITY · 核心体验</p>
           <h2 data-i18n="story.title">把四件高频麻烦事，做到透明且零焦虑</h2>
         </div>
 
         <div class="story-stack">
           <!-- Story 01 -->
-          <article class="story-band" data-scroll-story>
-            <div class="story-copy">
+          <article class="story-band">
+            <div class="story-copy float-in" style="--float-delay: 40ms">
               <span class="story-index mono">01</span>
               <h3 data-i18n="story.s1Title">可审计本地 AI 助手</h3>
               <p class="story-desc" data-i18n="story.s1Desc">
@@ -156,7 +151,7 @@
                 <span data-i18n="story.s1Proof">WinHTTP 阻塞真停止中位数 · 路径防粘连双端兜底</span>
               </div>
             </div>
-            <figure class="story-visual">
+            <figure class="story-visual float-in" style="--float-delay: 160ms">
               <div class="media-shell">
                 <img id="story-img-ai" src="assets/screenshots/01-ai-assistant.png" alt="Auditable local AI assistant" width="2560" height="1640" loading="lazy" decoding="async">
               </div>
@@ -164,8 +159,8 @@
           </article>
 
           <!-- Story 02 -->
-          <article class="story-band is-reversed" data-scroll-story>
-            <div class="story-copy">
+          <article class="story-band is-reversed">
+            <div class="story-copy float-in" style="--float-delay: 140ms">
               <span class="story-index mono">02</span>
               <h3 data-i18n="story.s2Title">先预演再落盘的智能整理</h3>
               <p class="story-desc" data-i18n="story.s2Desc">
@@ -176,7 +171,7 @@
                 <span data-i18n="story.s2Proof">1,000 文件全量零损一键撤回 · 整理仅 1.79 s</span>
               </div>
             </div>
-            <figure class="story-visual">
+            <figure class="story-visual float-in" style="--float-delay: 40ms">
               <div class="media-shell">
                 <img src="assets/screenshots/02-organize.png" alt="Dry-run file organizer preview" width="2560" height="1640" loading="lazy" decoding="async">
               </div>
@@ -184,8 +179,8 @@
           </article>
 
           <!-- Story 03 -->
-          <article class="story-band" data-scroll-story>
-            <div class="story-copy">
+          <article class="story-band">
+            <div class="story-copy float-in" style="--float-delay: 40ms">
               <span class="story-index mono">03</span>
               <h3 data-i18n="story.s3Title">Rust 多核零广告压缩内核</h3>
               <p class="story-desc" data-i18n="story.s3Desc">
@@ -196,7 +191,7 @@
                 <span data-i18n="story.s3Proof">高性能档多核 ZIP 压缩峰值 · 相对节约档提速 14.4×</span>
               </div>
             </div>
-            <figure class="story-visual">
+            <figure class="story-visual float-in" style="--float-delay: 160ms">
               <div class="media-shell">
                 <img src="assets/screenshots/03-archive.png" alt="Rust multi-core archive manager" width="2560" height="1640" loading="lazy" decoding="async">
               </div>
@@ -204,8 +199,8 @@
           </article>
 
           <!-- Story 04 -->
-          <article class="story-band is-reversed" data-scroll-story>
-            <div class="story-copy">
+          <article class="story-band is-reversed">
+            <div class="story-copy float-in" style="--float-delay: 140ms">
               <span class="story-index mono">04</span>
               <h3 data-i18n="story.s4Title">分级安全清理与签名溯源</h3>
               <p class="story-desc" data-i18n="story.s4Desc">
@@ -216,7 +211,7 @@
                 <span data-i18n="story.s4Proof">10,001 文件 FTS5 模糊检索中位数 · 68.4 ms 建库</span>
               </div>
             </div>
-            <figure class="story-visual visual-layered">
+            <figure class="story-visual visual-layered float-in" style="--float-delay: 40ms">
               <div class="media-shell">
                 <img src="assets/screenshots/04-cache.png" alt="Risk-tiered cache cleaner" width="2560" height="1640" loading="lazy" decoding="async">
               </div>
@@ -232,7 +227,7 @@
     <!-- Act III: Unified Real Machine Benchmarks (Zero Duplication) -->
     <section class="section bench-section" id="benchmarks">
       <div class="container">
-        <div class="section-head scroll-reveal">
+        <div class="section-head float-in">
           <p class="eyebrow" data-i18n="bench.eyebrow">REAL BENCHMARKS · 实测而非宣传</p>
           <h2 data-i18n="bench.title">每一组数字，都在本机真实跑测取得</h2>
           <p class="section-desc" data-i18n="bench.desc">
@@ -242,7 +237,7 @@
 
         <div class="bench-bento">
           <!-- Interactive 4-Tier Speed Chart -->
-          <div class="bento-card bench-chart scroll-card" style="--card-order: 0">
+          <div class="bento-card bench-chart float-in" style="--float-delay: 40ms">
             <div class="panel-head">
               <div>
                 <h3 data-i18n="bench.chartTitle">压缩内核四档动态性能阶梯</h3>
@@ -292,26 +287,26 @@
 
           <!-- 4 Compact Engineering Metrics -->
           <div class="stat-quad">
-            <article class="bento-card stat-tile scroll-card" style="--card-order: 1">
+            <article class="bento-card stat-tile float-in" style="--float-delay: 110ms">
               <div class="stat-num mono"><span class="count-up" data-val="5.56" data-dec="2">5.56</span><span class="stat-unit">MB</span></div>
               <div class="stat-label" data-i18n="bench.s1Title">原生 Rust 外壳体积</div>
               <p class="stat-meta" data-i18n="bench.s1Meta">零框架前端总源码 2.03 MB · 0 node_modules</p>
             </article>
 
-            <article class="bento-card stat-tile scroll-card" style="--card-order: 2">
+            <article class="bento-card stat-tile float-in" style="--float-delay: 190ms">
               <div class="stat-num mono"><span class="count-up" data-val="0.31" data-dec="2">0.31</span><span class="stat-unit">ms</span></div>
               <div class="stat-label" data-i18n="bench.s2Title">AI 阻塞停止中位数</div>
               <p class="stat-meta" data-i18n="bench.s2Meta">跨线程关闭 WinHTTP 句柄，告别超时卡死</p>
             </article>
 
-            <article class="bento-card stat-tile scroll-card" style="--card-order: 3">
+            <article class="bento-card stat-tile float-in" style="--float-delay: 270ms">
               <div class="stat-num mono"><span class="count-up" data-val="6.53" data-dec="2">6.53</span><span class="stat-unit">ms</span></div>
               <div class="stat-label" data-i18n="bench.s3Title">万级文件模糊检索</div>
               <p class="stat-meta" data-i18n="bench.s3Meta">Rust indexwalk 68.4 ms 建库（~14.6 万/秒）</p>
             </article>
 
-            <article class="bento-card stat-tile scroll-card" style="--card-order: 4">
-              <div class="stat-num mono"><span class="count-up" data-val="364" data-dec="0">364</span><span class="stat-unit">+</span></div>
+            <article class="bento-card stat-tile float-in" style="--float-delay: 350ms">
+              <div class="stat-num mono"><span class="count-up" data-val="366" data-dec="0">366</span><span class="stat-unit">+</span></div>
               <div class="stat-label" data-i18n="bench.s4Title">自动化测试门禁全绿</div>
               <p class="stat-meta" data-i18n="bench.s4Meta">Python + Rust + JS 三栈验证 · Release 0 警告</p>
             </article>
@@ -323,7 +318,7 @@
     <!-- Act IV: Focused Download + On-Demand Developer Architecture Disclosure -->
     <section class="section download-section" id="download">
       <div class="container">
-        <div class="section-head scroll-reveal-end">
+        <div class="section-head float-in">
           <p class="eyebrow" data-i18n="dl.eyebrow">GET QDISK · 立即获取</p>
           <h2 data-i18n="dl.title">选择适合你的版本，30 秒上手</h2>
           <p class="section-desc" data-i18n="dl.desc">
@@ -331,36 +326,36 @@
           </p>
         </div>
 
-        <div class="dl-grid scroll-reveal-end">
-          <article class="dl-card featured">
+        <div class="dl-grid">
+          <article class="dl-card featured float-in" style="--float-delay: 60ms">
             <div class="dl-top">
               <span class="dl-tag" data-i18n="dl.rec">推荐 · 日常主力</span>
-              <span class="mono dl-ver" id="dl-exe-ver">v1.43.17</span>
+              <span class="mono dl-ver" id="dl-exe-ver">v1.43.18</span>
             </div>
             <h3 data-i18n="dl.exeTitle">Windows 安装版 (NSIS x64)</h3>
             <p data-i18n="dl.exeDesc">一键标准安装，完整桌面与开始菜单图标、干净卸载，软件内自动核验 SHA-256 静默升级。</p>
-            <div class="dl-file mono" id="dl-exe-name">QDisk_1.43.17_x64-setup.exe · 20.6 MB</div>
-            <a class="btn primary full" id="dl-btn-exe" href="https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-setup.exe" data-i18n="dl.exeBtn">
+            <div class="dl-file mono" id="dl-exe-name">QDisk_1.43.18_x64-setup.exe · 20.7 MB</div>
+            <a class="btn primary full" id="dl-btn-exe" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-setup.exe" data-i18n="dl.exeBtn">
               下载安装版 (.exe)
             </a>
           </article>
 
-          <article class="dl-card">
+          <article class="dl-card float-in" style="--float-delay: 170ms">
             <div class="dl-top">
               <span class="dl-tag subtle" data-i18n="dl.port">免安装 · U 盘随身</span>
-              <span class="mono dl-ver" id="dl-zip-ver">v1.43.17</span>
+              <span class="mono dl-ver" id="dl-zip-ver">v1.43.18</span>
             </div>
             <h3 data-i18n="dl.zipTitle">Windows 便携版 (Portable ZIP)</h3>
             <p data-i18n="dl.zipDesc">解压至纯英文目录即可运行；内置更新器自动备份旧版并原子替换，异常自动回滚。</p>
-            <div class="dl-file mono" id="dl-zip-name">QDisk_1.43.17_x64-portable.zip · 25.0 MB</div>
-            <a class="btn secondary full" id="dl-btn-zip" href="https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-portable.zip" data-i18n="dl.zipBtn">
+            <div class="dl-file mono" id="dl-zip-name">QDisk_1.43.18_x64-portable.zip · 25.1 MB</div>
+            <a class="btn secondary full" id="dl-btn-zip" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-portable.zip" data-i18n="dl.zipBtn">
               下载便携版 (.zip)
             </a>
           </article>
         </div>
 
         <!-- On-Demand Developer Architecture & Build Disclosure (Noise Reduction) -->
-        <details class="dev-disclosure scroll-reveal-end">
+        <details class="dev-disclosure float-in" style="--float-delay: 240ms">
           <summary>
             <span class="dev-sum-title" data-i18n="dev.summary">开发者说明：三层架构、扩展接口与源码构建命令</span>
             <span class="dev-sum-icon" aria-hidden="true"></span>
@@ -398,14 +393,18 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
   <footer class="site-footer">
     <div class="container footer-inner">
       <div class="footer-left">
-        <img src="assets/logo.svg" alt="" width="22" height="22" loading="lazy">
-        <strong>轻盘 · QDisk</strong>
+        <span class="brand footer-brand" aria-label="轻盘 QDisk">
+          <span class="brand-mark sm" aria-hidden="true">
+            <img src="assets/logo.svg" alt="" width="22" height="22" loading="lazy">
+          </span>
+          <span class="brand-disk sm" aria-hidden="true">D<span class="disk-i"><i class="disk-i-dot"></i><i class="disk-i-stem"></i></span>sk</span>
+        </span>
         <span data-i18n="foot.note">MIT 开源 · 本地优先、零遥测、零广告</span>
       </div>
       <div class="footer-links">
         <a href="https://github.com/3347567186/QDisk" target="_blank" rel="noopener">GitHub</a>
         <a href="https://github.com/3347567186/QDisk/releases/latest" target="_blank" rel="noopener">Releases</a>
-        <a id="dl-sha-link" href="https://github.com/3347567186/QDisk/releases/download/v1.43.17/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt</a>
+        <a id="dl-sha-link" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt</a>
         <a href="https://github.com/3347567186/QDisk/issues" target="_blank" rel="noopener">Issues</a>
         <a href="https://github.com/3347567186/QDisk/blob/main/README.md" target="_blank" rel="noopener">中文文档</a>
         <a href="https://github.com/3347567186/QDisk/blob/main/README.en.md" target="_blank" rel="noopener">English Docs</a>
