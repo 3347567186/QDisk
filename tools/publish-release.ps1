@@ -6,8 +6,8 @@
        pwsh -File .\tools\publish-release.ps1 -BaseUrl "https://cdn.example.com/tidy/"
 
     2) 生成 GitHub Releases 清单（可选 -UploadGitHub 自动调 gh 上传）：
-       pwsh -File .\tools\publish-release.ps1 -GitHubRepo "owner/TidyAssistant"
-       pwsh -File .\tools\publish-release.ps1 -GitHubRepo "owner/TidyAssistant" -UploadGitHub
+       pwsh -File .\tools\publish-release.ps1 -GitHubRepo "3347567186/QDisk"
+       pwsh -File .\tools\publish-release.ps1 -GitHubRepo "3347567186/QDisk" -UploadGitHub
 
     3) 本机一键起本地更新源做真实端到端验证（127.0.0.1 放行 HTTP）：
        pwsh -File .\tools\publish-release.ps1 -ServeLocal -Port 18765
@@ -23,7 +23,7 @@ param(
   [ValidateSet('stable', 'beta')]
   [string]$Channel = 'stable',
   [string]$BaseUrl = '',
-  [string]$GitHubRepo = '3347567186/TidyAssistant',
+  [string]$GitHubRepo = '3347567186/QDisk',
   [string]$Notes = '',
   [string]$NotesFile = '',
   [string]$MinVersion = '',

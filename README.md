@@ -6,18 +6,18 @@
 
 **本地优先、零广告、每步高危动作均可预演与一键撤回的 Windows 文件整理、多核压缩、空间维护与可审计 AI 助手**
 
-[![Official Website](https://img.shields.io/badge/%E5%AE%98%E6%96%B9%E7%BD%91%E7%AB%99-Live%20Site-d44b24?style=for-the-badge)](https://3347567186.github.io/TidyAssistant/)
-[![Download Installer](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E5%AE%89%E8%A3%85%E7%89%88-v1.43.16%20(20.6%20MB)-161614?style=for-the-badge)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe)
-[![Download Portable](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E4%BE%BF%E6%90%BA%E7%89%88-ZIP%20(25.0%20MB)-0969da?style=for-the-badge)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip)
+[![Official Website](https://img.shields.io/badge/%E5%AE%98%E6%96%B9%E7%BD%91%E7%AB%99-Live%20Site-d44b24?style=for-the-badge)](https://3347567186.github.io/QDisk/)
+[![Download Installer](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E5%AE%89%E8%A3%85%E7%89%88-v1.43.17%20(20.6%20MB)-161614?style=for-the-badge)](https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-setup.exe)
+[![Download Portable](https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD%E4%BE%BF%E6%90%BA%E7%89%88-ZIP%20(25.0%20MB)-0969da?style=for-the-badge)](https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-portable.zip)
 
-[![Latest Release](https://img.shields.io/github/v/release/3347567186/TidyAssistant?color=2ea043&label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/3347567186/TidyAssistant/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/3347567186/QDisk?color=2ea043&label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/3347567186/QDisk/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6)](#四安装部署与下载)
 [![Tests](https://img.shields.io/badge/Tests-364%2B%20Passing%20%7C%200%20Warnings-15803d)](#一不靠吹嘘本机功能实测数据)
 
 **简体中文** | [English](README.en.md)
 
-**[🌐 访问官方网站](https://3347567186.github.io/TidyAssistant/)** · **[⬇️ 下载安装版 (.exe)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe)** · **[📦 下载便携版 (.zip)](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip)** · **[📋 全部版本与校验](https://github.com/3347567186/TidyAssistant/releases/latest)**
+**[🌐 访问官方网站](https://3347567186.github.io/QDisk/)** · **[⬇️ 下载安装版 (.exe)](https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-setup.exe)** · **[📦 下载便携版 (.zip)](https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-portable.zip)** · **[📋 全部版本与校验](https://github.com/3347567186/QDisk/releases/latest)**
 
 </div>
 
@@ -35,7 +35,7 @@
 | **1,000 文件整理预演 / 执行 / 撤回** | 1,000 个真实混合下载文件（10 扩展名，5 大分类） | 扫描 **`306.5 ms`** · 移动 **`1.79 s`** · 撤回 **`1.39 s`** | `1000/1000` 精准移动，`1000/1000` 一键原路还原，失败 0 |
 | **10,001 文件索引与模糊检索** | 50 子目录 × 200 文件 + 目标 PDF（30 次 FTS5 查询） | 建库 **`68.4 ms`**（~14.6 万文件/秒）· 检索中位数 **`6.53 ms`** | Rust `indexwalk` + SQLite FTS5，P95 检索延迟 `7.23 ms` |
 | **引擎冷启动 & JSON-RPC 往返** | `tidy.py --engine` 进程冷启 + 20 次热态 `ping` | 冷启含首包 **`224.4 ms`** · 热态往返 **`0.10 ms`** | 长驻引擎零重复冷启开销 |
-| **软件体积极致控制** | `v1.43.16` 正式 Release 产物 | 主程序 **`5.56 MB`** · 安装包 **`20.6 MB`** · 便携包 **`25.0 MB`** | 前端零框架总源码仅 `2.03 MB`（0 `node_modules`） |
+| **软件体积极致控制** | `v1.43.17` 正式 Release 产物 | 主程序 **`5.56 MB`** · 安装包 **`20.6 MB`** · 便携包 **`25.0 MB`** | 前端零框架总源码仅 `2.03 MB`（0 `node_modules`） |
 | **全栈自动化测试门禁** | `build.ps1` 每次发包强制执行 | **364+ 项测试全绿** · Release **`0` 警告** | Python 234 项 + Rust 58 项 + JS 7 套（含 72 项 AI 黄金集、35 项路径防粘连与 12 页 0 泄漏） |
 
 ### 2. Rust 多核压缩内核四档动态性能实测（64 MB 混合集：75% JSON + 25% PNG，32 文件）
@@ -53,7 +53,7 @@
 
 ## 二、4 个最硬核的功能重点（图文直览）
 
-> 更多交互展示请访问 **[官方网站](https://3347567186.github.io/TidyAssistant/)**。
+> 更多交互展示请访问 **[官方网站](https://3347567186.github.io/QDisk/)**。
 
 ### 1. 可审计本地 AI 助手：透明查证 + 0.31 ms 真停止 + 审批闸门
 
@@ -99,10 +99,10 @@
 
 ## 四、安装、部署与下载
 
-- **🌐 官方网站**：https://3347567186.github.io/TidyAssistant/
-- **⬇️ 安装版（推荐，20.6 MB）**：[QDisk_1.43.16_x64-setup.exe](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-setup.exe)
-- **📦 便携版（免安装，25.0 MB）**：[QDisk_1.43.16_x64-portable.zip](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/QDisk_1.43.16_x64-portable.zip)（解压至纯英文路径即用）
-- **🔐 校验与历史版本**：[GitHub Releases](https://github.com/3347567186/TidyAssistant/releases/latest) · [SHA256SUMS.txt](https://github.com/3347567186/TidyAssistant/releases/download/v1.43.16/SHA256SUMS.txt)
+- **🌐 官方网站**：https://3347567186.github.io/QDisk/
+- **⬇️ 安装版（推荐，20.6 MB）**：[QDisk_1.43.17_x64-setup.exe](https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-setup.exe)
+- **📦 便携版（免安装，25.0 MB）**：[QDisk_1.43.17_x64-portable.zip](https://github.com/3347567186/QDisk/releases/download/v1.43.17/QDisk_1.43.17_x64-portable.zip)（解压至纯英文路径即用）
+- **🔐 校验与历史版本**：[GitHub Releases](https://github.com/3347567186/QDisk/releases/latest) · [SHA256SUMS.txt](https://github.com/3347567186/QDisk/releases/download/v1.43.17/SHA256SUMS.txt)
 
 > 支持 **Windows 10 / 11 (x64)**；所有配置、规则与撤回记录独立保存在 `%LOCALAPPDATA%\整理助手数据`，内置官方 GitHub Releases 零配置在线更新（自动核验 SHA-256，便携版失败自动回滚）。私有化/内网部署详见 [发包与在线更新指南](docs/01-当前版/发包与在线更新指南.md)。
 
@@ -115,7 +115,7 @@
 需 Windows x64 + Rust 1.80+ + Python 3.11+ + Node.js 20+ + PowerShell 7 (`pwsh`) + NSIS 3.x：
 
 ```powershell
-git clone https://github.com/3347567186/TidyAssistant.git && cd TidyAssistant
+git clone https://github.com/3347567186/QDisk.git && cd QDisk
 
 # 3 秒跑完前端离线自测（零打包构建步骤，改完即测）
 node src/web/js/ai/scope.selftest.mjs
@@ -141,4 +141,4 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Bump patch
 
 ---
 
-欢迎提交 [Issue](https://github.com/3347567186/TidyAssistant/issues) 或 PR · 本项目基于 **[MIT License](LICENSE)** 开源。
+欢迎提交 [Issue](https://github.com/3347567186/QDisk/issues) 或 PR · 本项目基于 **[MIT License](LICENSE)** 开源。

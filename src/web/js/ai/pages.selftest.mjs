@@ -1464,7 +1464,7 @@ function findNodes(rootNode, pred, out = []) {
     currentVersion: '1.43.13',
     installKind: 'portable',
     busy: false,
-    releasesPage: 'https://github.com/3347567186/TidyAssistant/releases',
+    releasesPage: 'https://github.com/3347567186/QDisk/releases',
     config: {
       channel: 'stable',
       autoCheck: true,
@@ -1492,11 +1492,11 @@ function findNodes(rootNode, pred, out = []) {
     channel: 'stable',
     pubDate: '2026-11-23',
     notes: '红队验证版本更新说明',
-    downloadUrl: 'https://github.com/3347567186/TidyAssistant/releases/download/v9.9.9/app.zip',
+    downloadUrl: 'https://github.com/3347567186/QDisk/releases/download/v9.9.9/app.zip',
     fileName: '整理助手_9.9.9_便携版.zip',
     size: 25 * 1024 * 1024,
     sha256: fakeSha,
-    manifestUrl: 'https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json',
+    manifestUrl: 'https://github.com/3347567186/QDisk/releases/latest/download/latest.json',
     staged: null
   });
   sandbox.API.updaterDownload = () => new Promise((res, rej) => {

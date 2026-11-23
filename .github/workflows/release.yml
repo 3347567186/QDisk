@@ -1,4 +1,4 @@
-name: Publish TidyAssistant Release
+name: Publish QDisk Release
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
         run: |
           $ver = (Get-Content src\src-tauri\tauri.conf.json -Raw | ConvertFrom-Json).version
           Write-Host "Target version: $ver"
-          if ((Test-Path "release\TidyAssistant_${ver}_x64-setup.exe") -or (Test-Path "release\整理助手_${ver}_便携版.zip")) {
+          if ((Test-Path "release\QDisk_${ver}_x64-setup.exe") -or (Test-Path "release\QDisk_${ver}_x64-portable.zip")) {
             pwsh -NoProfile -File .\tools\publish-release.ps1 -GitHubRepo "${{ github.repository }}" -Channel "${{ inputs.channel || 'stable' }}"
           } else {
             Write-Host "请先在本地执行 .\build.ps1 生成安装包与便携包，或使用 tools\publish-release.ps1 -GitHubRepo owner/repo -UploadGitHub 一键发包。"

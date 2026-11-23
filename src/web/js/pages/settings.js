@@ -2139,7 +2139,7 @@
         state.updProgDom = { wrap: progWrap, fill: progFill, meta: progMeta, cancelBtn };
         syncUpdaterProgressDom();
 
-        const releasesPage = (st && st.releasesPage) || 'https://github.com/3347567186/TidyAssistant/releases';
+        const releasesPage = (st && st.releasesPage) || 'https://github.com/3347567186/QDisk/releases';
 
         const resultCard = (() => {
           if (state.updError) {

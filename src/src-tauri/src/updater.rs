@@ -31,13 +31,13 @@ const MAX_REDIRECTS: usize = 5;
 
 /// 官方内置 GitHub Releases 更新源（无需用户在设置中手动填写任何网址）。
 pub const OFFICIAL_FEED_URL: &str =
-    "https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json";
+    "https://github.com/3347567186/QDisk/releases/latest/download/latest.json";
 pub const OFFICIAL_API_LATEST_URL: &str =
-    "https://api.github.com/repos/3347567186/TidyAssistant/releases/latest";
+    "https://api.github.com/repos/3347567186/QDisk/releases/latest";
 pub const OFFICIAL_API_RELEASES_URL: &str =
-    "https://api.github.com/repos/3347567186/TidyAssistant/releases?per_page=8";
+    "https://api.github.com/repos/3347567186/QDisk/releases?per_page=8";
 pub const OFFICIAL_RELEASES_PAGE: &str =
-    "https://github.com/3347567186/TidyAssistant/releases";
+    "https://github.com/3347567186/QDisk/releases";
 
 static PART_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -425,14 +425,14 @@ pub fn validate_update_url(url: &str, origin_is_remote_https: bool) -> Result<(b
     if host.eq_ignore_ascii_case("github.com")
         && !path
             .to_ascii_lowercase()
-            .starts_with("/3347567186/tidyassistant/")
+            .starts_with("/3347567186/qdisk/")
     {
         bail!("安全拦截：拒绝从非官方仓库路径下载更新（{path}）");
     }
     if host.eq_ignore_ascii_case("api.github.com")
         && !path
             .to_ascii_lowercase()
-            .starts_with("/repos/3347567186/tidyassistant/")
+            .starts_with("/repos/3347567186/qdisk/")
     {
         bail!("安全拦截：拒绝访问非官方仓库 API（{path}）");
     }
@@ -1913,7 +1913,8 @@ mod tests {
         assert!(validate_update_url("https://fakegithub.com/latest.json", false).is_err());
         assert!(validate_update_url("https://github.com/attacker/malware/releases/download/v1/a.exe", false).is_err());
         assert!(validate_update_url("https://api.github.com/repos/attacker/malware/releases/latest", false).is_err());
-        assert!(validate_update_url("http://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json", false).is_err());
+        assert!(validate_update_url("https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json", false).is_err());
+        assert!(validate_update_url("http://github.com/3347567186/QDisk/releases/latest/download/latest.json", false).is_err());
         assert!(validate_update_url("https://user:pass@github.com/latest.json", false).is_err());
         assert!(validate_update_url("https://github.com/a\r\nX: 1", false).is_err());
         // 远端 HTTPS 禁止重定向到 HTTP 或本机回环（防 SSRF + 降级攻击）
@@ -1922,8 +1923,8 @@ mod tests {
         assert!(validate_update_url("https://release-assets.githubusercontent.com/a.exe", true).is_ok());
 
         assert_eq!(
-            resolve_asset_url("https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json", "Tidy_1.0_x64-setup.exe").unwrap(),
-            "https://github.com/3347567186/TidyAssistant/releases/latest/download/Tidy_1.0_x64-setup.exe"
+            resolve_asset_url("https://github.com/3347567186/QDisk/releases/latest/download/latest.json", "QDisk_1.0_x64-setup.exe").unwrap(),
+            "https://github.com/3347567186/QDisk/releases/latest/download/QDisk_1.0_x64-setup.exe"
         );
     }
 
