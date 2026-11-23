@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -11,10 +11,11 @@ use flate2::{Compress, Compression, Crc, FlushCompress, Status};
 use zip::write::SimpleFileOptions;
 use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
+use super::undo::UndoTracker;
 use super::util::{
-    collect_sources, copy_controlled, dos_datetime, ensure_parent, is_incompressible_ext,
-    resolve_dest, safe_join, zip_datetime, Budget, Overwrite, PerfProfile, Progress, SourceItem,
-    TaskControl, ThreadPriorityGuard,
+    collect_sources, copy_controlled, copy_controlled_abortable, dos_datetime, ensure_parent,
+    is_incompressible_ext, resolve_dest, safe_join_mapped, zip_datetime, Budget, Overwrite,
+    PerfProfile, Progress, SourceItem, TaskControl, ThreadPriorityGuard,
 };
 use super::{CreateReport, ExtractReport};
 
@@ -63,7 +64,6 @@ fn create_sequential(
     let mut writer = ZipWriter::new(BufWriter::with_capacity(profile.buf_size, file));
     let mut bytes = 0u64;
     let mut files = 0u64;
-    let dummy_budget = Budget::new(u64::MAX);
 
     for item in items {
         control.checkpoint(Some(progress))?;
@@ -102,7 +102,7 @@ fn create_sequential(
             &mut writer,
             control,
             profile,
-            Some(&dummy_budget),
+            None,
             Some(progress),
             |chunk| progress.add_bytes(chunk),
         )?;
@@ -122,6 +122,9 @@ fn create_sequential(
         bytes,
         packed: fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     })
 }
 
@@ -643,7 +646,8 @@ fn read_exact_or_eof(
 
 fn compress_deflate_block(chunk: &[u8], level: u32, is_last: bool) -> Result<Vec<u8>> {
     let mut comp = Compress::new(Compression::new(level.clamp(1, 9)), false);
-    let mut out = Vec::with_capacity(chunk.len() / 2 + 1024);
+    // 预留稍高于源块尺寸的容量，即便遇到高熵随机不可压数据也能一次完成避免多次扩容。
+    let mut out = Vec::with_capacity(chunk.len() + 16 * 1024);
     let mut offset = 0usize;
     let flush = if is_last {
         FlushCompress::Finish
@@ -940,6 +944,9 @@ fn create_parallel(
         bytes,
         packed: fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     })
 }
 
@@ -1029,6 +1036,7 @@ fn patch_zip64_lfh(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn extract(
     path: &Path,
     out_dir: &Path,
@@ -1036,19 +1044,24 @@ pub fn extract(
     password: Option<&str>,
     policy: Overwrite,
     profile: PerfProfile,
+    dir_map: &HashMap<String, String>,
+    undo: Option<&Arc<UndoTracker>>,
     progress: &Arc<Progress>,
     control: &Arc<TaskControl>,
 ) -> Result<ExtractReport> {
     if profile.threads > 1 {
-        if let Some(report) =
-            extract_parallel(path, out_dir, selected, password, policy, profile, progress, control)?
-        {
+        if let Some(report) = extract_parallel(
+            path, out_dir, selected, password, policy, profile, dir_map, undo, progress, control,
+        )? {
             return Ok(report);
         }
     }
-    extract_sequential(path, out_dir, selected, password, policy, profile, progress, control)
+    extract_sequential(
+        path, out_dir, selected, password, policy, profile, dir_map, undo, progress, control,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_sequential(
     path: &Path,
     out_dir: &Path,
@@ -1056,6 +1069,8 @@ fn extract_sequential(
     password: Option<&str>,
     policy: Overwrite,
     profile: PerfProfile,
+    dir_map: &HashMap<String, String>,
+    undo: Option<&Arc<UndoTracker>>,
     progress: &Progress,
     control: &TaskControl,
 ) -> Result<ExtractReport> {
@@ -1067,6 +1082,9 @@ fn extract_sequential(
         skipped: 0,
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     };
     let budget = Budget::for_extraction();
     let declared: u64 = selected
@@ -1100,8 +1118,12 @@ fn extract_sequential(
 
         // 目录不计入 total_files，决不能调用 file_done()，避免出现 954 / 734 计数溢出。
         if is_dir {
-            let target = safe_join(out_dir, &raw_name)?;
-            fs::create_dir_all(&target)?;
+            let target = safe_join_mapped(out_dir, &raw_name, dir_map)?;
+            if let Some(u) = undo {
+                u.ensure_dir(&target)?;
+            } else {
+                fs::create_dir_all(&target)?;
+            }
             report.dirs += 1;
             continue;
         }
@@ -1116,14 +1138,18 @@ fn extract_sequential(
             progress.file_done();
             continue;
         }
-        let target = safe_join(out_dir, &raw_name)?;
+        let target = safe_join_mapped(out_dir, &raw_name, dir_map)?;
         let Some(target) = resolve_dest(target, false, policy)? else {
             report.skipped += 1;
             progress.add_bytes(entry.size());
             progress.file_done();
             continue;
         };
-        ensure_parent(&target)?;
+        if let Some(u) = undo {
+            u.prepare_file_write(&target, policy)?;
+        } else {
+            ensure_parent(&target)?;
+        }
         let f = File::create(&target).with_context(|| format!("无法写入 {}", target.display()))?;
         let mut out = BufWriter::with_capacity(profile.buf_size, f);
         let n = match copy_controlled(
@@ -1146,6 +1172,9 @@ fn extract_sequential(
                 return Err(e);
             }
         };
+        if let Some(u) = undo {
+            u.record_created_file(&target);
+        }
         report.files += 1;
         report.bytes += n;
         progress.file_done();
@@ -1172,6 +1201,8 @@ fn extract_parallel(
     password: Option<&str>,
     policy: Overwrite,
     profile: PerfProfile,
+    dir_map: &HashMap<String, String>,
+    undo: Option<&Arc<UndoTracker>>,
     progress: &Arc<Progress>,
     control: &Arc<TaskControl>,
 ) -> Result<Option<ExtractReport>> {
@@ -1179,7 +1210,9 @@ fn extract_parallel(
     let mut jobs: Vec<ZipJob> = Vec::new();
     let mut dir_targets: Vec<std::path::PathBuf> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut seen_resolved: HashSet<String> = HashSet::new();
     let mut skipped: u64 = 0;
+    let mut skipped_bytes: u64 = 0;
     let mut dirs: u64 = 0;
 
     for i in 0..zip.len() {
@@ -1204,7 +1237,7 @@ fn extract_parallel(
             raw_size = raw.size();
         }
         if is_dir {
-            dir_targets.push(safe_join(out_dir, &raw_name)?);
+            dir_targets.push(safe_join_mapped(out_dir, &raw_name, dir_map)?);
             dirs += 1;
             continue;
         }
@@ -1214,22 +1247,28 @@ fn extract_parallel(
         if encrypted && password.map_or(true, |p| p.is_empty()) {
             bail!("该 ZIP 已加密，请先输入密码");
         }
-        let target = safe_join(out_dir, &raw_name)?;
+        let target = safe_join_mapped(out_dir, &raw_name, dir_map)?;
         if !seen.insert(target.to_string_lossy().to_lowercase()) {
             return Ok(None);
         }
         match resolve_dest(target, false, policy)? {
-            Some(target) => jobs.push(ZipJob {
-                index: i,
-                name: raw_name,
-                size: raw_size,
-                target,
-                encrypted,
-            }),
+            Some(target) => {
+                // 防止 Rename 自动重命名后的目标与归档内另一条目发生并发撞车（如 foo.txt -> foo (2).txt 撞上归档内原 foo (2).txt）
+                if !seen_resolved.insert(target.to_string_lossy().to_lowercase()) {
+                    return Ok(None);
+                }
+                jobs.push(ZipJob {
+                    index: i,
+                    name: raw_name,
+                    size: raw_size,
+                    target,
+                    encrypted,
+                })
+            }
             None => {
+                // 延迟到确认走并行路径后再统一计入进度，避免回退顺序解压时重复计数。
                 skipped += 1;
-                progress.add_bytes(raw_size);
-                progress.file_done();
+                skipped_bytes += raw_size;
             }
         }
     }
@@ -1241,9 +1280,19 @@ fn extract_parallel(
     let declared: u64 = jobs.iter().map(|j| j.size).sum();
     budget.check_declared(declared)?;
     let budget = &budget;
+    if skipped > 0 {
+        progress.add_bytes(skipped_bytes);
+        for _ in 0..skipped {
+            progress.file_done();
+        }
+    }
     for d in &dir_targets {
         control.checkpoint(Some(progress))?;
-        fs::create_dir_all(d)?;
+        if let Some(u) = undo {
+            u.ensure_dir(d)?;
+        } else {
+            fs::create_dir_all(d)?;
+        }
     }
 
     // 大文件优先 (LPT)：避免所有小文件写完后只剩单核跑最后一个大文件拖长尾。
@@ -1290,14 +1339,19 @@ fn extract_parallel(
                             zip.by_index(job.index)?
                         };
                         prog.set_current(&job.name);
-                        ensure_parent(&job.target)?;
+                        if let Some(u) = undo {
+                            u.prepare_file_write(&job.target, policy)?;
+                        } else {
+                            ensure_parent(&job.target)?;
+                        }
                         let f = File::create(&job.target)
                             .with_context(|| format!("无法写入 {}", job.target.display()))?;
                         let mut out = BufWriter::with_capacity(profile.buf_size, f);
-                        let n = match copy_controlled(
+                        let n = match copy_controlled_abortable(
                             &mut entry,
                             &mut out,
                             &ctl,
+                            Some(failed),
                             profile,
                             Some(budget),
                             Some(&prog),
@@ -1315,6 +1369,9 @@ fn extract_parallel(
                                 return Err(e);
                             }
                         };
+                        if let Some(u) = undo {
+                            u.record_created_file(&job.target);
+                        }
                         files.fetch_add(1, Ordering::Relaxed);
                         bytes.fetch_add(n, Ordering::Relaxed);
                         prog.file_done();
@@ -1345,6 +1402,9 @@ fn extract_parallel(
         skipped,
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     }))
 }
 
@@ -1393,6 +1453,7 @@ mod tests {
         let p = Arc::new(Progress::detached());
         let ctl = Arc::new(TaskControl::default());
         let selected = all_indices(zip);
+        let empty_map = HashMap::new();
         extract(
             zip,
             out,
@@ -1400,6 +1461,8 @@ mod tests {
             None,
             policy,
             PerfProfile::from_mode(mode),
+            &empty_map,
+            None,
             &p,
             &ctl,
         )
@@ -1485,6 +1548,7 @@ mod tests {
         let ctl = Arc::new(TaskControl::default());
         ctl.request_cancel();
         let selected = all_indices(&zip);
+        let empty_map = HashMap::new();
         let res = extract(
             &zip,
             &out,
@@ -1492,6 +1556,8 @@ mod tests {
             None,
             Overwrite::Overwrite,
             PerfProfile::from_mode("saver"),
+            &empty_map,
+            None,
             &p,
             &ctl,
         );
@@ -1613,6 +1679,7 @@ mod tests {
             let p = Arc::new(Progress::detached());
             let ctl = Arc::new(TaskControl::default());
             let selected = all_indices(&zip);
+            let empty_map = HashMap::new();
             let rep = extract(
                 &zip,
                 &out,
@@ -1620,6 +1687,8 @@ mod tests {
                 None,
                 Overwrite::Overwrite,
                 PerfProfile::from_mode(mode),
+                &empty_map,
+                None,
                 &p,
                 &ctl,
             )
@@ -1660,6 +1729,7 @@ mod tests {
         let ctl_a_c = Arc::clone(&ctl_a);
         let selected_a = all_indices(&zip);
         let handle_a = std::thread::spawn(move || {
+            let empty_map = HashMap::new();
             extract(
                 &zip_a,
                 &out_a_c,
@@ -1667,6 +1737,8 @@ mod tests {
                 None,
                 Overwrite::Overwrite,
                 PerfProfile::from_mode("hyper"),
+                &empty_map,
+                None,
                 &p_a_c,
                 &ctl_a_c,
             )
@@ -1688,6 +1760,7 @@ mod tests {
         let ctl_b_c = Arc::clone(&ctl_b);
         let selected_b = all_indices(&zip);
         let handle_b = std::thread::spawn(move || {
+            let empty_map = HashMap::new();
             extract(
                 &zip_b,
                 &out_b_c,
@@ -1695,6 +1768,8 @@ mod tests {
                 None,
                 Overwrite::Overwrite,
                 PerfProfile::from_mode("balanced"),
+                &empty_map,
+                None,
                 &p_b_c,
                 &ctl_b_c,
             )
@@ -1713,6 +1788,169 @@ mod tests {
             Ok(_) => panic!("取消后不应成功"),
             Err(e) => assert!(format!("{e}").contains("取消"), "unexpected: {e}"),
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parallel_zip_incompressible_random_and_boundaries() {
+        let root = temp_root("pz_rand");
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // 确定性 xorshift64 伪随机高熵数据：Deflate 无法压缩会轻微膨胀，覆盖扩块边界
+        let make_rand = |len: usize, mut s: u64| -> Vec<u8> {
+            let mut out = vec![0u8; len];
+            for chunk in out.chunks_mut(8) {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                let b = s.to_le_bytes();
+                for (i, dst) in chunk.iter_mut().enumerate() {
+                    *dst = b[i];
+                }
+            }
+            out
+        };
+        let b_under = make_rand(2 * 1024 * 1024 - 1, 0x1111_2222_3333_4444);
+        let b_exact = make_rand(2 * 1024 * 1024, 0x5555_6666_7777_8888);
+        let b_over = make_rand(2 * 1024 * 1024 + 1, 0x9999_aaaa_bbbb_cccc);
+        let b_big = make_rand(3 * 1024 * 1024 + 513 * 1024, 0xdead_beef_cafe_babe);
+
+        fs::write(src_dir.join("under_2m.bin"), &b_under).unwrap();
+        fs::write(src_dir.join("exact_2m.bin"), &b_exact).unwrap();
+        fs::write(src_dir.join("over_2m.bin"), &b_over).unwrap();
+        fs::write(src_dir.join("rand_3_5m.bin"), &b_big).unwrap();
+
+        let dest = root.join("rand.zip");
+        let p = Arc::new(Progress::detached());
+        let ctl = Arc::new(TaskControl::default());
+        let rep = create(&[src_dir], &dest, None, PerfProfile::from_mode("hyper"), &p, &ctl).unwrap();
+        assert_eq!(rep.files, 4);
+
+        let out = root.join("out");
+        let erep = run("hyper", &dest, &out, Overwrite::Overwrite).unwrap();
+        assert_eq!(erep.files, 4);
+        assert_eq!(fs::read(out.join("src/under_2m.bin")).unwrap(), b_under);
+        assert_eq!(fs::read(out.join("src/exact_2m.bin")).unwrap(), b_exact);
+        assert_eq!(fs::read(out.join("src/over_2m.bin")).unwrap(), b_over);
+        assert_eq!(fs::read(out.join("src/rand_3_5m.bin")).unwrap(), b_big);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parallel_extract_skip_fallback_no_double_count() {
+        let root = temp_root("skip_fb");
+        let zip = root.join("three.zip");
+        make_zip(
+            &zip,
+            &[("a.txt", b"aaa"), ("b.txt", b"bbb"), ("c.txt", b"ccc")],
+        );
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        // 预先放好 2 个文件，Skip 策略下只剩 1 个待写任务，迫使 extract_parallel 回退顺序路径
+        fs::write(out.join("a.txt"), b"keep-a").unwrap();
+        fs::write(out.join("b.txt"), b"keep-b").unwrap();
+
+        let p = Arc::new(Progress::detached());
+        let ctl = Arc::new(TaskControl::default());
+        let selected = all_indices(&zip);
+        let empty_map = HashMap::new();
+        let rep = extract(
+            &zip,
+            &out,
+            &selected,
+            None,
+            Overwrite::Skip,
+            PerfProfile::from_mode("hyper"),
+            &empty_map,
+            None,
+            &p,
+            &ctl,
+        )
+        .unwrap();
+        assert_eq!(rep.files, 1);
+        assert_eq!(rep.skipped, 2);
+        assert_eq!(p.files_count(), 3, "回退顺序解压时跳过条目不得被重复计数");
+        assert_eq!(p.bytes_count(), 9, "回退顺序解压时跳过字节不得被重复计数");
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"keep-a");
+        assert_eq!(fs::read(out.join("c.txt")).unwrap(), b"ccc");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parallel_create_pause_resume_and_cancel_no_deadlock() {
+        use std::time::Duration;
+
+        let root = temp_root("pz_pause");
+        let big_file = root.join("payload.tar");
+        let mut content = Vec::with_capacity(6 * 1024 * 1024);
+        for i in 0..(6 * 1024 * 1024 / 64) {
+            content.extend_from_slice(format!("block-data-{i:08}-tidy-assistant-redteam-verify-!!\n").as_bytes());
+        }
+        fs::write(&big_file, &content).unwrap();
+
+        // A: 暂停大文件并行 ZIP 压缩 -> 恢复 -> 完整解压校验
+        let zip_a = root.join("a.zip");
+        let p_a = Arc::new(Progress::detached());
+        let ctl_a = Arc::new(TaskControl::default());
+        assert!(ctl_a.set_paused(true));
+        let src_a = big_file.clone();
+        let dest_a = zip_a.clone();
+        let p_a_c = Arc::clone(&p_a);
+        let ctl_a_c = Arc::clone(&ctl_a);
+        let h_a = std::thread::spawn(move || {
+            create(&[src_a], &dest_a, None, PerfProfile::from_mode("hyper"), &p_a_c, &ctl_a_c)
+        });
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(p_a.bytes_count(), 0, "暂停期间并行压缩不得推进字节数");
+        assert!(ctl_a.set_paused(false));
+        let rep_a = h_a.join().unwrap().unwrap();
+        assert_eq!(rep_a.files, 1);
+        let out_a = root.join("out_a");
+        run("hyper", &zip_a, &out_a, Overwrite::Overwrite).unwrap();
+        assert_eq!(fs::read(out_a.join("payload.tar")).unwrap(), content);
+
+        // B: 暂停态下取消大文件并行 ZIP 压缩，必须 <500ms 退出且无死锁
+        let zip_b = root.join("b.zip");
+        let p_b = Arc::new(Progress::detached());
+        let ctl_b = Arc::new(TaskControl::default());
+        assert!(ctl_b.set_paused(true));
+        let src_b = big_file.clone();
+        let dest_b = zip_b.clone();
+        let p_b_c = Arc::clone(&p_b);
+        let ctl_b_c = Arc::clone(&ctl_b);
+        let h_b = std::thread::spawn(move || {
+            create(&[src_b], &dest_b, None, PerfProfile::from_mode("hyper"), &p_b_c, &ctl_b_c)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let t0 = Instant::now();
+        ctl_b.request_cancel();
+        let res_b = h_b.join().unwrap();
+        assert!(t0.elapsed() < Duration::from_millis(500), "取消耗时过长: {:?}", t0.elapsed());
+        assert!(res_b.is_err() && format!("{}", res_b.unwrap_err()).contains("取消"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parallel_rename_resolved_collision_falls_back_safely() {
+        let root = temp_root("ren_col");
+        let zip = root.join("col.zip");
+        // 磁盘已有 foo.txt，而包内同时有 foo.txt 和 foo (2).txt：
+        // 并行预扫描中 foo.txt -> foo (2).txt 会撞上另一条目 foo (2).txt，必须安全回退顺序解压不丢数据！
+        make_zip(&zip, &[("foo.txt", b"new-foo"), ("foo (2).txt", b"new-foo2")]);
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("foo.txt"), b"disk-orig").unwrap();
+
+        let rep = run("hyper", &zip, &out, Overwrite::Rename).unwrap();
+        assert_eq!(rep.files, 2);
+        assert_eq!(fs::read(out.join("foo.txt")).unwrap(), b"disk-orig");
+        let mut contents = vec![
+            fs::read(out.join("foo (2).txt")).unwrap(),
+            fs::read(out.join("foo (2) (2).txt")).unwrap(),
+        ];
+        contents.sort();
+        assert_eq!(contents, vec![b"new-foo".to_vec(), b"new-foo2".to_vec()]);
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -833,13 +833,45 @@ function findNodes(rootNode, pred, out = []) {
     process.exit(1);
   }
 
-  // 点击「暂停」：应立即显示暂停进度横幅，且按钮变为「继续」
+  // 红队边界：点击「暂停」在途期间若收到一条过期的 paused:false IPC 进度事件，不得闪退回运行态
+  let resolvePauseRpc = null;
+  sandbox.API.archivePause = () => new Promise((res) => { pauseCalls++; resolvePauseRpc = res; });
   clickBtn(pauseBtn);
+  emitProgress({
+    payload: {
+      op: 'extract',
+      phase: 'run',
+      paused: false,
+      mode: 'hyper',
+      files: 121,
+      totalFiles: 500,
+      bytes: 40 * 1024 * 1024,
+      totalBytes: 100 * 1024 * 1024,
+      name: 'big.tar'
+    }
+  });
+  const pauseBannerMidFlight = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
+  if (!pauseBannerMidFlight || !txt(pauseBannerMidFlight).includes('已暂停')) {
+    console.error('[压缩包红队回归] 暂停 RPC 在途期收到过期 run 事件导致暂停横幅闪烁消失');
+    process.exit(1);
+  }
+  if (resolvePauseRpc) resolvePauseRpc(true);
   await new Promise((r) => setTimeout(r, 20));
   const pauseBanner = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-pause-banner'))[0];
   const resumeBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n) === '继续')[0];
   if (pauseCalls !== 1 || !pauseBanner || !txt(pauseBanner).includes('已暂停') || !txt(pauseBanner).includes('40%') || !resumeBtn) {
     console.error(`[压缩包暂停回归] 暂停态界面状态异常: calls=${pauseCalls}, banner=${txt(pauseBanner)}, resume=${!!resumeBtn}`);
+    process.exit(1);
+  }
+
+  // 红队边界：任务运行/暂停期间再次尝试打开新压缩包，必须拦截，不能顶掉当前进度卡
+  let openCallsDuringBusy = 0;
+  const busyOpenSpy = sandbox.API.archiveOpen;
+  sandbox.API.archiveOpen = async () => { openCallsDuringBusy++; return null; };
+  await sandbox.Pages.archive.jump({ paths: ['D:\\other.zip'] });
+  sandbox.API.archiveOpen = busyOpenSpy;
+  if (openCallsDuringBusy !== 0) {
+    console.error('[压缩包红队回归] 任务进行/暂停期间允许打开新压缩包覆盖进度状态');
     process.exit(1);
   }
 
@@ -889,5 +921,184 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录与性能暂停流校验通过）`);
+// 回归 9：解压 / 压缩同名冲突提示（直接覆盖 vs 二者并存自动重命名）与安全撤回（防连点 + 0 泄漏）
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const rootArc = new FakeElement('div');
+  const modalRoot = sandbox.document._byId['modal-root'];
+  modalRoot.children = [];
+  const origCfgGet = sandbox.API.configGet;
+  const origCfgSet = sandbox.API.configSet;
+  const origOpen = sandbox.API.archiveOpen;
+  const origExtract = sandbox.API.archiveExtract;
+  const origCreate = sandbox.API.archiveCreate;
+  const origCheckExt = sandbox.API.archiveCheckExtractConflicts;
+  const origCheckCre = sandbox.API.archiveCheckCreateConflict;
+  const origUndo = sandbox.API.archiveUndo;
+  const origPickFiles = sandbox.API.pickFiles;
+  const origOpenPath = sandbox.API.openPath;
+
+  let capturedExtract = null;
+  let capturedCreate = null;
+  const undoCalls = [];
+
+  sandbox.API.configGet = async () => ({ archive_mode: 'balanced', archive_extract_dir: 'D:\\下载', archive_extract_open: false, archive_create_dir: 'D:\\下载' });
+  sandbox.API.configSet = async () => {};
+  sandbox.API.openPath = async () => {};
+  sandbox.API.archiveOpen = async (p) => ({
+    path: p,
+    format: 'ZIP',
+    entries: [{ index: 0, name: 'readme.txt', isDir: false, size: 512, packed: 256, modified: '2026-11-23 10:00:00', encrypted: false, crc: 1 }],
+    totalSize: 512,
+    totalPacked: 256,
+    encrypted: false,
+    solid: false,
+    comment: '',
+    needsRar: false,
+    rarReady: true
+  });
+  sandbox.API.archiveCheckExtractConflicts = async () => ({
+    hasConflicts: true,
+    outDirExists: true,
+    outDirIsFile: false,
+    suggestedOutDir: 'D:\\下载\\demo (2)',
+    fileConflicts: 1,
+    dirConflicts: 1,
+    samples: [{ name: 'demo', isDir: true }, { name: 'readme.txt', isDir: false }]
+  });
+  sandbox.API.archiveExtract = async (path, outDir, indices, password, overwrite, mode) => {
+    capturedExtract = { path, outDir, indices, overwrite, mode };
+    return { files: 1, dirs: 1, bytes: 512, skipped: 0, warnings: [], outDir, undoId: 'u-ext-99', canUndo: true, backupIncomplete: false };
+  };
+  sandbox.API.pickFiles = async () => ['D:\\下载\\src.txt'];
+  sandbox.API.archiveCheckCreateConflict = async () => ({
+    exists: true,
+    isDir: false,
+    size: 2048,
+    modified: '2026-11-23 11:00:00',
+    suggestedDest: 'D:\\下载\\src (2).zip'
+  });
+  sandbox.API.archiveCreate = async (sources, dest, format, mode) => {
+    capturedCreate = { sources, dest, format, mode };
+    return { path: dest, format, files: 1, bytes: 128, packed: 96, elapsedMs: 40, undoId: 'u-cre-99', canUndo: true, backupIncomplete: false };
+  };
+  sandbox.API.archiveUndo = async (undoId) => {
+    undoCalls.push(undoId);
+    return { op: undoId.includes('cre') ? 'create' : 'extract', removedFiles: 1, removedDirs: 1, restoredFiles: 0, skipped: 0, warnings: [] };
+  };
+
+  const beforeKey = (docListeners.get('keydown') || []).length;
+  const beforeInt = activeIntervals.size;
+  const ret = await sandbox.Pages.archive.mount(rootArc);
+  await new Promise((r) => setTimeout(r, 30));
+
+  // A: 解压冲突弹窗 -> 选择「二者并存（自动重命名）」-> 应改落到 suggestedOutDir 且策略为 rename
+  await sandbox.Pages.archive.jump({ paths: ['D:\\demo.zip'] });
+  const extractAllBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('解压全部'))[0];
+  clickBtn(extractAllBtn);
+  const startExtBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始解压'))[0];
+  clickBtn(startExtBtn);
+  await new Promise((r) => setTimeout(r, 30));
+
+  const owBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('直接覆盖'))[0];
+  const coexistBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('二者并存'))[0];
+  if (!owBtn || !coexistBtn) {
+    console.error(`[压缩包冲突回归] 解压冲突弹窗缺少选项按钮: ow=${!!owBtn}, coexist=${!!coexistBtn}`);
+    process.exit(1);
+  }
+  clickBtn(coexistBtn);
+  await new Promise((r) => setTimeout(r, 40));
+  if (!capturedExtract || capturedExtract.outDir !== 'D:\\下载\\demo (2)' || capturedExtract.overwrite !== 'rename') {
+    console.error(`[压缩包冲突回归] 二者并存未正确切到建议目录与重命名策略: ${JSON.stringify(capturedExtract)}`);
+    process.exit(1);
+  }
+
+  // 关掉完成弹窗，点页面顶部的「撤回解压」并验证防连点
+  const closeDoneBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  if (closeDoneBtn) clickBtn(closeDoneBtn);
+  await new Promise((r) => setTimeout(r, 30));
+  const undoExtBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回解压'))[0];
+  if (!undoExtBtn) {
+    console.error('[压缩包撤回回归] 解压完成后顶部卡片缺少「撤回解压」按钮');
+    process.exit(1);
+  }
+  clickBtn(undoExtBtn);
+  await new Promise((r) => setTimeout(r, 30));
+  const revertedExtBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('已撤回'))[0];
+  if (undoCalls.length !== 1 || undoCalls[0] !== 'u-ext-99' || !revertedExtBtn) {
+    console.error(`[压缩包撤回回归] 解压撤回状态异常: calls=${JSON.stringify(undoCalls)}, reverted=${!!revertedExtBtn}`);
+    process.exit(1);
+  }
+
+  // B: 切到「创建压缩包」-> 添加文件 -> 点「开始创建」-> 冲突弹窗选「二者并存」-> 验证改名与撤回压缩
+  const createTab = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('创建压缩包'))[0];
+  clickBtn(createTab);
+  const addFilesBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('添加文件'))[0];
+  clickBtn(addFilesBtn);
+  await new Promise((r) => setTimeout(r, 30));
+  const startCreateBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始创建'))[0];
+  clickBtn(startCreateBtn);
+  await new Promise((r) => setTimeout(r, 30));
+
+  const createCoexistBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('二者并存')).pop();
+  if (!createCoexistBtn) {
+    console.error('[压缩包冲突回归] 压缩冲突弹窗未弹出「二者并存」选项');
+    process.exit(1);
+  }
+  clickBtn(createCoexistBtn);
+  await new Promise((r) => setTimeout(r, 40));
+  if (!capturedCreate || capturedCreate.dest !== 'D:\\下载\\src (2).zip') {
+    console.error(`[压缩包冲突回归] 压缩二者并存未切换到 suggestedDest: ${JSON.stringify(capturedCreate)}`);
+    process.exit(1);
+  }
+
+  const closeCreateDone = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  if (closeCreateDone) clickBtn(closeCreateDone);
+  await new Promise((r) => setTimeout(r, 30));
+  const undoCreBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('撤回压缩'))[0];
+  if (!undoCreBtn) {
+    console.error('[压缩包撤回回归] 压缩完成后顶部卡片缺少「撤回压缩」按钮');
+    process.exit(1);
+  }
+  clickBtn(undoCreBtn);
+  await new Promise((r) => setTimeout(r, 30));
+  if (undoCalls.length !== 2 || undoCalls[1] !== 'u-cre-99') {
+    console.error(`[压缩包撤回回归] 压缩撤回未正确触发: calls=${JSON.stringify(undoCalls)}`);
+    process.exit(1);
+  }
+
+  if (typeof ret === 'function') ret();
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.configSet = origCfgSet;
+  sandbox.API.archiveOpen = origOpen;
+  sandbox.API.archiveExtract = origExtract;
+  sandbox.API.archiveCreate = origCreate;
+  sandbox.API.archiveCheckExtractConflicts = origCheckExt;
+  sandbox.API.archiveCheckCreateConflict = origCheckCre;
+  sandbox.API.archiveUndo = origUndo;
+  sandbox.API.pickFiles = origPickFiles;
+  sandbox.API.openPath = origOpenPath;
+  await new Promise((r) => setTimeout(r, 220));
+  const afterKey = (docListeners.get('keydown') || []).length;
+  const afterInt = activeIntervals.size;
+  if (afterKey !== beforeKey || afterInt !== beforeInt) {
+    console.error(`[压缩包冲突撤回回归] unmount 后资源未回收: keydown=${afterKey - beforeKey}, intervals=${afterInt - beforeInt}`);
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流与冲突撤回全链路校验通过）`);
 process.exit(0);

@@ -524,6 +524,22 @@ pub fn copy_controlled<R: Read + ?Sized, W: Write>(
     profile: PerfProfile,
     budget: Option<&Budget>,
     progress: Option<&Progress>,
+    on_bytes: impl FnMut(u64),
+) -> Result<u64> {
+    copy_controlled_abortable(reader, writer, control, None, profile, budget, progress, on_bytes)
+}
+
+/// 同 `copy_controlled`，额外接受并发任务共享的 `abort` 标志：同组任一工作线程遇致命错误时，
+/// 其余正在拷贝大文件的兄弟线程可在单块（<=1 MiB）内中止并清理半成品，避免拖住整任务。
+#[allow(clippy::too_many_arguments)]
+pub fn copy_controlled_abortable<R: Read + ?Sized, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    control: &TaskControl,
+    abort: Option<&AtomicBool>,
+    profile: PerfProfile,
+    budget: Option<&Budget>,
+    progress: Option<&Progress>,
     mut on_bytes: impl FnMut(u64),
 ) -> Result<u64> {
     let chunk_size = profile.buf_size.clamp(64 * 1024, 1024 * 1024);
@@ -531,6 +547,12 @@ pub fn copy_controlled<R: Read + ?Sized, W: Write>(
     let mut total = 0u64;
     let mut paced_bytes = 0u64;
     loop {
+        if abort.is_some_and(|a| a.load(Ordering::Acquire)) {
+            if control.is_cancelled() {
+                bail!("操作已取消");
+            }
+            bail!("并行任务已中止");
+        }
         control.checkpoint(progress)?;
         let n = reader.read(&mut buf)?;
         if n == 0 {
@@ -583,9 +605,10 @@ impl<R: Read> ControlledReader<R> {
 
 impl<R: Read> Read for ControlledReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // 绝不能返回 ErrorKind::Interrupted：std::io::copy / write_all 会对 Interrupted 无限重试导致取消死循环。
         self.control
             .checkpoint(Some(&self.progress))
-            .map_err(|_| std::io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+            .map_err(|_| std::io::Error::new(ErrorKind::Other, "操作已取消"))?;
         let max_slice = if self.saver_pace { 256 * 1024 } else { 512 * 1024 };
         let cap = buf.len().min(max_slice);
         let n = self.inner.read(&mut buf[..cap])?;
@@ -598,7 +621,7 @@ impl<R: Read> Read for ControlledReader<R> {
                     self.paced_bytes = 0;
                     self.control
                         .checkpoint(Some(&self.progress))
-                        .map_err(|_| std::io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+                        .map_err(|_| std::io::Error::new(ErrorKind::Other, "操作已取消"))?;
                     std::thread::sleep(Duration::from_millis(2));
                 }
             }
@@ -643,8 +666,12 @@ pub fn normalized_name(raw: &str) -> String {
 /// Rejects absolute paths, drive letters, UNC, `..`, ADS, reserved device names
 /// and names Windows would silently rewrite (trailing dot/space).
 pub fn safe_relative(raw: &str) -> Result<PathBuf> {
-    let name = normalized_name(raw);
-    let name = name.trim_end_matches('/');
+    let owned = normalized_name(raw);
+    let mut name = owned.trim_end_matches('/');
+    // 兼容 GNU/BSD tar 常见的 `./proj/a.txt` 前导相对前缀，同时继续拦截 `..` 与路径中段 `.`。
+    while let Some(rest) = name.strip_prefix("./") {
+        name = rest;
+    }
     if name.is_empty() {
         bail!("压缩包内存在空文件名");
     }
@@ -700,6 +727,36 @@ pub fn safe_join(root: &Path, raw: &str) -> Result<PathBuf> {
         }
     }
     Ok(joined)
+}
+
+/// 同 `safe_join`，在「二者并存（自动重命名）」模式下将冲突顶层目录名映射到新目录名。
+pub fn safe_join_mapped(
+    root: &Path,
+    raw: &str,
+    dir_map: &std::collections::HashMap<String, String>,
+) -> Result<PathBuf> {
+    let rel = safe_relative(raw)?;
+    for c in rel.components() {
+        if !matches!(c, Component::Normal(_)) {
+            bail!("拒绝不安全的路径: {raw}");
+        }
+    }
+    if dir_map.is_empty() {
+        return Ok(root.join(&rel));
+    }
+    let mut comps = rel.components();
+    let Some(Component::Normal(first)) = comps.next() else {
+        return Ok(root.join(&rel));
+    };
+    let key = first.to_string_lossy().to_lowercase();
+    let Some(mapped_first) = dir_map.get(&key) else {
+        return Ok(root.join(&rel));
+    };
+    let mut out = root.join(mapped_first);
+    for c in comps {
+        out.push(c.as_os_str());
+    }
+    Ok(out)
 }
 
 pub fn ensure_parent(path: &Path) -> Result<()> {
@@ -759,7 +816,7 @@ pub fn resolve_dest(path: PathBuf, is_dir: bool, policy: Overwrite) -> Result<Op
 /// 用 `symlink_metadata` 而不是 `metadata`：后者会跟随链接、永远返回目标的
 /// 属性，那样这个判断永远为假。读不到就当不是 —— 目标不存在时本来也不会走
 /// 到需要判断的分支。
-fn is_reparse(path: &Path) -> bool {
+pub fn is_reparse(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
         Ok(m) => {
             if m.file_type().is_symlink() {
@@ -792,11 +849,59 @@ pub fn unique_path(path: &Path) -> PathBuf {
             _ => format!("{stem} ({i})"),
         };
         let candidate = parent.join(name);
-        if !candidate.exists() {
+        if !candidate.exists() && fs::symlink_metadata(&candidate).is_err() {
             return candidate;
         }
     }
     parent.join(format!("{stem} (copy)"))
+}
+
+/// 文件夹专用不重名路径：不在 `.` 上拆分（如 `v1.2.0` -> `v1.2.0 (2)`）。
+pub fn unique_dir_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "folder".to_string());
+    for i in 2..10000 {
+        let candidate = parent.join(format!("{name} ({i})"));
+        if !candidate.exists() && fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{name} (copy)"))
+}
+
+/// 压缩包专用不重名路径：正确保留 `.tar.gz` / `.tar.bz2` / `.tar.xz` 复合后缀。
+pub fn unique_archive_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let raw_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive.zip".to_string());
+    let low = raw_name.to_ascii_lowercase();
+    let compound = [".tar.gz", ".tar.bz2", ".tar.xz"]
+        .into_iter()
+        .find(|s| low.ends_with(s));
+    let (stem, suffix) = if let Some(suf) = compound {
+        let cut = raw_name.len() - suf.len();
+        (raw_name[..cut].to_string(), raw_name[cut..].to_string())
+    } else if let Some(dot) = raw_name.rfind('.') {
+        if dot > 0 {
+            (raw_name[..dot].to_string(), raw_name[dot..].to_string())
+        } else {
+            (raw_name, String::new())
+        }
+    } else {
+        (raw_name, String::new())
+    };
+    for i in 2..10000 {
+        let candidate = parent.join(format!("{stem} ({i}){suffix}"));
+        if !candidate.exists() && fs::symlink_metadata(&candidate).is_err() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{stem} (copy){suffix}"))
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -1246,5 +1351,34 @@ mod tests {
             let g = ThreadPriorityGuard::enter(m);
             drop(g);
         }
+    }
+
+    #[test]
+    fn unique_dir_and_archive_path_preserve_dots_and_compound_ext() {
+        let root = PathBuf::from("D:\\Builds\\tidy-util-tests")
+            .join(format!("uniq_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("v1.2.0")).unwrap();
+        fs::create_dir_all(root.join("v1.2.0 (2)")).unwrap();
+        let next_dir = unique_dir_path(&root.join("v1.2.0"));
+        assert_eq!(next_dir.file_name().unwrap().to_string_lossy(), "v1.2.0 (3)");
+
+        fs::write(root.join("备份.tar.gz"), b"old").unwrap();
+        let next_tgz = unique_archive_path(&root.join("备份.tar.gz"));
+        assert_eq!(
+            next_tgz.file_name().unwrap().to_string_lossy(),
+            "备份 (2).tar.gz"
+        );
+
+        fs::write(root.join("a.zip"), b"old").unwrap();
+        let next_zip = unique_archive_path(&root.join("a.zip"));
+        assert_eq!(next_zip.file_name().unwrap().to_string_lossy(), "a (2).zip");
+
+        assert_eq!(safe_relative("./proj/a.txt").unwrap(), PathBuf::from("proj/a.txt"));
+        assert!(safe_relative(".").is_err());
+        assert!(safe_relative("./../evil.txt").is_err());
+        assert!(safe_relative("proj/../evil.txt").is_err());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

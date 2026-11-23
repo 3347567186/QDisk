@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,10 +14,11 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use lzma_rust2::XzReader;
 
+use super::undo::UndoTracker;
 use super::util::{
     collect_sources, copy_controlled, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join, Budget, ControlledReader, Overwrite, PerfProfile, Progress, TaskControl,
-    ThreadPriorityGuard,
+    safe_join, safe_join_mapped, Budget, ControlledReader, Overwrite, PerfProfile, Progress,
+    TaskControl, ThreadPriorityGuard,
 };
 use super::{ArchiveInfo, CreateReport, EntryInfo, ExtractReport, Kind};
 
@@ -136,6 +137,7 @@ fn unix_to_local_parts(secs: u64) -> Option<(u16, u8, u8, u8, u8, u8)> {
     filetime_to_local_parts(ft)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn extract(
     path: &Path,
     out_dir: &Path,
@@ -144,6 +146,8 @@ pub fn extract(
     _password: Option<&str>,
     policy: Overwrite,
     profile: PerfProfile,
+    dir_map: &HashMap<String, String>,
+    undo: Option<&Arc<UndoTracker>>,
     progress: &Progress,
     control: &TaskControl,
 ) -> Result<ExtractReport> {
@@ -156,13 +160,17 @@ pub fn extract(
         skipped: 0,
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     };
     let budget = Budget::for_extraction();
     for (idx, item) in ar.entries().context("TAR 读取失败")?.enumerate() {
+        // 即使跳过未选中条目，也要先过检查点，确保多 GB 归档部分解压时可随时暂停或取消。
+        control.checkpoint(Some(progress))?;
         if !selected.contains(&idx) {
             continue;
         }
-        control.checkpoint(Some(progress))?;
         let mut entry = match item {
             Ok(e) => e,
             Err(e) => {
@@ -181,9 +189,13 @@ pub fn extract(
         let ty = entry.header().entry_type();
         // 目录不计入 total_files，不能调用 file_done()，避免总文件数溢出。
         if ty.is_dir() {
-            match safe_join(out_dir, &raw) {
+            match safe_join_mapped(out_dir, &raw, dir_map) {
                 Ok(dir) => {
-                    fs::create_dir_all(&dir)?;
+                    if let Some(u) = undo {
+                        u.ensure_dir(&dir)?;
+                    } else {
+                        fs::create_dir_all(&dir)?;
+                    }
                     report.dirs += 1;
                 }
                 Err(e) => {
@@ -205,7 +217,7 @@ pub fn extract(
             progress.file_done();
             continue;
         }
-        let target = match safe_join(out_dir, &raw) {
+        let target = match safe_join_mapped(out_dir, &raw, dir_map) {
             Ok(p) => p,
             Err(e) => {
                 report.skipped += 1;
@@ -222,7 +234,11 @@ pub fn extract(
                 continue;
             }
         };
-        ensure_parent(&target)?;
+        if let Some(u) = undo {
+            u.prepare_file_write(&target, policy)?;
+        } else {
+            ensure_parent(&target)?;
+        }
         let f = File::create(&target).with_context(|| format!("无法写入 {}", target.display()))?;
         let mut out = BufWriter::with_capacity(profile.buf_size, f);
         let n = match copy_controlled(
@@ -245,6 +261,9 @@ pub fn extract(
                 return Err(e);
             }
         };
+        if let Some(u) = undo {
+            u.record_created_file(&target);
+        }
         report.files += 1;
         report.bytes += n;
         progress.file_done();
@@ -271,6 +290,7 @@ pub fn read_entry(path: &Path, kind: Kind, index: usize, limit: u64) -> Result<V
     bail!("条目索引超出范围")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn extract_single(
     path: &Path,
     out_dir: &Path,
@@ -278,6 +298,7 @@ pub fn extract_single(
     selected: &HashSet<usize>,
     policy: Overwrite,
     profile: PerfProfile,
+    undo: Option<&Arc<UndoTracker>>,
     progress: &Progress,
     control: &TaskControl,
 ) -> Result<ExtractReport> {
@@ -295,9 +316,16 @@ pub fn extract_single(
             skipped: 1,
             warnings: vec!["目标已存在，按策略跳过".into()],
             out_dir: out_dir.display().to_string(),
+            undo_id: None,
+            can_undo: false,
+            backup_incomplete: false,
         });
     };
-    ensure_parent(&target)?;
+    if let Some(u) = undo {
+        u.prepare_file_write(&target, policy)?;
+    } else {
+        ensure_parent(&target)?;
+    }
     let mut src = single_reader(path, kind)?;
     let f = File::create(&target)?;
     let mut out = BufWriter::with_capacity(profile.buf_size, f);
@@ -322,6 +350,9 @@ pub fn extract_single(
             return Err(e);
         }
     };
+    if let Some(u) = undo {
+        u.record_created_file(&target);
+    }
     progress.file_done();
     progress.finish();
     Ok(ExtractReport {
@@ -331,6 +362,9 @@ pub fn extract_single(
         skipped: 0,
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     })
 }
 
@@ -372,6 +406,9 @@ pub fn create_tar(
         bytes,
         packed: fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     })
 }
 
@@ -506,9 +543,10 @@ impl ParallelGzWriter {
         if self.buf.is_empty() {
             return Ok(());
         }
+        // 使用 ErrorKind::Other 而非 Interrupted，避免 std::io::Write::write_all 无限重试。
         self.control
             .checkpoint(Some(&self.progress))
-            .map_err(|_| io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+            .map_err(|_| io::Error::new(ErrorKind::Other, "操作已取消"))?;
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "GZIP 写入线程已中止"));
         }
@@ -550,7 +588,7 @@ impl Write for ParallelGzWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.control
             .checkpoint(Some(&self.progress))
-            .map_err(|_| io::Error::new(ErrorKind::Interrupted, "操作已取消"))?;
+            .map_err(|_| io::Error::new(ErrorKind::Other, "操作已取消"))?;
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "GZIP 并行压缩失败"));
         }
@@ -634,6 +672,9 @@ pub fn create_tgz(
             bytes,
             packed: fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
             elapsed_ms: started.elapsed().as_millis() as u64,
+            undo_id: None,
+            can_undo: false,
+            backup_incomplete: false,
         });
     }
 
@@ -661,6 +702,9 @@ pub fn create_tgz(
         bytes,
         packed: fs::metadata(dest).map(|m| m.len()).unwrap_or(0),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     })
 }
 
@@ -760,6 +804,7 @@ mod tests {
         fs::create_dir_all(&out).unwrap();
         let p_e = Arc::new(Progress::detached());
         let ctl_e = Arc::new(TaskControl::default());
+        let empty_map = HashMap::new();
         let erep = extract(
             &tgz,
             &out,
@@ -768,6 +813,8 @@ mod tests {
             None,
             Overwrite::Overwrite,
             prof,
+            &empty_map,
+            None,
             &p_e,
             &ctl_e,
         )
@@ -776,6 +823,70 @@ mod tests {
         assert_eq!(p_e.files_count(), erep.files);
         assert_eq!(fs::read(out.join("src/子目录/hello.txt")).unwrap(), small);
         assert_eq!(fs::read(out.join("src/stream.bin")).unwrap(), big);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parallel_tgz_pause_cancel_and_skip_cancel() {
+        use std::time::Duration;
+
+        let root = PathBuf::from("D:\\Builds\\tidy-tar-tests")
+            .join(format!("tgz_ctl_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        let blob = vec![b'Z'; 3 * 1024 * 1024];
+        fs::write(src_dir.join("a.bin"), &blob).unwrap();
+        fs::write(src_dir.join("b.bin"), b"tail").unwrap();
+
+        // A: 暂停态取消 ParallelGzWriter 必须 <500ms 干净退出且无死锁
+        let tgz_cancel = root.join("cancel.tar.gz");
+        let p1 = Arc::new(Progress::detached());
+        let ctl1 = Arc::new(TaskControl::default());
+        assert!(ctl1.set_paused(true));
+        let src_c = src_dir.clone();
+        let dst_c = tgz_cancel.clone();
+        let p1_c = Arc::clone(&p1);
+        let ctl1_c = Arc::clone(&ctl1);
+        let h = std::thread::spawn(move || {
+            create_tgz(&[src_c], &dst_c, PerfProfile::from_mode("hyper"), &p1_c, &ctl1_c)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        let t0 = Instant::now();
+        ctl1.request_cancel();
+        let res = h.join().unwrap();
+        assert!(t0.elapsed() < Duration::from_millis(500));
+        assert!(res.is_err() && format!("{}", res.unwrap_err()).contains("取消"));
+
+        // B: 正常创建后，仅选最后一个条目解压且在首条目跳过前取消 -> 必须立即返回取消
+        let tgz_ok = root.join("ok.tar.gz");
+        let p2 = Arc::new(Progress::detached());
+        let ctl2 = Arc::new(TaskControl::default());
+        create_tgz(&[src_dir], &tgz_ok, PerfProfile::from_mode("hyper"), &p2, &ctl2).unwrap();
+        let info = list(&tgz_ok, Kind::TarGz, None).unwrap();
+        let last_idx = info.entries.last().unwrap().index;
+        let mut only_last = HashSet::new();
+        only_last.insert(last_idx);
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let p3 = Arc::new(Progress::detached());
+        let ctl3 = Arc::new(TaskControl::default());
+        ctl3.request_cancel();
+        let empty_map = HashMap::new();
+        let res_skip = extract(
+            &tgz_ok,
+            &out,
+            Kind::TarGz,
+            &only_last,
+            None,
+            Overwrite::Overwrite,
+            PerfProfile::from_mode("hyper"),
+            &empty_map,
+            None,
+            &p3,
+            &ctl3,
+        );
+        assert!(res_skip.is_err() && format!("{}", res_skip.unwrap_err()).contains("取消"));
         let _ = fs::remove_dir_all(&root);
     }
 }

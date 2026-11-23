@@ -3,10 +3,11 @@ mod preview;
 mod rar;
 mod sevenz_impl;
 mod tar_impl;
+mod undo;
 mod util;
 mod zip_impl;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+pub use undo::{UndoReport, UndoTracker};
 pub use util::{Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard};
 
 use crate::data_dir;
@@ -27,8 +29,9 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// listing/extraction functions do not carry an AppHandle, so the RAR loader
 /// reads the DLL path from here.
 pub fn set_data_dir(path: PathBuf) {
-    let _ = DATA_DIR.set(path);
+    let _ = DATA_DIR.set(path.clone());
     sweep_stale_preview_dirs();
+    undo::sweep_stale_undo_dirs(&path);
 }
 
 /// 启动时清掉上次运行（崩溃、进程被杀）残留的预览目录，避免预览目录越积越多。
@@ -60,6 +63,7 @@ pub struct ArchiveCtx {
     busy: Arc<AtomicBool>,
     active_progress: Arc<Mutex<Option<Arc<Progress>>>>,
     preview_dir: Arc<Mutex<Option<PathBuf>>>,
+    undo_history: Arc<Mutex<VecDeque<undo::UndoRecord>>>,
 }
 
 pub struct OpGuard {
@@ -86,6 +90,23 @@ impl ArchiveCtx {
             *slot = progress;
         }
         Ok(OpGuard { ctx: self.clone() })
+    }
+
+    fn push_undo(&self, record: undo::UndoRecord) {
+        if let Ok(mut hist) = self.undo_history.lock() {
+            hist.push_back(record);
+            while hist.len() > undo::MAX_UNDO_RECORDS {
+                if let Some(old) = hist.pop_front() {
+                    old.cleanup_backup_dir();
+                }
+            }
+        }
+    }
+
+    fn take_undo(&self, id: &str) -> Option<undo::UndoRecord> {
+        let mut hist = self.undo_history.lock().ok()?;
+        let pos = hist.iter().position(|r| r.id == id)?;
+        hist.remove(pos)
     }
 }
 
@@ -148,7 +169,7 @@ pub struct ArchiveInfo {
     pub rar_ready: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractReport {
     pub files: u64,
@@ -157,9 +178,12 @@ pub struct ExtractReport {
     pub skipped: u64,
     pub warnings: Vec<String>,
     pub out_dir: String,
+    pub undo_id: Option<String>,
+    pub can_undo: bool,
+    pub backup_incomplete: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateReport {
     pub path: String,
@@ -168,6 +192,38 @@ pub struct CreateReport {
     pub bytes: u64,
     pub packed: u64,
     pub elapsed_ms: u64,
+    pub undo_id: Option<String>,
+    pub can_undo: bool,
+    pub backup_incomplete: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictSample {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractConflictInfo {
+    pub has_conflicts: bool,
+    pub out_dir_exists: bool,
+    pub out_dir_is_file: bool,
+    pub suggested_out_dir: String,
+    pub file_conflicts: u64,
+    pub dir_conflicts: u64,
+    pub samples: Vec<ConflictSample>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateConflictInfo {
+    pub exists: bool,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: String,
+    pub suggested_dest: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -362,7 +418,174 @@ pub fn list_archive(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> 
     }
 }
 
+fn resolve_selected_indices(info: &ArchiveInfo, indices: Option<Vec<usize>>) -> HashSet<usize> {
+    let mut selected: HashSet<usize> = match indices {
+        Some(v) => v.into_iter().collect(),
+        None => info
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.index)
+            .collect(),
+    };
+    let dirs: Vec<String> = info
+        .entries
+        .iter()
+        .filter(|e| e.is_dir && selected.contains(&e.index))
+        .map(|e| e.name.trim_end_matches('/').to_string() + "/")
+        .collect();
+    if !dirs.is_empty() {
+        for e in &info.entries {
+            if dirs.iter().any(|d| e.name.starts_with(d)) {
+                selected.insert(e.index);
+            }
+        }
+    }
+    selected
+}
+
+pub fn check_extract_conflicts(
+    path: &Path,
+    out_dir: &Path,
+    indices: Option<Vec<usize>>,
+    password: Option<&str>,
+    create_subfolder: bool,
+) -> Result<ExtractConflictInfo> {
+    let out_meta = fs::symlink_metadata(out_dir).ok();
+    let out_dir_is_file = out_meta.as_ref().is_some_and(|m| !m.is_dir());
+    let out_dir_exists = out_meta.is_some();
+    let suggested_out_dir = if out_dir_exists {
+        util::unique_dir_path(out_dir).display().to_string()
+    } else {
+        out_dir.display().to_string()
+    };
+
+    if out_dir_is_file {
+        let name = out_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| out_dir.display().to_string());
+        return Ok(ExtractConflictInfo {
+            has_conflicts: true,
+            out_dir_exists: true,
+            out_dir_is_file: true,
+            suggested_out_dir,
+            file_conflicts: 1,
+            dir_conflicts: 0,
+            samples: vec![ConflictSample { name, is_dir: false }],
+        });
+    }
+
+    if !out_dir_exists {
+        return Ok(ExtractConflictInfo {
+            has_conflicts: false,
+            out_dir_exists: false,
+            out_dir_is_file: false,
+            suggested_out_dir,
+            file_conflicts: 0,
+            dir_conflicts: 0,
+            samples: Vec::new(),
+        });
+    }
+
+    let info = list_archive(path, password)?;
+    let selected = resolve_selected_indices(&info, indices);
+    let mut file_conflicts = 0u64;
+    let mut dir_conflicts = 0u64;
+    let mut seen_dirs: HashSet<String> = HashSet::new();
+    let mut seen_files: HashSet<String> = HashSet::new();
+    let mut samples: Vec<ConflictSample> = Vec::new();
+
+    for e in &info.entries {
+        if !selected.contains(&e.index) {
+            continue;
+        }
+        let Ok(rel) = util::safe_relative(&e.name) else {
+            continue;
+        };
+        let mut comps = rel.components();
+        let Some(std::path::Component::Normal(first_os)) = comps.next() else {
+            continue;
+        };
+        let first = first_os.to_string_lossy().to_string();
+        let has_nested = comps.next().is_some();
+        if e.is_dir || has_nested {
+            let low = first.to_lowercase();
+            if seen_dirs.insert(low) && fs::symlink_metadata(out_dir.join(&first)).is_ok() {
+                dir_conflicts += 1;
+                if samples.len() < 8 {
+                    samples.push(ConflictSample {
+                        name: first,
+                        is_dir: true,
+                    });
+                }
+            }
+        }
+        if !e.is_dir {
+            let target = out_dir.join(&rel);
+            let low = target.to_string_lossy().to_lowercase();
+            if seen_files.insert(low) && fs::symlink_metadata(&target).is_ok() {
+                file_conflicts += 1;
+                if samples.len() < 8 {
+                    samples.push(ConflictSample {
+                        name: rel.to_string_lossy().replace('\\', "/"),
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+    }
+
+    let subfolder_clash = create_subfolder && out_dir_exists;
+    if subfolder_clash && samples.is_empty() {
+        let name = out_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| out_dir.display().to_string());
+        samples.push(ConflictSample { name, is_dir: true });
+    }
+
+    Ok(ExtractConflictInfo {
+        has_conflicts: subfolder_clash || file_conflicts > 0 || dir_conflicts > 0,
+        out_dir_exists,
+        out_dir_is_file: false,
+        suggested_out_dir,
+        file_conflicts,
+        dir_conflicts: if subfolder_clash && dir_conflicts == 0 {
+            1
+        } else {
+            dir_conflicts
+        },
+        samples,
+    })
+}
+
+pub fn check_create_conflict(dest: &Path) -> CreateConflictInfo {
+    let meta = fs::symlink_metadata(dest).ok();
+    let exists = meta.is_some();
+    let is_dir = meta.as_ref().is_some_and(|m| m.is_dir()) || util::is_reparse(dest);
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified = meta
+        .as_ref()
+        .map(|m| modified_string(util::filetime_to_local_parts(util::metadata_filetime(m))))
+        .unwrap_or_else(|| "—".to_string());
+    let suggested_dest = if exists {
+        util::unique_archive_path(dest).display().to_string()
+    } else {
+        dest.display().to_string()
+    };
+    CreateConflictInfo {
+        exists,
+        is_dir,
+        size,
+        modified,
+        suggested_dest,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn extract_archive(
+    ctx: Option<&ArchiveCtx>,
     path: &Path,
     out_dir: &Path,
     indices: Option<Vec<usize>>,
@@ -381,29 +604,7 @@ pub fn extract_archive(
         bail!("RAR 组件尚未安装");
     }
 
-    let mut selected: HashSet<usize> = match indices {
-        Some(v) => v.into_iter().collect(),
-        None => info
-            .entries
-            .iter()
-            .filter(|e| !e.is_dir)
-            .map(|e| e.index)
-            .collect(),
-    };
-    // If a directory was selected, include every descendant.
-    let dirs: Vec<String> = info
-        .entries
-        .iter()
-        .filter(|e| e.is_dir && selected.contains(&e.index))
-        .map(|e| e.name.trim_end_matches('/').to_string() + "/")
-        .collect();
-    if !dirs.is_empty() {
-        for e in &info.entries {
-            if dirs.iter().any(|d| e.name.starts_with(d)) {
-                selected.insert(e.index);
-            }
-        }
-    }
+    let selected = resolve_selected_indices(&info, indices);
     if selected.is_empty() {
         bail!("没有选中要解压的文件");
     }
@@ -421,29 +622,119 @@ pub fn extract_archive(
         .count() as u64;
     progress.set_totals(total_files, total_bytes);
 
-    fs::create_dir_all(out_dir)
+    let dir_map: HashMap<String, String> = if policy == Overwrite::Rename {
+        undo::build_dir_rename_map(
+            out_dir,
+            info.entries
+                .iter()
+                .filter(|e| selected.contains(&e.index))
+                .map(|e| (e.name.as_str(), e.is_dir)),
+        )
+    } else {
+        HashMap::new()
+    };
+
+    let tracker = Arc::new(UndoTracker::new(
+        "extract",
+        out_dir.to_path_buf(),
+        &data_dir_for_rar(),
+    ));
+    tracker
+        .ensure_dir(out_dir)
         .with_context(|| format!("无法创建目标目录 {}", out_dir.display()))?;
 
-    match kind {
+    let res = match kind {
         Kind::Zip => zip_impl::extract(
-            path, out_dir, &selected, password, policy, profile, progress, control,
+            path,
+            out_dir,
+            &selected,
+            password,
+            policy,
+            profile,
+            &dir_map,
+            Some(&tracker),
+            progress,
+            control,
         ),
         Kind::SevenZ => sevenz_impl::extract(
-            path, out_dir, &selected, password, policy, profile, progress, control,
+            path,
+            out_dir,
+            &selected,
+            password,
+            policy,
+            profile,
+            &dir_map,
+            Some(&tracker),
+            progress,
+            control,
         ),
         Kind::Tar | Kind::TarGz | Kind::TarBz2 | Kind::TarXz => tar_impl::extract(
-            path, out_dir, kind, &selected, password, policy, profile, progress, control,
+            path,
+            out_dir,
+            kind,
+            &selected,
+            password,
+            policy,
+            profile,
+            &dir_map,
+            Some(&tracker),
+            progress,
+            control,
         ),
-        Kind::Gz | Kind::Bz2 | Kind::Xz => {
-            tar_impl::extract_single(path, out_dir, kind, &selected, policy, profile, progress, control)
-        }
+        Kind::Gz | Kind::Bz2 | Kind::Xz => tar_impl::extract_single(
+            path,
+            out_dir,
+            kind,
+            &selected,
+            policy,
+            profile,
+            Some(&tracker),
+            progress,
+            control,
+        ),
         Kind::Rar => rar::extract(
-            path, out_dir, &selected, password, policy, profile, progress, control,
+            path,
+            out_dir,
+            &selected,
+            password,
+            policy,
+            profile,
+            &dir_map,
+            Some(&tracker),
+            progress,
+            control,
         ),
+    };
+
+    match res {
+        Ok(mut report) => {
+            let record = tracker.finalize();
+            let incomplete = record.backup_incomplete;
+            if let Some(c) = ctx {
+                if !record.is_empty() {
+                    let id = record.id.clone();
+                    c.push_undo(record);
+                    report.undo_id = Some(id);
+                    report.can_undo = true;
+                    report.backup_incomplete = incomplete;
+                } else {
+                    record.cleanup_backup_dir();
+                }
+            } else {
+                record.cleanup_backup_dir();
+            }
+            Ok(report)
+        }
+        Err(e) => {
+            tracker.rollback_on_error();
+            Err(e)
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_archive(
+    ctx: Option<&ArchiveCtx>,
     sources: &[PathBuf],
     dest: &Path,
     format: &str,
@@ -455,10 +746,26 @@ pub fn create_archive(
     if sources.is_empty() {
         bail!("请先选择要压缩的文件或文件夹");
     }
+    if fs::symlink_metadata(dest).is_ok_and(|m| m.is_dir()) {
+        bail!("目标路径是一个已存在的文件夹，无法作为压缩包写入");
+    }
+    if util::is_reparse(dest) {
+        bail!("目标路径为符号链接或重解析点，禁止直接覆盖");
+    }
     let profile = PerfProfile::from_mode(mode);
     let _prio = ThreadPriorityGuard::enter(profile.mode);
     progress.set_mode(profile.mode);
     let started = Instant::now();
+
+    let root_dir = dest
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let tracker = Arc::new(UndoTracker::new("create", root_dir, &data_dir_for_rar()));
+    if let Some(parent) = dest.parent() {
+        tracker.ensure_dir(parent)?;
+    }
+
     let tmp = dest.with_extension(format!(
         "{}part",
         dest.extension()
@@ -477,13 +784,46 @@ pub fn create_archive(
     };
     if let Err(e) = result {
         let _ = fs::remove_file(&tmp);
+        tracker.rollback_on_error();
+        return Err(e);
+    }
+
+    if let Err(e) = tracker.prepare_file_write(dest, Overwrite::Overwrite) {
+        let _ = fs::remove_file(&tmp);
+        tracker.rollback_on_error();
         return Err(e);
     }
     if dest.exists() {
-        fs::remove_file(dest).with_context(|| format!("无法覆盖 {}", dest.display()))?;
+        if let Err(e) = fs::remove_file(dest).with_context(|| format!("无法覆盖 {}", dest.display())) {
+            let _ = fs::remove_file(&tmp);
+            tracker.rollback_on_error();
+            return Err(e);
+        }
     }
-    fs::rename(&tmp, dest).with_context(|| format!("无法写入 {}", dest.display()))?;
+    if let Err(e) = fs::rename(&tmp, dest).with_context(|| format!("无法写入 {}", dest.display())) {
+        let _ = fs::remove_file(&tmp);
+        tracker.rollback_on_error();
+        return Err(e);
+    }
+    tracker.record_created_file(dest);
     let packed = fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+
+    let record = tracker.finalize();
+    let incomplete = record.backup_incomplete;
+    let (undo_id, can_undo) = if let Some(c) = ctx {
+        if !record.is_empty() {
+            let id = record.id.clone();
+            c.push_undo(record);
+            (Some(id), true)
+        } else {
+            record.cleanup_backup_dir();
+            (None, false)
+        }
+    } else {
+        record.cleanup_backup_dir();
+        (None, false)
+    };
+
     Ok(CreateReport {
         path: dest.display().to_string(),
         format: format.to_string(),
@@ -491,6 +831,9 @@ pub fn create_archive(
         bytes: progress.bytes_count(),
         packed,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        undo_id,
+        can_undo,
+        backup_incomplete: incomplete,
     })
 }
 
@@ -556,6 +899,55 @@ pub async fn archive_open(
 }
 
 #[tauri::command]
+pub async fn archive_check_extract_conflicts(
+    path: String,
+    out_dir: String,
+    indices: Option<Vec<usize>>,
+    password: Option<String>,
+    create_subfolder: Option<bool>,
+) -> Result<ExtractConflictInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        check_extract_conflicts(
+            Path::new(&path),
+            Path::new(&out_dir),
+            indices,
+            password.as_deref(),
+            create_subfolder.unwrap_or(false),
+        )
+        .map_err(util::io_err)
+    })
+    .await
+    .map_err(|e| format!("冲突检查失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn archive_check_create_conflict(dest: String) -> Result<CreateConflictInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || check_create_conflict(Path::new(&dest)))
+        .await
+        .map_err(|e| format!("冲突检查失败: {e}"))
+}
+
+#[tauri::command]
+pub async fn archive_undo(
+    state: State<'_, ArchiveCtx>,
+    undo_id: String,
+) -> Result<UndoReport, String> {
+    let ctx = state.inner().clone();
+    let guard = ctx.begin(None).map_err(|e| format!("{e:#}"))?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let Some(record) = ctx.take_undo(&undo_id) else {
+            bail!("未找到可撤回记录，可能已撤回或已被新任务覆盖");
+        };
+        undo::execute_undo(record)
+    })
+    .await
+    .map_err(|e| format!("撤回任务失败: {e}"))?
+    .map_err(util::io_err);
+    drop(guard);
+    result
+}
+
+#[tauri::command]
 pub async fn archive_extract(
     app: AppHandle,
     state: State<'_, ArchiveCtx>,
@@ -570,10 +962,12 @@ pub async fn archive_extract(
     let progress = Arc::new(Progress::new(app, "extract"));
     let guard = ctx.begin(Some(progress.clone())).map_err(|e| format!("{e:#}"))?;
     let control = ctx.control.clone();
+    let ctx_for_run = ctx.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let policy = Overwrite::parse(overwrite.as_deref().unwrap_or("rename"));
         let mode = mode.as_deref().unwrap_or("balanced");
         extract_archive(
+            Some(&ctx_for_run),
             Path::new(&path),
             Path::new(&out_dir),
             indices,
@@ -605,9 +999,11 @@ pub async fn archive_create(
     let progress = Arc::new(Progress::new(app, "create"));
     let guard = ctx.begin(Some(progress.clone())).map_err(|e| format!("{e:#}"))?;
     let control = ctx.control.clone();
+    let ctx_for_run = ctx.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let sources: Vec<PathBuf> = sources.into_iter().map(PathBuf::from).collect();
         create_archive(
+            Some(&ctx_for_run),
             &sources,
             Path::new(&dest),
             &format,
@@ -853,6 +1249,207 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn extract_conflict_check_coexist_folder_and_undo() {
+        let root = PathBuf::from("D:\\Builds\\tidy-mod-tests")
+            .join(format!("coexist_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(src.join("proj")).unwrap();
+        fs::write(src.join("proj/a.txt"), b"from-archive-a").unwrap();
+        fs::write(src.join("readme.txt"), b"from-archive-readme").unwrap();
+
+        let zip = root.join("bundle.zip");
+        let p0 = Arc::new(Progress::detached());
+        let c0 = Arc::new(TaskControl::default());
+        create_archive(
+            None,
+            &[src.join("proj"), src.join("readme.txt")],
+            &zip,
+            "zip",
+            "hyper",
+            None,
+            &p0,
+            &c0,
+        )
+        .unwrap();
+
+        // 目标目录已有同名目录 proj/old.txt 与同名文件 readme.txt
+        let out = root.join("out");
+        fs::create_dir_all(out.join("proj")).unwrap();
+        fs::write(out.join("proj/old.txt"), b"keep-old-dir").unwrap();
+        fs::write(out.join("readme.txt"), b"keep-old-file").unwrap();
+
+        let chk = check_extract_conflicts(&zip, &out, None, None, false).unwrap();
+        assert!(chk.has_conflicts);
+        assert!(chk.dir_conflicts >= 1);
+        assert!(chk.file_conflicts >= 1);
+
+        let ctx = ArchiveCtx::default();
+        let p1 = Arc::new(Progress::detached());
+        let c1 = Arc::new(TaskControl::default());
+        let rep = extract_archive(
+            Some(&ctx),
+            &zip,
+            &out,
+            None,
+            None,
+            Overwrite::Rename,
+            "hyper",
+            &p1,
+            &c1,
+        )
+        .unwrap();
+        assert!(rep.can_undo);
+        let undo_id = rep.undo_id.clone().expect("应生成 undo_id");
+
+        // 并存：原有目录和文件毫发无伤，新内容自动改名为 proj (2) 与 readme (2).txt
+        assert_eq!(fs::read(out.join("proj/old.txt")).unwrap(), b"keep-old-dir");
+        assert_eq!(fs::read(out.join("readme.txt")).unwrap(), b"keep-old-file");
+        assert_eq!(
+            fs::read(out.join("proj (2)/a.txt")).unwrap(),
+            b"from-archive-a"
+        );
+        assert_eq!(
+            fs::read(out.join("readme (2).txt")).unwrap(),
+            b"from-archive-readme"
+        );
+
+        // 撤回解压：仅删新建的 proj (2) 与 readme (2).txt，绝不动原有 proj/old.txt 与 readme.txt
+        let rec = ctx.take_undo(&undo_id).expect("应能取出 undo 记录");
+        let urep = undo::execute_undo(rec).unwrap();
+        assert_eq!(urep.removed_files, 2);
+        assert!(!out.join("proj (2)").exists());
+        assert!(!out.join("readme (2).txt").exists());
+        assert_eq!(fs::read(out.join("proj/old.txt")).unwrap(), b"keep-old-dir");
+        assert_eq!(fs::read(out.join("readme.txt")).unwrap(), b"keep-old-file");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extract_overwrite_and_undo_restores_original() {
+        let root = PathBuf::from("D:\\Builds\\tidy-mod-tests")
+            .join(format!("ow_undo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("doc.txt"), b"new-content-from-zip").unwrap();
+        fs::write(src.join("added.txt"), b"brand-new-file").unwrap();
+
+        let zip = root.join("p.zip");
+        let p0 = Arc::new(Progress::detached());
+        let c0 = Arc::new(TaskControl::default());
+        create_archive(
+            None,
+            &[src.join("doc.txt"), src.join("added.txt")],
+            &zip,
+            "zip",
+            "balanced",
+            None,
+            &p0,
+            &c0,
+        )
+        .unwrap();
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("doc.txt"), b"original-user-bytes").unwrap();
+
+        let ctx = ArchiveCtx::default();
+        let p1 = Arc::new(Progress::detached());
+        let c1 = Arc::new(TaskControl::default());
+        let rep = extract_archive(
+            Some(&ctx),
+            &zip,
+            &out,
+            None,
+            None,
+            Overwrite::Overwrite,
+            "hyper",
+            &p1,
+            &c1,
+        )
+        .unwrap();
+        assert_eq!(fs::read(out.join("doc.txt")).unwrap(), b"new-content-from-zip");
+        assert_eq!(fs::read(out.join("added.txt")).unwrap(), b"brand-new-file");
+
+        let rec = ctx.take_undo(rep.undo_id.as_deref().unwrap()).unwrap();
+        let urep = undo::execute_undo(rec).unwrap();
+        assert_eq!(urep.removed_files, 1);
+        assert_eq!(urep.restored_files, 1);
+        assert_eq!(fs::read(out.join("doc.txt")).unwrap(), b"original-user-bytes");
+        assert!(!out.join("added.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_conflict_and_undo_overwrite_and_new() {
+        let root = PathBuf::from("D:\\Builds\\tidy-mod-tests")
+            .join(format!("create_undo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("hello.txt"), b"hello-zip").unwrap();
+
+        let dest = root.join("archive.zip");
+        let chk_empty = check_create_conflict(&dest);
+        assert!(!chk_empty.exists);
+
+        let ctx = ArchiveCtx::default();
+        let p1 = Arc::new(Progress::detached());
+        let c1 = Arc::new(TaskControl::default());
+        let r1 = create_archive(
+            Some(&ctx),
+            &[src.join("hello.txt")],
+            &dest,
+            "zip",
+            "balanced",
+            None,
+            &p1,
+            &c1,
+        )
+        .unwrap();
+        assert!(dest.exists());
+        assert!(r1.can_undo);
+
+        // 已有压缩包时冲突检测应给出 suggestedDest
+        let chk_hit = check_create_conflict(&dest);
+        assert!(chk_hit.exists && !chk_hit.is_dir);
+        assert!(chk_hit.suggested_dest.ends_with("archive (2).zip"));
+
+        // 撤回新建压缩包 -> 删除压缩包，且不可二次撤回
+        let id1 = r1.undo_id.unwrap();
+        let rec1 = ctx.take_undo(&id1).unwrap();
+        let u1 = undo::execute_undo(rec1).unwrap();
+        assert_eq!(u1.removed_files, 1);
+        assert!(!dest.exists());
+        assert!(ctx.take_undo(&id1).is_none(), "同一撤回 ID 不可二次使用");
+
+        // 覆盖已有压缩包 -> 撤回后按字节还原旧压缩包
+        fs::write(&dest, b"OLD-ARCHIVE-SIGNATURE-12345").unwrap();
+        let p2 = Arc::new(Progress::detached());
+        let c2 = Arc::new(TaskControl::default());
+        let r2 = create_archive(
+            Some(&ctx),
+            &[src.join("hello.txt")],
+            &dest,
+            "zip",
+            "balanced",
+            None,
+            &p2,
+            &c2,
+        )
+        .unwrap();
+        assert_ne!(fs::read(&dest).unwrap(), b"OLD-ARCHIVE-SIGNATURE-12345");
+        let rec2 = ctx.take_undo(r2.undo_id.as_deref().unwrap()).unwrap();
+        let u2 = undo::execute_undo(rec2).unwrap();
+        assert_eq!(u2.restored_files, 1);
+        assert_eq!(fs::read(&dest).unwrap(), b"OLD-ARCHIVE-SIGNATURE-12345");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

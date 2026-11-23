@@ -39,6 +39,7 @@
     rarBusy: false,
     busy: false,
     paused: false,
+    pauseLock: '',
     cancelling: false,
     opKind: '',
     activeMode: 'balanced',
@@ -51,6 +52,8 @@
     create: { sources: [], dest: '', dir: '', format: 'zip', mode: 'balanced', password: '' },
     report: null,
     lastCreate: null,
+    lastExtract: null,
+    undoBusy: false,
     /* 列表渲染状态：行模型按目录缓存，视口外的行不建 DOM（虚拟滚动） */
     rowsByCwd: new Map(),
     viewKey: '',
@@ -138,6 +141,7 @@
   function startOp(label, kind) {
     S.busy = true;
     S.paused = false;
+    S.pauseLock = '';
     S.cancelling = false;
     S.opKind = kind || '';
     S.activeMode = S.create.mode || 'balanced';
@@ -145,16 +149,21 @@
     S.progress = null;
     S.speed = { t: 0, bytes: 0, ema: 0, samples: [] };
     renderProgress();
+    renderLastExtract();
+    renderLastCreate();
   }
 
   function endOp() {
     S.busy = false;
     S.paused = false;
+    S.pauseLock = '';
     S.cancelling = false;
     S.opKind = '';
     S.opLabel = '';
     S.progress = null;
     renderProgress();
+    renderLastExtract();
+    renderLastCreate();
   }
 
   function pct(n, d) {
@@ -298,9 +307,11 @@
     );
 
     const progress = h('div', { class: 'arc-progress card', hidden: true });
-    const view = h('div', { class: 'arc-view', id: 'arc-open' }, grid);
+    const lastExtractBox = h('div', { class: 'arc-last', hidden: true });
+    const view = h('div', { class: 'arc-view', id: 'arc-open' }, lastExtractBox, grid);
 
     els.open = view; els.path = path; els.meta = meta; els.rar = rar;
+    els.lastExtractBox = lastExtractBox;
     els.pathRow = h('div', { class: 'arc-path-row arc-path-row-head' }, path, pick, refresh, close);
     els.crumbs = crumbs; els.tbody = tbody; els.count = count;
     els.footLeft = footLeft; els.cancel = cancel; els.side = side;
@@ -321,6 +332,7 @@
       S.tableRO.observe(tableWrap);
     }
     els.setHeads = setHeads;
+    renderLastExtract();
     return view;
   }
 
@@ -339,6 +351,10 @@
 
   async function openArchive(path, password) {
     if (!path) return;
+    if (S.busy) {
+      toast(T('当前有压缩或解压任务正在进行，请先等待完成或取消', 'An archive operation is running; wait or cancel first'), 'warn');
+      return;
+    }
     S.path = path;
     S.password = password || '';
     S.selected.clear();
@@ -350,7 +366,7 @@
     resetRowCaches();          // 换包就丢掉旧的目录行缓存
     if (els.path) els.path.value = path;
     let pw = password || '';
-    startOp(T('正在读取压缩包…', 'Reading archive…'));
+    startOp(T('正在读取压缩包…', 'Reading archive…'), 'open');
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const info = await API.archiveOpen(path, pw || null);
@@ -365,10 +381,10 @@
         if (info.needsRar) refreshRar();
         return;
       } catch (e) {
-            if (!pw && attempt === 0 && looksEncrypted(e)) {
+        if (!pw && attempt === 0 && looksEncrypted(e)) {
           endOp();
           const entered = await askPassword(T('这个压缩包可能有密码', 'This archive may be encrypted'));
-          if (entered !== null && entered !== '') { pw = entered; startOp(T('正在读取压缩包…', 'Reading archive…')); continue; }
+          if (entered !== null && entered !== '') { pw = entered; startOp(T('正在读取压缩包…', 'Reading archive…'), 'open'); continue; }
         }
         endOp();
         toast(errText(e), 'error');
@@ -1141,11 +1157,211 @@
     });
   }
 
+  function askExtractConflict(conflict, out, picked) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      const targetName = baseName(out) || out;
+      const summaryText = conflict.outDirIsFile
+        ? T(`目标位置已存在同名文件「${targetName}」，无法在此处创建文件夹。`,
+            `A file named "${targetName}" already exists here, so a folder cannot be created at this path.`)
+        : (picked.subfolder && conflict.outDirExists)
+          ? T(`目标文件夹「${targetName}」已存在（检测到 ${fmtCount(conflict.dirConflicts)} 个文件夹、${fmtCount(conflict.fileConflicts)} 个文件冲突）。`,
+              `Target folder "${targetName}" already exists (${fmtCount(conflict.dirConflicts)} folder and ${fmtCount(conflict.fileConflicts)} file conflicts).`)
+          : T(`目标位置已存在同名内容：${fmtCount(conflict.dirConflicts)} 个文件夹、${fmtCount(conflict.fileConflicts)} 个文件。`,
+              `Conflicts found at destination: ${fmtCount(conflict.dirConflicts)} folders, ${fmtCount(conflict.fileConflicts)} files.`);
+
+      const samples = Array.isArray(conflict.samples) ? conflict.samples : [];
+      const listEl = samples.length
+        ? h('div', { class: 'arc-conflict-list' },
+            ...samples.map((s) => h('div', { class: 'arc-conflict-item' },
+              h('span', { class: 'arc-conflict-tag' + (s.isDir ? ' is-dir' : '') },
+                s.isDir ? T('文件夹', 'Folder') : T('文件', 'File')),
+              h('span', { class: 'ellipsis', title: s.name }, s.name)
+            ))
+          )
+        : null;
+
+      const coexistHint = (picked.subfolder && (conflict.outDirExists || conflict.outDirIsFile) && conflict.suggestedOutDir)
+        ? T(`选择「二者并存」将自动新建「${baseName(conflict.suggestedOutDir)}」，完整保留原有内容。`,
+            `Choosing "Keep both" will extract into "${baseName(conflict.suggestedOutDir)}" without touching existing items.`)
+        : T('选择「二者并存」会自动为冲突的文件与顶层文件夹追加序号（如 (2)），完整保留原有内容。',
+            'Choosing "Keep both" auto-renames conflicting files and top-level folders (e.g. (2)), leaving existing items untouched.');
+
+      const body = h('div', { class: 'arc-conflict-box' },
+        h('div', { class: 'arc-conflict-summary' }, summaryText),
+        listEl,
+        h('div', { class: 'small muted' }, coexistHint),
+        conflict.outDirIsFile
+          ? h('div', { class: 'small muted' }, T('该路径为普通文件，无法直接覆盖为文件夹。', 'Cannot overwrite a regular file as a directory.'))
+          : h('div', { class: 'small muted' }, T('选择「直接覆盖」会替换同名文件（解压后仍可点击「撤回解压」还原原文件）。', 'Choosing "Overwrite" replaces matching files (you can still click Undo afterwards to restore them).'))
+      );
+
+      const buttons = [{ id: 'cancel', label: T('取消', 'Cancel'), kind: 'ghost' }];
+      if (!conflict.outDirIsFile) {
+        buttons.push({ id: 'overwrite', label: T('直接覆盖', 'Overwrite'), kind: 'danger' });
+      }
+      buttons.push({ id: 'rename', label: T('二者并存（自动重命名）', 'Keep both (auto-rename)'), kind: 'primary' });
+
+      const m = modal({
+        title: T('发现同名文件或文件夹', 'Existing files or folders found'),
+        body,
+        wide: true,
+        buttons,
+        onClose: (v) => done(v === 'rename' || v === 'overwrite' ? v : null)
+      });
+      // 遵循安全默认原则：焦点给非破坏性的「二者并存」，绝不默认聚焦「直接覆盖」
+      const safeBtn = m.el.querySelector('.btn.primary');
+      if (safeBtn) safeBtn.focus();
+    });
+  }
+
+  function askCreateConflict(conflict, dest) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      const curName = baseName(dest) || dest;
+      const nextName = baseName(conflict.suggestedDest || dest) || dest;
+      const summaryText = conflict.isDir
+        ? T(`目标路径「${curName}」是一个已存在的文件夹，无法直接覆盖为压缩包。`,
+            `Destination "${curName}" is an existing folder and cannot be overwritten.`)
+        : T(`目标位置已存在同名压缩包「${curName}」（${fmtBytes(conflict.size || 0)} · ${conflict.modified || '—'}）。`,
+            `An archive named "${curName}" already exists (${fmtBytes(conflict.size || 0)} · ${conflict.modified || '—'}).`);
+
+      const body = h('div', { class: 'arc-conflict-box' },
+        h('div', { class: 'arc-conflict-summary' }, summaryText),
+        h('div', { class: 'arc-conflict-list' },
+          h('div', { class: 'arc-conflict-item' },
+            h('span', { class: 'arc-conflict-tag' + (conflict.isDir ? ' is-dir' : '') },
+              conflict.isDir ? T('文件夹', 'Folder') : T('已有文件', 'Existing')),
+            h('span', { class: 'ellipsis', title: dest }, dest)
+          ),
+          h('div', { class: 'arc-conflict-item' },
+            h('span', { class: 'arc-conflict-tag is-new' }, T('新文件名', 'New name')),
+            h('span', { class: 'ellipsis', title: conflict.suggestedDest || dest }, nextName)
+          )
+        ),
+        h('div', { class: 'small muted' },
+          T(`选择「二者并存」将保存为「${nextName}」；`, `Choosing "Keep both" saves as "${nextName}"; `) +
+          (conflict.isDir
+            ? T('目标为文件夹，不支持直接覆盖。', 'direct overwrite is unavailable for folders.')
+            : T('选择「直接覆盖」会替换原文件（完成后仍可点击「撤回压缩」还原旧包）。', 'choosing "Overwrite" replaces the old file (Undo can restore it).')))
+      );
+
+      const buttons = [{ id: 'cancel', label: T('取消', 'Cancel'), kind: 'ghost' }];
+      if (!conflict.isDir) {
+        buttons.push({ id: 'overwrite', label: T('直接覆盖', 'Overwrite'), kind: 'danger' });
+      }
+      buttons.push({ id: 'rename', label: T('二者并存（自动重命名）', 'Keep both (auto-rename)'), kind: 'primary' });
+
+      const m = modal({
+        title: T('目标压缩包已存在', 'Archive already exists'),
+        body,
+        wide: true,
+        buttons,
+        onClose: (v) => done(v === 'rename' || v === 'overwrite' ? v : null)
+      });
+      const safeBtn = m.el.querySelector('.btn.primary');
+      if (safeBtn) safeBtn.focus();
+    });
+  }
+
+  function formatUndoSummary(urep) {
+    const parts = [];
+    if (urep.removedFiles) parts.push(T(`删除 ${fmtCount(urep.removedFiles)} 个新建文件`, `removed ${fmtCount(urep.removedFiles)} files`));
+    if (urep.removedDirs) parts.push(T(`清理 ${fmtCount(urep.removedDirs)} 个新建目录`, `cleaned ${fmtCount(urep.removedDirs)} folders`));
+    if (urep.restoredFiles) parts.push(T(`还原 ${fmtCount(urep.restoredFiles)} 个被覆盖文件`, `restored ${fmtCount(urep.restoredFiles)} files`));
+    if (urep.skipped) parts.push(T(`保留 ${fmtCount(urep.skipped)} 项已修改或原有内容`, `kept ${fmtCount(urep.skipped)} modified/existing items`));
+    return parts.length ? parts.join(' · ') : T('未发现需要变更的文件', 'Nothing to revert');
+  }
+
+  async function runUndo(record, kind) {
+    if (!record || !record.undoId || record.undone || S.undoBusy) return;
+    if (S.busy) {
+      toast(T('当前有任务正在运行，请稍后再撤回', 'Wait for the running task to finish before undoing'), 'warn');
+      return;
+    }
+    S.undoBusy = true;
+    renderLastExtract();
+    renderLastCreate();
+    try {
+      const urep = await API.archiveUndo(record.undoId);
+      record.undone = true;
+      record.undoReport = urep;
+      record.undoSummary = formatUndoSummary(urep);
+      const label = kind === 'create' ? T('已撤回压缩：', 'Reverted compression: ') : T('已撤回解压：', 'Reverted extraction: ');
+      const hasWarn = Array.isArray(urep.warnings) && urep.warnings.length > 0;
+      toast(label + record.undoSummary + (hasWarn ? `（${urep.warnings[0]}）` : ''), hasWarn ? 'warn' : 'ok', 6500);
+    } catch (e) {
+      toast(errText(e), 'error');
+    } finally {
+      S.undoBusy = false;
+      renderLastExtract();
+      renderLastCreate();
+    }
+  }
+
+  function renderLastExtract() {
+    const box = els.lastExtractBox;
+    if (!box) return;
+    const r = S.lastExtract;
+    box.innerHTML = '';
+    box.hidden = !r;
+    if (!r) return;
+    const open = h('button', { class: 'btn ghost sm' }, icon('folder', 14), T('打开文件夹', 'Open folder'));
+    open.onclick = () => API.openPath(r.outDir).catch((e) => toast(errText(e), 'error'));
+    const undoBtn = (r.canUndo && r.undoId)
+      ? h('button', {
+          class: 'btn ghost sm',
+          disabled: !!(r.undone || S.undoBusy || S.busy)
+        }, icon('undo', 14), r.undone ? T('已撤回', 'Reverted') : (S.undoBusy ? T('撤回中…', 'Undoing…') : T('撤回解压', 'Undo extract')))
+      : null;
+    if (undoBtn && !r.undone) undoBtn.onclick = () => runUndo(r, 'extract');
+    const hide = h('button', { class: 'btn ghost sm icon', title: T('收起', 'Dismiss'), 'aria-label': T('收起', 'Dismiss') }, icon('close', 14));
+    hide.onclick = () => { S.lastExtract = null; renderLastExtract(); };
+    const title = r.undone
+      ? T('已撤回解压：', 'Reverted extract: ') + (r.archiveName || baseName(r.outDir))
+      : T('已解压：', 'Extracted: ') + (r.archiveName || baseName(r.outDir));
+    const sub = r.undone
+      ? (r.undoSummary || r.outDir)
+      : (T('文件 ', 'Files ') + fmtCount(r.files) + ' · ' + T('目录 ', 'Folders ') + fmtCount(r.dirs) + ' · ' + fmtBytes(r.bytes) + ' · ' + r.outDir);
+    box.appendChild(h('div', { class: 'arc-last-card' + (r.undone ? ' is-undone' : '') },
+      h('span', { class: 'arc-last-ic' }, icon(r.undone ? 'undo' : 'export', 18)),
+      h('div', { class: 'arc-last-text' },
+        h('div', { class: 'arc-last-title' }, title),
+        h('div', { class: 'small muted ellipsis', title: r.outDir }, sub)),
+      h('span', { class: 'spacer' }),
+      h('div', { class: 'arc-last-acts' }, open, undoBtn, hide)));
+  }
+
   async function doExtract(indices) {
     if (!S.path || S.busy) return;
     const picked = await askExtractDest(indices);
-    if (!picked) return;
-    const out = picked.subfolder ? joinPath(picked.dir, picked.folder) : picked.dir;
+    if (!picked || destroyed || S.busy) return;
+    let out = picked.subfolder ? joinPath(picked.dir, picked.folder) : picked.dir;
+    let effectiveOverwrite = S.overwrite;
+
+    // 解压前冲突检测：发现目标目录/文件重名时，提示「直接覆盖」或「二者并存（自动重命名）」
+    if (typeof API.archiveCheckExtractConflicts === 'function') {
+      let conflict = null;
+      try {
+        conflict = await API.archiveCheckExtractConflicts(S.path, out, indices, S.password || null, !!picked.subfolder);
+      } catch { conflict = null; }
+      if (destroyed || S.busy) return;
+      if (conflict && conflict.hasConflicts) {
+        const choice = await askExtractConflict(conflict, out, picked);
+        if (!choice || destroyed || S.busy) return;
+        if (choice === 'rename') {
+          if (picked.subfolder && (conflict.outDirExists || conflict.outDirIsFile) && conflict.suggestedOutDir) {
+            out = conflict.suggestedOutDir;
+          }
+          effectiveOverwrite = 'rename';
+        } else if (choice === 'overwrite') {
+          effectiveOverwrite = 'overwrite';
+        }
+      }
+    }
+
     S.extract.dir = picked.dir;
     S.extract.openAfter = picked.openAfter;
     API.configSet({
@@ -1154,24 +1370,39 @@
     }).catch(() => {});
     startOp(T('正在解压…', 'Extracting…'), 'extract');
     try {
-      const report = await API.archiveExtract(S.path, out, indices, S.password || null, S.overwrite, S.create.mode);
+      const report = await API.archiveExtract(S.path, out, indices, S.password || null, effectiveOverwrite, S.create.mode);
       endOp();
+      S.lastExtract = Object.assign({}, report, {
+        archiveName: baseName(S.path),
+        undone: false,
+        undoSummary: ''
+      });
+      renderLastExtract();
       const body = h('div', { class: 'arc-report' },
         h('div', null, T('解压完成', 'Extraction complete')),
         h('div', { class: 'small muted' },
           T('文件 ', 'Files ') + fmtCount(report.files) + ' · ' +
           T('目录 ', 'Folders ') + fmtCount(report.dirs) + ' · ' +
           fmtBytes(report.bytes) + (report.skipped ? ' · ' + T('跳过 ', 'Skipped ') + fmtCount(report.skipped) : '')),
-        h('div', { class: 'small muted ellipsis' }, report.outDir)
+        h('div', { class: 'small muted ellipsis' }, report.outDir),
+        report.backupIncomplete
+          ? h('div', { class: 'small muted' }, T('注：部分跨盘覆盖文件超出 512 MB 备份上限，撤回时将予以保留。', 'Note: some cross-drive overwritten files exceeded the 512 MB backup limit and will be kept on undo.'))
+          : null
       );
+      const modalBtns = [{ id: 'close', label: T('关闭', 'Close'), kind: 'ghost' }];
+      if (report.canUndo && report.undoId) {
+        modalBtns.push({ id: 'undo', label: T('撤回本次解压', 'Undo extract'), kind: 'ghost' });
+      }
+      modalBtns.push({ id: 'open', label: T('打开文件夹', 'Open folder'), kind: 'primary' });
+      const recRef = S.lastExtract;
       modal({
         title: T('解压完成', 'Done'),
         body,
-        buttons: [
-          { id: 'close', label: T('关闭', 'Close'), kind: 'ghost' },
-          { id: 'open', label: T('打开文件夹', 'Open folder'), kind: 'primary' }
-        ],
-        onClose: (v) => { if (v === 'open') API.openPath(report.outDir).catch(() => {}); }
+        buttons: modalBtns,
+        onClose: (v) => {
+          if (v === 'open') API.openPath(report.outDir).catch(() => {});
+          if (v === 'undo') runUndo(recRef, 'extract');
+        }
       });
       if (picked.openAfter) API.openPath(report.outDir).catch(() => {});
     } catch (e) {
@@ -1184,18 +1415,21 @@
   }
 
   async function pauseOp() {
-    if (!S.busy || S.paused || S.cancelling) return;
+    if (!S.busy || S.paused || S.cancelling || S.pauseLock || S.opKind === 'open') return;
     S.paused = true;
+    S.pauseLock = 'pausing';
     S.speed.t = 0;
     renderProgress();
     try {
       const ok = await API.archivePause();
       if (destroyed || !S.busy || S.cancelling) return;
+      S.pauseLock = '';
       if (ok === false) {
         S.paused = false;
         renderProgress();
       }
     } catch {
+      S.pauseLock = '';
       if (!destroyed && S.busy && !S.cancelling) {
         S.paused = false;
         renderProgress();
@@ -1204,18 +1438,21 @@
   }
 
   async function resumeOp() {
-    if (!S.busy || !S.paused || S.cancelling) return;
+    if (!S.busy || !S.paused || S.cancelling || S.pauseLock || S.opKind === 'open') return;
     S.paused = false;
+    S.pauseLock = 'resuming';
     S.speed.t = 0;
     renderProgress();
     try {
       const ok = await API.archiveResume();
       if (destroyed || !S.busy || S.cancelling) return;
+      S.pauseLock = '';
       if (ok === false) {
         S.paused = true;
         renderProgress();
       }
     } catch {
+      S.pauseLock = '';
       if (!destroyed && S.busy && !S.cancelling) {
         S.paused = true;
         renderProgress();
@@ -1227,6 +1464,7 @@
     if (!S.busy || S.cancelling) return;
     S.cancelling = true;
     S.paused = false;
+    S.pauseLock = '';
     S.speed.t = 0;
     renderProgress();
     try { await API.archiveCancel(); } catch { /* ignore */ }
@@ -1377,7 +1615,12 @@
     }
     const currentName = (p && p.name) ? p.name : phaseText;
     els.progress.appendChild(h('div', { class: 'small muted ellipsis', title: currentName }, currentName));
-    if (S.busy) {
+    const canControl = S.opKind === 'extract' || S.opKind === 'create';
+    if (els.cancel) {
+      els.cancel.hidden = !(S.busy && canControl);
+      els.cancel.disabled = !!S.cancelling;
+    }
+    if (S.busy && canControl) {
       const toggleBtn = h('button', {
         class: S.paused ? 'btn primary sm' : 'btn ghost sm',
         disabled: !!S.cancelling
@@ -1538,7 +1781,7 @@
   }
 
   /* 建完的压缩包留在页面顶部：关掉弹窗后仍然看得到「刚才那个已经建好了」，
-     不用再回列表里找。下次创建时替换。 */
+     不用再回列表里找。下次创建时替换，并支持一键撤回。 */
   function renderLastCreate() {
     const box = els.lastBox;
     if (!box) return;
@@ -1546,21 +1789,38 @@
     box.innerHTML = '';
     box.hidden = !r;
     if (!r) return;
-    const open = h('button', { class: 'btn sm' }, icon('archive', 14), T('打开压缩包', 'Open'));
-    open.onclick = () => openArchive(r.path, null);
-    const show = h('button', { class: 'btn ghost sm' }, icon('folder', 14), T('在文件夹中显示', 'Show in folder'));
-    show.onclick = () => API.reveal(r.path).catch((e) => toast(errText(e), 'error'));
+    const restored = !!(r.undone && r.undoReport && r.undoReport.restoredFiles > 0);
+    const open = (!r.undone || restored)
+      ? h('button', { class: 'btn sm' }, icon('archive', 14), T('打开压缩包', 'Open'))
+      : null;
+    if (open) open.onclick = () => openArchive(r.path, null);
+    const show = (!r.undone || restored)
+      ? h('button', { class: 'btn ghost sm' }, icon('folder', 14), T('在文件夹中显示', 'Show in folder'))
+      : null;
+    if (show) show.onclick = () => API.reveal(r.path).catch((e) => toast(errText(e), 'error'));
+    const undoBtn = (r.canUndo && r.undoId)
+      ? h('button', {
+          class: 'btn ghost sm',
+          disabled: !!(r.undone || S.undoBusy || S.busy)
+        }, icon('undo', 14), r.undone ? T('已撤回', 'Reverted') : (S.undoBusy ? T('撤回中…', 'Undoing…') : T('撤回压缩', 'Undo compress')))
+      : null;
+    if (undoBtn && !r.undone) undoBtn.onclick = () => runUndo(r, 'create');
     const hide = h('button', { class: 'btn ghost sm icon', title: T('收起', 'Dismiss'), 'aria-label': T('收起', 'Dismiss') }, icon('close', 14));
     hide.onclick = () => { S.lastCreate = null; renderLastCreate(); };
-    box.appendChild(h('div', { class: 'arc-last-card' },
-      h('span', { class: 'arc-last-ic' }, icon('archive', 18)),
+    const title = r.undone
+      ? T('已撤回压缩：', 'Reverted archive: ') + baseName(r.path)
+      : T('已创建：', 'Created: ') + baseName(r.path);
+    const sub = r.undone
+      ? (r.undoSummary || r.path)
+      : (fmtBytes(r.packed) + ' · ' + fmtCount(r.files) + T(' 个文件', ' files') +
+          ' · ' + ((r.elapsedMs || 0) / 1000).toFixed(1) + ' s');
+    box.appendChild(h('div', { class: 'arc-last-card' + (r.undone ? ' is-undone' : '') },
+      h('span', { class: 'arc-last-ic' }, icon(r.undone ? 'undo' : 'archive', 18)),
       h('div', { class: 'arc-last-text' },
-        h('div', { class: 'arc-last-title' }, T('已创建：', 'Created: ') + baseName(r.path)),
-        h('div', { class: 'small muted ellipsis', title: r.path },
-          fmtBytes(r.packed) + ' · ' + fmtCount(r.files) + T(' 个文件', ' files') +
-          ' · ' + ((r.elapsedMs || 0) / 1000).toFixed(1) + ' s')),
+        h('div', { class: 'arc-last-title' }, title),
+        h('div', { class: 'small muted ellipsis', title: r.path }, sub)),
       h('span', { class: 'spacer' }),
-      show, open, hide));
+      h('div', { class: 'arc-last-acts' }, show, open, undoBtn, hide)));
   }
 
   function renderCreate() {
@@ -1796,8 +2056,23 @@
         body: T('目标文件扩展名不是 ' + EXT[S.create.format] + '，仍要继续吗？', 'The extension is not ' + EXT[S.create.format] + '. Continue?'),
         ok: T('继续', 'Continue')
       });
-      if (!ok) return;
+      if (!ok || destroyed || S.busy) return;
     }
+
+    // 压缩前冲突检测：发现同名压缩包/目录时，提示「直接覆盖」或「二者并存（自动重命名）」
+    if (typeof API.archiveCheckCreateConflict === 'function') {
+      let conflict = null;
+      try { conflict = await API.archiveCheckCreateConflict(dest); } catch { conflict = null; }
+      if (destroyed || S.busy) return;
+      if (conflict && conflict.exists) {
+        const choice = await askCreateConflict(conflict, dest);
+        if (!choice || destroyed || S.busy) return;
+        if (choice === 'rename' && conflict.suggestedDest) {
+          dest = conflict.suggestedDest;
+        }
+      }
+    }
+
     S.create.dest = dest;
     S.create.dir = dirName(dest);
     if (els.dest) els.dest.value = dest;
@@ -1808,7 +2083,7 @@
       const report = await API.archiveCreate(sources, dest, S.create.format, S.create.mode, pw);
       endOp();
       S.report = report;
-      S.lastCreate = report;
+      S.lastCreate = Object.assign({}, report, { undone: false, undoSummary: '' });
       renderLastCreate();
       // 创建完的压缩包是从待压缩列表里「出货」了：清掉列表，避免再点一次生成重复包
       S.create.sources = [];
@@ -1821,19 +2096,28 @@
           h('span', { class: 'ellipsis', title: report.path }, baseName(report.path))),
         h('div', { class: 'small muted' },
           fmtBytes(report.packed) + ' · ' + fmtCount(report.files) + T(' 个文件', ' files') + ' · ' + ((report.elapsedMs || 0) / 1000).toFixed(1) + ' s'),
-        h('div', { class: 'small muted ellipsis', title: report.path }, report.path)
+        h('div', { class: 'small muted ellipsis', title: report.path }, report.path),
+        report.backupIncomplete
+          ? h('div', { class: 'small muted' }, T('注：原压缩包超出跨盘 512 MB 备份上限，撤回时将保留现状。', 'Note: original archive exceeded the 512 MB cross-drive backup limit.'))
+          : null
       );
+      const modalBtns = [
+        { id: 'close', label: T('关闭', 'Close'), kind: 'ghost' },
+        { id: 'reveal', label: T('在文件夹中显示', 'Show in folder'), kind: 'ghost' }
+      ];
+      if (report.canUndo && report.undoId) {
+        modalBtns.push({ id: 'undo', label: T('撤回本次压缩', 'Undo compress'), kind: 'ghost' });
+      }
+      modalBtns.push({ id: 'open', label: T('打开压缩包', 'Open archive'), kind: 'primary' });
+      const recRef = S.lastCreate;
       modal({
         title: T('压缩包已创建', 'Archive created'),
         body,
-        buttons: [
-          { id: 'close', label: T('关闭', 'Close'), kind: 'ghost' },
-          { id: 'reveal', label: T('在文件夹中显示', 'Show in folder'), kind: 'ghost' },
-          { id: 'open', label: T('打开压缩包', 'Open archive'), kind: 'primary' }
-        ],
+        buttons: modalBtns,
         onClose: (v) => {
           if (v === 'open') openArchive(report.path, null);
           if (v === 'reveal') API.reveal(report.path).catch(() => {});
+          if (v === 'undo') runUndo(recRef, 'create');
         }
       });
     } catch (e) {
@@ -1970,11 +2254,20 @@
           if (p.phase === 'cancelling') {
             S.cancelling = true;
             S.paused = false;
+            S.pauseLock = '';
             S.speed.t = 0;
           } else if (!S.cancelling) {
-            S.paused = !!(p.paused || p.phase === 'paused');
-            if (S.paused) S.speed.t = 0;
-            else sampleSpeed(p);
+            const incomingPaused = !!(p.paused || p.phase === 'paused');
+            // 暂停/继续 RPC 在途期间，忽略来自 IPC 队列的反向旧状态，消除按钮与横幅闪烁。
+            if (S.pauseLock === 'pausing' && !incomingPaused) {
+              S.speed.t = 0;
+            } else if (S.pauseLock === 'resuming' && incomingPaused) {
+              S.speed.t = 0;
+            } else {
+              S.paused = incomingPaused;
+              if (S.paused) S.speed.t = 0;
+              else sampleSpeed(p);
+            }
           }
           renderProgress();
         });
@@ -2018,6 +2311,7 @@
       API.archiveCancel().catch(() => {});
       S.busy = false;
       S.paused = false;
+      S.pauseLock = '';
       S.cancelling = false;
       S.opKind = '';
       S.opLabel = '';
@@ -2031,6 +2325,7 @@
     S.preview = null;
     if (S.scrollRaf) { cancelAnimationFrame(S.scrollRaf); S.scrollRaf = 0; }
     if (S.tableRO) { try { S.tableRO.disconnect(); } catch { /* ignore */ } S.tableRO = null; }
+    S.undoBusy = false;
     root = null;
     els = {};
   }

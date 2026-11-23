@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::fs;
 use std::io::Read;
@@ -6,15 +6,17 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use libloading::Library;
 
 use super::download;
+use super::undo::UndoTracker;
 use super::util::{
-    ensure_parent, resolve_dest, safe_relative, sha256_file, utf16_to_string, wide_path, Overwrite,
-    PerfProfile, Progress, TaskControl, ThreadPriorityGuard,
+    ensure_parent, resolve_dest, safe_join_mapped, safe_relative, sha256_file, utf16_to_string,
+    wide_path, Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard,
 };
 use super::{ArchiveInfo, EntryInfo, ExtractReport, RarStatus};
 
@@ -252,6 +254,13 @@ unsafe extern "system" fn rar_callback(
         if control.is_cancelled() {
             return -1;
         }
+        // UCM_CHANGEVOLUME (0): 仅在 RAR_VOL_NOTIFY (p2 == 1) 时继续；缺失分卷或密码询问返回 -1 避免死循环。
+        if msg == 0 {
+            return if p2 == 1 { 1 } else { -1 };
+        }
+        if msg == 2 || msg == 3 {
+            return -1;
+        }
         0
     })
     .unwrap_or(-1)
@@ -478,6 +487,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn extract(
     path: &Path,
     out_dir: &Path,
@@ -485,6 +495,8 @@ pub fn extract(
     password: Option<&str>,
     policy: Overwrite,
     profile: PerfProfile,
+    dir_map: &HashMap<String, String>,
+    undo: Option<&Arc<UndoTracker>>,
     progress: &Progress,
     control: &TaskControl,
 ) -> Result<ExtractReport> {
@@ -517,11 +529,17 @@ pub fn extract(
         skipped: 0,
         warnings: Vec::new(),
         out_dir: out_dir.display().to_string(),
+        undo_id: None,
+        can_undo: false,
+        backup_incomplete: false,
     };
     let mut index = 0usize;
     loop {
         control.checkpoint(Some(progress))?;
         let (header, rc) = api.header(handle)?;
+        if control.is_cancelled() {
+            bail!("操作已取消");
+        }
         if rc == 10 {
             break;
         }
@@ -550,6 +568,9 @@ pub fn extract(
         index += 1;
         if !wanted {
             let skip = api.process(handle, RAR_SKIP, None, None);
+            if control.is_cancelled() {
+                bail!("操作已取消");
+            }
             if skip != 0 {
                 bail!("RAR 跳过条目失败: {}", rar_error(skip));
             }
@@ -564,17 +585,21 @@ pub fn extract(
             continue;
         }
         if is_dir {
-            if let Ok(rel) = safe_relative(&name) {
-                let dir = out_dir.join(rel);
-                if fs::create_dir_all(&dir).is_ok() {
+            if let Ok(dir) = safe_join_mapped(out_dir, &name, dir_map) {
+                let ok = if let Some(u) = undo {
+                    u.ensure_dir(&dir).is_ok()
+                } else {
+                    fs::create_dir_all(&dir).is_ok()
+                };
+                if ok {
                     report.dirs += 1;
                 }
             }
             let _ = api.process(handle, RAR_SKIP, None, None);
             continue;
         }
-        let rel = match safe_relative(&name) {
-            Ok(r) => r,
+        let mapped_target = match safe_join_mapped(out_dir, &name, dir_map) {
+            Ok(p) => p,
             Err(e) => {
                 report.skipped += 1;
                 report.warnings.push(format!("{e}"));
@@ -582,7 +607,7 @@ pub fn extract(
                 continue;
             }
         };
-        let target = match resolve_dest(out_dir.join(&rel), false, policy)? {
+        let target = match resolve_dest(mapped_target, false, policy)? {
             Some(p) => p,
             None => {
                 report.skipped += 1;
@@ -592,42 +617,71 @@ pub fn extract(
                 continue;
             }
         };
-        ensure_parent(&target)?;
+        if let Some(u) = undo {
+            u.prepare_file_write(&target, policy)?;
+        } else {
+            ensure_parent(&target)?;
+        }
         let parent = target.parent().unwrap_or(out_dir);
         let original_name = std::path::Path::new(&name)
             .file_name()
             .map(|s| s.to_os_string())
             .unwrap_or_else(|| std::ffi::OsString::from("file"));
-        let extracted = parent.join(&original_name);
+        let direct_extracted = parent.join(&original_name);
+        // Coexist（自动重命名）场景下，若 parent\original_name 已存在，直接解压到 parent 会覆盖原文件，
+        // 故隔离到临时子目录解压后再原子改名到 target。
+        let stage_dir = if direct_extracted != target && fs::symlink_metadata(&direct_extracted).is_ok() {
+            let d = parent.join(format!(".tidy_rar_{}_{}", std::process::id(), index));
+            fs::create_dir_all(&d)?;
+            Some(d)
+        } else {
+            None
+        };
+        let extract_dir = stage_dir.as_deref().unwrap_or(parent);
+        let extracted = extract_dir.join(&original_name);
 
         progress.set_current(&name);
         cb_state.entry_bytes.store(0, Ordering::Relaxed);
         cb_state.extracting.store(true, Ordering::Release);
-        let rc = api.process(handle, RAR_EXTRACT, Some(parent), None);
+        let rc = api.process(handle, RAR_EXTRACT, Some(extract_dir), None);
         cb_state.extracting.store(false, Ordering::Release);
 
         if control.is_cancelled() {
             let _ = fs::remove_file(&extracted);
-            if extracted != target {
+            if let Some(d) = &stage_dir {
+                let _ = fs::remove_dir_all(d);
+            }
+            if extracted != target && stage_dir.is_none() {
                 let _ = fs::remove_file(&target);
             }
             bail!("操作已取消");
         }
         if rc != 0 {
             let _ = fs::remove_file(&extracted);
+            if let Some(d) = &stage_dir {
+                let _ = fs::remove_dir_all(d);
+            }
             report.skipped += 1;
             report.warnings.push(format!("{name}: {}", rar_error(rc)));
             let _ = api.process(handle, RAR_SKIP, None, None);
             continue;
         }
         if extracted != target {
-            if let Err(e) = fs::rename(&extracted, &target) {
+            let mv = fs::rename(&extracted, &target);
+            if let Some(d) = &stage_dir {
+                let _ = fs::remove_dir_all(d);
+            }
+            if let Err(e) = mv {
+                let _ = fs::remove_file(&extracted);
                 report.skipped += 1;
                 report
                     .warnings
                     .push(format!("{name}: 重命名失败: {e}"));
                 continue;
             }
+        }
+        if let Some(u) = undo {
+            u.record_created_file(&target);
         }
         let reported = cb_state.entry_bytes.load(Ordering::Relaxed);
         if size > reported {

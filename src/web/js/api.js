@@ -55,6 +55,16 @@
       invoke('archive_extract', { path, outDir, indices, password: password || null, overwrite, mode: mode || null }),
     archiveCreate: (sources, dest, format, mode, password) =>
       invoke('archive_create', { sources, dest, format, mode, password: password || null }),
+    archiveCheckExtractConflicts: (path, outDir, indices, password, createSubfolder) =>
+      invoke('archive_check_extract_conflicts', {
+        path,
+        outDir,
+        indices,
+        password: password || null,
+        createSubfolder: !!createSubfolder
+      }),
+    archiveCheckCreateConflict: (dest) => invoke('archive_check_create_conflict', { dest }),
+    archiveUndo: (undoId) => invoke('archive_undo', { undoId }),
     archivePause: () => invoke('archive_pause'),
     archiveResume: () => invoke('archive_resume'),
     archiveCancel: () => invoke('archive_cancel'),
