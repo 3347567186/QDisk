@@ -1392,8 +1392,10 @@ mod tests {
         // 验证 collect_sources 在扫描阶段也能即时响应取消
         let ctl = TaskControl::default();
         ctl.request_cancel();
-        let scan_res = collect_sources(&[root.clone()], None, Some(&ctl));
-        assert!(scan_res.is_err() && format!("{}", scan_res.unwrap_err()).contains("取消"));
+        match collect_sources(&[root.clone()], None, Some(&ctl)) {
+            Ok(_) => panic!("取消后 collect_sources 不应成功"),
+            Err(e) => assert!(format!("{e}").contains("取消"), "unexpected: {e}"),
+        }
 
         let _ = fs::remove_dir_all(&root);
     }
