@@ -25,6 +25,7 @@ param(
   [string]$BaseUrl = '',
   [string]$GitHubRepo = '3347567186/TidyAssistant',
   [string]$Notes = '',
+  [string]$NotesFile = '',
   [string]$MinVersion = '',
   [switch]$UploadGitHub,
   [switch]$ServeLocal,
@@ -77,6 +78,13 @@ function Get-NotesFromChangelog([string]$ver, [string]$path) {
 
 if (-not $Notes) {
   $Notes = Get-NotesFromChangelog -ver $Version -path $changelogPath
+}
+$ReleaseBody = $Notes
+if ($NotesFile) {
+  if (-not (Test-Path -LiteralPath $NotesFile)) {
+    throw "找不到 NotesFile：$NotesFile"
+  }
+  $ReleaseBody = [IO.File]::ReadAllText($NotesFile, [Text.Encoding]::UTF8).Trim()
 }
 
 if ($ServeLocal) {
@@ -173,13 +181,18 @@ if ($UploadGitHub) {
     $files += $tmpAsciiPort
   }
   $tag = "v$Version"
-  $args = @('release', 'create', $tag) + $files + @('--repo', $GitHubRepo, '--title', "TidyAssistant $tag", '--notes', $Notes)
+  $tmpBody = Join-Path ([IO.Path]::GetTempPath()) "tidy_release_notes_${Version}.md"
+  [IO.File]::WriteAllText($tmpBody, $ReleaseBody + "`n", $enc)
+  $args = @('release', 'create', $tag) + $files + @('--repo', $GitHubRepo, '--title', "TidyAssistant $tag", '--notes-file', $tmpBody)
   if ($Channel -eq 'beta') { $args += '--prerelease' }
   Write-Host "正在上传 Release $tag 到 GitHub ($GitHubRepo)…" -ForegroundColor Cyan
   try {
     & $gh @args
     if ($LASTEXITCODE -ne 0) { throw "gh release create 失败（退出码 $LASTEXITCODE）" }
   } finally {
+    if (Test-Path -LiteralPath $tmpBody) {
+      Remove-Item -LiteralPath $tmpBody -Force -ErrorAction SilentlyContinue
+    }
     if ($tmpAsciiPort -and (Test-Path -LiteralPath $tmpAsciiPort)) {
       Remove-Item -LiteralPath $tmpAsciiPort -Force -ErrorAction SilentlyContinue
     }
