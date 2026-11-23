@@ -414,7 +414,7 @@
       toBottom.classList.remove('on');
       /* 输入框的「忙」跟着可见会话走：后台会话在跑不该锁住这里，
          可见会话在跑就得能停 —— 停止按钮停的永远是看得见的这一条。 */
-      composer.setBusy(!!state.running, false);
+      composer.setBusy(!!state.running, !!(state.running && state.token && state.token.stopped));
       requestAnimationFrame(function () { paintActiveTurn(); });
       /* 可见会话变了，「运行中」高亮与「这是你正在看的那个」都得跟着变 */
       notifyBusy();
@@ -634,14 +634,24 @@
            （输入框的忙态跟着可见会话走），万一按到也只作用于可见的那个，
            绝不能顺手把别人的任务停掉。 */
         const pane = activePane;
-        if (!pane || !pane.state.running) return;
+        if (!pane) return;
+        /* 若正在播收尾打字动画，一并立刻落定，不让光标继续晃 */
+        if (typeof pane._cancelStream === 'function') {
+          try { pane._cancelStream(); } catch (e) { /* 忽略 */ }
+        }
+        if (!pane.state.running) return;
         const st = pane.state;
         st.token.stopped = true;
+        /* 先把按钮切到「正在停止」并即时改写过程行文案，再触发 onStop：
+           这样即使 onStop 同步收尾把按钮置回 idle，也不会被后面的 setBusy(true,true) 反手锁死。 */
+        composer.setBusy(true, true);
+        if (pane.current && pane.current.pg) {
+          pane.current.pg.setRunning(true, T('正在停止…', 'Stopping…'));
+        }
         /* 旗标只让环路在下一步前收手；在飞的这次请求要靠 onStop 立刻结束，
-           Rust 侧 ai_cancel 再去断连接——两边都做，才不用等接口自己超时。 */
+           Rust 侧 ai_cancel 再去直接关闭 WinHTTP 句柄断连——两边都做，毫秒级停下。 */
         try { if (typeof st.token.onStop === 'function') st.token.onStop(); } catch (e) { /* 收尾失败也要停 */ }
         try { if (window.API && window.API.aiCancel) window.API.aiCancel(); } catch (e) { /* 断连失败不影响界面 */ }
-        composer.setBusy(true, true);
       },
       onThinkingChange: (v) => {
         /* 强度是全局偏好：每个 pane 的 state 都要跟上。
@@ -689,16 +699,29 @@
 
     function setMode(k) {
       if (!proposals) return;
-      const p = Object.assign({}, proposals.getPolicy(), { mode: k });
+      const cur = proposals.getPolicy();
+      const prev = cur ? cur.mode : 'off';
+      const p = Object.assign({}, cur, { mode: k });
       proposals.setPolicy(p);
       rememberUi({ agent: p });
       paintFoot();
-      if (k === 'full') {
-        addNotice(T('「放手」已打开：能撤销的动作直接执行，永久删除仍要输入确认词。',
-          'Full auto on: reversible actions run at once; permanent deletes still need the word.'), 'warn');
-      } else if (k !== 'off') {
-        addNotice(T('已允许 AI 动手（' + (MODE_LABEL[k] || MODE_LABEL.off)[0] + '）。每个动作都会先变成一张卡片。',
-          'AI is allowed to act (' + k + '). Every action arrives as a card first.'), 'info');
+      if (prev === k) return;
+      /* 切权限档位只是偏好变更，绝不能调 startAnswer 往对话流里插一条「思考中」气泡；
+         底栏已常驻显示当前档位，这里用轻提示确认即可。 */
+      if (UIx && typeof UIx.toast === 'function') {
+        if (k === 'full') {
+          UIx.toast(T('「放手」已打开：回收站级动作自动执行，永久删除仍需确认词',
+            'Full auto on: reversible actions run automatically; permanent deletes still need confirmation'), 'warn', 3200);
+        } else if (k === 'auto') {
+          UIx.toast(T('已切到「自动」：可撤销动作直接执行，3 秒内可停',
+            'Switched to Auto: reversible actions run automatically with 3s undo window'), 'info', 2600);
+        } else if (k === 'confirm') {
+          UIx.toast(T('已切到「确认」：每个动作先变成卡片，点确认后才执行',
+            'Switched to Confirm: every action arrives as a card for approval'), 'info', 2600);
+        } else {
+          UIx.toast(T('已切到「只读」：仅查证不修改文件',
+            'Switched to Read-only: inspect only, no file changes'), 'info', 2200);
+        }
       }
     }
 
@@ -1480,12 +1503,14 @@
         if (finished) return;
         finished = true;
         if (timer) { cancelAnimationFrame(timer); timer = null; }
+        if (pane && pane._cancelStream === finish) pane._cancelStream = null;
         body.classList.remove('ai-streaming');
         body.removeEventListener('click', finish);
         paintAnswer(body, str);
         scrollEnd(false, pane);
         if (onDone) onDone();
       };
+      if (pane) pane._cancelStream = finish;
 
       body.addEventListener('click', finish);
 
@@ -1817,20 +1842,25 @@
     function addNotice(message, level, pane, opts) {
       const tgt = pane || activePane;
       if (!tgt) return;
-      let c = tgt.current || null;
-      if (!c) c = startAnswer(null, tgt);
-      if (!c) return;
+      const c = tgt.current || null;
       const transient = !!(opts && opts.transient);
-      if (transient) {
-        if (c.extra && c.extra.children) {
+      if (c && c.extra) {
+        if (transient && c.extra.children) {
           Array.from(c.extra.children).forEach((ch) => {
             if (ch && ch.classList && ch.classList.contains('transient')) ch.remove();
           });
         }
+        c.extra.appendChild(h('div', {
+          class: 'ai-notice ' + (level || 'info') + (transient ? ' transient' : '')
+        }, message));
+      } else {
+        /* 没有进行中的回答时绝不能调用 startAnswer：否则会凭空造出一个永久转圈的「正在思考」气泡，
+           且因为 state.running=false 导致用户点不动停止按钮。改为直接落一条轻量提示行。 */
+        if (isVisible(tgt)) setEmpty(false);
+        tgt.msgs.appendChild(h('div', {
+          class: 'ai-notice ai-sys-notice ' + (level || 'info')
+        }, message));
       }
-      c.extra.appendChild(h('div', {
-        class: 'ai-notice ' + (level || 'info') + (transient ? ' transient' : '')
-      }, message));
       scrollEnd(false, tgt);
     }
 
@@ -1935,13 +1965,57 @@
       /* 继续不是新问题：用户那条消息已经在断点里，再插一条会重复 */
       if (!resume) addUser(q ? shown : shown, pane);
 
-      st.token = { stopped: false };
+      /* 早在 AIStore.load / ensureGuard 之前就装好可抢占的停止钩子：
+         如果用户在进 agent.run 之前那几十毫秒就点了停止，也能立刻收尾，绝不发出后续网络请求。 */
+      const earlyWaiters = [];
+      st.token = {
+        stopped: false,
+        onStop: () => {
+          st.token.stopped = true;
+          earlyWaiters.splice(0).forEach((fn) => { try { fn(); } catch (e) { /* 忽略 */ } });
+        }
+      };
+      const raceEarly = (p) => {
+        if (st.token.stopped) return Promise.resolve(null);
+        return new Promise((resolve, reject) => {
+          const onAbort = () => resolve(null);
+          const cleanup = () => {
+            const idx = earlyWaiters.indexOf(onAbort);
+            if (idx >= 0) earlyWaiters.splice(idx, 1);
+          };
+          earlyWaiters.push(onAbort);
+          Promise.resolve(p).then(
+            (v) => { cleanup(); resolve(v); },
+            (err) => { cleanup(); reject(err); }
+          );
+        });
+      };
+      const finishStoppedEarly = () => {
+        const stoppedRes = {
+          ok: false,
+          stopped: true,
+          interrupted: true,
+          answer: T('已停止。', 'Stopped.'),
+          evidence: [],
+          suggest: [],
+          followUps: [],
+          trace: []
+        };
+        finishAnswer(stoppedRes, pane);
+        st.running = false;
+        if (isVisible(pane)) composer.setBusy(false, false);
+        st.lastResult = stoppedRes;
+        notifyBusy();
+        releaseFlight();
+      };
       /* 忙态只锁得住看得见的那个会话：后台会话在跑不该让当前输入框发不出话 */
       if (isVisible(pane)) composer.setBusy(true, false);
 
-      const settings = await AIStore.load();
+      const settings = await raceEarly(AIStore.load());
+      if (st.token.stopped) { finishStoppedEarly(); return; }
       applyModels(settings, pane);
-      try { await ensureGuard(); } catch (e) { /* 闸门没配好也不挡住只读问答 */ }
+      try { await raceEarly(ensureGuard()); } catch (e) { /* 闸门没配好也不挡住只读问答 */ }
+      if (st.token.stopped) { finishStoppedEarly(); return; }
       if (!AIStore.isConfigured(settings)) {
         st.running = false;
         if (isVisible(pane)) composer.setBusy(false, false);
@@ -2066,6 +2140,8 @@
           token: st.token,
           resume: resume,
           onEvent: (ev) => {
+            /* 点了停止后忽略滞后到达的流式事件，避免把「正在停止…」重新覆写成「正在推理」 */
+            if (st.token && st.token.stopped) return;
             /* 过程行一律写这一轮自己的 pane：切走之后 current 可能已经指向
                用户新会话里的另一轮，靠它落笔就把 A 的过程写进 B 了 */
             const c = pane.current;
@@ -2118,12 +2194,7 @@
          用量行才能说清「思考预算用了多少 / 一共给了多少」 */
       if (res && !res.policy) res.policy = policy2;
       finishAnswer(res, pane);
-      st.running = false;
-      if (isVisible(pane)) composer.setBusy(false, false);
       st.lastResult = res;
-      /* 收尾立刻同步一次运行态：左栏的「运行中」标记要跟着消失，
-         不然它会一直挂着，用户以为还在跑 */
-      notifyBusy();
       if (res.usage) {
         st.usedTokens = (res.usage.prompt_tokens || 0) + (res.usage.completion_tokens || 0);
         /* 底栏的用量环只反映看得见的会话：后台会话跑完不该把用户眼前这个圈跳一下 */
@@ -2151,6 +2222,7 @@
         status: res.status || ''
       });
       if (st.history.length > 50) st.history = st.history.slice(-50);
+      let saveP = null;
       if (st.session) {
         st.session.facts = st.facts || [];
         st.session.messages.push({ role: 'user', content: q, at: Date.now() });
@@ -2184,7 +2256,9 @@
           } : null
         });
         if (!st.session.title || st.session.title === '新会话') st.session.title = q.slice(0, 30);
-        try { await AIStore.saveSession(st.session); } catch (e) { /* 落盘失败不打断对话 */ }
+        try {
+          saveP = Promise.resolve(AIStore.saveSession(st.session)).catch(() => {});
+        } catch (e) { /* 落盘失败不打断对话 */ }
         /* 记住「正在聊的这个会话」：下次进 AI 页直接接着聊，
            而不是每次都开一个空白新会话。后台会话跑完不该改这条记忆——
            用户此刻正在看的是另一个会话。 */
@@ -2208,10 +2282,13 @@
         exhausted: !!res.exhausted,
         stopped: !!res.stopped
       });
-      /* 这一轮彻底收尾：让出单飞位，队列里排着的下一条这时才起跑。
-         放在最末而不是 finishAnswer 里，是因为调用方还要读 res 落盘：
-         提前出队会让下一轮立刻改写 st.lastResult / st.session。 */
+      /* 同步解除 running 与单飞位：避免「按钮已变回发送、inFlight 却还在等落盘」导致用户立刻再发被静默吞掉 */
+      st.running = false;
+      if (isVisible(pane)) composer.setBusy(false, false);
       releaseFlight();
+      if (saveP) {
+        try { await saveP; } catch (e) { /* 落盘失败不打断对话 */ }
+      }
     }
 
     /* 重试：payload 里冻着「当初点发送那一刻」的模型名，
@@ -2812,6 +2889,12 @@
         inFlight = null;
         queue.length = 0;
         panes.forEach(function (p) {
+          if (typeof p._cancelStream === 'function') {
+            try { p._cancelStream(); } catch (e) { /* 忽略 */ }
+          }
+          if (p.state && p.state.token && typeof p.state.token.onStop === 'function' && p.state.running) {
+            try { p.state.token.onStop(); } catch (e) { /* 忽略 */ }
+          }
           p.state.running = false;
           p.current = null;
           if (p.msgs.parentNode) p.msgs.parentNode.removeChild(p.msgs);

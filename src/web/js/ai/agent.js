@@ -1339,6 +1339,7 @@
         const sentAt = Date.now();
         let res;
         try {
+          if (stop && stop.isStopped()) throw abortError();
           const sent = transport({
             url: curEndpoint || '',
             headers: curKey ? { Authorization: 'Bearer ' + curKey } : {},
@@ -1348,7 +1349,7 @@
           });
           /* 取消后后端仍会把这次请求跑完再报错，挂个空 catch 免得变成未处理拒绝 */
           if (sent && typeof sent.catch === 'function') sent.catch(() => {});
-          /* 逻辑取消：不等网络，立即收手（Rust 侧另有旗标去断掉连接） */
+          /* 逻辑取消：不等网络，立即收手（Rust 侧另有 WinHTTP 句柄强制关闭） */
           res = await (stop ? stop.race(sent) : sent);
         } catch (e) {
           /* 用户点了停止：不能当成接口超时去放宽重试 */
@@ -1436,7 +1437,9 @@
                 message: '接口暂时不可用（HTTP ' + res.status + '），' + Math.round(wait / 1000) + ' 秒后自动重试'
               });
             }
-            await new Promise((r) => setTimeout(r, wait));
+            await (stop && stop.sleep
+              ? stop.sleep(wait)
+              : new Promise((r) => setTimeout(r, wait)));
             if (stop && stop.isStopped()) throw abortError();
             continue;
           }
@@ -1800,20 +1803,49 @@
         }
       };
 
-      /* 停止：`token.stopped` 只是旗标，真正让在飞请求立刻结束的是这里的 race。
-         Rust 侧还有 ai_cancel 去断掉连接，两边都不能省：
-         旗标管界面，断连管不把 token 白花完。 */
+      /* 停止：`token.stopped` 只是旗标，真正让在飞请求与退避等待立刻结束的是这里的 race / sleep。
+         Rust 侧还有 ai_cancel 直接关闭 WinHTTP 请求句柄，两边都不能省：
+         旗标与 race 管界面 0ms 收尾，断连管不把 token 白花完。 */
       const waiters = [];
       const stop = {
         isStopped: () => !!token.stopped,
-        race: (p) => new Promise((resolve, reject) => {
-          waiters.push(reject);
-          Promise.resolve(p).then(resolve, reject);
-        })
+        race: (p) => {
+          if (token.stopped) return Promise.reject(abortError());
+          return new Promise((resolve, reject) => {
+            const onAbort = () => reject(abortError());
+            const cleanup = () => {
+              const idx = waiters.indexOf(onAbort);
+              if (idx >= 0) waiters.splice(idx, 1);
+            };
+            waiters.push(onAbort);
+            Promise.resolve(p).then(
+              (v) => { cleanup(); resolve(v); },
+              (err) => { cleanup(); reject(err); }
+            );
+          });
+        },
+        sleep: (ms) => {
+          if (token.stopped) return Promise.reject(abortError());
+          return new Promise((resolve, reject) => {
+            let timer = null;
+            const onAbort = () => {
+              if (timer !== null) { clearTimeout(timer); timer = null; }
+              reject(abortError());
+            };
+            waiters.push(onAbort);
+            timer = setTimeout(() => {
+              timer = null;
+              const idx = waiters.indexOf(onAbort);
+              if (idx >= 0) waiters.splice(idx, 1);
+              if (token.stopped) reject(abortError());
+              else resolve();
+            }, ms);
+          });
+        }
       };
       token.onStop = () => {
         token.stopped = true;
-        waiters.splice(0).forEach((fn) => fn(abortError()));
+        waiters.splice(0).forEach((fn) => { try { fn(); } catch (e) { /* 忽略单个取消回调异常 */ } });
       };
       if (token.stopped) token.onStop();
 
@@ -2153,7 +2185,10 @@
           try {
             const runner = tools[call.tool];
             if (!runner) throw new Error('工具不存在：' + call.tool);
-            result = await stop.race(runner.run(args));
+            /* 取消后底层工具可能稍后才拒绝，挂空 catch 防止产生未处理的 Promise 拒绝 */
+            const toolPromise = Promise.resolve().then(() => runner.run(args));
+            toolPromise.catch(() => {});
+            result = await stop.race(toolPromise);
           } catch (e) {
             if ((e && e.code === 'aborted') || stop.isStopped()) return stoppedResult();
             ok = false;

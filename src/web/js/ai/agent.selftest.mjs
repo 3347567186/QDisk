@@ -2016,6 +2016,66 @@ for (const c of CASES) {
   results.push({ id: 'G68', group: '开发者', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: res.usage ? res.usage.steps : 0 });
 }
 
+/* G69 停止/取消对抗测试：503 退避睡眠毫秒级唤醒、预置停止零请求、工具在取消后延迟抛错无未处理拒绝 */
+{
+  const bad = [];
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled += 1; };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    // 1) 503 退避等待（原本 setTimeout 2400ms 无法打断）必须在 onStop 后 < 200ms 立刻退出
+    const token1 = { stopped: false };
+    const agent1 = createAgent({
+      transport: async () => ({ status: 503, body: 'upstream busy' }),
+      tools,
+      prompt,
+      settings
+    });
+    const t0 = Date.now();
+    setTimeout(() => { if (typeof token1.onStop === 'function') token1.onStop(); }, 35);
+    const r1 = await agent1.run({ userText: '看看下载目录', ctx: { page: 'ai', dir: 'D:\\Downloads' }, token: token1 });
+    const dt1 = Date.now() - t0;
+    if (!r1.stopped || r1.ok) bad.push('503 退避期间停止未返回 stopped 结果');
+    if (dt1 > 400) bad.push('503 退避期间停止过慢（未打断 sleep）：' + dt1 + 'ms');
+
+    // 2) 预置已停止 token：零网络请求，立刻返回 stopped
+    let calls2 = 0;
+    const token2 = { stopped: true };
+    const agent2 = createAgent({
+      transport: async () => { calls2 += 1; return { status: 200, body: '{}' }; },
+      tools,
+      prompt,
+      settings
+    });
+    const r2 = await agent2.run({ userText: '看看下载目录', ctx: { page: 'ai' }, token: token2 });
+    if (!r2.stopped || calls2 !== 0) bad.push('预置 stopped token 仍发起了请求：calls=' + calls2);
+
+    // 3) 工具运行中取消，底层工具稍后才 reject：不得触发 unhandledRejection
+    const token3 = { stopped: false };
+    const slowTools = Object.assign({}, tools, {
+      list_dir: Object.assign({}, tools.list_dir, {
+        run: () => new Promise((_, rej) => {
+          setTimeout(() => rej(new Error('late tool failure after stop')), 30);
+        })
+      })
+    });
+    const agent3 = createAgent({
+      transport: scripted([toolStep('list_dir', { dir: 'D:\\Downloads' })]),
+      tools: slowTools,
+      prompt,
+      settings
+    });
+    setTimeout(() => { if (typeof token3.onStop === 'function') token3.onStop(); }, 10);
+    const r3 = await agent3.run({ userText: '看看下载目录', ctx: { page: 'ai', dir: 'D:\\Downloads' }, token: token3 });
+    await new Promise((r) => setTimeout(r, 60));
+    if (!r3.stopped) bad.push('工具执行中停止未返回 stopped');
+    if (unhandled > 0) bad.push('工具取消后滞后 reject 产生未处理 Promise 拒绝：' + unhandled);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  results.push({ id: 'G69', group: '停止响应', pass: bad.length === 0, why: bad.join('；'), tools: '-', steps: 0 });
+}
+
 const passCount = results.filter((r) => r.pass).length;
 const seqOk = results.filter((r) => !/工具序列/.test(r.why)).length;
 

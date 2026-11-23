@@ -79,6 +79,14 @@ class FakeElement extends FakeNode {
   remove() {
     if (this.parent) this.parent.removeChild(this);
   }
+  contains(node) {
+    let cur = node;
+    while (cur) {
+      if (cur === this) return true;
+      cur = cur.parent || cur.parentNode || null;
+    }
+    return false;
+  }
   replaceChildren(...nodes) {
     this.children = nodes;
     nodes.forEach(n => { if (n) n.parent = this; });
@@ -144,6 +152,13 @@ class FakeElement extends FakeNode {
   }
   setAttribute(k, v) { this.attributes[k] = v; if (k === 'id') this.id = v; }
   getAttribute(k) { return this.attributes[k]; }
+  hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attributes, k); }
+  toggleAttribute(k, force) {
+    const on = force === undefined ? !this.hasAttribute(k) : !!force;
+    if (on) this.setAttribute(k, '');
+    else this.removeAttribute(k);
+    return on;
+  }
   removeAttribute(k) { delete this.attributes[k]; }
   get textContent() { return this._textContent; }
   set textContent(v) { this._textContent = String(v); this.children = []; }
@@ -1586,5 +1601,182 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.updaterInstall = origInstall;
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子、外壳竞态与在线更新全链路校验通过）`);
+/* ==================== 回归 13：AI 切换权限模式不进虚假思考态 + 对话暂停即时生效与紧接重发 ==================== */
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const rootAi = new FakeElement('div');
+  const origCfgGetAi = sandbox.API.configGet;
+  const origStore = sandbox.API.aiStore;
+  const origHttp = sandbox.API.aiHttp;
+  const origHttpStream = sandbox.API.aiHttpStream;
+  const origCancel = sandbox.API.aiCancel;
+
+  const storeMem = new Map();
+  let cancelCalls = 0;
+  let httpCalls = 0;
+  let httpMode = 'hang';
+
+  sandbox.API.configGet = async () => ({
+    ai: {
+      enabled: true,
+      endpoint: 'http://127.0.0.1:11434/v1/chat/completions',
+      key: 'sk-selftest',
+      model: 'test-model',
+      models: ['test-model']
+    }
+  });
+  sandbox.API.aiStore = async (op, name, content) => {
+    if (op === 'read') return storeMem.has(name) ? storeMem.get(name) : null;
+    if (op === 'write') { storeMem.set(name, String(content || '')); return true; }
+    if (op === 'list') return Array.from(storeMem.keys()).filter((k) => k.startsWith('session_'));
+    if (op === 'delete') { storeMem.delete(name); return true; }
+    return null;
+  };
+  sandbox.API.aiCancel = async () => { cancelCalls += 1; return true; };
+  sandbox.API.aiHttpStream = null;
+  sandbox.API.aiHttp = async () => {
+    httpCalls += 1;
+    if (httpMode === 'hang') {
+      return new Promise(() => {});
+    }
+    return {
+      status: 200,
+      body: JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ answer: '第二轮正常回答。' }) } }],
+        usage: { prompt_tokens: 100, completion_tokens: 20 }
+      })
+    };
+  };
+
+  const retAi = await sandbox.Pages.ai.mount(rootAi);
+  if (sandbox.AIStore && sandbox.AIStore.load) await sandbox.AIStore.load(true);
+  await new Promise((r) => setTimeout(r, 40));
+
+  // 1) 打开「动手档位」菜单（只读/确认/自动/放手）并依次切换 -> 绝不能凭空生成任何「思考中」气泡或转圈
+  const modeBtn = findNodes(rootAi, (n) => n.classList && n.classList.contains('dac-agent-mode'))[0];
+  if (!modeBtn) {
+    console.error('[AI 权限切换回归] 未找到权限档位按钮 .dac-agent-mode');
+    process.exit(1);
+  }
+  const allDocNodes = () => [rootAi, sandbox.document.body];
+  const findAll = (pred) => allDocNodes().flatMap((r) => findNodes(r, pred));
+
+  clickBtn(modeBtn);
+  const autoRow = findAll((n) => n.classList && n.classList.contains('dac-perm-row') && n.dataset && n.dataset.mode === 'auto')[0];
+  const fullRow = findAll((n) => n.classList && n.classList.contains('dac-perm-row') && n.dataset && n.dataset.mode === 'full')[0];
+  if (!autoRow || !fullRow) {
+    console.error('[AI 权限切换回归] 权限菜单缺少「自动」或「放手」选项');
+    process.exit(1);
+  }
+  clickBtn(autoRow);
+  await new Promise((r) => setTimeout(r, 20));
+  const runningAfterAuto = findNodes(rootAi, (n) => n.classList && n.classList.contains('pg') && n.hasAttribute && n.hasAttribute('data-running'));
+  const botBubblesAfterAuto = findNodes(rootAi, (n) => n.classList && n.classList.contains('ai-msg') && n.classList.contains('bot'));
+  if (runningAfterAuto.length !== 0 || botBubblesAfterAuto.length !== 0) {
+    console.error(`[AI 权限切换回归] 切换到「自动」后误触发了虚假思考气泡: running=${runningAfterAuto.length}, bots=${botBubblesAfterAuto.length}`);
+    process.exit(1);
+  }
+
+  clickBtn(modeBtn);
+  clickBtn(fullRow);
+  await new Promise((r) => setTimeout(r, 20));
+  const runningAfterFull = findNodes(rootAi, (n) => n.classList && n.classList.contains('pg') && n.hasAttribute && n.hasAttribute('data-running'));
+  const botBubblesAfterFull = findNodes(rootAi, (n) => n.classList && n.classList.contains('ai-msg') && n.classList.contains('bot'));
+  if (runningAfterFull.length !== 0 || botBubblesAfterFull.length !== 0) {
+    console.error(`[AI 权限切换回归] 切换到「放手」后误触发了虚假思考气泡: running=${runningAfterFull.length}, bots=${botBubblesAfterFull.length}`);
+    process.exit(1);
+  }
+
+  // 验证 Escape 与点菜单外侧均可正确收起 modeMenu（之前遗漏了 modeMorph）
+  clickBtn(modeBtn);
+  const modeMenuEl = autoRow.parentNode && autoRow.parentNode.parentNode && autoRow.parentNode.parentNode.parentNode && autoRow.parentNode.parentNode.parentNode.parentNode;
+  if (!modeMenuEl || modeMenuEl.hidden) {
+    console.error('[AI 权限切换回归] 点击按钮后 modeMenu 未打开');
+    process.exit(1);
+  }
+  const fireDoc = (type, extra) => {
+    const ev = Object.assign(new sandbox.Event(type), { preventDefault() {}, stopPropagation() {} }, extra || {});
+    (docListeners.get(type) || []).slice().forEach((fn) => fn(ev));
+  };
+  fireDoc('keydown', { key: 'Escape' });
+  if (modeBtn.getAttribute('aria-expanded') !== 'false') {
+    console.error('[AI 权限切换回归] 按 Escape 未关闭权限档位菜单');
+    process.exit(1);
+  }
+  clickBtn(modeBtn);
+  if (modeBtn.getAttribute('aria-expanded') !== 'true') {
+    console.error('[AI 权限切换回归] 二次打开权限档位菜单失败');
+    process.exit(1);
+  }
+  fireDoc('mousedown', { target: sandbox.document.body });
+  if (modeBtn.getAttribute('aria-expanded') !== 'false') {
+    console.error('[AI 权限切换回归] 点击外部未关闭权限档位菜单');
+    process.exit(1);
+  }
+  await new Promise((r) => setTimeout(r, 170));
+  if (!modeMenuEl.hidden) {
+    console.error('[AI 权限切换回归] 淡出后 modeMenu 仍未 hidden');
+    process.exit(1);
+  }
+
+  // 2) 发起一轮挂起的 AI 对话 -> 点击停止按钮 -> 必须在 < 100ms 内停住、调用 aiCancel、清除转圈并恢复发送态
+  const inputEl = findNodes(rootAi, (n) => n.classList && n.classList.contains('dac-input'))[0];
+  const sendBtn = findNodes(rootAi, (n) => n.classList && n.classList.contains('dac-send'))[0];
+  if (!inputEl || !sendBtn) {
+    console.error('[AI 停止回归] 未找到输入框或发送/停止按钮');
+    process.exit(1);
+  }
+  inputEl.value = '帮我看看下载目录';
+  inputEl.dispatchEvent(new sandbox.Event('input'));
+  clickBtn(sendBtn);
+  await new Promise((r) => setTimeout(r, 35));
+  if (sendBtn.getAttribute('data-state') !== 'stop') {
+    console.error(`[AI 停止回归] 对话进行中按钮未切到 stop 态: state=${sendBtn.getAttribute('data-state')}`);
+    process.exit(1);
+  }
+  const stopT0 = Date.now();
+  clickBtn(sendBtn);
+  await new Promise((r) => setTimeout(r, 45));
+  const stopDt = Date.now() - stopT0;
+  const runningAfterStop = findNodes(rootAi, (n) => n.classList && n.classList.contains('pg') && n.hasAttribute && n.hasAttribute('data-running'));
+  if (cancelCalls < 1 || runningAfterStop.length !== 0 || sendBtn.getAttribute('data-state') === 'stop' || !txt(rootAi).includes('已停止')) {
+    console.error(`[AI 停止回归] 点击停止后未能即时落定: cancelCalls=${cancelCalls}, running=${runningAfterStop.length}, state=${sendBtn.getAttribute('data-state')}, dt=${stopDt}ms`);
+    process.exit(1);
+  }
+
+  // 3) 停止后立刻发送新消息：不得被残留的 inFlight 锁静默吞掉
+  httpMode = 'fast';
+  const callsBefore = httpCalls;
+  inputEl.value = '第二轮验证';
+  inputEl.dispatchEvent(new sandbox.Event('input'));
+  clickBtn(sendBtn);
+  await new Promise((r) => setTimeout(r, 60));
+  if (httpCalls <= callsBefore || !txt(rootAi).includes('第二轮正常回答')) {
+    console.error(`[AI 停止回归] 停止后紧接发起新提问被吞或失败: httpCalls=${httpCalls - callsBefore}`);
+    process.exit(1);
+  }
+
+  if (typeof retAi === 'function') retAi();
+  sandbox.API.configGet = origCfgGetAi;
+  if (sandbox.AIStore && sandbox.AIStore.load) await sandbox.AIStore.load(true);
+  sandbox.API.aiStore = origStore;
+  sandbox.API.aiHttp = origHttp;
+  sandbox.API.aiHttpStream = origHttpStream;
+  sandbox.API.aiCancel = origCancel;
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子、外壳竞态、在线更新与 AI 权限切换/即时停止全链路校验通过）`);
 process.exit(0);

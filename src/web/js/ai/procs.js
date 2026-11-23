@@ -4,7 +4,7 @@
      ▸ 执行 3 次思考，调用 4 次工具，记录 2 条
        ✳ 思考   · 先看这台机器上有几块盘…
        ▸ 磁盘   · 磁盘 3 个 · 4ms
-       ▸ 空文件夹 · dir="C:\Users\十二" · depth=2
+       ▸ 空文件夹 · dir="C:\Users\demo" · depth=2
    折叠时只剩组头一行；展开后是平铺的过程行，每行 = 图标 + 类别 + 参数摘要（等宽）。
    行可点开：思考行展开原文，工具行展开结果摘要与原始返回。
 
@@ -291,10 +291,14 @@
       /* 一问一答、没有思考也没有工具的一轮：这一组本来就是空的，
          留一行「正在查证」等于给用户看一个假过程，直接收掉 */
       if (!counts.thoughts && !counts.tools) el.hidden = true;
+      if (timer) {
+        root.clearInterval(timer);
+        timer = 0;
+      }
       onAppend();
     }
 
-    const timer = root.setInterval(function () {
+    let timer = root.setInterval(function () {
       if (!running) return;
       const sec = Math.max(0, Math.round((Date.now() - started) / 1000));
       const m = Math.floor(sec / 60);
@@ -314,7 +318,10 @@
       close: function () { setOpen(false); },
       get counts() { return { thoughts: counts.thoughts, tools: counts.tools, records: counts.records }; },
       destroy: function () {
-        root.clearInterval(timer);
+        if (timer) {
+          root.clearInterval(timer);
+          timer = 0;
+        }
         if (el.parentNode) el.parentNode.removeChild(el);
       }
     };

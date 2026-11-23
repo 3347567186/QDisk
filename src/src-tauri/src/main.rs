@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1942,6 +1942,7 @@ fn http_post(
     body: &str,
     timeout_ms: u64,
     method: &str,
+    start_epoch: u64,
 ) -> Result<(u32, String), String> {
     use std::ffi::c_void;
     use std::ptr;
@@ -1952,6 +1953,10 @@ fn http_post(
         WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
     };
 
+    let cancelled = || AI_CANCEL_EPOCH.load(Ordering::SeqCst) != start_epoch;
+    if cancelled() {
+        return Err("已取消".into());
+    }
     let (secure, host, port, path) = split_url(url)?;
     let timeout = timeout_ms.clamp(1000, 120_000) as i32;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
@@ -1975,6 +1980,9 @@ fn http_post(
     };
 
     unsafe {
+        if cancelled() {
+            return Err("已取消".into());
+        }
         let session = WinHttpOpen(agent_w.as_ptr(), access, ptr::null(), ptr::null(), 0);
         if session.is_null() {
             return Err("WinHTTP 初始化失败".into());
@@ -1999,7 +2007,12 @@ fn http_post(
                 WinHttpCloseHandle(connect);
                 return Err("无法创建请求".into());
             }
+            let req_guard = AiRequestGuard::register(request);
             let inner = (|| -> Result<(u32, String), String> {
+                // 登记后立刻复核一次代次，消除 start_epoch 采样到登记之间的取消竞态
+                if cancelled() {
+                    return Err("已取消".into());
+                }
                 // GET 不带包体：有些服务端收到长度为 0 的 POST 风格包体会直接 400
                 let (body_ptr, body_len) = if is_get {
                     (ptr::null::<c_void>(), 0u32)
@@ -2016,10 +2029,22 @@ fn http_post(
                     0,
                 );
                 if ok == 0 {
+                    if cancelled() {
+                        return Err("已取消".into());
+                    }
                     return Err("请求发送失败（地址或代理不可达）".into());
                 }
+                if cancelled() {
+                    return Err("已取消".into());
+                }
                 if WinHttpReceiveResponse(request, ptr::null_mut()) == 0 {
+                    if cancelled() {
+                        return Err("已取消".into());
+                    }
                     return Err("服务器无响应".into());
+                }
+                if cancelled() {
+                    return Err("已取消".into());
                 }
                 let mut status: u32 = 0;
                 let mut len = std::mem::size_of::<u32>() as u32;
@@ -2034,12 +2059,14 @@ fn http_post(
                 let mut buf = vec![0u8; 64 * 1024];
                 let mut body_out: Vec<u8> = Vec::new();
                 loop {
-                    // 页面点了停止：不再等剩下的分片，直接把控制权还回去
-                    if AI_CANCEL.load(Ordering::SeqCst) {
+                    if cancelled() {
                         return Err("已取消".into());
                     }
                     let mut available: u32 = 0;
                     if WinHttpQueryDataAvailable(request, &mut available) == 0 {
+                        if cancelled() {
+                            return Err("已取消".into());
+                        }
                         return Err("读取响应失败".into());
                     }
                     if available == 0 {
@@ -2048,6 +2075,9 @@ fn http_post(
                     let want = available.min(buf.len() as u32);
                     let mut got: u32 = 0;
                     if WinHttpReadData(request, buf.as_mut_ptr() as *mut c_void, want, &mut got) == 0 {
+                        if cancelled() {
+                            return Err("已取消".into());
+                        }
                         return Err("读取响应失败".into());
                     }
                     if got == 0 {
@@ -2060,7 +2090,8 @@ fn http_post(
                 }
                 Ok((status, String::from_utf8_lossy(&body_out).to_string()))
             })();
-            WinHttpCloseHandle(request);
+            // 必须先释放/注销 request 句柄，再关父级 connect 句柄
+            drop(req_guard);
             WinHttpCloseHandle(connect);
             inner
         })();
@@ -2069,16 +2100,78 @@ fn http_post(
     }
 }
 
-/// AI 请求的取消旗标。页面点「停止」时置 true，正在读响应的循环
-/// 每个分片检查一次并立刻收手 —— 否则最长要等满 300 秒超时才返回。
-/// 同一时刻只会有一个 AI 请求（单窗口、单会话），所以用全局旗标就够，
-/// 不需要按请求 id 管理；新请求开始前会把它复位。
-static AI_CANCEL: AtomicBool = AtomicBool::new(false);
+/// AI 请求的取消代次（单调递增）与在飞 WinHTTP 请求句柄表。
+/// 用代次替代单个布尔旗标，避免「旧请求取消后立刻发新请求」时把旧请求的取消信号冲掉；
+/// 配合句柄表，ai_cancel() 会跨线程直接关闭在飞的 HINTERNET 请求句柄，
+/// 让阻塞在 SendRequest / ReceiveResponse / QueryDataAvailable / ReadData 的线程在 <1ms 内立刻返回。
+static AI_CANCEL_EPOCH: AtomicU64 = AtomicU64::new(0);
+#[cfg(windows)]
+static AI_REQ_SEQ: AtomicU64 = AtomicU64::new(1);
+#[cfg(windows)]
+static ACTIVE_AI_HANDLES: Mutex<Vec<(u64, usize)>> = Mutex::new(Vec::new());
 
-/// 页面主动停止：不阻塞、不等网络，下一次分片检查就退出。
+/// RAII 守卫：保证每个 WinHTTP 请求句柄被精确关闭一次（要么由 ai_cancel() 主动关闭打断阻塞，
+/// 要么在请求正常退出时由 Drop 关闭），彻底杜绝双重关闭或悬空句柄。
+#[cfg(windows)]
+struct AiRequestGuard {
+    req_id: u64,
+    handle: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+impl AiRequestGuard {
+    fn register(handle: *mut std::ffi::c_void) -> Self {
+        let req_id = AI_REQ_SEQ.fetch_add(1, Ordering::SeqCst);
+        let mut g = ACTIVE_AI_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+        g.push((req_id, handle as usize));
+        Self { req_id, handle }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for AiRequestGuard {
+    fn drop(&mut self) {
+        let still_owned = {
+            let mut g = ACTIVE_AI_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = g.iter().position(|(id, _)| *id == self.req_id) {
+                g.swap_remove(pos);
+                true
+            } else {
+                false
+            }
+        };
+        if still_owned && !self.handle.is_null() {
+            unsafe {
+                windows_sys::Win32::Networking::WinHttp::WinHttpCloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+/// 立即中止所有在飞的 AI WinHTTP 请求：在锁外关闭句柄，避免阻塞或死锁。
+#[cfg(windows)]
+fn abort_active_ai_handles() {
+    let handles: Vec<(u64, usize)> = {
+        let mut g = ACTIVE_AI_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *g)
+    };
+    for (_, raw) in handles {
+        if raw != 0 {
+            unsafe {
+                windows_sys::Win32::Networking::WinHttp::WinHttpCloseHandle(
+                    raw as *mut std::ffi::c_void,
+                );
+            }
+        }
+    }
+}
+
+/// 页面主动停止：推进取消代次并立刻关闭在飞 WinHTTP 请求句柄，毫秒级中止阻塞连接。
 #[tauri::command]
 fn ai_cancel() -> bool {
-    AI_CANCEL.store(true, Ordering::SeqCst);
+    AI_CANCEL_EPOCH.fetch_add(1, Ordering::SeqCst);
+    #[cfg(windows)]
+    abort_active_ai_handles();
     true
 }
 
@@ -2086,6 +2179,7 @@ fn ai_cancel() -> bool {
 /// 入参 {url, headers?:{k:v}, body, timeout_ms?, method?:'POST'|'GET'}，出参 {status, body, elapsed_ms}
 #[tauri::command(async)]
 fn ai_http(req: Value) -> Result<Value, String> {
+    let start_epoch = AI_CANCEL_EPOCH.load(Ordering::SeqCst);
     let url = req
         .get("url")
         .and_then(|v| v.as_str())
@@ -2129,9 +2223,7 @@ fn ai_http(req: Value) -> Result<Value, String> {
         }
     }
     let started = Instant::now();
-    // 新请求开始：上一次的「停止」不该影响这一次
-    AI_CANCEL.store(false, Ordering::SeqCst);
-    let (status, text) = http_post(&url, &headers, &body, timeout, &method)?;
+    let (status, text) = http_post(&url, &headers, &body, timeout, &method, start_epoch)?;
     Ok(json!({
         "status": status,
         "body": text,
@@ -2148,6 +2240,7 @@ fn http_post_cb(
     body: &str,
     timeout_ms: u64,
     method: &str,
+    start_epoch: u64,
     on_chunk: &mut dyn FnMut(&str),
 ) -> Result<(u32, String), String> {
     use std::ffi::c_void;
@@ -2159,6 +2252,10 @@ fn http_post_cb(
         WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
     };
 
+    let cancelled = || AI_CANCEL_EPOCH.load(Ordering::SeqCst) != start_epoch;
+    if cancelled() {
+        return Err("已取消".into());
+    }
     let (secure, host, port, path) = split_url(url)?;
     let timeout = timeout_ms.clamp(1000, 300_000) as i32;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
@@ -2181,6 +2278,9 @@ fn http_post_cb(
     };
 
     unsafe {
+        if cancelled() {
+            return Err("已取消".into());
+        }
         let session = WinHttpOpen(agent_w.as_ptr(), access, ptr::null(), ptr::null(), 0);
         if session.is_null() {
             return Err("WinHTTP 初始化失败".into());
@@ -2205,7 +2305,11 @@ fn http_post_cb(
                 WinHttpCloseHandle(connect);
                 return Err("无法创建请求".into());
             }
+            let req_guard = AiRequestGuard::register(request);
             let inner = (|| -> Result<(u32, String), String> {
+                if cancelled() {
+                    return Err("已取消".into());
+                }
                 let (body_ptr, body_len) = if is_get {
                     (ptr::null::<c_void>(), 0u32)
                 } else {
@@ -2221,10 +2325,22 @@ fn http_post_cb(
                     0,
                 );
                 if ok == 0 {
+                    if cancelled() {
+                        return Err("已取消".into());
+                    }
                     return Err("请求发送失败（地址或代理不可达）".into());
                 }
+                if cancelled() {
+                    return Err("已取消".into());
+                }
                 if WinHttpReceiveResponse(request, ptr::null_mut()) == 0 {
+                    if cancelled() {
+                        return Err("已取消".into());
+                    }
                     return Err("服务器无响应".into());
+                }
+                if cancelled() {
+                    return Err("已取消".into());
                 }
                 let mut status: u32 = 0;
                 let mut len = std::mem::size_of::<u32>() as u32;
@@ -2243,11 +2359,14 @@ fn http_post_cb(
                 let mut emitted = 0usize;
                 loop {
                     // 页面点了停止：立刻停读。已经推出去的分片页面会丢弃
-                    if AI_CANCEL.load(Ordering::SeqCst) {
+                    if cancelled() {
                         return Err("已取消".into());
                     }
                     let mut available: u32 = 0;
                     if WinHttpQueryDataAvailable(request, &mut available) == 0 {
+                        if cancelled() {
+                            return Err("已取消".into());
+                        }
                         return Err("读取响应失败".into());
                     }
                     if available == 0 {
@@ -2256,6 +2375,9 @@ fn http_post_cb(
                     let want = available.min(buf.len() as u32);
                     let mut got: u32 = 0;
                     if WinHttpReadData(request, buf.as_mut_ptr() as *mut c_void, want, &mut got) == 0 {
+                        if cancelled() {
+                            return Err("已取消".into());
+                        }
                         return Err("读取响应失败".into());
                     }
                     if got == 0 {
@@ -2271,6 +2393,9 @@ fn http_post_cb(
                         Err(e) => e.valid_up_to(),
                     };
                     if valid > 0 {
+                        if cancelled() {
+                            return Err("已取消".into());
+                        }
                         // valid 前缀一定是合法 UTF-8，from_utf8_lossy 这里不会替换任何字符
                         on_chunk(&String::from_utf8_lossy(&tail[..valid]));
                         emitted += valid;
@@ -2278,7 +2403,7 @@ fn http_post_cb(
                 }
                 Ok((status, String::from_utf8_lossy(&body_out).to_string()))
             })();
-            WinHttpCloseHandle(request);
+            drop(req_guard);
             WinHttpCloseHandle(connect);
             inner
         })();
@@ -2290,6 +2415,7 @@ fn http_post_cb(
 /// 流式对话：每读到一段就通过 Channel 推给页面，最后再回完整结果。
 #[tauri::command(async)]
 fn ai_http_stream(req: Value, on_chunk: tauri::ipc::Channel<String>) -> Result<Value, String> {
+    let start_epoch = AI_CANCEL_EPOCH.load(Ordering::SeqCst);
     let url = req
         .get("url")
         .and_then(|v| v.as_str())
@@ -2333,12 +2459,18 @@ fn ai_http_stream(req: Value, on_chunk: tauri::ipc::Channel<String>) -> Result<V
         }
     }
     let started = Instant::now();
-    // 新请求开始：上一次的「停止」不该影响这一次
-    AI_CANCEL.store(false, Ordering::SeqCst);
-    let (status, text) = http_post_cb(&url, &headers, &body, timeout, &method, &mut |piece| {
-        // 页面关掉或切走的瞬间送不出去，属于正常情况，不打断读取
-        let _ = on_chunk.send(piece.to_string());
-    })?;
+    let (status, text) = http_post_cb(
+        &url,
+        &headers,
+        &body,
+        timeout,
+        &method,
+        start_epoch,
+        &mut |piece| {
+            // 页面关掉或切走的瞬间送不出去，属于正常情况，不打断读取
+            let _ = on_chunk.send(piece.to_string());
+        },
+    )?;
     Ok(json!({
         "status": status,
         "body": text,
@@ -2924,6 +3056,89 @@ mod shell_tests {
         assert_eq!(caps["archive"]["schemaVersion"], json!(1));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ai_cancel_aborts_blocked_winhttp_in_milliseconds() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Barrier};
+
+        // 场景 1：服务端接受连接后刻意沉默 10 秒（模拟推理模型卡在 WinHttpReceiveResponse），
+        // ai_cancel() 必须跨线程关闭请求句柄，在 < 600ms 内返回 Err("已取消")，绝不等 10s/30s 超时。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(Barrier::new(2));
+        let accepted_srv = Arc::clone(&accepted);
+        let srv = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut req_buf = [0u8; 512];
+                let _ = s.read(&mut req_buf);
+                accepted_srv.wait();
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{}/v1/chat/completions", addr.port());
+        let start_epoch = AI_CANCEL_EPOCH.load(Ordering::SeqCst);
+        let url_clone = url.clone();
+        let worker = std::thread::spawn(move || {
+            let mut chunks = 0usize;
+            http_post_cb(
+                &url_clone,
+                &[("Content-Type".into(), "application/json".into())],
+                "{}",
+                30_000,
+                "POST",
+                start_epoch,
+                &mut |_| {
+                    chunks += 1;
+                },
+            )
+        });
+
+        // 等服务端真正收到请求、客户端已经阻塞在 WinHttpReceiveResponse
+        accepted.wait();
+        std::thread::sleep(Duration::from_millis(30));
+        let cancel_at = Instant::now();
+        assert!(ai_cancel());
+        let res = worker.join().expect("worker 线程不应 panic");
+        let abort_ms = cancel_at.elapsed().as_millis();
+        assert_eq!(res, Err("已取消".to_string()), "阻塞请求应返回已取消");
+        assert!(
+            abort_ms < 600,
+            "ai_cancel 应在毫秒级打断阻塞 WinHTTP，实际耗时 {abort_ms}ms"
+        );
+        {
+            let g = ACTIVE_AI_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(g.is_empty(), "取消并退出后活动句柄表必须为空，无泄漏");
+        }
+        let _ = srv.join();
+
+        // 场景 2：上一轮取消后立刻发起新请求，新代次必须正常收到 HTTP 200，不受旧取消影响
+        let listener2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let srv2 = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener2.accept() {
+                let mut req_buf = [0u8; 512];
+                let _ = s.read(&mut req_buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                let _ = s.flush();
+            }
+        });
+        let url2 = format!("http://127.0.0.1:{}/v1/chat/completions", addr2.port());
+        let next_epoch = AI_CANCEL_EPOCH.load(Ordering::SeqCst);
+        let ok_res = http_post(
+            &url2,
+            &[("Content-Type".into(), "application/json".into())],
+            "{}",
+            5_000,
+            "POST",
+            next_epoch,
+        );
+        let _ = srv2.join();
+        assert_eq!(ok_res, Ok((200, "ok".to_string())));
     }
 }
 

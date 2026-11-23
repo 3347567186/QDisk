@@ -593,7 +593,11 @@
         ck.appendChild(icon('check', 10));
         ck.hidden = true;
         row.appendChild(ck);
-        row.addEventListener('click', function () { pickModel(m.id); });
+        row.addEventListener('click', function (e) {
+          if (e && e.preventDefault) e.preventDefault();
+          if (e && e.stopPropagation) e.stopPropagation();
+          pickModel(m.id);
+        });
         rowsBox.appendChild(row);
         modelRows.push(row);
       });
@@ -712,7 +716,9 @@
       row.appendChild(ic);
       row.appendChild(bodyBox);
       row.appendChild(ck);
-      row.addEventListener('click', function () {
+      row.addEventListener('click', function (e) {
+        if (e && e.preventDefault) e.preventDefault();
+        if (e && e.stopPropagation) e.stopPropagation();
         permission = opt.id;
         syncPerm();
         permMorph.hide();
@@ -796,7 +802,9 @@
       row.appendChild(ic);
       row.appendChild(bodyBox);
       row.appendChild(ck);
-      row.addEventListener('click', function () {
+      row.addEventListener('click', function (e) {
+        if (e && e.preventDefault) e.preventDefault();
+        if (e && e.stopPropagation) e.stopPropagation();
         agentMode = opt.id;
         syncMode();
         modeMorph.hide();
@@ -1250,25 +1258,28 @@
     function onDocDown(e) {
       if (modelMorph.open && !pillWrap.contains(e.target) && !modelMenu.contains(e.target)) modelMorph.hide();
       if (permMorph.open && !permWrap.contains(e.target) && !permMenu.contains(e.target)) permMorph.hide();
+      if (modeMorph.open && !modeWrap.contains(e.target) && !modeMenu.contains(e.target)) modeMorph.hide();
       if (mentionState && !field.contains(e.target)) closeMentions();
     }
     function onDocKey(e) {
       if (e.key !== 'Escape') return;
       /* 菜单开着且有筛选词时，Esc 先退回全量，再按一次才关菜单。
          这条必须在捕获阶段判：document 上的监听早于输入框自己的 keydown。 */
-      if (modelMorph.open && modelQuery) { setModelQuery(''); e.preventDefault(); return; }
-      if (modelMorph.open) { modelMorph.hide(); return; }
-      if (permMorph.open) { permMorph.hide(); return; }
+      if (modelMorph.open && modelQuery) { setModelQuery(''); if (e.preventDefault) e.preventDefault(); return; }
+      if (modelMorph.open) { modelMorph.hide(); if (e.preventDefault) e.preventDefault(); return; }
+      if (permMorph.open) { permMorph.hide(); if (e.preventDefault) e.preventDefault(); return; }
+      if (modeMorph.open) { modeMorph.hide(); if (e.preventDefault) e.preventDefault(); return; }
       if (mentionState) closeMentions();
     }
     /* 气泡是 fixed 定位，跟着页面滚会脱开触发块 —— 一滚就关掉（捕获阶段收，
        包括 .ai-scroll 这种内部滚动容器）。 */
     function onAnyScroll(e) {
-      if (!modelMorph.open && !permMorph.open) return;
+      if (!modelMorph.open && !permMorph.open && !modeMorph.open) return;
       const t = e.target;
-      if (t && t.nodeType === 1 && (modelMenu.contains(t) || permMenu.contains(t))) return;
+      if (t && t.nodeType === 1 && (modelMenu.contains(t) || permMenu.contains(t) || modeMenu.contains(t))) return;
       if (modelMorph.open) modelMorph.hide();
       if (permMorph.open) permMorph.hide();
+      if (modeMorph.open) modeMorph.hide();
     }
     root.document.addEventListener('mousedown', onDocDown, true);
     root.document.addEventListener('keydown', onDocKey, true);
@@ -1277,6 +1288,7 @@
     function onResize() {
       modelMorph.layout();
       permMorph.layout();
+      modeMorph.layout();
       effort.resize();
     }
     root.addEventListener('resize', onResize);
@@ -1406,7 +1418,7 @@
         if (modelMorph.open) modelMorph.layout();
       },
       openMenu: function () { modelMorph.show(); },
-      closeMenu: function () { modelMorph.hide(); },
+      closeMenu: function () { modelMorph.hide(); permMorph.hide(); modeMorph.hide(); },
       destroy: function () {
         root.document.removeEventListener('mousedown', onDocDown, true);
         root.document.removeEventListener('keydown', onDocKey, true);
