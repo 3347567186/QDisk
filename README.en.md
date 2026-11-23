@@ -136,3 +136,25 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Bump patch
 ---
 
 Issues & PRs welcome at [GitHub Issues](https://github.com/3347567186/QDisk/issues) · Licensed under **[MIT](LICENSE)**.
+
+---
+
+## ☕ Buy the Author a Coffee
+
+> Building and maintaining an indie open-source tool takes time and care. If **QDisk** has saved you time or reclaimed disk space, consider buying the author a coffee — every bit of support fuels future updates and polish. Thank you!
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center" width="260">
+        <img src="website/assets/sponsor/wechat.jpg" width="210" alt="WeChat Pay QR" /><br />
+        <sub><strong>WeChat Pay</strong></sub>
+      </td>
+      <td align="center" width="260">
+        <img src="website/assets/sponsor/alipay.jpg" width="210" alt="Alipay QR" /><br />
+        <sub><strong>Alipay</strong></sub>
+      </td>
+    </tr>
+  </table>
+  <p><sub>Forever free, open-source &amp; ad-free · Giving a ⭐ Star is equally appreciated!</sub></p>
+</div>

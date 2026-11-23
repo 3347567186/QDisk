@@ -5694,13 +5694,65 @@ html[data-theme="dark"] .ai-tnav-pop {
 .upd-box.warn { border-left: 3px solid var(--warn); }
 .upd-box-title { font-weight: 600; color: var(--text-1); }
 .upd-box-head { align-items: center; gap: 8px; }
-.upd-notes {
-  margin: 0; padding: 8px 10px; max-height: 180px; overflow: auto;
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-  font-family: inherit; font-size: 12.5px; line-height: 1.55;
-  white-space: pre-wrap; word-break: break-word; color: var(--text-2);
+.upd-summary {
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.upd-sha { font-size: 11px; word-break: break-all; }
+.upd-link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: var(--fs-tiny);
+  color: var(--accent);
+  cursor: pointer;
+}
+.upd-link-btn:hover:not(:disabled) { text-decoration: underline; }
+.upd-link-btn:disabled { opacity: 0.5; cursor: default; }
+.upd-log-viewer {
+  max-height: min(56vh, 420px);
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.upd-log-md {
+  font-size: var(--fs-small);
+  line-height: 1.65;
+  color: var(--text-2);
+  word-break: break-word;
+}
+.upd-log-md h1, .upd-log-md h2, .upd-log-md h3 {
+  margin: 12px 0 6px;
+  color: var(--text-1);
+  font-weight: 600;
+}
+.upd-log-md h1:first-child, .upd-log-md h2:first-child, .upd-log-md h3:first-child { margin-top: 0; }
+.upd-log-md ul, .upd-log-md ol { margin: 4px 0 8px; padding-left: 18px; }
+.upd-log-md li { margin: 3px 0; }
+.upd-log-md code {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: var(--fs-tiny);
+}
+.upd-details {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.upd-details summary { cursor: pointer; user-select: none; }
+.upd-details-body { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.upd-sha { font-size: var(--fs-tiny); word-break: break-all; }
 .upd-acts { gap: 8px; padding-top: 2px; }
 .upd-prog {
   padding: 10px 12px; border-radius: var(--radius);

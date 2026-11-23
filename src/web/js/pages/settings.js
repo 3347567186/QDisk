@@ -2224,6 +2224,119 @@
 
         const releasesPage = (st && st.releasesPage) || 'https://github.com/3347567186/QDisk/releases';
 
+        function fmtReleaseDate(raw) {
+          if (!raw) return '';
+          const m = String(raw).match(/^(\d{4}-\d{2}-\d{2})/);
+          return m ? m[1] : String(raw).slice(0, 10);
+        }
+
+        function extractReleaseSummary(rawNotes) {
+          if (!rawNotes) return '';
+          const lines = String(rawNotes).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          for (const line of lines) {
+            const clean = line
+              .replace(/^#+\s*/, '')
+              .replace(/^\d+\.\d+\.\d+[^—–-]*[—–-]+\s*/, '')
+              .replace(/^[-*]\s+/, '')
+              .replace(/\*\*([^*]+)\*\*/g, '$1')
+              .replace(/`([^`]+)`/g, '$1')
+              .trim();
+            if (clean) return clean;
+          }
+          return '';
+        }
+
+        function openReleaseNotesModal({ ver, pubDate, pkgKind, pkgSize, pkgSha, notes, isReady, stagedPath }) {
+          const rendered = (window.AIMd && typeof window.AIMd.render === 'function' && notes)
+            ? window.AIMd.render(String(notes))
+            : null;
+          const notesEl = rendered
+            ? h('div', {
+              class: 'upd-log-md',
+              html: rendered,
+              onclick: (e) => {
+                const a = e && e.target && e.target.closest ? e.target.closest('a[href]') : null;
+                if (!a) return;
+                const href = a.getAttribute('href') || '';
+                if (/^https?:\/\//i.test(href)) {
+                  e.preventDefault();
+                  openExternalUrl(href);
+                }
+              }
+            })
+            : h('div', { class: 'small muted', text: notes || T('暂无详细更新说明', 'No release notes provided') });
+
+          const metaBits = [
+            pubDate ? fmtReleaseDate(pubDate) : '',
+            pkgSize > 0 ? fmtSize(pkgSize) : '',
+            pkgKind === 'installer' ? T('安装版', 'Installer') : T('便携版', 'Portable')
+          ].filter(Boolean).join(' · ');
+
+          let notesModalHandle = null;
+          const extraActions = h('div', { class: 'row wrap', style: { gap: '8px', marginTop: '8px' } },
+            h('button', {
+              type: 'button',
+              class: 'btn ghost sm',
+              onclick: () => openExternalUrl(releasesPage)
+            }, icon('external', 13), h('span', { text: T('在 GitHub 查看', 'Open on GitHub') })),
+            isReady && stagedPath
+              ? h('button', {
+                type: 'button',
+                class: 'btn ghost sm',
+                onclick: () => reveal(stagedPath)
+              }, icon('folder', 13), h('span', { text: T('打开安装包目录', 'Show in folder') }))
+              : null,
+            hasNew && !isReady
+              ? h('button', {
+                type: 'button',
+                class: 'btn ghost sm',
+                disabled: state.updDownloading,
+                onclick: async () => {
+                  if (notesModalHandle && typeof notesModalHandle.close === 'function') notesModalHandle.close();
+                  await skipUpdateVersion(ver);
+                }
+              }, h('span', { text: T('跳过此版本', 'Skip this version') }))
+              : null
+          );
+
+          const detailsBlock = h('details', { class: 'upd-details' },
+            h('summary', { class: 'small muted', text: T('校验信息与更多操作', 'Checksum & more options') }),
+            h('div', { class: 'upd-details-body' },
+              pkgSha ? h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
+                h('span', { class: 'small muted mono upd-sha', text: 'SHA-256: ' + pkgSha }),
+                h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  onclick: () => UI.copy(pkgSha, T('已复制 SHA-256', 'SHA-256 copied'))
+                }, h('span', { text: T('复制', 'Copy') }))
+              ) : null,
+              extraActions
+            )
+          );
+
+          notesModalHandle = modal({
+            title: T(`v${ver} 更新日志`, `v${ver} Release Notes`),
+            wide: true,
+            body: h('div', { class: 'stack' },
+              metaBits ? h('div', { class: 'small muted', text: metaBits }) : null,
+              h('div', { class: 'upd-log-viewer' }, notesEl),
+              detailsBlock
+            ),
+            buttons: [
+              { id: 'close', label: T('关闭', 'Close') },
+              isReady
+                ? { id: 'install', label: T('立即重启并安装更新', 'Restart & install'), kind: 'primary' }
+                : (hasNew && !state.updDownloading
+                  ? { id: 'download', label: T('下载更新包', 'Download update'), kind: 'primary' }
+                  : null)
+            ].filter(Boolean),
+            onAction: (id) => {
+              if (id === 'download') startUpdateDownload();
+              else if (id === 'install') installStagedUpdate(ver, pkgKind);
+            }
+          });
+        }
+
         const resultCard = (() => {
           if (state.updError) {
             return h('div', { class: 'upd-box warn' },
@@ -2246,16 +2359,17 @@
           const pkgSize = (staged && staged.size) || (chk && chk.size) || 0;
           const pkgSha = (staged && staged.sha256) || (chk && chk.sha256) || '';
           const isReady = !!(staged && staged.version === targetVer);
+          const summaryLine = extractReleaseSummary(chk && chk.notes);
+          const dateLabel = fmtReleaseDate(chk && chk.pubDate);
           return h('div', { class: 'upd-box accent' },
             h('div', { class: 'row wrap upd-box-head' },
-              h('span', { class: 'badge ok', text: T('发现新版本', 'New release') }),
+              h('span', { class: 'badge ok', text: isReady ? T('更新已就绪', 'Ready to install') : T('发现新版本', 'New release') }),
               h('strong', { class: 'mono', text: 'v' + targetVer }),
-              chk && chk.pubDate ? h('span', { class: 'small muted', text: chk.pubDate }) : null,
+              dateLabel ? h('span', { class: 'small muted', text: dateLabel }) : null,
               pkgSize > 0 ? h('span', { class: 'small muted', text: fmtSize(pkgSize) }) : null,
               h('span', { class: 'badge', text: pkgKind === 'installer' ? T('安装包', 'Installer') : T('便携包', 'Portable') })
             ),
-            chk && chk.notes ? h('pre', { class: 'upd-notes', text: chk.notes }) : null,
-            pkgSha ? h('div', { class: 'small muted mono upd-sha', text: 'SHA-256: ' + pkgSha }) : null,
+            summaryLine ? h('div', { class: 'upd-summary', text: summaryLine }) : null,
             h('div', { class: 'row wrap upd-acts' },
               isReady
                 ? h('button', {
@@ -2274,21 +2388,20 @@
                 }, icon('download', 14), h('span', {
                   text: state.updDownloading ? T('下载中…', 'Downloading…') : T('下载更新包', 'Download update')
                 })),
-              chk && hasNew && !isReady
-                ? h('button', {
-                  type: 'button',
-                  class: 'btn ghost sm',
-                  disabled: state.updDownloading,
-                  onclick: () => skipUpdateVersion(targetVer)
-                }, h('span', { text: T('跳过此版本', 'Skip version') }))
-                : null,
-              isReady && staged && staged.path
-                ? h('button', {
-                  type: 'button',
-                  class: 'btn ghost sm',
-                  onclick: () => reveal(staged.path)
-                }, h('span', { text: T('打开所在文件夹', 'Show in folder') }))
-                : null
+              h('button', {
+                type: 'button',
+                class: 'btn ghost sm',
+                onclick: () => openReleaseNotesModal({
+                  ver: targetVer,
+                  pubDate: chk && chk.pubDate,
+                  pkgKind,
+                  pkgSize,
+                  pkgSha,
+                  notes: chk && chk.notes,
+                  isReady,
+                  stagedPath: staged && staged.path
+                })
+              }, icon('external', 13), h('span', { text: T('查看更新日志', 'Release notes') }))
             )
           );
         })();
@@ -2338,26 +2451,23 @@
           progWrap,
           resultCard,
           h('div', { class: 'action-bar' },
-            h('span', {
-              class: 'small muted',
-              text: cacheBytes > 0
-                ? T('本地更新缓存：', 'Update cache: ') + fmtSize(cacheBytes)
-                : T('更新包下载后自动核验 SHA-256，校验通过才允许安装', 'SHA-256 is verified before installation')
-            }),
+            h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center' } },
+              h('span', {
+                class: 'small muted',
+                text: cacheBytes > 0
+                  ? T('本地更新缓存：', 'Update cache: ') + fmtSize(cacheBytes)
+                  : T('自动校验 SHA-256，安全无损升级', 'SHA-256 verified safe upgrades')
+              }),
+              cacheBytes > 0
+                ? h('button', {
+                  type: 'button',
+                  class: 'upd-link-btn',
+                  disabled: state.updDownloading || state.updInstalling,
+                  onclick: (ev) => clearUpdaterCache(ev && ev.currentTarget)
+                }, T('清理缓存', 'Clear'))
+                : null
+            ),
             h('div', { class: 'spacer' }),
-            cacheBytes > 0
-              ? h('button', {
-                type: 'button',
-                class: 'btn sm ghost',
-                disabled: state.updDownloading || state.updInstalling,
-                onclick: (ev) => clearUpdaterCache(ev && ev.currentTarget)
-              }, h('span', { text: T('清理缓存', 'Clear cache') }))
-              : null,
-            h('button', {
-              type: 'button',
-              class: 'btn sm ghost',
-              onclick: () => openExternalUrl(releasesPage)
-            }, h('span', { text: T('查看发布页', 'Release page') })),
             h('button', {
               type: 'button',
               class: 'btn sm primary',

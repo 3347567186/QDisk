@@ -142,3 +142,26 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Bump patch
 ---
 
 欢迎提交 [Issue](https://github.com/3347567186/QDisk/issues) 或 PR · 本项目基于 **[MIT License](LICENSE)** 开源。
+
+---
+
+## ☕ 请作者喝杯咖啡
+
+> 独立开发与持续维护不易，如果 **轻盘 QDisk** 帮你省下了时间和磁盘空间，欢迎请作者喝杯咖啡。  
+> 你的每一份支持都会化作持续优化与打磨软件的动力，谢谢支持！
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center" width="260">
+        <img src="website/assets/sponsor/wechat.jpg" width="210" alt="微信赞赏码" /><br />
+        <sub><strong>微信支付 · 扫一扫赞赏</strong></sub>
+      </td>
+      <td align="center" width="260">
+        <img src="website/assets/sponsor/alipay.jpg" width="210" alt="支付宝赞赏码" /><br />
+        <sub><strong>支付宝 · 扫一扫赞赏</strong></sub>
+      </td>
+    </tr>
+  </table>
+  <p><sub>软件永久免费开源、零广告零捆绑 · 随心支持，点一颗 ⭐ Star 同样是莫大的鼓励</sub></p>
+</div>

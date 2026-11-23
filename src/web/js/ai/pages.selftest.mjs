@@ -1537,10 +1537,23 @@ function findNodes(rootNode, pred, out = []) {
   await new Promise((r) => setTimeout(r, 30));
 
   const dlBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('下载更新包'))[0];
-  if (!dlBtn || !txt(rootSet).includes('v9.9.9') || !txt(rootSet).includes('红队验证版本更新说明')) {
-    console.error('[在线更新回归] 检查更新后未展示新版本卡片与下载按钮');
+  const notesBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('查看更新日志'))[0];
+  const inlineRawPre = findNodes(rootSet, (n) => n.tagName === 'PRE' && n.classList && n.classList.contains('upd-notes'));
+  if (!dlBtn || !notesBtn || inlineRawPre.length > 0 || !txt(rootSet).includes('v9.9.9') || !txt(rootSet).includes('红队验证版本更新说明')) {
+    console.error(`[在线更新回归] 检查更新后卡片简化或更新日志入口异常: dl=${!!dlBtn}, notesBtn=${!!notesBtn}, rawPre=${inlineRawPre.length}`);
     process.exit(1);
   }
+  // 点击「查看更新日志」必须打开独立窗口展示，且关闭后彻底清理
+  clickBtn(notesBtn);
+  await new Promise((r) => setTimeout(r, 15));
+  const notesViewer = findNodes(modalRoot, (n) => n.classList && n.classList.contains('upd-log-viewer'))[0];
+  if (!notesViewer || !txt(modalRoot).includes('v9.9.9 更新日志')) {
+    console.error('[在线更新回归] 点击「查看更新日志」未打开独立更新日志窗口');
+    process.exit(1);
+  }
+  const closeNotesBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  if (closeNotesBtn) clickBtn(closeNotesBtn);
+  await new Promise((r) => setTimeout(r, 15));
 
   // 开始下载并推送 5 帧高频进度：取消下载按钮必须保持同一 DOM 节点引用（防点击被吞）
   clickBtn(dlBtn);

@@ -81,7 +81,14 @@
       'dev.l3': '本地引擎 + indexwalk',
       'dev.copy': '复制命令',
       'dev.copied': '已复制',
-      'foot.note': 'MIT 开源 · 本地优先、零遥测、零广告'
+      'foot.note': 'MIT 开源 · 本地优先、零遥测、零广告',
+      'foot.coffee': '请作者喝杯咖啡',
+      'sponsor.title': '请作者喝杯咖啡',
+      'sponsor.sub': '软件独立开发与持续维护不易，如果轻盘 QDisk 帮你省下了时间和空间，欢迎请作者喝杯咖啡，后续会更加努力打磨和优化软件，谢谢支持！',
+      'sponsor.wechat': '微信支付 · 扫一扫赞赏',
+      'sponsor.alipay': '支付宝 · 扫一扫赞赏',
+      'sponsor.note': '轻盘永久免费开源、零广告 · 随心赞赏，在 GitHub 点 Star 同样是莫大的鼓励',
+      'sponsor.close': '谢谢，先逛逛'
     },
     en: {
       brand: 'QDisk',
@@ -149,7 +156,14 @@
       'dev.l3': 'Local Engine + indexwalk',
       'dev.copy': 'Copy',
       'dev.copied': 'Copied',
-      'foot.note': 'MIT Licensed · Local-first, zero telemetry, zero ads'
+      'foot.note': 'MIT Licensed · Local-first, zero telemetry, zero ads',
+      'foot.coffee': 'Buy Me a Coffee',
+      'sponsor.title': 'Buy the Author a Coffee',
+      'sponsor.sub': 'Building and maintaining an indie open-source tool takes real care. If QDisk saved you time or reclaimed disk space, consider buying the author a coffee — your support fuels future updates!',
+      'sponsor.wechat': 'WeChat Pay · Scan QR',
+      'sponsor.alipay': 'Alipay · Scan QR',
+      'sponsor.note': 'Forever free, open-source & ad-free · Giving a GitHub Star is equally appreciated',
+      'sponsor.close': 'Maybe Later'
     }
   };
 
@@ -170,7 +184,7 @@
 
   let curLang = 'zh';
   let curBenchMode = 'create';
-  let currentVer = 'v1.43.18';
+  let currentVer = 'v1.44.1';
 
   /* ---- Two-State Color Scheme Toggle (modern-web-guidance: dark-mode-toggle) ---- */
   const metaScheme = document.querySelector('meta[name="color-scheme"]');
@@ -268,6 +282,16 @@
       const tip = curLang === 'en' ? 'Star QDisk on GitHub' : '在 GitHub 上给 QDisk 点 Star';
       starBtn.setAttribute('aria-label', tip);
       starBtn.setAttribute('title', tip);
+    }
+    const coffeeBtn = document.getElementById('header-coffee-btn');
+    if (coffeeBtn) {
+      const tip = curLang === 'en' ? 'Buy the author a coffee' : '请作者喝杯咖啡';
+      coffeeBtn.setAttribute('aria-label', tip);
+      coffeeBtn.setAttribute('title', tip);
+    }
+    const closeX = document.getElementById('sponsor-close-x');
+    if (closeX) {
+      closeX.setAttribute('aria-label', curLang === 'en' ? 'Close' : '关闭');
     }
     const activeTab = document.querySelector('.stage-tabs [role="tab"][aria-selected="true"]');
     updateStageCaption(activeTab);
@@ -521,7 +545,7 @@
       }
       setHref('dl-sha-link', `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
     })
-    .catch(() => { /* Static v1.43.18 fallback already rendered */ });
+    .catch(() => { /* Static v1.44.1 fallback already rendered */ });
 
   /* ---- Hydrate GitHub Star Count from Same-Origin repo-meta.json (0 CORS / 0 Rate-Limit) ---- */
   fetch('./repo-meta.json', { cache: 'no-cache' })
@@ -535,4 +559,89 @@
       }
     })
     .catch(() => {});
+
+  /* ---- Sponsor / Buy Me a Coffee Native <dialog> Controller ---- */
+  const sponsorDialog = document.getElementById('sponsor-dialog');
+  const openCoffeeTriggers = [
+    document.getElementById('header-coffee-btn'),
+    document.getElementById('footer-coffee-btn')
+  ].filter(Boolean);
+  const closeCoffeeTriggers = [
+    document.getElementById('sponsor-close-x'),
+    document.getElementById('sponsor-close-btn')
+  ].filter(Boolean);
+
+  let supportsDisplayTransition;
+  function canTransitionDisplay() {
+    if (supportsDisplayTransition !== undefined) return supportsDisplayTransition;
+    if (!window.CSS || typeof window.CSS.supports !== 'function' || !window.CSS.supports('transition-behavior', 'allow-discrete') || !document.body) {
+      return false;
+    }
+    const probe = document.createElement('div');
+    probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+    document.body.appendChild(probe);
+    getComputedStyle(probe).display;
+    probe.style.display = 'none';
+    supportsDisplayTransition = getComputedStyle(probe).display === 'block';
+    probe.remove();
+    return supportsDisplayTransition;
+  }
+
+  function supportsTopLayerExit() {
+    return !!(window.CSS && typeof window.CSS.supports === 'function' && window.CSS.supports('overlay', 'auto') && canTransitionDisplay());
+  }
+
+  async function closeSponsorDialog() {
+    if (!sponsorDialog || !sponsorDialog.open) return;
+    if (!supportsTopLayerExit()) {
+      sponsorDialog.setAttribute('data-closing', '');
+      const animations = typeof sponsorDialog.getAnimations === 'function'
+        ? sponsorDialog.getAnimations({ subtree: true })
+        : [];
+      if (animations.length > 0) {
+        await Promise.race([
+          Promise.allSettled(animations.map((a) => a.finished)),
+          new Promise((r) => setTimeout(r, 600))
+        ]);
+      }
+      if (!sponsorDialog.hasAttribute('data-closing')) return;
+      sponsorDialog.removeAttribute('data-closing');
+    }
+    sponsorDialog.close();
+  }
+
+  if (sponsorDialog) {
+    openCoffeeTriggers.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        sponsorDialog.removeAttribute('data-closing');
+        if (!sponsorDialog.open) sponsorDialog.showModal();
+      });
+    });
+
+    closeCoffeeTriggers.forEach((btn) => {
+      btn.addEventListener('click', () => closeSponsorDialog());
+    });
+
+    sponsorDialog.addEventListener('cancel', (event) => {
+      if (!supportsTopLayerExit()) {
+        event.preventDefault();
+        closeSponsorDialog();
+      }
+    });
+
+    // Fallback for browsers without <dialog closedby="any"> support (e.g. Safari)
+    if (!('closedBy' in HTMLDialogElement.prototype)) {
+      sponsorDialog.addEventListener('click', (event) => {
+        if (event.target !== sponsorDialog) return;
+        const rect = sponsorDialog.getBoundingClientRect();
+        const inside = (
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width
+        );
+        if (!inside) closeSponsorDialog();
+      });
+    }
+  }
 })();

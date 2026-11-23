@@ -61,6 +61,14 @@
           <span class="star-label" data-i18n="nav.star">点 Star</span>
           <span class="star-count mono" id="header-star-count" hidden></span>
         </a>
+        <button type="button" class="coffee-btn" id="header-coffee-btn" aria-label="请作者喝杯咖啡" title="请作者喝杯咖啡">
+          <svg class="coffee-ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path class="coffee-steam" d="M8 3.5c0 1.1.8 1.4.8 2.5M12 3c0 1.1.8 1.4.8 2.5"/>
+            <path d="M5 9h11v6.2a4.8 4.8 0 0 1-4.8 4.8H9.8A4.8 4.8 0 0 1 5 15.2V9Z"/>
+            <path d="M16 10.5h1.8a2.7 2.7 0 0 1 0 5.4H16"/>
+            <path d="M4 21h14"/>
+          </svg>
+        </button>
         <a class="btn primary sm" href="#download" data-i18n="nav.get">立即下载</a>
       </div>
     </div>
@@ -82,12 +90,12 @@
           </p>
 
           <div class="hero-cta">
-            <a class="btn primary lg" id="hero-dl-installer" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-setup.exe">
+            <a class="btn primary lg" id="hero-dl-installer" href="https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-setup.exe">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg>
               <span data-i18n="hero.dlExe">下载安装版</span>
               <span class="btn-meta mono" id="hero-exe-size">20.7 MB</span>
             </a>
-            <a class="btn secondary lg" id="hero-dl-portable" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-portable.zip">
+            <a class="btn secondary lg" id="hero-dl-portable" href="https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-portable.zip">
               <span data-i18n="hero.dlZip">便携免安装版</span>
               <span class="btn-meta mono" id="hero-zip-size">25.1 MB</span>
             </a>
@@ -107,7 +115,7 @@
             <div class="window-chrome" aria-hidden="true">
               <span class="win-brand">
                 <img src="assets/logo.svg" alt="" width="15" height="15">
-                <span id="win-chrome-title">轻盘 QDisk v1.43.18</span>
+                <span id="win-chrome-title">轻盘 QDisk v1.44.1</span>
               </span>
               <span class="win-caption" id="stage-caption">透明查证 · 0.31 ms 真停止 · 四档权限审批</span>
               <span class="win-dots"><i></i><i></i><i></i></span>
@@ -333,12 +341,12 @@
           <article class="dl-card featured float-in" style="--float-delay: 60ms">
             <div class="dl-top">
               <span class="dl-tag" data-i18n="dl.rec">推荐 · 日常主力</span>
-              <span class="mono dl-ver" id="dl-exe-ver">v1.43.18</span>
+              <span class="mono dl-ver" id="dl-exe-ver">v1.44.1</span>
             </div>
             <h3 data-i18n="dl.exeTitle">Windows 安装版 (NSIS x64)</h3>
             <p data-i18n="dl.exeDesc">一键标准安装，完整桌面与开始菜单图标、干净卸载，软件内自动核验 SHA-256 静默升级。</p>
-            <div class="dl-file mono" id="dl-exe-name">QDisk_1.43.18_x64-setup.exe · 20.7 MB</div>
-            <a class="btn primary full" id="dl-btn-exe" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-setup.exe" data-i18n="dl.exeBtn">
+            <div class="dl-file mono" id="dl-exe-name">QDisk_1.44.1_x64-setup.exe · 20.7 MB</div>
+            <a class="btn primary full" id="dl-btn-exe" href="https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-setup.exe" data-i18n="dl.exeBtn">
               下载安装版 (.exe)
             </a>
           </article>
@@ -346,12 +354,12 @@
           <article class="dl-card float-in" style="--float-delay: 170ms">
             <div class="dl-top">
               <span class="dl-tag subtle" data-i18n="dl.port">免安装 · U 盘随身</span>
-              <span class="mono dl-ver" id="dl-zip-ver">v1.43.18</span>
+              <span class="mono dl-ver" id="dl-zip-ver">v1.44.1</span>
             </div>
             <h3 data-i18n="dl.zipTitle">Windows 便携版 (Portable ZIP)</h3>
             <p data-i18n="dl.zipDesc">解压至纯英文目录即可运行；内置更新器自动备份旧版并原子替换，异常自动回滚。</p>
-            <div class="dl-file mono" id="dl-zip-name">QDisk_1.43.18_x64-portable.zip · 25.1 MB</div>
-            <a class="btn secondary full" id="dl-btn-zip" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/QDisk_1.43.18_x64-portable.zip" data-i18n="dl.zipBtn">
+            <div class="dl-file mono" id="dl-zip-name">QDisk_1.44.1_x64-portable.zip · 25.1 MB</div>
+            <a class="btn secondary full" id="dl-btn-zip" href="https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-portable.zip" data-i18n="dl.zipBtn">
               下载便携版 (.zip)
             </a>
           </article>
@@ -405,15 +413,65 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
         <span data-i18n="foot.note">MIT 开源 · 本地优先、零遥测、零广告</span>
       </div>
       <div class="footer-links">
+        <button type="button" class="footer-coffee-link" id="footer-coffee-btn" data-i18n="foot.coffee">请作者喝杯咖啡</button>
         <a href="https://github.com/3347567186/QDisk" target="_blank" rel="noopener">GitHub</a>
         <a href="https://github.com/3347567186/QDisk/releases/latest" target="_blank" rel="noopener">Releases</a>
-        <a id="dl-sha-link" href="https://github.com/3347567186/QDisk/releases/download/v1.43.18/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt</a>
+        <a id="dl-sha-link" href="https://github.com/3347567186/QDisk/releases/download/v1.44.1/SHA256SUMS.txt" target="_blank" rel="noopener">SHA256SUMS.txt</a>
         <a href="https://github.com/3347567186/QDisk/issues" target="_blank" rel="noopener">Issues</a>
         <a href="https://github.com/3347567186/QDisk/blob/main/README.md" target="_blank" rel="noopener">中文文档</a>
         <a href="https://github.com/3347567186/QDisk/blob/main/README.en.md" target="_blank" rel="noopener">English Docs</a>
       </div>
     </div>
   </footer>
+
+  <!-- Sponsor / Buy Me a Coffee Modal Dialog -->
+  <dialog class="sponsor-dialog" id="sponsor-dialog" closedby="any" aria-labelledby="sponsor-title">
+    <div class="sponsor-sheet">
+      <div class="sponsor-head">
+        <div class="sponsor-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 3.5c0 1.1.8 1.4.8 2.5M12 3c0 1.1.8 1.4.8 2.5"/>
+            <path d="M5 9h11v6.2a4.8 4.8 0 0 1-4.8 4.8H9.8A4.8 4.8 0 0 1 5 15.2V9Z"/>
+            <path d="M16 10.5h1.8a2.7 2.7 0 0 1 0 5.4H16"/>
+            <path d="M4 21h14"/>
+          </svg>
+        </div>
+        <div class="sponsor-head-copy">
+          <h2 id="sponsor-title" data-i18n="sponsor.title">请作者喝杯咖啡</h2>
+          <p class="sponsor-sub" data-i18n="sponsor.sub">软件独立开发与持续维护不易，如果轻盘 QDisk 帮你省下了时间和空间，欢迎请作者喝杯咖啡，后续会更加努力打磨和优化软件，谢谢支持！</p>
+        </div>
+        <button type="button" class="sponsor-close" id="sponsor-close-x" aria-label="关闭">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="sponsor-grid">
+        <figure class="sponsor-card sponsor-wechat">
+          <div class="sponsor-qr-frame">
+            <img src="assets/sponsor/wechat.jpg" alt="微信赞赏码" width="240" height="320" loading="lazy" decoding="async">
+          </div>
+          <figcaption>
+            <span class="sponsor-dot" aria-hidden="true"></span>
+            <span data-i18n="sponsor.wechat">微信支付 · 扫一扫赞赏</span>
+          </figcaption>
+        </figure>
+        <figure class="sponsor-card sponsor-alipay">
+          <div class="sponsor-qr-frame">
+            <img src="assets/sponsor/alipay.jpg" alt="支付宝赞赏码" width="240" height="320" loading="lazy" decoding="async">
+          </div>
+          <figcaption>
+            <span class="sponsor-dot" aria-hidden="true"></span>
+            <span data-i18n="sponsor.alipay">支付宝 · 扫一扫赞赏</span>
+          </figcaption>
+        </figure>
+      </div>
+
+      <div class="sponsor-foot">
+        <p class="sponsor-note" data-i18n="sponsor.note">轻盘永久免费开源、零广告 · 随心赞赏，在 GitHub 点 Star 同样是莫大的鼓励</p>
+        <button type="button" class="btn secondary sm" id="sponsor-close-btn" data-i18n="sponsor.close">谢谢，先逛逛</button>
+      </div>
+    </div>
+  </dialog>
 
   <script src="app.js" defer></script>
 </body>
