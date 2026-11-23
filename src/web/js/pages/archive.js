@@ -8,10 +8,10 @@
   const errText = UI.errText;
 
   const MODES = [
-    { id: 'saver', zh: '节约', en: 'Saver', hint: T('1 线程 · 低占用，后台省电', '1 thread · low CPU/IO') },
-    { id: 'balanced', zh: '平衡', en: 'Balanced', hint: T('2 线程 · 速度与体积均衡', '2 threads · balanced') },
-    { id: 'performance', zh: '高性能', en: 'Performance', hint: T('4 线程 · 并行加速，媒体免重压', '4 threads · fast, smart store') },
-    { id: 'hyper', zh: '超线程', en: 'Hyper', hint: T('满核并行 · 极速压缩/解压', 'All cores · maximum speed') }
+    { id: 'saver', zh: '节约', en: 'Saver', hint: T('单核低占 · 约 25% 负载，省电静音', 'Single core · ~25% load, quiet') },
+    { id: 'balanced', zh: '平衡', en: 'Balanced', hint: T('均衡阶梯 · 约 50% 负载，体积速度兼顾', 'Balanced · ~50% load') },
+    { id: 'performance', zh: '高性能', en: 'Performance', hint: T('多核加速 · 约 75% 负载，媒体免重压', 'Multi-core · ~75% load, smart store') },
+    { id: 'hyper', zh: '超线程', en: 'Hyper', hint: T('满核全速 · 100% 零限速极速引擎', 'All cores · 100% unthrottled') }
   ];
 
   const FORMATS = [
@@ -1840,8 +1840,8 @@
         h('span', { class: 'arc-field-label' }, T('性能模式', 'Performance mode')),
         modeBox,
         h('div', { class: 'small muted arc-field-hint' },
-          T('ZIP / 7Z / TAR.GZ 均按档位启用多核并行（含大文件分块加速）与压缩级别 6 / 5 / 3 / 1；高性能与超线程对音视频/图片/压缩包免重压。',
-            'ZIP / 7Z / TAR.GZ scale across threads (including multi-block large files) with levels 6 / 5 / 3 / 1; Performance & Hyper store already-compressed media directly.'))),
+          T('按本机核心数动态分配线程、缓冲块、压缩级别（6/5/3/1）与自适应占空比（25%/50%/75%/100%），超线程零限速满核直通；高性能与超线程对音视频/图片/压缩包免重压。',
+            'Dynamically scales threads, buffers, levels (6/5/3/1) and adaptive duty cycle (25%/50%/75%/100%) to your hardware; Hyper runs 100% unthrottled.'))),
       h('div', { class: 'arc-field' },
         h('span', { class: 'arc-field-label' }, T('密码', 'Password')),
         pw)

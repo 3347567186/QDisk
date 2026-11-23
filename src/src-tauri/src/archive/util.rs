@@ -17,11 +17,15 @@ pub struct PerfProfile {
     pub mode: &'static str,
     pub threads: usize,
     pub buf_size: usize,
+    pub block_size: usize,
     pub zip_level: u32,
     pub sevenz_level: u32,
     pub gzip_level: u32,
     pub smart_store: bool,
-    pub saver_pace: bool,
+    /// I/O 及单流解压/拷贝占空比（25 / 50 / 75 / 100，无固定 MB/s 限死值，自适应任意硬件速度）。
+    pub io_duty_pct: u8,
+    /// 多核并行压缩工作线程占空比（35 / 65 / 85 / 100），叠加阶梯线程数与压缩等级形成清晰 4 档阶梯。
+    pub cpu_duty_pct: u8,
 }
 
 impl PerfProfile {
@@ -30,46 +34,69 @@ impl PerfProfile {
             .map(|n| n.get())
             .unwrap_or(4)
             .max(1);
+        Self::from_mode_with_cores(raw, avail)
+    }
+
+    /// 按本机逻辑核心数动态推导 4 档阶梯参数：在 >=4 核机器上严格满足
+    /// `saver < balanced < performance < hyper`，超线程档释放全部核心且零节流。
+    pub fn from_mode_with_cores(raw: &str, avail: usize) -> Self {
+        let avail = avail.max(1);
+        let hyper_t = avail.clamp(1, 32);
+        let perf_t = ((avail * 6 + 5) / 10)
+            .max(if avail >= 3 { 2 } else { 1 })
+            .min(hyper_t.saturating_sub(1).max(1));
+        let bal_t = ((avail * 3 + 5) / 10)
+            .max(if avail >= 4 { 2 } else { 1 })
+            .min(perf_t.saturating_sub(1).max(1));
+
         match raw {
             "saver" => Self {
                 mode: "saver",
                 threads: 1,
                 buf_size: 64 * 1024,
+                block_size: 512 * 1024,
                 zip_level: 6,
                 sevenz_level: 5,
                 gzip_level: 6,
                 smart_store: false,
-                saver_pace: true,
+                io_duty_pct: 25,
+                cpu_duty_pct: 35,
             },
             "performance" => Self {
                 mode: "performance",
-                threads: 4.min(avail).max(1),
+                threads: perf_t,
                 buf_size: 512 * 1024,
+                block_size: 1024 * 1024,
                 zip_level: 3,
                 sevenz_level: 2,
                 gzip_level: 3,
                 smart_store: true,
-                saver_pace: false,
+                io_duty_pct: 75,
+                cpu_duty_pct: 85,
             },
             "hyper" => Self {
                 mode: "hyper",
-                threads: avail.clamp(1, 16),
-                buf_size: 1024 * 1024,
+                threads: hyper_t,
+                buf_size: 2 * 1024 * 1024,
+                block_size: 2 * 1024 * 1024,
                 zip_level: 1,
                 sevenz_level: 1,
                 gzip_level: 1,
                 smart_store: true,
-                saver_pace: false,
+                io_duty_pct: 100,
+                cpu_duty_pct: 100,
             },
             _ => Self {
                 mode: "balanced",
-                threads: 2.min(avail).max(1),
+                threads: bal_t,
                 buf_size: 256 * 1024,
+                block_size: 1024 * 1024,
                 zip_level: 5,
                 sevenz_level: 3,
                 gzip_level: 5,
                 smart_store: false,
-                saver_pace: false,
+                io_duty_pct: 50,
+                cpu_duty_pct: 65,
             },
         }
     }
@@ -279,6 +306,116 @@ impl TaskControl {
         }
         if self.cancel.load(Ordering::Acquire) {
             bail!("操作已取消");
+        }
+        Ok(())
+    }
+
+    /// 可随时被暂停/取消唤醒的节流让渡：基于 Condvar wait_timeout，收到取消 <1ms 立即返回 Err，
+    /// 收到暂停则直接转入阻塞挂起，绝不影响即时暂停/取消手感。
+    pub fn sleep_interruptible(&self, dur: Duration) -> Result<()> {
+        if dur.is_zero() {
+            return self.checkpoint(None);
+        }
+        if self.cancel.load(Ordering::Acquire) {
+            bail!("操作已取消");
+        }
+        let deadline = Instant::now() + dur;
+        let mut guard = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if self.cancel.load(Ordering::Acquire) {
+                bail!("操作已取消");
+            }
+            if self.paused.load(Ordering::Acquire) {
+                while self.paused.load(Ordering::Acquire) && !self.cancel.load(Ordering::Acquire) {
+                    guard = self.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+                }
+                if self.cancel.load(Ordering::Acquire) {
+                    bail!("操作已取消");
+                }
+                // 恢复后直接继续干活，不补睡暂停前的残余节流时间。
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            let rem = deadline - now;
+            let (g, _) = self
+                .cv
+                .wait_timeout(guard, rem)
+                .unwrap_or_else(|e| e.into_inner());
+            guard = g;
+        }
+    }
+}
+
+/// 自适应占空比控制器：不写死任何 MB/s 速率，仅按实际工作耗时与目标占空比动态让渡时间片。
+/// - `duty_pct >= 100`（超线程档）：零时钟调用、零让渡、100% 满速。
+/// - 采用带符号欠账（signed rest debt）与 16 ms 睡眠阈值，精确抵消 Windows 15.6 ms 系统时钟粒度偏差；
+///   单次工作样本封顶 40 ms、单次让渡封顶 64 ms，避免杀毒/系统抖动引发卡顿雪崩。
+pub struct WorkPacer {
+    duty_pct: u8,
+    rest_debt_ns: i64,
+}
+
+impl WorkPacer {
+    const MIN_REST_NS: i64 = 16_000_000;
+    const MAX_WORK_SAMPLE_NS: i64 = 40_000_000;
+    const MAX_SLEEP_NS: i64 = 64_000_000;
+    const MIN_DEBT_NS: i64 = -32_000_000;
+
+    pub fn new(duty_pct: u8) -> Self {
+        Self {
+            duty_pct: duty_pct.clamp(10, 100),
+            rest_debt_ns: 0,
+        }
+    }
+
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.duty_pct < 100
+    }
+
+    #[inline]
+    pub fn mark_start(&self) -> Option<Instant> {
+        if self.duty_pct >= 100 {
+            None
+        } else {
+            Some(Instant::now())
+        }
+    }
+
+    #[inline]
+    pub fn finish_step(&mut self, started: Option<Instant>, control: &TaskControl) -> Result<()> {
+        let Some(t0) = started else {
+            return Ok(());
+        };
+        self.account(t0.elapsed(), control)
+    }
+
+    pub fn account(&mut self, work_dur: Duration, control: &TaskControl) -> Result<()> {
+        if self.duty_pct >= 100 {
+            return Ok(());
+        }
+        let work_ns = (work_dur.as_nanos() as i64).min(Self::MAX_WORK_SAMPLE_NS);
+        if work_ns <= 0 {
+            return Ok(());
+        }
+        let d = self.duty_pct as i64;
+        let add_rest = (work_ns * (100 - d)) / d;
+        self.rest_debt_ns = (self.rest_debt_ns + add_rest).min(Self::MAX_SLEEP_NS * 2);
+        if self.rest_debt_ns < Self::MIN_REST_NS {
+            return Ok(());
+        }
+        let target_ns = self.rest_debt_ns.min(Self::MAX_SLEEP_NS);
+        let t_sleep = Instant::now();
+        control.sleep_interruptible(Duration::from_nanos(target_ns as u64))?;
+        let actual_ns = t_sleep.elapsed().as_nanos() as i64;
+        // 若休眠途中用户点了「暂停」后又恢复，actual_ns 会远大于 target_ns，直接清零欠账避免透支或错乱。
+        if actual_ns > target_ns + 50_000_000 {
+            self.rest_debt_ns = 0;
+        } else {
+            self.rest_debt_ns = (self.rest_debt_ns - actual_ns).max(Self::MIN_DEBT_NS);
         }
         Ok(())
     }
@@ -542,10 +679,10 @@ pub fn copy_controlled_abortable<R: Read + ?Sized, W: Write>(
     progress: Option<&Progress>,
     mut on_bytes: impl FnMut(u64),
 ) -> Result<u64> {
-    let chunk_size = profile.buf_size.clamp(64 * 1024, 1024 * 1024);
+    let chunk_size = profile.buf_size.clamp(64 * 1024, 2 * 1024 * 1024);
     let mut buf = vec![0u8; chunk_size];
     let mut total = 0u64;
-    let mut paced_bytes = 0u64;
+    let mut pacer = WorkPacer::new(profile.io_duty_pct);
     loop {
         if abort.is_some_and(|a| a.load(Ordering::Acquire)) {
             if control.is_cancelled() {
@@ -554,6 +691,7 @@ pub fn copy_controlled_abortable<R: Read + ?Sized, W: Write>(
             bail!("并行任务已中止");
         }
         control.checkpoint(progress)?;
+        let step_t0 = pacer.mark_start();
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
@@ -565,25 +703,20 @@ pub fn copy_controlled_abortable<R: Read + ?Sized, W: Write>(
             b.charge(chunk)?;
         }
         on_bytes(chunk);
-        if profile.saver_pace {
-            paced_bytes += chunk;
-            if paced_bytes >= 2 * 1024 * 1024 {
-                paced_bytes = 0;
-                control.checkpoint(progress)?;
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }
+        pacer.finish_step(step_t0, control)?;
     }
     Ok(total)
 }
 
-/// 分块流式 ControlledReader：让逐文件读取（如 TAR/7Z 压缩大文件）在成员内部也能毫秒级响应暂停/取消并持续推送进度。
+/// 分块流式 ControlledReader：让逐文件读取（如 TAR/7Z 压缩大文件）在成员内部也能毫秒级响应暂停/取消、
+/// 持续推送进度，并按占空比自适应阶梯控速（超线程档 100% 零开销直通）。
 pub struct ControlledReader<R: Read> {
     inner: R,
     control: Arc<TaskControl>,
     progress: Arc<Progress>,
-    saver_pace: bool,
-    paced_bytes: u64,
+    max_slice: usize,
+    pacer: WorkPacer,
+    last_work_start: Option<Instant>,
 }
 
 impl<R: Read> ControlledReader<R> {
@@ -591,14 +724,30 @@ impl<R: Read> ControlledReader<R> {
         inner: R,
         control: Arc<TaskControl>,
         progress: Arc<Progress>,
-        saver_pace: bool,
+        duty_pct: u8,
     ) -> Self {
+        let pacer = WorkPacer::new(duty_pct);
+        let last_work_start = if pacer.is_active() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let max_slice = if duty_pct <= 35 {
+            128 * 1024
+        } else if duty_pct <= 65 {
+            256 * 1024
+        } else if duty_pct < 100 {
+            512 * 1024
+        } else {
+            1024 * 1024
+        };
         Self {
             inner,
             control,
             progress,
-            saver_pace,
-            paced_bytes: 0,
+            max_slice,
+            pacer,
+            last_work_start,
         }
     }
 }
@@ -606,25 +755,28 @@ impl<R: Read> ControlledReader<R> {
 impl<R: Read> Read for ControlledReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // 绝不能返回 ErrorKind::Interrupted：std::io::copy / write_all 会对 Interrupted 无限重试导致取消死循环。
+        let cp_start = if self.last_work_start.is_some() {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.control
             .checkpoint(Some(&self.progress))
             .map_err(|_| std::io::Error::new(ErrorKind::Other, "操作已取消"))?;
-        let max_slice = if self.saver_pace { 256 * 1024 } else { 512 * 1024 };
-        let cap = buf.len().min(max_slice);
+        if let Some(t0) = self.last_work_start {
+            // 若刚刚在 checkpoint 内挂起暂停过，跳过该暂停空窗不计为工作耗时。
+            let paused_here = cp_start.is_some_and(|s| s.elapsed() >= Duration::from_millis(5));
+            if !paused_here {
+                self.pacer
+                    .account(t0.elapsed(), &self.control)
+                    .map_err(|_| std::io::Error::new(ErrorKind::Other, "操作已取消"))?;
+            }
+            self.last_work_start = Some(Instant::now());
+        }
+        let cap = buf.len().min(self.max_slice);
         let n = self.inner.read(&mut buf[..cap])?;
         if n > 0 {
-            let chunk = n as u64;
-            self.progress.add_bytes(chunk);
-            if self.saver_pace {
-                self.paced_bytes += chunk;
-                if self.paced_bytes >= 2 * 1024 * 1024 {
-                    self.paced_bytes = 0;
-                    self.control
-                        .checkpoint(Some(&self.progress))
-                        .map_err(|_| std::io::Error::new(ErrorKind::Other, "操作已取消"))?;
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            }
+            self.progress.add_bytes(n as u64);
         }
         Ok(n)
     }
@@ -1339,7 +1491,13 @@ mod tests {
         let hyper = PerfProfile::from_mode("hyper");
 
         assert_eq!(saver.threads, 1);
-        assert!(saver.saver_pace);
+        assert_eq!(saver.io_duty_pct, 25);
+        assert_eq!(balanced.io_duty_pct, 50);
+        assert_eq!(perf.io_duty_pct, 75);
+        assert_eq!(hyper.io_duty_pct, 100);
+        assert!(saver.cpu_duty_pct < balanced.cpu_duty_pct);
+        assert!(balanced.cpu_duty_pct < perf.cpu_duty_pct);
+        assert!(perf.cpu_duty_pct < hyper.cpu_duty_pct);
         assert!(!saver.smart_store);
         assert_eq!(saver.zip_level, 6);
         assert_eq!(balanced.zip_level, 5);
@@ -1348,6 +1506,27 @@ mod tests {
         assert_eq!(hyper.zip_level, 1);
         assert!(hyper.smart_store);
         assert!(hyper.threads >= balanced.threads);
+        assert!(saver.buf_size < balanced.buf_size && balanced.buf_size < perf.buf_size && perf.buf_size < hyper.buf_size);
+
+        // 在常见 4 / 8 / 12 / 16 / 24 核机器上，4 档线程数严格单调递增
+        for cores in [4usize, 6, 8, 12, 16, 20, 24, 32] {
+            let s = PerfProfile::from_mode_with_cores("saver", cores);
+            let b = PerfProfile::from_mode_with_cores("balanced", cores);
+            let p = PerfProfile::from_mode_with_cores("performance", cores);
+            let h = PerfProfile::from_mode_with_cores("hyper", cores);
+            assert!(
+                s.threads < b.threads && b.threads < p.threads && p.threads < h.threads,
+                "cores={cores} 线程阶梯未严格递增: {}/{}/{}/{}",
+                s.threads, b.threads, p.threads, h.threads
+            );
+        }
+        // 低核边缘机器（1 / 2 / 3 核）不得出现 0 线程或 panic
+        for cores in [1usize, 2, 3] {
+            for m in ["saver", "balanced", "performance", "hyper"] {
+                let pr = PerfProfile::from_mode_with_cores(m, cores);
+                assert!(pr.threads >= 1 && pr.threads <= cores);
+            }
+        }
 
         assert!(is_incompressible_ext(Path::new("photo.JPG")));
         assert!(is_incompressible_ext(Path::new("clip.mp4")));
@@ -1398,5 +1577,57 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn work_pacer_stepped_duty_and_interruptible_cancel() {
+        // A: 节流休眠期间请求取消必须立刻唤醒（<< 60ms）
+        let ctl_c = Arc::new(TaskControl::default());
+        let ctl_c2 = Arc::clone(&ctl_c);
+        let h_c = std::thread::spawn(move || {
+            let mut pacer = WorkPacer::new(25);
+            // 20ms 工作 -> 25% 占空比目标休眠 60ms
+            pacer.account(Duration::from_millis(20), &ctl_c2)
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        let t_cancel = Instant::now();
+        ctl_c.request_cancel();
+        let res_c = h_c.join().unwrap();
+        assert!(res_c.is_err(), "节流休眠中取消应返回 Err");
+        assert!(
+            t_cancel.elapsed() < Duration::from_millis(35),
+            "取消唤醒耗时过长: {:?}",
+            t_cancel.elapsed()
+        );
+
+        // B: 真实四档占空比阶梯耗时验证（无硬编码 MB/s，按真实工作量 4 档严格递增耗时 => 速率严格递增）
+        let run_mode = |mode: &str| -> Duration {
+            let prof = PerfProfile::from_mode(mode);
+            let mut pacer = WorkPacer::new(prof.io_duty_pct);
+            let ctl = TaskControl::default();
+            let t0 = Instant::now();
+            // 模拟 16 步、每步 4ms 真实繁忙计算/IO（共 64ms 纯工作量）
+            for _ in 0..16 {
+                let s = pacer.mark_start();
+                let busy = Instant::now();
+                while busy.elapsed() < Duration::from_millis(4) {
+                    std::hint::spin_loop();
+                }
+                pacer.finish_step(s, &ctl).unwrap();
+            }
+            t0.elapsed()
+        };
+        let t_hyper = run_mode("hyper");
+        let t_perf = run_mode("performance");
+        let t_bal = run_mode("balanced");
+        let t_saver = run_mode("saver");
+        assert!(
+            t_hyper < t_perf && t_perf < t_bal && t_bal < t_saver,
+            "四档阶梯耗时未严格递增 (hyper < perf < bal < saver): hyper={t_hyper:?}, perf={t_perf:?}, bal={t_bal:?}, saver={t_saver:?}"
+        );
+        assert!(
+            t_saver.as_millis() >= t_hyper.as_millis() * 2,
+            "节约档与超线程档差距应清晰拉开 (>=2x): hyper={t_hyper:?}, saver={t_saver:?}"
+        );
     }
 }

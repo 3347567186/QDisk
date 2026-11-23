@@ -130,7 +130,7 @@ pub fn create(
     if outer_threads <= 1 {
         for (ci, chunk) in chunks.iter().enumerate() {
             control.checkpoint(Some(progress))?;
-            let (entries, readers) = materialize(chunk, control, progress, profile.saver_pace)?;
+            let (entries, readers) = materialize(chunk, control, progress, profile.io_duty_pct)?;
             if let Err(e) = writer.push_archive_entries(entries, readers) {
                 if control.is_cancelled() {
                     bail!("操作已取消");
@@ -172,7 +172,7 @@ pub fn create(
                             let _ = tx.send((i, Err(e)));
                             break;
                         }
-                        let result = materialize(&chunks[i], &ctl, &prog, profile.saver_pace)
+                        let result = materialize(&chunks[i], &ctl, &prog, profile.cpu_duty_pct)
                             .and_then(|(entries, readers)| {
                                 sevenz_rust2::prepare_block(methods.clone(), entries, readers)
                                     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -279,7 +279,7 @@ fn materialize(
     chunk: &[SourceItem],
     control: &Arc<TaskControl>,
     progress: &Arc<Progress>,
-    saver_pace: bool,
+    duty_pct: u8,
 ) -> Result<(Vec<ArchiveEntry>, Vec<SourceReader<AnyReader>>)> {
     let mut entries = Vec::with_capacity(chunk.len());
     let mut readers = Vec::with_capacity(chunk.len());
@@ -296,7 +296,7 @@ fn materialize(
                 f,
                 control.clone(),
                 progress.clone(),
-                saver_pace,
+                duty_pct,
             ))
         };
         entries.push(entry);

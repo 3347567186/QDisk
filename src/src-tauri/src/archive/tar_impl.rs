@@ -18,11 +18,9 @@ use super::undo::UndoTracker;
 use super::util::{
     collect_sources, copy_controlled, ensure_parent, filetime_to_local_parts, resolve_dest,
     safe_join, safe_join_mapped, Budget, ControlledReader, Overwrite, PerfProfile, Progress,
-    TaskControl, ThreadPriorityGuard,
+    TaskControl, ThreadPriorityGuard, WorkPacer,
 };
 use super::{ArchiveInfo, CreateReport, EntryInfo, ExtractReport, Kind};
-
-const GZ_BLOCK_SIZE: usize = 1024 * 1024;
 
 fn reader(path: &Path, kind: Kind) -> Result<Box<dyn Read>> {
     let f = File::open(path).with_context(|| format!("无法打开 {}", path.display()))?;
@@ -396,7 +394,7 @@ pub fn create_tar(
     let started = Instant::now();
     let f = File::create(dest)?;
     let mut builder = tar::Builder::new(BufWriter::with_capacity(profile.buf_size, f));
-    let (files, bytes) = append_sources(&mut builder, sources, dest, profile, progress, control)?;
+    let (files, bytes) = append_sources(&mut builder, sources, dest, profile.io_duty_pct, progress, control)?;
     let mut out = builder.into_inner().context("无法完成 TAR 写入")?;
     out.flush()?;
     out.into_inner()
@@ -420,6 +418,7 @@ pub fn create_tar(
 /// 再由顺序写入线程重排落盘，兼容标准 gunzip 与 `MultiGzDecoder`。
 struct ParallelGzWriter {
     buf: Vec<u8>,
+    block_size: usize,
     seq: usize,
     in_tx: Option<mpsc::SyncSender<(usize, Vec<u8>)>>,
     abort: Arc<AtomicBool>,
@@ -437,6 +436,7 @@ impl ParallelGzWriter {
         control: Arc<TaskControl>,
         progress: Arc<Progress>,
     ) -> Self {
+        let block_size = profile.block_size.clamp(512 * 1024, 2 * 1024 * 1024);
         let threads = profile.threads.max(2);
         let qcap = (threads * 2).max(4);
         let (in_tx, in_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(qcap);
@@ -455,8 +455,10 @@ impl ParallelGzWriter {
             let prog = Arc::clone(&progress);
             let level = profile.gzip_level.clamp(1, 9);
             let mode = profile.mode;
+            let cpu_duty = profile.cpu_duty_pct;
             workers.push(std::thread::spawn(move || {
                 let _prio = ThreadPriorityGuard::enter(mode);
+                let mut pacer = WorkPacer::new(cpu_duty);
                 loop {
                     if abort_w.load(Ordering::Acquire) {
                         break;
@@ -477,11 +479,18 @@ impl ParallelGzWriter {
                         let _ = tx.send((seq, Err(e)));
                         break;
                     }
+                    let step_t0 = pacer.mark_start();
                     let mut gz = GzEncoder::new(Vec::with_capacity(raw.len() / 2 + 64), Compression::new(level));
                     let res = gz.write_all(&raw).and_then(|_| gz.finish()).map_err(Into::into);
                     if res.is_err() {
                         abort_w.store(true, Ordering::SeqCst);
                         failed_w.store(true, Ordering::SeqCst);
+                    }
+                    if let Err(e) = pacer.finish_step(step_t0, &ctl) {
+                        abort_w.store(true, Ordering::SeqCst);
+                        failed_w.store(true, Ordering::SeqCst);
+                        let _ = tx.send((seq, Err(e)));
+                        break;
                     }
                     if tx.send((seq, res)).is_err() {
                         break;
@@ -536,7 +545,8 @@ impl ParallelGzWriter {
         });
 
         Self {
-            buf: Vec::with_capacity(GZ_BLOCK_SIZE),
+            buf: Vec::with_capacity(block_size),
+            block_size,
             seq: 0,
             in_tx: Some(in_tx),
             abort,
@@ -559,7 +569,7 @@ impl ParallelGzWriter {
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "GZIP 写入线程已中止"));
         }
-        let block = std::mem::replace(&mut self.buf, Vec::with_capacity(GZ_BLOCK_SIZE));
+        let block = std::mem::replace(&mut self.buf, Vec::with_capacity(self.block_size));
         let seq = self.seq;
         self.seq += 1;
         let Some(tx) = self.in_tx.as_ref() else {
@@ -603,10 +613,10 @@ impl Write for ParallelGzWriter {
         }
         let mut offset = 0usize;
         while offset < data.len() {
-            let take = (GZ_BLOCK_SIZE - self.buf.len()).min(data.len() - offset);
+            let take = (self.block_size - self.buf.len()).min(data.len() - offset);
             self.buf.extend_from_slice(&data[offset..offset + take]);
             offset += take;
-            if self.buf.len() >= GZ_BLOCK_SIZE {
+            if self.buf.len() >= self.block_size {
                 self.flush_block()?;
             }
         }
@@ -651,7 +661,7 @@ pub fn create_tgz(
     if profile.threads <= 1 {
         let gz = GzEncoder::new(out_buf, Compression::new(profile.gzip_level.clamp(1, 9)));
         let mut builder = tar::Builder::new(gz);
-        let (files, bytes) = append_sources(&mut builder, sources, dest, profile, progress, control)?;
+        let (files, bytes) = append_sources(&mut builder, sources, dest, profile.io_duty_pct, progress, control)?;
         let gz = match builder.into_inner() {
             Ok(g) => g,
             Err(e) => {
@@ -690,7 +700,8 @@ pub fn create_tgz(
 
     let pgz = ParallelGzWriter::new(out_buf, profile, control.clone(), progress.clone());
     let mut builder = tar::Builder::new(pgz);
-    let (files, bytes) = append_sources(&mut builder, sources, dest, profile, progress, control)?;
+    // 并行 GZIP 由 ParallelGzWriter 工作线程按 cpu_duty_pct 控速，reader 侧直通 100 避免双重节流。
+    let (files, bytes) = append_sources(&mut builder, sources, dest, 100, progress, control)?;
     let pgz = match builder.into_inner() {
         Ok(g) => g,
         Err(e) => {
@@ -723,7 +734,7 @@ fn append_sources<W: Write>(
     builder: &mut tar::Builder<W>,
     sources: &[PathBuf],
     dest: &Path,
-    profile: PerfProfile,
+    reader_duty_pct: u8,
     progress: &Arc<Progress>,
     control: &Arc<TaskControl>,
 ) -> Result<(u64, u64)> {
@@ -759,7 +770,7 @@ fn append_sources<W: Write>(
             file.take(len),
             control.clone(),
             progress.clone(),
-            profile.saver_pace,
+            reader_duty_pct,
         );
         if let Err(e) = builder.append_data(&mut header, &item.name, reader) {
             if control.is_cancelled() {

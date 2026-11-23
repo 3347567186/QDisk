@@ -6,8 +6,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use libloading::Library;
@@ -16,7 +16,7 @@ use super::download;
 use super::undo::UndoTracker;
 use super::util::{
     ensure_parent, resolve_dest, safe_join_mapped, safe_relative, sha256_file, utf16_to_string,
-    wide_path, Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard,
+    wide_path, Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard, WorkPacer,
 };
 use super::{ArchiveInfo, EntryInfo, ExtractReport, RarStatus};
 
@@ -201,8 +201,8 @@ struct RarCbState {
     progress: *const Progress,
     extracting: AtomicBool,
     entry_bytes: AtomicU64,
-    saver_pace: bool,
-    paced: AtomicU64,
+    pace_active: bool,
+    pacer: Mutex<(WorkPacer, Option<Instant>)>,
 }
 
 struct HandleGuard<'a> {
@@ -239,14 +239,15 @@ unsafe extern "system" fn rar_callback(
                 let n = p2 as u64;
                 state.entry_bytes.fetch_add(n, Ordering::Relaxed);
                 progress.add_bytes(n);
-                if state.saver_pace {
-                    let prev = state.paced.fetch_add(n, Ordering::Relaxed);
-                    if (prev + n) / (2 * 1024 * 1024) > prev / (2 * 1024 * 1024) {
-                        if control.checkpoint(Some(progress)).is_err() {
+                if state.pace_active {
+                    let mut guard = state.pacer.lock().unwrap_or_else(|e| e.into_inner());
+                    let (ref mut pacer, ref mut last_ts) = *guard;
+                    if let Some(t0) = *last_ts {
+                        if pacer.account(t0.elapsed(), control).is_err() {
                             return -1;
                         }
-                        std::thread::sleep(Duration::from_millis(2));
                     }
+                    *last_ts = Some(Instant::now());
                 }
             }
             return 1;
@@ -508,13 +509,15 @@ pub fn extract(
     }
     let api = RarApi::load(&dll)?;
     // 声明顺序保证 HandleGuard 先于 cb_state Drop，避免 UnRAR 持有悬空回调上下文。
+    let pacer = WorkPacer::new(profile.io_duty_pct);
+    let pace_active = pacer.is_active();
     let cb_state = RarCbState {
         control: control as *const TaskControl,
         progress: progress as *const Progress,
         extracting: AtomicBool::new(false),
         entry_bytes: AtomicU64::new(0),
-        saver_pace: profile.saver_pace,
-        paced: AtomicU64::new(0),
+        pace_active,
+        pacer: Mutex::new((pacer, None)),
     };
     let handle = api.open_archive(path, RAR_OM_EXTRACT)?;
     let _guard = HandleGuard { api: &api, handle };
@@ -643,6 +646,11 @@ pub fn extract(
 
         progress.set_current(&name);
         cb_state.entry_bytes.store(0, Ordering::Relaxed);
+        if cb_state.pace_active {
+            if let Ok(mut guard) = cb_state.pacer.lock() {
+                guard.1 = Some(Instant::now());
+            }
+        }
         cb_state.extracting.store(true, Ordering::Release);
         let rc = api.process(handle, RAR_EXTRACT, Some(extract_dir), None);
         cb_state.extracting.store(false, Ordering::Release);

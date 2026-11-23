@@ -15,12 +15,11 @@ use super::undo::UndoTracker;
 use super::util::{
     collect_sources, copy_controlled, copy_controlled_abortable, dos_datetime, ensure_parent,
     is_incompressible_ext, resolve_dest, safe_join_mapped, zip_datetime, Budget, Overwrite,
-    PerfProfile, Progress, SourceItem, TaskControl, ThreadPriorityGuard,
+    PerfProfile, Progress, SourceItem, TaskControl, ThreadPriorityGuard, WorkPacer,
 };
 use super::{CreateReport, ExtractReport};
 
 const LARGE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
-const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 const SMALL_BATCH_ITEMS: usize = 16;
 
 pub fn open(path: &Path) -> Result<ZipArchive<BufReader<File>>> {
@@ -269,11 +268,13 @@ impl ParallelZipWriter {
         )?;
         let mut src = File::open(&item.path)
             .with_context(|| format!("无法读取 {}", item.path.display()))?;
-        let mut buf = vec![0u8; profile.buf_size.clamp(64 * 1024, 1024 * 1024)];
+        let mut buf = vec![0u8; profile.buf_size.clamp(64 * 1024, 2 * 1024 * 1024)];
         let mut crc = Crc::new();
         let mut total = 0u64;
+        let mut pacer = WorkPacer::new(profile.io_duty_pct);
         loop {
             control.checkpoint(Some(progress))?;
+            let step_t0 = pacer.mark_start();
             let n = src.read(&mut buf)?;
             if n == 0 {
                 break;
@@ -282,6 +283,7 @@ impl ParallelZipWriter {
             self.writer.write_all(&buf[..n])?;
             total += n as u64;
             progress.add_bytes(n as u64);
+            pacer.finish_step(step_t0, control)?;
         }
         let sum = crc.sum();
         patch_zip64_lfh(
@@ -332,6 +334,7 @@ impl ParallelZipWriter {
             &placeholder_extra,
         )?;
 
+        let block_size = profile.block_size.clamp(512 * 1024, 2 * 1024 * 1024);
         let threads = profile.threads.max(2);
         let qcap = (threads * 2).max(4);
         let (in_tx, in_rx) = mpsc::sync_channel::<(usize, Vec<u8>, bool)>(qcap);
@@ -356,7 +359,7 @@ impl ParallelZipWriter {
                 let mut crc = Crc::new();
                 let mut total = 0u64;
                 let mut seq = 0usize;
-                let mut current = read_exact_or_eof(&mut f, PARALLEL_BLOCK_SIZE, &reader_ctl, &reader_prog, abort_ref)?;
+                let mut current = read_exact_or_eof(&mut f, block_size, &reader_ctl, &reader_prog, abort_ref)?;
                 while !current.is_empty() {
                     if abort_ref.load(Ordering::Acquire) {
                         bail!("并行压缩已中止");
@@ -364,7 +367,7 @@ impl ParallelZipWriter {
                     reader_ctl.checkpoint(Some(&reader_prog))?;
                     crc.update(&current);
                     total += current.len() as u64;
-                    let next = read_exact_or_eof(&mut f, PARALLEL_BLOCK_SIZE, &reader_ctl, &reader_prog, abort_ref)?;
+                    let next = read_exact_or_eof(&mut f, block_size, &reader_ctl, &reader_prog, abort_ref)?;
                     let is_last = next.is_empty();
                     if in_tx.send((seq, current, is_last)).is_err() {
                         bail!("并行压缩通道已关闭");
@@ -384,8 +387,10 @@ impl ParallelZipWriter {
                 let w_prog = progress.clone();
                 let abort_ref = &abort;
                 let level = profile.zip_level;
+                let cpu_duty = profile.cpu_duty_pct;
                 worker_handles.push(scope.spawn(move || {
                     let _prio = ThreadPriorityGuard::enter(profile.mode);
+                    let mut pacer = WorkPacer::new(cpu_duty);
                     loop {
                         if abort_ref.load(Ordering::Acquire) {
                             break;
@@ -406,9 +411,15 @@ impl ParallelZipWriter {
                             break;
                         }
                         let raw_len = chunk.len() as u64;
+                        let step_t0 = pacer.mark_start();
                         let res = compress_deflate_block(&chunk, level, is_last);
                         if res.is_err() {
                             abort_ref.store(true, Ordering::SeqCst);
+                        }
+                        if let Err(e) = pacer.finish_step(step_t0, &w_ctl) {
+                            abort_ref.store(true, Ordering::SeqCst);
+                            let _ = tx.send((seq, 0, Err(e)));
+                            break;
                         }
                         if tx.send((seq, raw_len, res)).is_err() {
                             break;
@@ -785,6 +796,7 @@ fn write_small_batch(
             let prog = progress.clone();
             scope.spawn(move || {
                 let _prio = ThreadPriorityGuard::enter(profile.mode);
+                let mut pacer = WorkPacer::new(profile.cpu_duty_pct);
                 loop {
                     if abort_ref.load(Ordering::Acquire) {
                         break;
@@ -798,9 +810,15 @@ fn write_small_batch(
                         let _ = tx.send((idx, Err(e)));
                         break;
                     }
+                    let step_t0 = pacer.mark_start();
                     let res = prepare_small_item(batch[idx], profile);
                     if res.is_err() {
                         abort_ref.store(true, Ordering::SeqCst);
+                    }
+                    if let Err(e) = pacer.finish_step(step_t0, &ctl) {
+                        abort_ref.store(true, Ordering::SeqCst);
+                        let _ = tx.send((idx, Err(e)));
+                        break;
                     }
                     if tx.send((idx, res)).is_err() {
                         break;
