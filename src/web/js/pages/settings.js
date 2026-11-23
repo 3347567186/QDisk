@@ -2,7 +2,7 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, section, toast, empty, skeleton, confirm, modal, setActions } = UI;
+  const { h, T, icon, section, toast, empty, skeleton, confirm, modal, setActions, busy, withButtonBusy, progressModal } = UI;
 
   const media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
@@ -125,6 +125,9 @@
         updInstalling: false,
         updProg: null,
         updProgDom: null,
+        updCheckProg: null,
+        updCheckDom: null,
+        dataMigrating: false,
         openId: 'appearance'
       };
 
@@ -437,9 +440,17 @@
         state.autostartBusy = true;
         paint();
         try {
-          const now = await API.setAutostart(want);
-          state.autostart = !!now;
-          toast(now ? T('已开启开机自启', 'Autostart enabled') : T('已关闭开机自启', 'Autostart disabled'), 'ok');
+          const now = await busy(
+            () => API.setAutostart(want),
+            want ? T('正在开启开机自启…', 'Enabling autostart…') : T('正在关闭开机自启…', 'Disabling autostart…'),
+            'settings'
+          );
+          if (typeof now === 'boolean') {
+            state.autostart = !!now;
+            toast(now ? T('已开启开机自启', 'Autostart enabled') : T('已关闭开机自启', 'Autostart disabled'), 'ok');
+          } else {
+            state.autostart = !want;
+          }
         } catch (e) {
           state.autostart = !want;
           toast(errText(e), 'error');
@@ -449,11 +460,9 @@
       }
 
       async function onRunAsAdmin() {
-        try {
+        await busy(async () => {
           await API.runAsAdmin();
-        } catch (e) {
-          toast(errText(e), 'error');
-        }
+        }, T('正在请求管理员权限并重启…', 'Requesting admin rights and restarting…'), 'settings');
       }
 
       /* ---------- 整理默认值 ---------- */
@@ -461,7 +470,7 @@
         const s = state.settings;
         const o = state.original;
         if (!s || !o) return [];
-        return ['data_dir', 'recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content',
+        return ['recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content',
           'index_freshness', 'index_max_mb', 'index_rebuild_idle',
           'prune_enabled', 'prune_history_keep', 'prune_thumbs_mb', 'prune_backup_keep']
           .filter((k) => s[k] !== o[k]);
@@ -546,36 +555,49 @@
           });
           /* 预演：只报数字不删。真删的入口不放在设置页 ——
              用户要的是「不再长」，不是「再给他一个清理按钮」。 */
-          function previewPrune() {
-            try {
-              API.engine('prune.run', { dry_run: true }).then((r) => {
+          async function previewPrune(ev) {
+            const btn = ev && ev.currentTarget;
+            const run = async () => {
+              try {
+                const r = await API.engine('prune.run', { dry_run: true });
                 const mb = ((r && r.bytes) || 0) / 1048576;
                 const n = (r && r.files) || 0;
                 toast(n ? ('现在能清 ' + n + ' 项，约 ' + mb.toFixed(1) + ' MB；这些会在下次启动或整理后自动收掉')
                         : '没有可清的东西，本地数据已经是最新状态');
-              }, () => toast('预览失败，引擎没有响应'));
-            } catch (e) {
-              toast('预览失败：' + (e && e.message ? e.message : e));
+              } catch (e) {
+                toast('预览失败：' + errText(e), 'error');
+              }
+            };
+            if (btn && typeof withButtonBusy === 'function') {
+              await withButtonBusy(btn, T('预演中…', 'Previewing…'), run);
+            } else {
+              await busy(run, T('正在预演本地数据清理…', 'Previewing cleanup…'), 'settings');
             }
           }
 
+          const unifiedDataDir = (state.app && state.app.data_dir) || s.data_dir || '';
           body = h('div', { class: 'stack' },
             h('div', { class: 'set-card' },
               setRow(T('数据目录', 'Data folder'),
                 h('div', { class: 'row' },
                   h('input', {
                     class: 'input grow mono', readonly: true, spellcheck: 'false',
-                    value: s.data_dir || '—', title: s.data_dir || ''
+                    value: unifiedDataDir || '—', title: unifiedDataDir || ''
                   }),
                   h('button', {
-                    class: 'btn ghost sm icon', disabled: !s.data_dir,
+                    class: 'btn ghost sm icon', disabled: !unifiedDataDir,
                     title: T('打开目录', 'Open folder'), 'aria-label': T('打开目录', 'Open folder'),
-                    onclick: () => reveal(s.data_dir)
+                    onclick: () => reveal(unifiedDataDir)
                   }, icon('external', 14)),
-                  h('button', { class: 'btn sm', onclick: pickDataDir }, icon('folder', 14),
-                    h('span', { text: T('更改…', 'Change…') }))
+                  h('button', {
+                    class: 'btn sm',
+                    disabled: state.dataMigrating,
+                    onclick: pickDataDir
+                  }, icon('folder', 14),
+                    h('span', { text: state.dataMigrating ? T('迁移中…', 'Migrating…') : T('更改并迁移…', 'Change & migrate…') }))
                 ),
-                T('索引、缓存与 settings.json 所在位置；更改只迁移配置', 'Index, cache and settings.json; changing migrates the config only')),
+                T('配置、AI 会话、整理历史与日志统一存放于此；更改后一次性迁移核心数据、在新目录自动重建缓存与索引并自动重启生效',
+                  'Unified folder for config, AI chats, history and logs; changing migrates data, rebuilds cache/index in the new folder and restarts automatically')),
               /* 三个短字段并一行，与 AI 区块的「参数」行同一套密度 */
               setRow(T('整理规则', 'Tidy rules'),
                 h('div', { class: 'set-tri' },
@@ -629,26 +651,22 @@
                   h('button', {
                     class: 'btn ghost sm', type: 'button',
                     onclick: async () => {
-                      toast(T('正在自检索引…', 'Checking index…'), 'info');
-                      try {
+                      await busy(async (ctrl) => {
+                        ctrl && ctrl.setSub(T('正在检查并修复异常索引库…', 'Verifying and rebuilding index databases…'));
                         const r = await API.engine('search.selfcheck', { rebuild: true });
                         const n = (r && r.rebuilt && r.rebuilt.length) || 0;
                         toast(T('自检完成，重建 ' + n + ' 项', 'Selfcheck done, rebuilt ' + n + ' items'), 'ok');
-                      } catch (e) {
-                        toast(T('自检失败：', 'Selfcheck failed: ') + UI.errText(e), 'warn');
-                      }
+                      }, T('正在自检索引，请稍候…', 'Checking index…'), 'search');
                     }
                   }, icon('shield', 13), h('span', { text: T('索引自检与修复', 'Index selfcheck') })),
                   h('button', {
                     class: 'btn ghost sm', type: 'button',
                     onclick: async () => {
-                      toast(T('正在刷新热目录索引…', 'Refreshing hot index…'), 'info');
-                      try {
+                      await busy(async (ctrl) => {
+                        ctrl && ctrl.setSub(T('正在扫描桌面/文档/下载等常用目录…', 'Scanning desktop, documents and downloads…'));
                         await API.engine('search.hot', { force: true });
                         toast(T('热目录已刷新', 'Hot folders refreshed'), 'ok');
-                      } catch (e) {
-                        toast(T('刷新失败：', 'Refresh failed: ') + UI.errText(e), 'warn');
-                      }
+                      }, T('正在刷新热目录索引…', 'Refreshing hot index…'), 'search');
                     }
                   }, icon('refresh', 13), h('span', { text: T('刷新热目录', 'Refresh hot folders') }))
                 ),
@@ -784,14 +802,70 @@
         paint();
       }
 
+      let activeMigModal = null;
+
       async function pickDataDir() {
-        if (!state.settings) return;
+        if (state.dataMigrating) return;
+        const curDir = (state.app && state.app.data_dir) || (state.settings && state.settings.data_dir) || '';
         try {
-          const dir = await API.pickFolder(state.settings.data_dir || undefined);
-          if (!dir || dir === state.settings.data_dir) return;
-          state.settings.data_dir = dir;
+          const dir = await API.pickFolder(curDir || undefined);
+          if (!dir) return;
+          if (curDir && dir.toLowerCase() === curDir.toLowerCase()) {
+            toast(T('新目录与当前数据目录相同', 'Same as the current data folder'), 'info');
+            return;
+          }
+          if (typeof API.dataDirMigratePreview !== 'function' || typeof API.dataDirMigrate !== 'function') {
+            toast(T('当前环境不支持统一数据迁移', 'Unified data migration is unavailable here'), 'warn');
+            return;
+          }
+          const preview = await busy(
+            () => API.dataDirMigratePreview(dir),
+            T('正在校验目标目录与磁盘空间…', 'Validating target folder and disk space…'),
+            'migrate'
+          );
+          if (!preview) return;
+          const sizeTxt = fmtSize(preview.totalBytes || 0);
+          const freeTxt = preview.freeBytes ? fmtSize(preview.freeBytes) : '';
+          const ok = await confirm({
+            title: T('统一迁移数据目录并重启', 'Migrate data folder & restart'),
+            body: T(
+              `原目录：${preview.oldDir}\n新目录：${preview.newDir}\n\n` +
+              `将一次性迁移 ${preview.fileCount || 0} 个核心文件（约 ${sizeTxt}，包含配置、AI 会话、整理历史、日志与工具组件）` +
+              (freeTxt ? `；目标盘剩余空间 ${freeTxt}。` : '。') +
+              '\n\n运行缓存与索引会在重启后于新目录自动重建，全程显示进度并在完成后自动重启软件。继续？',
+              `From: ${preview.oldDir}\nTo: ${preview.newDir}\n\n` +
+              `Will migrate ${preview.fileCount || 0} core files (${sizeTxt}). Cache and indexes will be rebuilt automatically in the new folder, and the app will restart automatically. Continue?`
+            ),
+            ok: T('开始迁移并重启', 'Migrate & restart')
+          });
+          if (!ok) return;
+
+          state.dataMigrating = true;
           paint();
-          toast(T('已选择新目录，保存后生效', 'New folder selected, save to apply'), 'info');
+          activeMigModal = progressModal({
+            title: T('正在统一迁移数据目录', 'Migrating data folder'),
+            initialText: T('正在准备迁移…', 'Preparing migration…'),
+            initialSub: T('请勿关闭软件，完成后将自动重启并在新目录重建运行文件', 'Please keep the app open; it will restart automatically when done'),
+            kind: 'migrate'
+          });
+          try {
+            const res = await API.dataDirMigrate(dir);
+            if (activeMigModal) {
+              activeMigModal.update({
+                text: T('迁移完成，正在自动重启软件…', 'Migration complete, restarting…'),
+                sub: T(`新目录：${(res && res.newDir) || dir}`, `New folder: ${(res && res.newDir) || dir}`),
+                percent: 100
+              });
+            }
+          } catch (err) {
+            state.dataMigrating = false;
+            if (activeMigModal) {
+              activeMigModal.setError(errText(err));
+              activeMigModal = null;
+            }
+            toast(errText(err), 'error');
+            paint();
+          }
         } catch (e) {
           toast(errText(e), 'error');
         }
@@ -800,8 +874,6 @@
       async function saveDefaults() {
         const s = state.settings;
         if (!s || state.saving) return;
-        const dataDir = String(s.data_dir || '').trim();
-        if (!dataDir) { toast(T('数据目录不能为空', 'The data folder cannot be empty'), 'warn'); return; }
         const depth = Number(s.recursive_depth);
         if (!Number.isInteger(depth) || depth < 1 || depth > 4) {
           toast(T('递归深度需为 1 到 4 的整数', 'Recursive depth must be an integer from 1 to 4'), 'warn');
@@ -820,7 +892,6 @@
           return;
         }
         const patch = {
-          data_dir: dataDir,
           recursive_depth: depth,
           conflict_policy: s.conflict_policy,
           log_keep_days: keep,
@@ -837,25 +908,18 @@
         const keys = Object.keys(patch).filter((k) => patch[k] !== state.original[k]);
         if (!keys.length) { toast(T('没有需要保存的更改', 'Nothing to save'), 'info'); return; }
 
-        if (patch.data_dir !== state.original.data_dir) {
-          const ok = await confirm({
-            title: T('更改数据目录', 'Change the data folder'),
-            body: T('设置与缓存会迁移到新目录，原目录中的文件不会自动搬走。继续？',
-              'Settings and cache move to the new folder; existing files are not moved. Continue?'),
-            ok: T('更改', 'Change')
-          });
-          if (!ok) return;
-        }
-
         state.saving = true;
         paint();
-        try {
-          for (const key of keys) await API.engine('settings.set', { key, value: patch[key] });
+        await busy(async (ctrl) => {
+          for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            ctrl && ctrl.setProgress(Math.round(((i + 1) / keys.length) * 90));
+            await API.engine('settings.set', { key, value: patch[key] });
+          }
           await loadSettings();
+          ctrl && ctrl.setProgress(100);
           toast(T('设置已保存', 'Settings saved'), 'ok');
-        } catch (e) {
-          toast(errText(e), 'error');
-        }
+        }, T('正在保存设置…', 'Saving settings…'), 'settings');
         state.saving = false;
         paint();
       }
@@ -936,7 +1000,7 @@
 
         state.scheduleBusy = true;
         paint();
-        try {
+        await busy(async () => {
           await API.scheduleSet(!!sc.enabled, time, days, cache, screenshots);
           const fresh = await API.scheduleGet().catch(() => null);
           if (fresh) {
@@ -954,9 +1018,7 @@
           toast(state.scheduleExists
             ? T('定时清理已启用', 'Scheduled clean enabled')
             : T('定时清理已关闭', 'Scheduled clean disabled'), 'ok');
-        } catch (e) {
-          toast(errText(e), 'error');
-        }
+        }, T('正在配置 Windows 计划任务…', 'Applying Windows scheduled task…'), 'settings');
         state.scheduleBusy = false;
         paint();
       }
@@ -2139,6 +2201,27 @@
         state.updProgDom = { wrap: progWrap, fill: progFill, meta: progMeta, cancelBtn };
         syncUpdaterProgressDom();
 
+        const chkFill = h('div', { class: 'mig-progress-fill', style: 'width: ' + ((state.updCheckProg && state.updCheckProg.percent) || 12) + '%' });
+        const chkText = h('span', {
+          class: 'small',
+          style: { color: 'var(--text-1)', flex: '1 1 auto' },
+          text: (state.updCheckProg && state.updCheckProg.stage) || T('正在连接官方更新源…', 'Connecting to official update server…')
+        });
+        const chkPct = h('span', {
+          class: 'small mono',
+          style: { color: 'var(--accent)', fontWeight: '600' },
+          text: ((state.updCheckProg && state.updCheckProg.percent) || 12) + '%'
+        });
+        const chkWrap = h('div', { class: 'upd-check-bar', hidden: !state.updChecking },
+          h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
+            h('span', { class: 'btn-spin', style: { color: 'var(--accent)' }, 'aria-hidden': 'true' }),
+            chkText,
+            chkPct
+          ),
+          h('div', { class: 'mig-progress-track' }, chkFill)
+        );
+        state.updCheckDom = { wrap: chkWrap, fill: chkFill, text: chkText, pct: chkPct };
+
         const releasesPage = (st && st.releasesPage) || 'https://github.com/3347567186/QDisk/releases';
 
         const resultCard = (() => {
@@ -2251,6 +2334,7 @@
               )
             )
           ),
+          chkWrap,
           progWrap,
           resultCard,
           h('div', { class: 'action-bar' },
@@ -2266,7 +2350,7 @@
                 type: 'button',
                 class: 'btn sm ghost',
                 disabled: state.updDownloading || state.updInstalling,
-                onclick: clearUpdaterCache
+                onclick: (ev) => clearUpdaterCache(ev && ev.currentTarget)
               }, h('span', { text: T('清理缓存', 'Clear cache') }))
               : null,
             h('button', {
@@ -2279,7 +2363,7 @@
               class: 'btn sm primary',
               disabled: state.updChecking || state.updDownloading,
               onclick: checkForUpdates
-            }, icon('refresh', 14), h('span', {
+            }, state.updChecking ? h('span', { class: 'btn-spin', 'aria-hidden': 'true' }) : icon('refresh', 14), h('span', {
               text: state.updChecking ? T('检查中…', 'Checking…') : T('立即检查更新', 'Check for updates')
             }))
           )
@@ -2340,10 +2424,25 @@
         }
       }
 
+      function syncUpdaterCheckDom() {
+        const d = state.updCheckDom;
+        if (!d) return;
+        d.wrap.hidden = !state.updChecking;
+        const p = state.updCheckProg;
+        if (!p) return;
+        if (typeof p.stage === 'string' && p.stage) d.text.textContent = p.stage;
+        if (typeof p.percent === 'number') {
+          const v = Math.max(0, Math.min(100, Math.round(p.percent)));
+          d.pct.textContent = v + '%';
+          d.fill.style.width = v + '%';
+        }
+      }
+
       async function checkForUpdates() {
         if (state.updChecking || state.updDownloading) return;
         state.updChecking = true;
         state.updError = null;
+        state.updCheckProg = { stage: T('正在连接官方更新源…', 'Connecting to official update server…'), percent: 10 };
         paint();
         try {
           const res = await API.updaterCheck(state.updChannel);
@@ -2361,6 +2460,7 @@
           toast(state.updError, 'error');
         } finally {
           state.updChecking = false;
+          state.updCheckProg = null;
           paint();
         }
       }
@@ -2422,15 +2522,22 @@
         }
       }
 
-      async function clearUpdaterCache() {
-        try {
-          await API.updaterClearCache();
-          if (state.updCheck) state.updCheck = Object.assign({}, state.updCheck, { staged: null });
-          await loadUpdater();
-          toast(T('更新缓存已清理', 'Update cache cleared'), 'ok');
-          paint();
-        } catch (e) {
-          toast(errText(e), 'error');
+      async function clearUpdaterCache(btn) {
+        const run = async () => {
+          try {
+            await API.updaterClearCache();
+            if (state.updCheck) state.updCheck = Object.assign({}, state.updCheck, { staged: null });
+            await loadUpdater();
+            toast(T('更新缓存已清理', 'Update cache cleared'), 'ok');
+            paint();
+          } catch (e) {
+            toast(errText(e), 'error');
+          }
+        };
+        if (btn && typeof withButtonBusy === 'function') {
+          await withButtonBusy(btn, T('清理中…', 'Clearing…'), run);
+        } else {
+          await busy(run, T('正在清理更新缓存…', 'Clearing update cache…'), 'settings');
         }
       }
 
@@ -2468,17 +2575,37 @@
             : h('span', { class: 'badge warn', text: T('未启动', 'Not running') }))
           : h('span', { class: 'badge', text: T('未知', 'Unknown') });
 
+        const dataDirPath = (app && app.data_dir) || (state.settings && state.settings.data_dir) || '';
+        const dataDirRow = h('div', { class: 'row' },
+          h('input', {
+            class: 'input grow mono', readonly: true, spellcheck: 'false',
+            value: dataDirPath || '—', title: dataDirPath || ''
+          }),
+          h('button', {
+            class: 'btn ghost sm icon', disabled: !dataDirPath,
+            title: T('打开目录', 'Open folder'), 'aria-label': T('打开目录', 'Open folder'),
+            onclick: () => reveal(dataDirPath)
+          }, icon('external', 14)),
+          h('button', {
+            class: 'btn sm',
+            disabled: state.dataMigrating,
+            onclick: pickDataDir
+          }, icon('folder', 14),
+            h('span', { text: state.dataMigrating ? T('迁移中…', 'Migrating…') : T('更改并迁移…', 'Change & migrate…') }))
+        );
+
         const body = h('div', { class: 'stack' },
           state.appError
             ? empty(T('应用信息读取失败', 'Could not read app info'), state.appError)
-            /* 三个目录行各自带「打开」按钮（pathRow 里就有），
-               原来工具栏又把同样三个按钮排了一遍，纯重复。 */
             : h('div', { class: 'set-card' },
               h('dl', { class: 'kv' },
                 kvRow(T('版本', 'Version'), h('span', { class: 'mono', text: (app && app.version) || '—' })),
                 kvRow(T('程序目录', 'Program folder'), pathRow(app && app.exe_dir)),
-                kvRow(T('数据目录', 'Data folder'), pathRow(app && app.data_dir)),
-                kvRow(T('日志目录', 'Log folder'), pathRow(app && app.log_dir)),
+                kvRow(T('数据目录', 'Data folder'), dataDirRow),
+                kvRow(T('日志目录', 'Log folder'), h('div', { class: 'stack', style: { gap: '4px' } },
+                  pathRow(app && app.log_dir),
+                  h('span', { class: 'small muted', text: T('日志、缓存与索引统一存放在数据目录下，更改数据目录时会自动整体迁移并重建', 'Logs, cache and indexes live inside the data folder and follow it automatically') })
+                )),
                 kvRow(T('引擎状态', 'Engine'), h('div', { class: 'row' }, status,
                   h('span', { class: 'small muted', text: eng && eng.pid ? 'PID ' + eng.pid : '' }))),
                 kvRow(T('权限', 'Privileges'), state.admin
@@ -2487,9 +2614,9 @@
               )
             ),
           h('div', { class: 'action-bar' },
-            h('span', { class: 'small muted', text: T('版本号同时写进 tauri.conf.json 与 Cargo.toml', 'The version is written to both tauri.conf.json and Cargo.toml') }),
+            h('span', { class: 'small muted', text: T('数据目录与日志目录全局统一；更改后自动一次性迁移并重启生效', 'Data and log folders stay unified; changing migrates and restarts automatically') }),
             h('div', { class: 'spacer' }),
-            h('button', { class: 'btn sm', onclick: refreshMaintenance }, icon('refresh', 14), h('span', { text: T('刷新', 'Refresh') }))
+            h('button', { class: 'btn sm', onclick: (ev) => refreshMaintenance(ev && ev.currentTarget) }, icon('refresh', 14), h('span', { text: T('刷新', 'Refresh') }))
           ),
           state.engineError ? h('div', { class: 'small muted', text: state.engineError }) : null
         );
@@ -2503,10 +2630,17 @@
         });
       }
 
-      async function refreshMaintenance() {
-        await Promise.all([loadAbout(), loadAdmin()]);
-        paint();
-        toast(T('已刷新', 'Refreshed'), 'ok');
+      async function refreshMaintenance(btn) {
+        const run = async () => {
+          await Promise.all([loadAbout(), loadAdmin(), loadSettings()]);
+          paint();
+          toast(T('已刷新', 'Refreshed'), 'ok');
+        };
+        if (btn && typeof withButtonBusy === 'function') {
+          await withButtonBusy(btn, T('刷新中…', 'Refreshing…'), run);
+        } else {
+          await busy(run, T('正在刷新运行状态…', 'Refreshing status…'), 'settings');
+        }
       }
 
       /* ---------- 数据加载 ---------- */
@@ -2592,7 +2726,7 @@
           if (!id || id === 'settings') return;
           const st = active.state;
           if (!st || !st.settings || !st.original) return;
-          const dirty = ['data_dir', 'recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content']
+          const dirty = ['recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content']
             .some((k) => st.settings[k] !== st.original[k]);
           if (!dirty) return;
           e.preventDefault();
@@ -2622,6 +2756,8 @@
       paint();
 
       let unlistenUpd = null;
+      let unlistenUpdCheck = null;
+      let unlistenDataMig = null;
       try {
         if (window.__TAURI__ && window.__TAURI__.event && typeof window.__TAURI__.event.listen === 'function') {
           unlistenUpd = await window.__TAURI__.event.listen('updater-progress', (ev) => {
@@ -2630,6 +2766,24 @@
             if (!p) return;
             state.updProg = p;
             syncUpdaterProgressDom();
+          });
+          unlistenUpdCheck = await window.__TAURI__.event.listen('updater-check-progress', (ev) => {
+            if (!active || active.root !== root) return;
+            const p = (ev && ev.payload) || null;
+            if (!p) return;
+            state.updCheckProg = p;
+            syncUpdaterCheckDom();
+          });
+          unlistenDataMig = await window.__TAURI__.event.listen('data-dir-migrate-progress', (ev) => {
+            if (!active || active.root !== root) return;
+            const p = (ev && ev.payload) || null;
+            if (!p || !activeMigModal) return;
+            activeMigModal.update({
+              text: p.detail || T('正在迁移数据…', 'Migrating data…'),
+              sub: p.current ? T('当前处理：' + p.current, 'Current: ' + p.current)
+                : T('请勿关闭软件，完成后将自动重启生效', 'Please keep the app open until finished'),
+              percent: typeof p.percent === 'number' ? p.percent : undefined
+            });
           });
         }
       } catch (e) { /* 非 Tauri 环境跳过事件监听 */ }
@@ -2641,7 +2795,11 @@
 
       return function unmount() {
         if (unlistenUpd) { try { unlistenUpd(); } catch (e) { /* ignore */ } unlistenUpd = null; }
+        if (unlistenUpdCheck) { try { unlistenUpdCheck(); } catch (e) { /* ignore */ } unlistenUpdCheck = null; }
+        if (unlistenDataMig) { try { unlistenDataMig(); } catch (e) { /* ignore */ } unlistenDataMig = null; }
+        if (activeMigModal) { try { activeMigModal.close(); } catch (e) { /* ignore */ } activeMigModal = null; }
         state.updProgDom = null;
+        state.updCheckDom = null;
         liveJump = null;
         active = null;
         setActions();

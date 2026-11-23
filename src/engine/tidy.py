@@ -98,24 +98,46 @@ def read_data_locator():
       "ok"      指针存在且目录还在
       "missing" 指针存在但目录不在了（盘没接 / 被删 / 被改名）
       "none"    没有指针（老版本，或从没改过数据目录）
+    当多个候选位置都存在指针时，按 updated_ms（或文件 mtime）取最新的一份，
+    避免只读程序目录里的旧指针盖住用户目录里的新选择。
     """
+    best_ok = None
+    best_missing = None
     for p in _locator_candidates():
         try:
             with open(p, encoding="utf-8-sig") as f:
-                raw = (json.load(f) or {}).get("data_dir")
+                data = json.load(f) or {}
+            raw = data.get("data_dir")
         except Exception:
             continue
         if not isinstance(raw, str) or not raw.strip():
             continue
         d = os.path.normpath(os.path.expandvars(raw.strip()))
-        return (d, "ok") if os.path.isdir(d) else (d, "missing")
+        ts = data.get("updated_ms")
+        if not isinstance(ts, (int, float)):
+            try:
+                ts = int(os.path.getmtime(p) * 1000)
+            except OSError:
+                ts = 0
+        if os.path.isdir(d):
+            if best_ok is None or ts > best_ok[0]:
+                best_ok = (ts, d)
+        else:
+            if best_missing is None or ts > best_missing[0]:
+                best_missing = (ts, d)
+    if best_ok is not None:
+        return (best_ok[1], "ok")
+    if best_missing is not None:
+        return (best_missing[1], "missing")
     return (None, "none")
 
 
 def write_data_locator(d):
-    """把数据目录写进指针文件；优先 exe 旁边，写不了退用户目录。失败返回空串。"""
+    """把数据目录写进所有可写指针位置（带 updated_ms 与 Rust 外壳共享仲裁协议）。"""
     body = {"data_dir": os.path.normpath(d),
-            "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
+            "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_ms": int(time.time() * 1000)}
+    first_ok = ""
     for p in _locator_candidates():
         try:
             os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -123,10 +145,11 @@ def write_data_locator(d):
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(body, f, ensure_ascii=False, indent=1)
             os.replace(tmp, p)
-            return p
+            if not first_ok:
+                first_ok = p
         except Exception:
             continue
-    return ""
+    return first_ok
 
 
 def _dir_writable(d):
@@ -7136,7 +7159,7 @@ def _spawn_detached(cmd):
     try:
         import ctypes
         rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe",
-                                                 "/c " + cmd, None, 1)
+                                                 "/c " + cmd, None, 0)
         if int(rc) > 32:
             return True
         if int(rc) == 5:
@@ -7930,17 +7953,26 @@ def _engine_process_close(params):
         }
 
     import subprocess, time
+    no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     if pid:
-        # 按 PID 关闭单进程
+        # 按 PID 关闭单进程（严禁弹出黑色控制台窗口）
         try:
-            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True, text=True, timeout=5)
+            subprocess.run(
+                ["taskkill", "/PID", str(pid)],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=5, creationflags=no_win
+            )
         except Exception:
             pass
 
         if force:
             try:
-                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, text=True, timeout=5)
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    timeout=5, creationflags=no_win
+                )
             except Exception:
                 pass
         return {"ok": True, "pid": pid, "name": name or str(pid), "closed": True}
@@ -7948,36 +7980,50 @@ def _engine_process_close(params):
     # 按名称关闭
     was_running = _engine_process_is_running(clean + ".exe")
     if not was_running:
-        return {"ok": True, "name": clean, "was_running": False, "closed": False}
+        return {"ok": True, "name": clean, "was_running": False, "closed": False, "still_running": False}
 
-    # 1. 尝试优雅通知退出（taskkill 不加 /F 发送 WM_CLOSE）
+    # 1. 尝试优雅通知退出（taskkill 不加 /F 发送 WM_CLOSE，静默无黑框）
     try:
-        subprocess.run(["taskkill", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
+        subprocess.run(
+            ["taskkill", "/IM", "%s.exe" % clean],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=5, creationflags=no_win
+        )
     except Exception:
         pass
 
-    # 非阻塞短轮询等待退出（最多 300ms，每次 50ms）
+    # 非阻塞轮询等待优雅退出并释放文件锁（最多 2.5s，每次 100ms，退出即刻返回）
     still_running = True
-    for _ in range(6):
-        time.sleep(0.05)
+    for _ in range(25):
+        time.sleep(0.1)
         if not _engine_process_is_running(clean + ".exe"):
             still_running = False
             break
 
-    # 2. 若配置了 force 且仍在运行，再尝试强制终止
+    # 2. 若配置了 force 且仍在运行，再尝试强制终止（同样静默无黑框）
     if still_running and force:
         try:
-            subprocess.run(["taskkill", "/F", "/IM", "%s.exe" % clean], capture_output=True, text=True, timeout=5)
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "%s.exe" % clean],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=5, creationflags=no_win
+            )
         except Exception:
             pass
-        for _ in range(2):
-            time.sleep(0.05)
+        for _ in range(10):
+            time.sleep(0.1)
             if not _engine_process_is_running(clean + ".exe"):
                 still_running = False
                 break
 
     closed = not _engine_process_is_running(clean + ".exe")
-    return {"ok": True, "name": clean, "was_running": was_running, "closed": closed}
+    return {
+        "ok": True,
+        "name": clean,
+        "was_running": was_running,
+        "closed": closed,
+        "still_running": not closed
+    }
 
 
 def _engine_process_list(params=None):

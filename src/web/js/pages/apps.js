@@ -1711,29 +1711,37 @@
         toast(T('系统核心组件受保护，禁止关闭', 'System component is protected'), 'warn');
         return;
       }
-      try {
-        const r = await API.engine('process.close', {
+      const r = await busy(
+        () => API.engine('process.close', {
           name: it.clean_name,
           force: !!force,
           confirm_sensitive: false
+        }),
+        T(`正在关闭进程【${it.name}】…`, `Closing process [${it.name}]…`),
+        'apps'
+      );
+      if (!r) return;
+      if (r.need_confirm) {
+        const ok = await UI.confirm({
+          title: T('敏感数据应用提示', 'Sensitive App Warning'),
+          body: r.warning + '\n\n' + T('确定要强制关闭该进程吗？', 'Are you sure you want to close it?'),
+          ok: T('强制关闭', 'Force close'),
+          danger: true
         });
-        if (r && r.need_confirm) {
-          const ok = await UI.confirm(
-            T('敏感数据应用提示', 'Sensitive App Warning'),
-            r.warning + '\n\n' + T('确定要强制关闭该进程吗？', 'Are you sure you want to close it?')
-          );
-          if (!ok) return;
-          await API.engine('process.close', {
+        if (!ok) return;
+        const r2 = await busy(
+          () => API.engine('process.close', {
             name: it.clean_name,
             force: true,
             confirm_sensitive: true
-          });
-        }
-        toast(T(`已关闭进程【${it.name}】`, `Closed process [${it.name}]`), 'ok');
-        loadProcs(true);
-      } catch (err) {
-        toast(T('关闭进程失败：', 'Failed to close process: ') + ((err && err.message) || String(err)), 'error');
+          }),
+          T(`正在强制关闭【${it.name}】…`, `Force closing [${it.name}]…`),
+          'apps'
+        );
+        if (!r2) return;
       }
+      toast(T(`已关闭进程【${it.name}】`, `Closed process [${it.name}]`), 'ok');
+      loadProcs(true);
     }
 
     function renderProcTable() {
@@ -3064,15 +3072,12 @@
 
     async function doRestartAsAdmin() {
       btnAdmin.disabled = true;
-      try {
+      await busy(async () => {
         await API.runAsAdmin();
         toast(T('已请求管理员权限，应用会重启，请在系统弹窗里确认',
           'Elevation requested. The app will restart; confirm the system prompt'), 'ok', 6000);
-      } catch (e) {
-        toast(errText(e), 'error');
-      } finally {
-        btnAdmin.disabled = false;
-      }
+      }, T('正在请求管理员权限并重启…', 'Requesting admin rights and restarting…'), 'apps');
+      btnAdmin.disabled = false;
     }
 
     /* ---------------- 数据 ---------------- */
@@ -3396,45 +3401,45 @@
         danger: true
       });
       if (!yes) return;
-      try {
+      const deleted = await busy(async () => {
         await API.engine('apps.delete_entry', {
           name: it.name, version: it.version || '', confirm: true
         });
+        return true;
+      }, T('正在删除注册表条目…', 'Deleting registry entry…'), 'apps');
+      if (deleted) {
         toast(T('已删除注册表条目', 'Registry entry deleted'), 'ok');
         await loadApps(false);
-      } catch (e) {
-        toast(errText(e), 'error');
       }
     }
 
     async function showRegistry(it) {
       if (!it) return;
-      try {
-        const r = await API.engine('apps.registry', {
-          name: it.name, version: it.version || ''
-        });
-        const rows = (r.values || []).map((v) =>
-          h('tr', null,
-            h('td', { class: 'mono small' }, v.name),
-            h('td', { class: 'mono small ellipsis', title: v.value }, v.value)
-          ));
-        modal({
-          title: T('注册表条目', 'Registry entry'),
-          wide: true,
-          body: h('div', { class: 'stack' },
-            h('div', { class: 'small muted mono ellipsis', title: (r.hive || '') + '\\' + (r.key || '') },
-              (r.hive || '') + '\\' + (r.key || '')),
-            h('div', { class: 'table-wrap' },
-              h('table', { class: 'table dense' },
-                h('thead', null, h('tr', null,
-                  h('th', null, T('名称', 'Name')), h('th', null, T('值', 'Value')))),
-                h('tbody', null, ...rows)))
-          ),
-          buttons: [{ id: 'ok', label: T('关闭', 'Close'), kind: 'primary' }]
-        });
-      } catch (e) {
-        toast(errText(e), 'error');
-      }
+      const r = await busy(
+        () => API.engine('apps.registry', { name: it.name, version: it.version || '' }),
+        T('正在读取注册表信息…', 'Reading registry entry…'),
+        'apps'
+      );
+      if (!r) return;
+      const rows = (r.values || []).map((v) =>
+        h('tr', null,
+          h('td', { class: 'mono small' }, v.name),
+          h('td', { class: 'mono small ellipsis', title: v.value }, v.value)
+        ));
+      modal({
+        title: T('注册表条目', 'Registry entry'),
+        wide: true,
+        body: h('div', { class: 'stack' },
+          h('div', { class: 'small muted mono ellipsis', title: (r.hive || '') + '\\' + (r.key || '') },
+            (r.hive || '') + '\\' + (r.key || '')),
+          h('div', { class: 'table-wrap' },
+            h('table', { class: 'table dense' },
+              h('thead', null, h('tr', null,
+                h('th', null, T('名称', 'Name')), h('th', null, T('值', 'Value')))),
+              h('tbody', null, ...rows)))
+        ),
+        buttons: [{ id: 'ok', label: T('关闭', 'Close'), kind: 'primary' }]
+      });
     }
 
     function openSite(it) {

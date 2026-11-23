@@ -4,7 +4,7 @@
 (function () {
   'use strict';
 
-  const { h, T, icon, fmtBytes, fmtCount, toast, empty, modal, confirm, setActions } = UI;
+  const { h, T, icon, fmtBytes, fmtCount, toast, empty, modal, confirm, setActions, busy } = UI;
   const errText = UI.errText;
 
   const MODES = [
@@ -1356,21 +1356,30 @@
     renderLastExtract();
     renderLastCreate();
     try {
-      const urep = await API.archiveUndo(record.undoId);
-      record.undone = true;
-      record.undoReport = urep;
-      record.undoSummary = formatUndoSummary(urep);
-      if (S.activeUndoId === record.undoId) S.activeUndoId = null;
-      emitHook('undo:done', { kind, record, report: urep });
-      const label = kind === 'create' ? T('已撤回压缩：', 'Reverted compression: ') : T('已撤回解压：', 'Reverted extraction: ');
-      const hasWarn = Array.isArray(urep.warnings) && urep.warnings.length > 0;
-      toast(label + record.undoSummary + (hasWarn ? `（${urep.warnings[0]}）` : ''), hasWarn ? 'warn' : 'ok', 6500);
-    } catch (e) {
-      const msg = errText(e);
-      if (/未找到可撤回记录/.test(msg) && S.activeUndoId === record.undoId) {
-        S.activeUndoId = null;
-      }
-      toast(msg, 'error');
+      await busy(async () => {
+        try {
+          const urep = await API.archiveUndo(record.undoId);
+          record.undone = true;
+          record.undoReport = urep;
+          record.undoSummary = formatUndoSummary(urep);
+          if (S.activeUndoId === record.undoId) S.activeUndoId = null;
+          S.undoBusy = false;
+          renderLastExtract();
+          renderLastCreate();
+          emitHook('undo:done', { kind, record, report: urep });
+          const label = kind === 'create' ? T('已撤回压缩：', 'Reverted compression: ') : T('已撤回解压：', 'Reverted extraction: ');
+          const hasWarn = Array.isArray(urep.warnings) && urep.warnings.length > 0;
+          toast(label + record.undoSummary + (hasWarn ? `（${urep.warnings[0]}）` : ''), hasWarn ? 'warn' : 'ok', 6500);
+        } catch (e) {
+          const msg = errText(e);
+          if (/未找到可撤回记录/.test(msg) && S.activeUndoId === record.undoId) {
+            S.activeUndoId = null;
+          }
+          toast(msg, 'error');
+        }
+      }, kind === 'create'
+        ? T('正在撤回压缩并清理产物…', 'Reverting compression…')
+        : T('正在撤回解压并还原文件…', 'Reverting extraction…'), 'spin');
     } finally {
       S.undoBusy = false;
       renderLastExtract();

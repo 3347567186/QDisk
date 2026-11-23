@@ -34,7 +34,10 @@ window.Pages.shots = {
 - `UI.fmtBytes(n)`、`UI.fmtCount(n)`、`UI.fmtTime(unixSec)`、`UI.fmtDateTime(isoString)`。
 - `UI.toast(msg, kind)`：kind = info | ok | warn | error。
 - `UI.confirm({title, body, ok, danger})` → Promise<bool>。
-- `UI.busy(fn, label?)`：显示遮罩执行 fn，异常自动 toast 并返回 undefined。
+- `UI.busy(fn, label?, kind?)`：并发引用计数安全遮罩执行 `fn(ctrl)`，支持 `ctrl.setText`/`ctrl.setSub`/`ctrl.setProgress(0..100)` 与超时耗时感知，异常自动 toast 并返回 undefined。
+- `UI.withButtonBusy(btn, busyLabel, fn)`：按钮级防重入禁用 + 迷你旋转图标等待态，结束必还原。
+- `UI.progressModal({ title, initialText, initialSub, kind })`：不可误关的多阶段进度弹窗（用于数据目录统一迁移等持久化关键任务）。
+- `API.dataDirMigratePreview(targetDir)` / `API.dataDirMigrate(targetDir)`：数据目录统一准入校验、一次性迁移与自动重启生效。
 - `UI.skeleton(rows)`：骨架屏节点。
 - `UI.empty(text, sub?)`：空态节点。
 - `UI.card(title?, ...children)`：卡片容器。

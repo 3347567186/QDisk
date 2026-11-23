@@ -262,8 +262,10 @@
             toast(T('该目录已在列表中', 'That folder is already listed'), 'warn');
             return;
           }
-          await API.engine('search.add', { roots: [dir] });
-          await refreshStatus({ quiet: true });
+          await UI.busy(async () => {
+            await API.engine('search.add', { roots: [dir] });
+            await refreshStatus({ quiet: true });
+          }, T('正在添加索引目录…', 'Adding indexed folder…'), 'search');
           manager && manager.render();
           paint();
           toast(T('已添加目录，点「建立索引」生效', 'Folder added — run Index to apply'), 'ok');
@@ -281,15 +283,16 @@
           danger: true
         });
         if (!ok) return;
-        try {
+        const removed = await UI.busy(async () => {
           await API.engine('search.remove', { ids: [row.id] });
           state.scope = state.scope.filter((id) => id !== row.id);
           await refreshStatus({ quiet: true });
+          return true;
+        }, T('正在删除索引文件…', 'Deleting index…'), 'search');
+        if (removed) {
           manager && manager.render();
           paint();
           toast(T('索引已删除', 'Index deleted'), 'ok');
-        } catch (e) {
-          toast(errText(e), 'error');
         }
       }
 

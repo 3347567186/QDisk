@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -50,15 +50,174 @@ const STORE_CACHE_TTL: Duration = Duration::from_secs(300);
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// 当前进程生效的统一数据目录（启动时从 `数据位置.json` 解析并锁定，全进程单一真相源）。
+static ACTIVE_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// 防止并发触发数据目录迁移。
+static DATA_MIGRATE_BUSY: AtomicBool = AtomicBool::new(false);
+
+const DATA_LOCATOR_NAME: &str = "数据位置.json";
+
+/// 软件已知核心持久数据项（统一迁移白名单，绝不触碰用户放进旧目录的其他无关文件）。
+const CORE_MIGRATE_ENTRIES: &[&str] = &[
+    "app.json",
+    "配置",
+    "ai",
+    "history",
+    "logs",
+    "迁移",
+    "卸载备份",
+    "updates",
+    "bin",
+];
+
+/// 重启后由新目录自动重建的运行时缓存目录（迁移时不硬搬被 WebView2/SQLite 锁住的缓存）。
+const REBUILD_SUBDIRS: &[&str] = &["配置", "logs", "history", "cache", "ai", "webview"];
+
+/// 主进程退出后，旧数据目录中允许由隐藏引导脚本安全清扫的软件已知子项。
+const CLEANUP_KNOWN_ENTRIES: &[&str] = &[
+    "webview",
+    "cache",
+    "preview",
+    "archive_undo",
+    "thumbs",
+    "logs",
+    "history",
+    "配置",
+    "ai",
+    "app.json",
+    "迁移",
+    "卸载备份",
+    "updates",
+    "bin",
+];
+
 // ---------------------------------------------------------------- paths
 
 fn env_dir(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
 }
 
-fn data_dir() -> PathBuf {
+fn default_data_dir() -> PathBuf {
     let base = env_dir("LOCALAPPDATA").unwrap_or_else(|| PathBuf::from("."));
     base.join("整理助手数据")
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn normalize_path_str(raw: &str) -> String {
+    let mut s = raw.trim().trim_matches('"').replace('/', "\\");
+    while s.len() > 3 && s.ends_with('\\') {
+        s.pop();
+    }
+    s
+}
+
+fn locator_read_candidates_for(exe_d: &Path, local_app_data: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(3);
+    out.push(exe_d.join("引擎").join(DATA_LOCATOR_NAME));
+    out.push(exe_d.join(DATA_LOCATOR_NAME));
+    if let Some(la) = local_app_data {
+        out.push(la.join("整理助手").join(DATA_LOCATOR_NAME));
+    }
+    out
+}
+
+fn locator_write_candidates_for(exe_d: &Path, local_app_data: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(2);
+    let eng_dir = exe_d.join("引擎");
+    if eng_dir.is_dir() {
+        out.push(eng_dir.join(DATA_LOCATOR_NAME));
+    }
+    if let Some(la) = local_app_data {
+        out.push(la.join("整理助手").join(DATA_LOCATOR_NAME));
+    }
+    out
+}
+
+/// 从多个候选指针文件中读取最新且有效的 `data_dir`（按 `updated_ms` 仲裁，缺失时回退文件 mtime）。
+fn read_locator_from_candidates(candidates: &[PathBuf]) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for path in candidates {
+        let Ok(raw_text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let cleaned = raw_text.trim_start_matches('\u{feff}');
+        let Ok(v) = serde_json::from_str::<Value>(cleaned) else {
+            continue;
+        };
+        let Some(raw_dir) = v.get("data_dir").and_then(|d| d.as_str()) else {
+            continue;
+        };
+        let norm = normalize_path_str(raw_dir);
+        if norm.is_empty() {
+            continue;
+        }
+        let pb = PathBuf::from(&norm);
+        if !pb.is_absolute() || !pb.is_dir() {
+            continue;
+        }
+        let ts = v
+            .get("updated_ms")
+            .and_then(|x| x.as_u64())
+            .unwrap_or_else(|| {
+                std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0)
+            });
+        let replace = match &best {
+            None => true,
+            Some((best_ts, _)) => ts > *best_ts,
+        };
+        if replace {
+            best = Some((ts, pb));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+fn write_locator_to_candidates(target: &Path, candidates: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let norm = normalize_path_str(&target.to_string_lossy());
+    let now_ms = unix_now_ms();
+    let body = json!({
+        "data_dir": norm,
+        "updated": format!("{} {}", chrono_like_stamp(), clock()),
+        "updated_ms": now_ms
+    });
+    let txt = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
+    let mut written = Vec::new();
+    let mut last_err = String::new();
+    for loc in candidates {
+        match write_file_atomic(loc, txt.as_bytes()) {
+            Ok(()) => written.push(loc.clone()),
+            Err(e) => last_err = e,
+        }
+    }
+    if written.is_empty() {
+        return Err(if last_err.is_empty() {
+            "无法写入数据目录指针文件".into()
+        } else {
+            format!("无法写入数据目录指针文件：{last_err}")
+        });
+    }
+    Ok(written)
+}
+
+fn data_dir() -> PathBuf {
+    ACTIVE_DATA_DIR
+        .get_or_init(|| {
+            let local = env_dir("LOCALAPPDATA");
+            let cands = locator_read_candidates_for(&exe_dir(), local.as_deref());
+            read_locator_from_candidates(&cands).unwrap_or_else(default_data_dir)
+        })
+        .clone()
 }
 
 fn log_dir() -> PathBuf {
@@ -209,24 +368,30 @@ fn config_set(patch: Value) -> Result<Value, String> {
 
 // ---------------------------------------------------------------- engine
 
-/// 把引擎的数据目录固定到 %LOCALAPPDATA%\整理助手数据，
-/// 避免和安装目录（%LOCALAPPDATA%\整理助手）混在一起、卸载时误删。
+/// 确保引擎旁 `数据位置.json` 与当前生效的仲裁后数据目录一致，绝不倒退覆盖。
 fn ensure_engine_data_dir(engine: &Path) {
+    if DATA_MIGRATE_BUSY.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(dir) = engine.parent() else { return };
-    let locator = dir.join("数据位置.json");
+    let locator = dir.join(DATA_LOCATOR_NAME);
     let want = data_dir();
     let _ = std::fs::create_dir_all(&want);
     let current = std::fs::read_to_string(&locator)
         .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.get("data_dir").and_then(|d| d.as_str()).map(str::to_string));
-    let want_text = want.to_string_lossy().to_string();
-    if current.as_deref() == Some(want_text.as_str()) {
+        .and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())
+        .and_then(|v| v.get("data_dir").and_then(|d| d.as_str()).map(normalize_path_str));
+    let want_text = normalize_path_str(&want.to_string_lossy());
+    if current.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&want_text)) {
         return;
     }
-    let body = json!({ "data_dir": want_text, "updated": clock() });
+    let body = json!({
+        "data_dir": want_text,
+        "updated": format!("{} {}", chrono_like_stamp(), clock()),
+        "updated_ms": unix_now_ms()
+    });
     if let Ok(txt) = serde_json::to_string_pretty(&body) {
-        let _ = std::fs::write(&locator, txt);
+        let _ = write_file_atomic(&locator, txt.as_bytes());
     }
 }
 
@@ -1064,6 +1229,472 @@ async fn run_as_admin(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
         handle.exit(0);
     });
     Ok(())
+}
+
+// ---------------------------------------------------------------- data dir migration
+
+fn is_drive_root_str(norm: &str) -> bool {
+    let b = norm.as_bytes();
+    (b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        || (b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\')
+}
+
+fn path_eq_ci(a: &Path, b: &Path) -> bool {
+    normalize_path_str(&a.to_string_lossy())
+        .to_lowercase()
+        == normalize_path_str(&b.to_string_lossy()).to_lowercase()
+}
+
+fn path_is_inside_ci(child: &Path, parent: &Path) -> bool {
+    let c = normalize_path_str(&child.to_string_lossy()).to_lowercase();
+    let p = normalize_path_str(&parent.to_string_lossy()).to_lowercase();
+    c.starts_with(&format!("{p}\\"))
+}
+
+fn is_forbidden_system_dir(norm: &str) -> bool {
+    let low = norm.to_lowercase();
+    if low.contains("\\$recycle.bin") || low.contains("\\system volume information") {
+        return true;
+    }
+    let mut blocked = vec![
+        r"c:\windows".to_string(),
+        r"c:\program files".to_string(),
+        r"c:\program files (x86)".to_string(),
+        r"c:\programdata".to_string(),
+    ];
+    for key in ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+        if let Some(p) = env_dir(key) {
+            let s = normalize_path_str(&p.to_string_lossy()).to_lowercase();
+            if !s.is_empty() {
+                blocked.push(s);
+            }
+        }
+    }
+    for b in blocked {
+        if low == b || (b.ends_with("\\windows") && low.starts_with(&format!("{b}\\"))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_data_dir_target(
+    raw_target: &str,
+    current: &Path,
+    exe_d: &Path,
+    keep_created: bool,
+) -> Result<PathBuf, String> {
+    let norm = normalize_path_str(raw_target);
+    if norm.is_empty() {
+        return Err("数据目录不能为空".into());
+    }
+    if norm.chars().count() > 160 {
+        return Err("路径过长（不能超过 160 个字符），请选择更短的目录以免索引与 WebView2 失败".into());
+    }
+    let target = PathBuf::from(&norm);
+    if !target.is_absolute() {
+        return Err("数据目录必须是绝对路径（例如 D:\\QDiskData）".into());
+    }
+    if is_drive_root_str(&norm) {
+        return Err(format!("{norm} 是盘符根目录，请在其下新建一个专属子目录（例如 {norm}\\整理助手数据）"));
+    }
+    if target.is_file() {
+        return Err(format!("目标路径是文件而不是目录：{norm}"));
+    }
+    if is_forbidden_system_dir(&norm) {
+        return Err(format!("不能把数据目录设在系统受保护目录中：{norm}"));
+    }
+    if path_eq_ci(&target, current) {
+        return Err("新目录与当前数据目录相同，无需迁移".into());
+    }
+    if path_is_inside_ci(&target, current) {
+        return Err("新数据目录不能位于当前数据目录内部".into());
+    }
+    if path_is_inside_ci(current, &target) {
+        return Err("新数据目录不能是当前数据目录的上级目录".into());
+    }
+    let eng_dir = exe_d.join("引擎");
+    if path_eq_ci(&target, exe_d) || path_eq_ci(&target, &eng_dir) || path_is_inside_ci(&target, &eng_dir) {
+        return Err("不能直接把数据目录放在程序目录或引擎目录内（可放在程序外的独立目录）".into());
+    }
+    // 记录原本不存在的祖先链，预检模式（keep_created=false）结束时清理干净，避免取消后留下空目录
+    let mut created_chain = Vec::new();
+    if !target.exists() {
+        let mut cur = target.as_path();
+        while !cur.exists() {
+            created_chain.push(cur.to_path_buf());
+            match cur.parent() {
+                Some(p) if !p.as_os_str().is_empty() => cur = p,
+                _ => break,
+            }
+        }
+    }
+    if let Err(e) = std::fs::create_dir_all(&target) {
+        return Err(format!("无法创建目标目录：{e}"));
+    }
+    let probe = target.join(format!(".tidy_write_probe_{}", std::process::id()));
+    let write_res = std::fs::write(&probe, b"ok");
+    let _ = std::fs::remove_file(&probe);
+    if write_res.is_err() || !keep_created {
+        for d in &created_chain {
+            let _ = std::fs::remove_dir(d);
+        }
+    }
+    if let Err(e) = write_res {
+        return Err(format!("目标目录不可写（权限不足或磁盘只读）：{e}"));
+    }
+    Ok(target)
+}
+
+#[cfg(windows)]
+fn disk_free_bytes_for(path: &Path) -> Option<u64> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let mut wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_avail: u64 = 0;
+    let mut total: u64 = 0;
+    let mut total_free: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_mut_ptr(),
+            &mut free_avail as *mut u64,
+            &mut total as *mut u64,
+            &mut total_free as *mut u64,
+        )
+    };
+    if ok != 0 { Some(free_avail) } else { None }
+}
+
+#[cfg(not(windows))]
+fn disk_free_bytes_for(_path: &Path) -> Option<u64> {
+    None
+}
+
+struct MigrateFile {
+    src: PathBuf,
+    rel: PathBuf,
+    size: u64,
+}
+
+fn collect_core_migrate_files(src_root: &Path) -> (Vec<MigrateFile>, Vec<PathBuf>, u64) {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let mut total_bytes: u64 = 0;
+
+    for &name in CORE_MIGRATE_ENTRIES {
+        let entry = src_root.join(name);
+        if !entry.exists() {
+            continue;
+        }
+        if entry.is_file() {
+            let sz = std::fs::metadata(&entry).map(|m| m.len()).unwrap_or(0);
+            total_bytes = total_bytes.saturating_add(sz);
+            files.push(MigrateFile {
+                src: entry,
+                rel: PathBuf::from(name),
+                size: sz,
+            });
+        } else if entry.is_dir() {
+            dirs.push(PathBuf::from(name));
+            for item in walkdir::WalkDir::new(&entry).follow_links(false).into_iter().flatten() {
+                let p = item.path();
+                let Ok(rel) = p.strip_prefix(src_root) else {
+                    continue;
+                };
+                if item.file_type().is_dir() {
+                    dirs.push(rel.to_path_buf());
+                } else if item.file_type().is_file() {
+                    let sz = item.metadata().map(|m| m.len()).unwrap_or(0);
+                    total_bytes = total_bytes.saturating_add(sz);
+                    files.push(MigrateFile {
+                        src: p.to_path_buf(),
+                        rel: rel.to_path_buf(),
+                        size: sz,
+                    });
+                }
+            }
+        }
+    }
+    (files, dirs, total_bytes)
+}
+
+fn sync_migrated_settings_json(old_dir: &Path, new_dir: &Path) -> Result<(), String> {
+    let cfg_dir = new_dir.join("配置");
+    std::fs::create_dir_all(&cfg_dir).map_err(|e| format!("创建配置目录失败：{e}"))?;
+    let sp = cfg_dir.join("settings.json");
+    let mut val = if sp.is_file() {
+        std::fs::read_to_string(&sp)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+    if !val.is_object() {
+        val = json!({});
+    }
+    let new_str = normalize_path_str(&new_dir.to_string_lossy());
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("data_dir".into(), json!(new_str));
+        if let Some(cd) = obj.get("cache_dir").and_then(|x| x.as_str()).map(normalize_path_str) {
+            if !cd.is_empty() {
+                let cd_path = PathBuf::from(&cd);
+                if path_eq_ci(&cd_path, old_dir) || path_is_inside_ci(&cd_path, old_dir) {
+                    obj.insert("cache_dir".into(), json!(""));
+                }
+            }
+        }
+    }
+    let text = serde_json::to_string_pretty(&val).map_err(|e| e.to_string())?;
+    write_file_atomic(&sp, text.as_bytes()).map_err(|e| format!("更新新目录 settings.json 失败：{e}"))
+}
+
+fn copy_core_data_with_progress<F>(
+    old_dir: &Path,
+    new_dir: &Path,
+    mut on_progress: F,
+) -> Result<(usize, u64, Vec<String>), String>
+where
+    F: FnMut(u8, usize, usize, &str),
+{
+    let (files, dirs, total_bytes) = collect_core_migrate_files(old_dir);
+    let need_bytes = total_bytes.saturating_add(64 * 1024 * 1024);
+    if let Some(free) = disk_free_bytes_for(new_dir) {
+        if free < need_bytes {
+            return Err(format!(
+                "目标磁盘剩余空间不足（至少需要约 {:.1} MB，当前剩余 {:.1} MB）",
+                need_bytes as f64 / 1048576.0,
+                free as f64 / 1048576.0
+            ));
+        }
+    }
+
+    for rel_dir in &dirs {
+        let dst_d = new_dir.join(rel_dir);
+        std::fs::create_dir_all(&dst_d)
+            .map_err(|e| format!("创建目录 {} 失败：{e}", dst_d.display()))?;
+    }
+
+    let total_files = files.len();
+    let mut copied_files: usize = 0;
+    let mut copied_bytes: u64 = 0;
+    let mut skipped_warnings: Vec<String> = Vec::new();
+    let mut last_pct: u8 = 0;
+
+    for (idx, item) in files.iter().enumerate() {
+        let dst = new_dir.join(&item.rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建目标子目录失败：{e}"))?;
+        }
+        let rel_txt = item.rel.to_string_lossy().to_string();
+        let is_log = rel_txt.to_lowercase().starts_with("logs\\");
+        match std::fs::copy(&item.src, &dst) {
+            Ok(_) => {
+                copied_files += 1;
+                copied_bytes = copied_bytes.saturating_add(item.size);
+            }
+            Err(e) => {
+                // 正在追加写入的当日日志文件若被短暂锁定，不阻断整体配置与历史迁移
+                if is_log {
+                    skipped_warnings.push(format!("跳过锁定日志 {rel_txt}：{e}"));
+                } else {
+                    return Err(format!("复制 {rel_txt} 失败：{e}"));
+                }
+            }
+        }
+        let pct = if total_bytes > 0 {
+            18u8.saturating_add(((copied_bytes.saturating_mul(64)) / total_bytes).min(64) as u8)
+        } else if total_files > 0 {
+            18u8.saturating_add((((idx + 1) * 64) / total_files).min(64) as u8)
+        } else {
+            82
+        };
+        if pct != last_pct || idx + 1 == total_files {
+            last_pct = pct;
+            on_progress(pct, idx + 1, total_files, &rel_txt);
+        }
+    }
+
+    // 在新目录重建必需子目录结构，重启后自动在新目录生成索引/WebView2/日志
+    for &sub in REBUILD_SUBDIRS {
+        std::fs::create_dir_all(new_dir.join(sub))
+            .map_err(|e| format!("重建目录 {sub} 失败：{e}"))?;
+    }
+    sync_migrated_settings_json(old_dir, new_dir)?;
+    Ok((copied_files, copied_bytes, skipped_warnings))
+}
+
+#[cfg(windows)]
+fn spawn_migrate_restart_bootstrap(old_dir: &Path, exe_path: &Path) -> Result<(), String> {
+    let cur_pid = std::process::id().to_string();
+    let known = CLEANUP_KNOWN_ENTRIES.join("|");
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$pidVal = [int]$env:_TIDY_MIG_PID
+$oldDir = $env:_TIDY_MIG_OLD
+$exePath = $env:_TIDY_MIG_EXE
+$known = ($env:_TIDY_MIG_KNOWN -split '\|') | Where-Object { $_ }
+
+for ($i = 0; $i -lt 150; $i++) {
+  if (-not (Get-Process -Id $pidVal -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 100
+}
+Start-Sleep -Milliseconds 300
+
+if ($oldDir -and (Test-Path -LiteralPath $oldDir)) {
+  foreach ($name in $known) {
+    $p = Join-Path $oldDir $name
+    if (Test-Path -LiteralPath $p) {
+      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+  $left = Get-ChildItem -LiteralPath $oldDir -Force -ErrorAction SilentlyContinue
+  if (-not $left) {
+    Remove-Item -LiteralPath $oldDir -Force -ErrorAction SilentlyContinue
+  }
+}
+
+if ($exePath -and (Test-Path -LiteralPath $exePath)) {
+  Start-Process -FilePath $exePath -ArgumentList '--restarted'
+}
+"#;
+    Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
+        .env("_TIDY_MIG_PID", cur_pid)
+        .env("_TIDY_MIG_OLD", old_dir.to_string_lossy().to_string())
+        .env("_TIDY_MIG_EXE", exe_path.to_string_lossy().to_string())
+        .env("_TIDY_MIG_KNOWN", known)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("启动重启引导器失败：{e}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn spawn_migrate_restart_bootstrap(_old_dir: &Path, _exe_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+async fn data_dir_migrate_preview(target_dir: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let current = data_dir();
+        let target = validate_data_dir_target(&target_dir, &current, &exe_dir(), false)?;
+        let (files, _dirs, total_bytes) = collect_core_migrate_files(&current);
+        let probe_disk = if target.exists() {
+            target.as_path()
+        } else {
+            target.parent().unwrap_or(target.as_path())
+        };
+        let free_bytes = disk_free_bytes_for(probe_disk).unwrap_or(0);
+        let target_has_files = target.is_dir()
+            && std::fs::read_dir(&target)
+                .ok()
+                .and_then(|mut rd| rd.next())
+                .is_some();
+        Ok(json!({
+            "oldDir": normalize_path_str(&current.to_string_lossy()),
+            "newDir": normalize_path_str(&target.to_string_lossy()),
+            "fileCount": files.len(),
+            "totalBytes": total_bytes,
+            "freeBytes": free_bytes,
+            "targetHasFiles": target_has_files
+        }))
+    })
+    .await
+    .map_err(|e| format!("预检任务失败：{e}"))?
+}
+
+#[tauri::command]
+async fn data_dir_migrate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    target_dir: String,
+) -> Result<Value, String> {
+    if DATA_MIGRATE_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("当前正在迁移数据目录，请等待完成".into());
+    }
+    struct ResetGuard;
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            DATA_MIGRATE_BUSY.store(false, Ordering::SeqCst);
+        }
+    }
+
+    let engine = Arc::clone(&state.engine);
+    let app2 = app.clone();
+    let emit = |app_h: &tauri::AppHandle, phase: &str, percent: u8, done: usize, total: usize, current: &str, detail: &str| {
+        let _ = app_h.emit(
+            "data-dir-migrate-progress",
+            json!({
+                "phase": phase,
+                "percent": percent,
+                "done": done,
+                "total": total,
+                "current": current,
+                "detail": detail
+            }),
+        );
+    };
+
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let _guard = ResetGuard;
+        let old_dir = data_dir();
+        let exe_d = exe_dir();
+        emit(&app2, "validate", 5, 0, 0, "", "正在校验目标目录与磁盘空间…");
+        let new_dir = validate_data_dir_target(&target_dir, &old_dir, &exe_d, true)?;
+
+        emit(&app2, "stop_engine", 14, 0, 0, "", "正在停止后台引擎并释放文件句柄…");
+        if let Ok(mut g) = engine.lock() {
+            if let Some(mut old) = g.take() {
+                let _ = old.child.kill();
+                let _ = old.child.wait();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+
+        emit(&app2, "copy", 18, 0, 0, "", "正在一次性迁移配置、历史、AI 会话与日志…");
+        let (copied_files, copied_bytes, warnings) =
+            copy_core_data_with_progress(&old_dir, &new_dir, |pct, done, total, rel| {
+                emit(&app2, "copy", pct, done, total, rel, &format!("正在迁移 ({done}/{total})：{rel}"));
+            })?;
+
+        emit(&app2, "locator", 90, copied_files, copied_files, "", "正在写入新目录指针并建立目录骨架…");
+        let local = env_dir("LOCALAPPDATA");
+        let write_cands = locator_write_candidates_for(&exe_d, local.as_deref());
+        let written = write_locator_to_candidates(&new_dir, &write_cands)?;
+
+        emit(&app2, "restarting", 98, copied_files, copied_files, "", "迁移完成，正在自动重启轻盘并在新目录重建运行文件…");
+        let cur_exe = std::env::current_exe().map_err(|e| format!("获取当前程序路径失败：{e}"))?;
+        spawn_migrate_restart_bootstrap(&old_dir, &cur_exe)?;
+
+        emit(&app2, "done", 100, copied_files, copied_files, "", "即将自动重启生效…");
+        Ok(json!({
+            "oldDir": normalize_path_str(&old_dir.to_string_lossy()),
+            "newDir": normalize_path_str(&new_dir.to_string_lossy()),
+            "copiedFiles": copied_files,
+            "copiedBytes": copied_bytes,
+            "warnings": warnings,
+            "locators": written.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+            "restarting": true
+        }))
+    })
+    .await
+    .map_err(|e| format!("迁移任务失败：{e}"))??;
+
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(450));
+        handle.exit(0);
+    });
+    Ok(result)
 }
 
 /// PowerShell `-EncodedCommand` 要 UTF-16LE 字节的 Base64；这里自己编码，不引依赖。
@@ -2943,10 +3574,13 @@ fn main() {
     let auto = std::env::args().any(|a| a == "--auto");
     let auto_clean = std::env::args().any(|a| a == "--auto-clean");
     let elevated = std::env::args().any(|a| a == "--elevated");
+    let restarted = std::env::args().any(|a| a == "--restarted");
 
-    // 提权实例：等旧实例把单实例锁 / WebView2 profile 放掉再起，避免 0x800700AA
+    // 提权/迁移重启实例：等旧实例把单实例锁 / WebView2 profile 放掉再起，避免 0x800700AA
     if elevated {
         std::thread::sleep(std::time::Duration::from_millis(1500));
+    } else if restarted {
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
     // WebView2 的配置目录固定放进我们自己的数据目录，
@@ -2992,6 +3626,8 @@ fn main() {
             resolve_local_path,
             app_info,
             app_capabilities,
+            data_dir_migrate_preview,
+            data_dir_migrate,
             is_admin,
             run_as_admin,
             toggle_fullscreen,
@@ -3505,6 +4141,102 @@ mod shell_tests {
             let data = std::fs::read(&p).unwrap_or_else(|_| panic!("missing {png}"));
             assert!(data.starts_with(b"\x89PNG"), "{png} must be valid PNG");
         }
+    }
+
+    #[test]
+    fn locator_arbitrates_by_latest_timestamp_and_migrates_core_data() {
+        let root = std::env::temp_dir().join(format!("tidy_mig_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe_d = root.join("app");
+        let eng_d = exe_d.join("引擎");
+        let local_d = root.join("local");
+        let old_data = root.join("old_data");
+        let new_data = root.join("new_data");
+        std::fs::create_dir_all(&eng_d).unwrap();
+        std::fs::create_dir_all(&local_d).unwrap();
+        std::fs::create_dir_all(old_data.join("配置")).unwrap();
+        std::fs::create_dir_all(old_data.join("ai")).unwrap();
+        std::fs::create_dir_all(old_data.join("webview")).unwrap();
+        std::fs::create_dir_all(old_data.join("cache")).unwrap();
+        std::fs::create_dir_all(&new_data).unwrap();
+
+        // 1. 两个指针冲突时，必须选 updated_ms 更新的目录（防只读程序目录旧指针盖掉用户新选择）
+        let eng_loc = eng_d.join(DATA_LOCATOR_NAME);
+        let user_loc = local_d.join("整理助手").join(DATA_LOCATOR_NAME);
+        write_file_atomic(
+            &eng_loc,
+            serde_json::to_string(&json!({ "data_dir": old_data, "updated_ms": 1000 }))
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        write_file_atomic(
+            &user_loc,
+            serde_json::to_string(&json!({ "data_dir": new_data, "updated_ms": 2000 }))
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        let read_cands = locator_read_candidates_for(&exe_d, Some(&local_d));
+        let picked = read_locator_from_candidates(&read_cands).expect("must resolve locator");
+        assert!(path_eq_ci(&picked, &new_data), "should pick newer timestamp locator");
+
+        // 2. 校验规则拒绝盘符根、程序目录、嵌套目录、相同目录、超长路径；预检模式不残留新建目录
+        assert!(validate_data_dir_target("C:\\", &old_data, &exe_d, false).is_err());
+        assert!(validate_data_dir_target(&exe_d.to_string_lossy(), &old_data, &exe_d, false).is_err());
+        assert!(validate_data_dir_target(&old_data.join("sub").to_string_lossy(), &old_data, &exe_d, false).is_err());
+        assert!(validate_data_dir_target(&old_data.to_string_lossy(), &old_data, &exe_d, false).is_err());
+        let long_path = format!("C:\\{}", "a".repeat(170));
+        assert!(validate_data_dir_target(&long_path, &old_data, &exe_d, false).is_err());
+        let dry_target = root.join("preview_only_dir");
+        assert!(validate_data_dir_target(&dry_target.to_string_lossy(), &old_data, &exe_d, false).is_ok());
+        assert!(!dry_target.exists(), "preview mode must not leave behind newly created dir");
+
+        // 3. 核心迁移：搬走 app.json / 配置 / ai 并更新 settings.json，跳过 webview 与 cache，在新目录重建空骨架
+        std::fs::write(old_data.join("app.json"), r#"{"theme":"dark"}"#).unwrap();
+        std::fs::write(
+            old_data.join("配置").join("settings.json"),
+            serde_json::to_string(&json!({
+                "data_dir": old_data,
+                "cache_dir": old_data.join("cache")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(old_data.join("ai").join("sessions.json"), "[]").unwrap();
+        std::fs::write(old_data.join("webview").join("lock.db"), "locked").unwrap();
+        std::fs::write(old_data.join("cache").join("idx.db"), "cache").unwrap();
+        std::fs::write(old_data.join("user_unrelated.txt"), "keep").unwrap();
+
+        let target = root.join("migrated_target");
+        let valid_target = validate_data_dir_target(&target.to_string_lossy(), &old_data, &exe_d, true).unwrap();
+        let (cnt, _bytes, warns) = copy_core_data_with_progress(&old_data, &valid_target, |_, _, _, _| {}).unwrap();
+        assert!(warns.is_empty());
+        assert_eq!(cnt, 3);
+        assert!(valid_target.join("app.json").is_file());
+        assert!(valid_target.join("ai").join("sessions.json").is_file());
+        assert!(!valid_target.join("webview").join("lock.db").exists());
+        assert!(!valid_target.join("cache").join("idx.db").exists());
+        assert!(!valid_target.join("user_unrelated.txt").exists());
+        for &sub in REBUILD_SUBDIRS {
+            assert!(valid_target.join(sub).is_dir(), "must recreate {sub}");
+        }
+        let s_txt = std::fs::read_to_string(valid_target.join("配置").join("settings.json")).unwrap();
+        let s_val: Value = serde_json::from_str(&s_txt).unwrap();
+        assert_eq!(
+            s_val["data_dir"].as_str().unwrap().to_lowercase(),
+            normalize_path_str(&valid_target.to_string_lossy()).to_lowercase()
+        );
+        assert_eq!(s_val["cache_dir"].as_str().unwrap(), "");
+
+        // 4. 双写指针并验证读回
+        let write_cands = locator_write_candidates_for(&exe_d, Some(&local_d));
+        let written = write_locator_to_candidates(&valid_target, &write_cands).unwrap();
+        assert_eq!(written.len(), 2);
+        let picked2 = read_locator_from_candidates(&read_cands).unwrap();
+        assert!(path_eq_ci(&picked2, &valid_target));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

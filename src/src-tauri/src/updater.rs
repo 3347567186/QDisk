@@ -32,6 +32,8 @@ const MAX_REDIRECTS: usize = 5;
 /// 官方内置 GitHub Releases 更新源（无需用户在设置中手动填写任何网址）。
 pub const OFFICIAL_FEED_URL: &str =
     "https://github.com/3347567186/QDisk/releases/latest/download/latest.json";
+pub const OFFICIAL_LATEST_REDIRECT_URL: &str =
+    "https://github.com/3347567186/QDisk/releases/latest";
 pub const OFFICIAL_API_LATEST_URL: &str =
     "https://api.github.com/repos/3347567186/QDisk/releases/latest";
 pub const OFFICIAL_API_RELEASES_URL: &str =
@@ -466,6 +468,64 @@ pub fn resolve_asset_url(manifest_url: &str, raw_asset_url: &str) -> Result<Stri
 
 // ---------------------------------------------------------------- 原生 WinHTTP 流式客户端（支持安全跳转与取消）
 
+/// 将 WinHTTP 常见错误码映射为清晰可读的中文网络诊断信息。
+pub fn describe_winhttp_error(code: u32) -> &'static str {
+    match code {
+        12002 => "连接或读取超时（WinHTTP 12002）",
+        12007 => "DNS 无法解析更新服务器域名（WinHTTP 12007）",
+        12015 => "代理身份验证失败（WinHTTP 12015）",
+        12017 => "网络请求已取消（WinHTTP 12017）",
+        12029 => "无法连接到更新服务器或代理端口（WinHTTP 12029）",
+        12030 => "与更新服务器的连接被意外断开（WinHTTP 12030）",
+        12031 => "与更新服务器的连接被重置（WinHTTP 12031）",
+        12152 => "更新服务器返回了无效响应（WinHTTP 12152）",
+        12175 => "TLS/HTTPS 安全握手失败（WinHTTP 12175）",
+        12178 => "系统自动代理配置失败（WinHTTP 12178）",
+        12180 => "无法发现系统代理脚本（WinHTTP 12180）",
+        _ => "网络传输异常",
+    }
+}
+
+/// 从 GitHub `/releases/latest` 的 302 Location 中安全提取合法发布标签（如 `v1.43.18`）。
+pub fn extract_tag_from_release_location(loc: &str) -> Option<String> {
+    let trimmed = loc.trim();
+    let idx = trimmed.find("/releases/tag/")?;
+    let rest = &trimmed[idx + "/releases/tag/".len()..];
+    let tag = rest.split(['?', '#', '/']).next()?.trim();
+    if tag.is_empty() || tag.len() > 64 {
+        return None;
+    }
+    if !tag
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    let ver = tag.trim_start_matches(['v', 'V']);
+    if SemVer::parse(ver).is_err() {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+#[cfg(windows)]
+fn is_retryable_transport_err(msg: &str) -> bool {
+    msg.contains("WinHTTP 12")
+        || msg.contains("连接超时")
+        || msg.contains("超时")
+        || msg.contains("断开")
+        || msg.contains("重置")
+        || msg.contains("无法连接")
+        || msg.contains("代理")
+        || msg.contains("握手")
+        || msg.contains("读取更新数据")
+}
+
+#[cfg(windows)]
+fn is_dns_err(msg: &str) -> bool {
+    msg.contains("WinHTTP 12007")
+}
+
 #[cfg(windows)]
 fn winhttp_fetch_bytes(
     url: &str,
@@ -473,26 +533,43 @@ fn winhttp_fetch_bytes(
     timeout_ms: u64,
     accept: &str,
 ) -> Result<(u32, Vec<u8>, String)> {
-    let mut sink = Vec::new();
-    let mut total_written = 0u64;
-    let (status, final_url) = winhttp_stream_get(
-        url,
-        timeout_ms,
-        accept,
-        None,
-        max_bytes as u64,
-        &mut |chunk, _expected| {
-            total_written += chunk.len() as u64;
-            if total_written > max_bytes as u64 {
-                bail!("响应体积超过上限（{} B）", max_bytes);
+    let mut last_err = None;
+    for attempt in 0..2 {
+        let mut sink = Vec::new();
+        let mut total_written = 0u64;
+        match winhttp_stream_get(
+            url,
+            timeout_ms,
+            accept,
+            None,
+            max_bytes as u64,
+            &mut |chunk, _expected| {
+                total_written += chunk.len() as u64;
+                if total_written > max_bytes as u64 {
+                    bail!("响应体积超过上限（{} B）", max_bytes);
+                }
+                sink.extend_from_slice(chunk);
+                Ok(())
+            },
+        ) {
+            Ok((status, final_url)) => return Ok((status, sink, final_url)),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let retryable = is_retryable_transport_err(&msg) && !is_dns_err(&msg);
+                last_err = Some(e);
+                if attempt == 0 && retryable {
+                    std::thread::sleep(Duration::from_millis(350));
+                    continue;
+                }
+                break;
             }
-            sink.extend_from_slice(chunk);
-            Ok(())
-        },
-    )?;
-    Ok((status, sink, final_url))
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("获取更新清单失败")))
 }
 
+/// 先尝试系统自动代理（识别 Windows 系统代理 / Clash / v2rayN / PAC），
+/// 若遇代理或连接类错误则自动回退直连，规避 `DEFAULT_PROXY` 读不到系统代理或僵尸代理端口卡死的问题。
 #[cfg(windows)]
 fn winhttp_stream_get<F>(
     initial_url: &str,
@@ -505,14 +582,84 @@ fn winhttp_stream_get<F>(
 where
     F: FnMut(&[u8], u64) -> Result<()>,
 {
+    let (_, init_host, _, _) = validate_update_url(initial_url, false)?;
+    if is_local_host(&init_host) {
+        return winhttp_stream_get_with_proxy(
+            initial_url,
+            timeout_ms,
+            accept,
+            cancel,
+            hard_cap_bytes,
+            false,
+            on_chunk,
+        );
+    }
+    let mut received_any = false;
+    let first = winhttp_stream_get_with_proxy(
+        initial_url,
+        timeout_ms,
+        accept,
+        cancel,
+        hard_cap_bytes,
+        true,
+        &mut |chunk, expected| {
+            received_any = true;
+            on_chunk(chunk, expected)
+        },
+    );
+    match first {
+        Ok(ok) => Ok(ok),
+        Err(err) => {
+            if received_any || cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                return Err(err);
+            }
+            let msg = format!("{err:#}");
+            if !is_retryable_transport_err(&msg) {
+                return Err(err);
+            }
+            append_log("warn", &format!("更新请求自动代理模式失败，切换直连重试：{msg}"));
+            winhttp_stream_get_with_proxy(
+                initial_url,
+                timeout_ms,
+                accept,
+                cancel,
+                hard_cap_bytes,
+                false,
+                on_chunk,
+            )
+            .map_err(|direct_err| {
+                anyhow::anyhow!("{direct_err:#}（自动代理模式：{msg}）")
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+fn winhttp_stream_get_with_proxy<F>(
+    initial_url: &str,
+    timeout_ms: u64,
+    accept: &str,
+    cancel: Option<&AtomicBool>,
+    hard_cap_bytes: u64,
+    use_auto_proxy: bool,
+    on_chunk: &mut F,
+) -> Result<(u32, String)>
+where
+    F: FnMut(&[u8], u64) -> Result<()>,
+{
+    use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Networking::WinHttp::{
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
         WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
         WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_DISABLE_REDIRECTS,
-        WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_CONTENT_LENGTH,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
+        WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_CONTENT_LENGTH,
         WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
     };
+
+    const WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2: u32 = 0x0000_0800;
+    const WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3: u32 = 0x0000_2000;
 
     let (init_sec, init_host, _, _) = validate_update_url(initial_url, false)?;
     let origin_remote_https = init_sec && !is_local_host(&init_host);
@@ -520,7 +667,9 @@ where
     let timeout = timeout_ms.clamp(2000, 180_000) as i32;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let agent_w = wide(&format!("TidyAssistant/{}", env!("CARGO_PKG_VERSION")));
-    let header_text = format!("Accept: {accept}\r\nCache-Control: no-cache\r\n");
+    let header_text = format!(
+        "Accept: {accept}\r\nCache-Control: no-cache\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
+    );
     let header_w = wide(&header_text);
 
     for hop in 0..=MAX_REDIRECTS {
@@ -530,10 +679,10 @@ where
         let (secure, host, port, path) =
             validate_update_url(&current_url, hop > 0 && origin_remote_https)?;
         let local = is_local_host(&host);
-        let access = if local {
+        let access = if local || !use_auto_proxy {
             WINHTTP_ACCESS_TYPE_NO_PROXY
         } else {
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
         };
         let host_w = wide(&host);
         let path_w = wide(&path);
@@ -542,13 +691,32 @@ where
         let next_location: Option<String> = unsafe {
             let session = WinHttpOpen(agent_w.as_ptr(), access, ptr::null(), ptr::null(), 0);
             if session.is_null() {
-                bail!("WinHTTP 初始化失败");
+                let code = GetLastError();
+                bail!("WinHTTP 初始化失败：{}（错误码 {code}）", describe_winhttp_error(code));
             }
             let step = (|| -> Result<Result<Option<String>, (u32, String)>> {
                 WinHttpSetTimeouts(session, timeout, timeout, timeout, timeout);
+                // 显式启用 TLS 1.2 + 1.3（老系统不支持 1.3 时自动回退 1.2），消除 12175 握手异常
+                let mut protos = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+                if WinHttpSetOption(
+                    session,
+                    WINHTTP_OPTION_SECURE_PROTOCOLS,
+                    &mut protos as *mut _ as *mut c_void,
+                    std::mem::size_of::<u32>() as u32,
+                ) == 0
+                {
+                    let mut tls12 = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+                    let _ = WinHttpSetOption(
+                        session,
+                        WINHTTP_OPTION_SECURE_PROTOCOLS,
+                        &mut tls12 as *mut _ as *mut c_void,
+                        std::mem::size_of::<u32>() as u32,
+                    );
+                }
                 let connect = WinHttpConnect(session, host_w.as_ptr(), port, 0);
                 if connect.is_null() {
-                    bail!("无法连接更新服务器 {host}:{port}");
+                    let code = GetLastError();
+                    bail!("无法连接更新服务器 {host}:{port}：{}（{code}）", describe_winhttp_error(code));
                 }
                 let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
                 let request = WinHttpOpenRequest(
@@ -583,10 +751,12 @@ where
                         0,
                     ) == 0
                     {
-                        bail!("连接更新服务器失败（请检查网络、代理或更新源地址）");
+                        let code = GetLastError();
+                        bail!("连接更新服务器失败：{}（错误码 {code}）", describe_winhttp_error(code));
                     }
                     if WinHttpReceiveResponse(request, ptr::null_mut()) == 0 {
-                        bail!("更新服务器无响应或连接超时");
+                        let code = GetLastError();
+                        bail!("更新服务器无响应：{}（错误码 {code}）", describe_winhttp_error(code));
                     }
                     let mut status: u32 = 0;
                     let mut slen = std::mem::size_of::<u32>() as u32;
@@ -653,6 +823,9 @@ where
                         return Ok(Ok(Some(resolved)));
                     }
 
+                    if status == 403 || status == 429 {
+                        bail!("更新服务器触发访问限流（HTTP {status}）");
+                    }
                     if status != 200 {
                         bail!("更新服务器返回 HTTP {status}");
                     }
@@ -876,12 +1049,164 @@ pub fn parse_static_manifest(manifest_url: &str, v: &Value) -> Result<ReleaseMan
     })
 }
 
+#[cfg(windows)]
+fn probe_latest_tag_via_redirect(timeout_ms: u64) -> Result<String> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Networking::WinHttp::{
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
+        WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
+        WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION,
+        WINHTTP_QUERY_STATUS_CODE,
+    };
+    const TLS12: u32 = 0x0000_0800;
+    const TLS13: u32 = 0x0000_2000;
+
+    let (secure, host, port, path) = validate_update_url(OFFICIAL_LATEST_REDIRECT_URL, false)?;
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let agent_w = wide(&format!("TidyAssistant/{}", env!("CARGO_PKG_VERSION")));
+    let host_w = wide(&host);
+    let path_w = wide(&path);
+    let method_w = wide("GET");
+    let timeout = timeout_ms.clamp(2000, 30_000) as i32;
+
+    let mut last_err = None;
+    for use_auto in [true, false] {
+        let access = if use_auto {
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+        } else {
+            WINHTTP_ACCESS_TYPE_NO_PROXY
+        };
+        let res = unsafe {
+            let session = WinHttpOpen(agent_w.as_ptr(), access, ptr::null(), ptr::null(), 0);
+            if session.is_null() {
+                Err(anyhow::anyhow!("WinHTTP 初始化失败"))
+            } else {
+                let out = (|| -> Result<String> {
+                    WinHttpSetTimeouts(session, timeout, timeout, timeout, timeout);
+                    let mut protos = TLS12 | TLS13;
+                    if WinHttpSetOption(
+                        session,
+                        WINHTTP_OPTION_SECURE_PROTOCOLS,
+                        &mut protos as *mut _ as *mut c_void,
+                        std::mem::size_of::<u32>() as u32,
+                    ) == 0
+                    {
+                        let mut p12 = TLS12;
+                        let _ = WinHttpSetOption(
+                            session,
+                            WINHTTP_OPTION_SECURE_PROTOCOLS,
+                            &mut p12 as *mut _ as *mut c_void,
+                            std::mem::size_of::<u32>() as u32,
+                        );
+                    }
+                    let connect = WinHttpConnect(session, host_w.as_ptr(), port, 0);
+                    if connect.is_null() {
+                        let code = GetLastError();
+                        bail!("无法连接 GitHub：{}（{code}）", describe_winhttp_error(code));
+                    }
+                    let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
+                    let request = WinHttpOpenRequest(
+                        connect,
+                        method_w.as_ptr(),
+                        path_w.as_ptr(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        flags,
+                    );
+                    if request.is_null() {
+                        WinHttpCloseHandle(connect);
+                        bail!("无法创建标签探测请求");
+                    }
+                    let inner = (|| -> Result<String> {
+                        let mut disable_redir: u32 = WINHTTP_DISABLE_REDIRECTS;
+                        WinHttpSetOption(
+                            request,
+                            WINHTTP_OPTION_DISABLE_FEATURE,
+                            &mut disable_redir as *mut _ as *mut c_void,
+                            std::mem::size_of::<u32>() as u32,
+                        );
+                        if WinHttpSendRequest(request, ptr::null(), 0, ptr::null_mut(), 0, 0, 0) == 0 {
+                            let code = GetLastError();
+                            bail!("探测最新版本失败：{}（{code}）", describe_winhttp_error(code));
+                        }
+                        if WinHttpReceiveResponse(request, ptr::null_mut()) == 0 {
+                            let code = GetLastError();
+                            bail!("探测最新版本超时：{}（{code}）", describe_winhttp_error(code));
+                        }
+                        let mut status: u32 = 0;
+                        let mut slen = std::mem::size_of::<u32>() as u32;
+                        WinHttpQueryHeaders(
+                            request,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            ptr::null(),
+                            &mut status as *mut _ as *mut c_void,
+                            &mut slen,
+                            ptr::null_mut(),
+                        );
+                        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                            bail!("未获得版本重定向（HTTP {status}）");
+                        }
+                        let mut loc_bytes: u32 = 0;
+                        WinHttpQueryHeaders(
+                            request,
+                            WINHTTP_QUERY_LOCATION,
+                            ptr::null(),
+                            ptr::null_mut(),
+                            &mut loc_bytes,
+                            ptr::null_mut(),
+                        );
+                        if loc_bytes == 0 || loc_bytes > 4096 {
+                            bail!("重定向缺少有效 Location");
+                        }
+                        let mut wbuf = vec![0u16; (loc_bytes as usize / 2) + 2];
+                        let mut actual = loc_bytes;
+                        if WinHttpQueryHeaders(
+                            request,
+                            WINHTTP_QUERY_LOCATION,
+                            ptr::null(),
+                            wbuf.as_mut_ptr() as *mut c_void,
+                            &mut actual,
+                            ptr::null_mut(),
+                        ) == 0
+                        {
+                            bail!("读取版本重定向地址失败");
+                        }
+                        let end = wbuf.iter().position(|&c| c == 0).unwrap_or(wbuf.len());
+                        let loc = String::from_utf16_lossy(&wbuf[..end]);
+                        extract_tag_from_release_location(&loc)
+                            .context("无法从重定向地址解析最新版本号")
+                    })();
+                    WinHttpCloseHandle(request);
+                    WinHttpCloseHandle(connect);
+                    inner
+                })();
+                WinHttpCloseHandle(session);
+                out
+            }
+        };
+        match res {
+            Ok(tag) => return Ok(tag),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                last_err = Some(e);
+                if !is_retryable_transport_err(&msg) {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("无法探测最新版本标签")))
+}
+
 /// 解析 GitHub Releases API JSON（支持 `/releases/latest` 单对象与 `/releases?per_page=8` 数组）。
-/// 优先使用附件中的 `latest.json`，其次使用资产原生 `digest`（sha256）或 `SHA256SUMS.txt`。
+/// 优先使用附件中的 `latest.json`（拉取失败时自动平滑降级到 API 原生 assets + digest / SHA256SUMS.txt）。
 #[cfg(windows)]
 fn fetch_and_parse_manifest(feed_url: &str) -> Result<ReleaseManifest> {
     let (_status, bytes, final_url) =
-        winhttp_fetch_bytes(feed_url, MAX_MANIFEST_BYTES, 15_000, "application/json, application/vnd.github+json")?;
+        winhttp_fetch_bytes(feed_url, MAX_MANIFEST_BYTES, 9_000, "application/json, application/vnd.github+json")?;
     let raw_v: Value = serde_json::from_slice(&bytes).context("更新清单不是合法的 JSON 格式")?;
 
     // 支持 GitHub `/releases?per_page=8` 列表（beta 通道取最新一条非 draft 发布）
@@ -897,21 +1222,27 @@ fn fetch_and_parse_manifest(feed_url: &str) -> Result<ReleaseManifest> {
     // 判断是否为 GitHub Releases API 响应（含 tag_name + assets 数组）
     if v.get("tag_name").is_some() && v.get("assets").and_then(|a| a.as_array()).is_some() {
         let assets = v["assets"].as_array().unwrap();
-        // 1. 若 Release 附件自带 latest.json，直接拉取它（最完整）
+        // 1. 若 Release 附件自带 latest.json，优先拉取它；若附件拉取失败不直接报错，平滑降级到 API 资产列表
         if let Some(manifest_asset) = assets.iter().find(|a| {
             a.get("name")
                 .and_then(|n| n.as_str())
                 .is_some_and(|n| n.eq_ignore_ascii_case("latest.json"))
         }) {
             if let Some(dl) = manifest_asset.get("browser_download_url").and_then(|u| u.as_str()) {
-                let (_, mbytes, murl) =
-                    winhttp_fetch_bytes(dl, MAX_MANIFEST_BYTES, 15_000, "application/json")?;
-                let mv: Value = serde_json::from_slice(&mbytes)
-                    .context("GitHub Release 内的 latest.json 解析失败")?;
-                return parse_static_manifest(&murl, &mv);
+                match winhttp_fetch_bytes(dl, MAX_MANIFEST_BYTES, 9_000, "application/json")
+                    .and_then(|(_, mbytes, murl)| {
+                        let mv: Value = serde_json::from_slice(&mbytes)
+                            .context("GitHub Release 内的 latest.json 解析失败")?;
+                        parse_static_manifest(&murl, &mv)
+                    }) {
+                    Ok(m) => return Ok(m),
+                    Err(e) => {
+                        append_log("warn", &format!("附件 latest.json 拉取失败，降级解析 API 资产列表：{e:#}"));
+                    }
+                }
             }
         }
-        // 2. 否则从 assets 直接装配（读取可选 SHA256SUMS.txt 补齐摘要）
+        // 2. 从 assets 直接装配（读取可选 SHA256SUMS.txt 补齐摘要）
         let mut sums = std::collections::HashMap::new();
         if let Some(sum_asset) = assets.iter().find(|a| {
             a.get("name")
@@ -919,7 +1250,7 @@ fn fetch_and_parse_manifest(feed_url: &str) -> Result<ReleaseManifest> {
                 .is_some_and(|n| n.eq_ignore_ascii_case("SHA256SUMS.txt"))
         }) {
             if let Some(dl) = sum_asset.get("browser_download_url").and_then(|u| u.as_str()) {
-                if let Ok((_, sbytes, _)) = winhttp_fetch_bytes(dl, 256 * 1024, 15_000, "text/plain") {
+                if let Ok((_, sbytes, _)) = winhttp_fetch_bytes(dl, 256 * 1024, 9_000, "text/plain") {
                     sums = parse_sha256sums_text(&String::from_utf8_lossy(&sbytes));
                 }
             }
@@ -1527,8 +1858,12 @@ try {
 
   $newEng = Join-Path $srcDir '引擎'
   if (Test-Path -LiteralPath $newEng) {
+    $oldLoc = Join-Path $oldEng '数据位置.json'
+    $savedLoc = Join-Path $bakDir '数据位置.json'
+    if (Test-Path -LiteralPath $oldLoc) { Copy-Item -LiteralPath $oldLoc -Destination $savedLoc -Force -ErrorAction SilentlyContinue }
     if (Test-Path -LiteralPath $oldEng) { Remove-Item -LiteralPath $oldEng -Recurse -Force }
     Copy-Item -LiteralPath $newEng -Destination $oldEng -Recurse -Force
+    if (Test-Path -LiteralPath $savedLoc) { Copy-Item -LiteralPath $savedLoc -Destination (Join-Path $oldEng '数据位置.json') -Force -ErrorAction SilentlyContinue }
   }
   $newTp = Join-Path $srcDir 'THIRD_PARTY.md'
   if (Test-Path -LiteralPath $newTp) {
@@ -1602,27 +1937,92 @@ pub fn updater_config_set(patch: Value) -> Result<UpdaterConfig, String> {
 }
 
 #[cfg(windows)]
-fn fetch_official_manifest(channel: &str) -> Result<ReleaseManifest> {
+fn fetch_official_manifest<F>(channel: &str, mut on_stage: F) -> Result<ReleaseManifest>
+where
+    F: FnMut(&str, u8),
+{
     if let Some(local_feed) = dev_loopback_feed() {
+        on_stage("正在连接本地调试更新源…", 40);
         return fetch_and_parse_manifest(&local_feed);
     }
-    let endpoints: &[&str] = if channel == "beta" {
-        &[OFFICIAL_API_RELEASES_URL, OFFICIAL_FEED_URL]
-    } else {
-        &[OFFICIAL_FEED_URL, OFFICIAL_API_LATEST_URL]
-    };
-    let mut last_err = None;
-    for ep in endpoints {
-        match fetch_and_parse_manifest(ep) {
+    let mut errors: Vec<String> = Vec::new();
+    let mut saw_dns_fail = false;
+
+    if channel == "beta" {
+        on_stage("正在查询官方预发布版本列表 (1/2)…", 30);
+        match fetch_and_parse_manifest(OFFICIAL_API_RELEASES_URL) {
             Ok(m) => return Ok(m),
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                saw_dns_fail |= is_dns_err(&msg);
+                append_log("warn", &format!("更新通道 beta-api 失败：{msg}"));
+                errors.push(msg);
+            }
+        }
+        if !saw_dns_fail {
+            on_stage("正在切换官方发布清单重试 (2/2)…", 70);
+            match fetch_and_parse_manifest(OFFICIAL_FEED_URL) {
+                Ok(m) => return Ok(m),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    append_log("warn", &format!("更新通道 beta-feed 失败：{msg}"));
+                    errors.push(msg);
+                }
+            }
+        }
+    } else {
+        on_stage("正在连接官方更新清单 (1/3)…", 25);
+        match fetch_and_parse_manifest(OFFICIAL_FEED_URL) {
+            Ok(m) => return Ok(m),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                saw_dns_fail |= is_dns_err(&msg);
+                append_log("warn", &format!("更新通道 primary-feed 失败：{msg}"));
+                errors.push(msg);
+            }
+        }
+
+        if !saw_dns_fail {
+            on_stage("主源响应异常，正在通过标签直链重试 (2/3)…", 55);
+            match probe_latest_tag_via_redirect(8_000).and_then(|tag| {
+                let direct_url = format!(
+                    "https://github.com/3347567186/QDisk/releases/download/{tag}/latest.json"
+                );
+                fetch_and_parse_manifest(&direct_url)
+            }) {
+                Ok(m) => return Ok(m),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    saw_dns_fail |= is_dns_err(&msg);
+                    append_log("warn", &format!("更新通道 tag-direct 失败：{msg}"));
+                    errors.push(msg);
+                }
+            }
+        }
+
+        if !saw_dns_fail {
+            on_stage("正在切换 GitHub Releases API 备用通道 (3/3)…", 80);
+            match fetch_and_parse_manifest(OFFICIAL_API_LATEST_URL) {
+                Ok(m) => return Ok(m),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    append_log("warn", &format!("更新通道 github-api 失败：{msg}"));
+                    errors.push(msg);
+                }
+            }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("无法连接官方 GitHub 更新源，请检查网络或代理")))
+
+    if saw_dns_fail {
+        bail!("无法解析 GitHub 域名（DNS 失败），请检查网络连接或系统代理设置");
+    }
+    let summary = errors.into_iter().next().unwrap_or_else(|| "网络不可达".into());
+    bail!("获取更新失败：{summary}（可检查网络/系统代理后重试，或点击「查看发布页」手动下载）")
 }
 
 #[tauri::command]
 pub async fn updater_check(
+    app: AppHandle,
     state: State<'_, UpdaterState>,
     channel: Option<String>,
 ) -> Result<UpdateCheckResult, String> {
@@ -1632,9 +2032,19 @@ pub async fn updater_check(
         .unwrap_or(cfg.channel);
     let ignored = cfg.ignored_version;
     let staged = state.staged.lock().ok().and_then(|g| g.clone());
+    let app2 = app.clone();
 
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<UpdateCheckResult, String> {
-        let manifest = fetch_official_manifest(&ch).map_err(|e| format!("{e:#}"))?;
+        let emit_check = |stage: &str, percent: u8| {
+            let _ = app2.emit(
+                "updater-check-progress",
+                json!({ "stage": stage, "percent": percent }),
+            );
+        };
+        emit_check("正在准备检查更新…", 10);
+        let manifest = fetch_official_manifest(&ch, |stage, pct| emit_check(stage, pct))
+            .map_err(|e| format!("{e:#}"))?;
+        emit_check("正在核验版本信息…", 92);
         let mut res = evaluate_manifest(
             env!("CARGO_PKG_VERSION"),
             detect_install_kind(),
@@ -2130,5 +2540,28 @@ mod tests {
 
         let _ = srv.join();
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_redirect_tag_extraction_and_error_diagnostics() {
+        assert_eq!(
+            extract_tag_from_release_location("https://github.com/3347567186/QDisk/releases/tag/v1.43.18"),
+            Some("v1.43.18".into())
+        );
+        assert_eq!(
+            extract_tag_from_release_location("/3347567186/QDisk/releases/tag/v1.44.0-beta.1?foo=1"),
+            Some("v1.44.0-beta.1".into())
+        );
+        assert_eq!(
+            extract_tag_from_release_location("https://github.com/3347567186/QDisk/releases/tag/../../evil"),
+            None
+        );
+        assert_eq!(
+            extract_tag_from_release_location("https://github.com/3347567186/QDisk/releases"),
+            None
+        );
+        assert!(describe_winhttp_error(12007).contains("DNS"));
+        assert!(describe_winhttp_error(12002).contains("超时"));
+        assert!(describe_winhttp_error(12175).contains("TLS"));
     }
 }

@@ -76,6 +76,35 @@ class TestLocator(Base):
     def test_none_when_absent(self):
         self.assertEqual(tidy.read_data_locator(), (None, "none"))
 
+    def test_timestamp_arbitration_prefers_newer_locator(self):
+        old_d = self.mk("old_loc")
+        new_d = self.mk("new_loc")
+        p_exe = os.path.join(self.root, tidy.DATA_LOCATOR_NAME)
+        p_usr = os.path.join(tidy._LEGACY_DATA, tidy.DATA_LOCATOR_NAME)
+        self.write(p_exe, json.dumps({"data_dir": old_d, "updated_ms": 1000}))
+        self.write(p_usr, json.dumps({"data_dir": new_d, "updated_ms": 2000}))
+        self.assertEqual(tidy.read_data_locator(), (new_d, "ok"))
+
+    def test_process_close_uses_create_no_window(self):
+        import subprocess
+        from unittest import mock
+        captured = []
+
+        def fake_run(*args, **kwargs):
+            captured.append((args, kwargs))
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(tidy, "_engine_process_is_running", side_effect=[True, False, False]), \
+             mock.patch.object(subprocess, "run", side_effect=fake_run):
+            res = tidy._engine_process_close({"name": "chrome"})
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["closed"])
+        self.assertTrue(captured, "expected taskkill invocation")
+        expected_flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for _a, kw in captured:
+            self.assertEqual(kw.get("creationflags"), expected_flag)
+            self.assertEqual(kw.get("stdin"), subprocess.DEVNULL)
+
 
 class TestSettingsPath(Base):
     def test_settings_follows_data_dir(self):

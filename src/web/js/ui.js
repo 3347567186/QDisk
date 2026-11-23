@@ -179,30 +179,196 @@
     });
   }
 
-  async function busy(fn, label, kind) {
+  const busyStack = [];
+  let busyElapsedTimer = null;
+  let busyStartDelay = null;
+
+  function stopBusyTimers() {
+    if (busyStartDelay) {
+      clearTimeout(busyStartDelay);
+      busyStartDelay = null;
+    }
+    if (busyElapsedTimer) {
+      clearInterval(busyElapsedTimer);
+      busyElapsedTimer = null;
+    }
+  }
+
+  function renderTopBusy() {
     const overlay = document.getElementById('overlay');
     const text = document.getElementById('overlay-text');
+    const sub = document.getElementById('overlay-sub');
+    const pct = document.getElementById('overlay-pct');
+    const bar = document.getElementById('overlay-bar');
+    const fill = document.getElementById('overlay-fill');
     const ic = document.getElementById('overlay-ic');
-    const msg = label || T('正在处理…', 'Working…');
-    if (text) text.textContent = msg;
+
+    const top = busyStack.length ? busyStack[busyStack.length - 1] : null;
+    if (!top) {
+      stopBusyTimers();
+      if (overlay) overlay.hidden = true;
+      return;
+    }
+    if (text) text.textContent = top.label;
     if (ic) {
-      const k = LOADERS[kind] ? kind : 'spin';
+      const k = LOADERS[top.kind] ? top.kind : 'spin';
       ic.className = 'ldr ldr-' + k;
       ic.innerHTML = LOADERS[k];
     }
+    const elapsedSec = Math.floor((performance.now() - top.started) / 1000);
+    const subText = top.sub || (elapsedSec >= 2 ? T(`已等待 ${elapsedSec} 秒，请稍候…`, `Working (${elapsedSec}s)…`) : '');
+    if (sub) {
+      sub.textContent = subText;
+      sub.hidden = !subText;
+    }
+    const hasPct = typeof top.percent === 'number' && Number.isFinite(top.percent);
+    if (pct) {
+      pct.textContent = hasPct ? `${Math.max(0, Math.min(100, Math.round(top.percent)))}%` : '';
+      pct.hidden = !hasPct;
+    }
+    if (bar && fill) {
+      if (hasPct) {
+        bar.classList.add('det');
+        fill.style.width = `${Math.max(0, Math.min(100, top.percent))}%`;
+      } else {
+        bar.classList.remove('det');
+        fill.style.width = '0%';
+      }
+    }
     if (overlay) overlay.hidden = false;
-    const started = performance.now();
+  }
+
+  async function busy(fn, label, kind) {
+    const entry = {
+      label: label || T('正在处理…', 'Working…'),
+      kind: LOADERS[kind] ? kind : 'spin',
+      sub: '',
+      percent: null,
+      started: performance.now()
+    };
+    busyStack.push(entry);
+    renderTopBusy();
+    if (!busyStartDelay && !busyElapsedTimer) {
+      busyStartDelay = setTimeout(() => {
+        busyStartDelay = null;
+        if (!busyStack.length) return;
+        renderTopBusy();
+        if (!busyElapsedTimer) {
+          busyElapsedTimer = setInterval(renderTopBusy, 1000);
+        }
+      }, 2000);
+    }
+    const ctrl = {
+      setText(msg) {
+        if (typeof msg === 'string' && msg) {
+          entry.label = msg;
+          renderTopBusy();
+        }
+      },
+      setSub(msg) {
+        entry.sub = typeof msg === 'string' ? msg : '';
+        renderTopBusy();
+      },
+      setProgress(p) {
+        entry.percent = (typeof p === 'number' && Number.isFinite(p)) ? Math.max(0, Math.min(100, p)) : null;
+        renderTopBusy();
+      }
+    };
     try {
-      return await fn();
+      return await fn(ctrl);
     } catch (err) {
       toast(err && err.message ? err.message : String(err), 'error');
       return undefined;
     } finally {
-      // 太快返回时留一帧给动画，避免遮罩一闪而过（人眼读不到反馈）
-      const left = 220 - (performance.now() - started);
-      if (left > 0) await new Promise((r) => setTimeout(r, left));
-      if (overlay) overlay.hidden = true;
+      if (busyStack.length <= 1) stopBusyTimers();
+      // 太快返回时留一帧给动画，避免遮罩一闪而过（仅真实有 overlay 元素时生效）
+      if (document.getElementById('overlay')) {
+        const left = 220 - (performance.now() - entry.started);
+        if (left > 0) await new Promise((r) => setTimeout(r, left));
+      }
+      const idx = busyStack.indexOf(entry);
+      if (idx >= 0) busyStack.splice(idx, 1);
+      renderTopBusy();
     }
+  }
+
+  /**
+   * 按钮级等待反馈：执行异步操作期间禁用按钮、显示旋转等待图标与过程文案，结束必还原。
+   */
+  async function withButtonBusy(btn, busyLabel, fn) {
+    if (!btn || btn.disabled) return undefined;
+    const savedHtml = btn.innerHTML;
+    const wasDisabled = btn.disabled;
+    btn.disabled = true;
+    if (btn.classList) btn.classList.add('busy');
+    try {
+      btn.innerHTML = '';
+      btn.appendChild(h('span', { class: 'btn-spin', 'aria-hidden': 'true' }));
+      btn.appendChild(h('span', { text: busyLabel || T('处理中…', 'Working…') }));
+    } catch { /* mock DOM fallback */ }
+    try {
+      return await fn();
+    } finally {
+      if (btn) {
+        btn.disabled = wasDisabled;
+        if (btn.classList) btn.classList.remove('busy');
+        try { btn.innerHTML = savedHtml; } catch { /* ignore */ }
+      }
+    }
+  }
+
+  /**
+   * 不可误关的多阶段进度弹窗（用于数据目录迁移等关键持久化任务）。
+   */
+  function progressModal({ title, initialText, initialSub, kind = 'migrate' }) {
+    const root = document.getElementById('modal-root');
+    const titleEl = h('h3', { text: title || T('正在处理', 'Working') });
+    const textEl = h('div', { style: { fontWeight: '600', color: 'var(--text-1)', flex: '1 1 auto' }, text: initialText || T('正在准备…', 'Preparing…') });
+    const pctEl = h('span', { class: 'mono small', style: { color: 'var(--accent)', fontWeight: '600' }, text: '0%' });
+    const subEl = h('div', { class: 'small muted', text: initialSub || T('请勿关闭软件，完成后将自动生效', 'Please keep the app open until finished') });
+    const fillEl = h('div', { class: 'mig-progress-fill', style: { width: '4%' } });
+    const errEl = h('div', { class: 'small', style: { color: 'var(--danger)', display: 'none', whiteSpace: 'pre-wrap' } });
+    const closeBtn = h('button', { class: 'btn primary', type: 'button', style: { display: 'none' }, text: T('关闭', 'Close') });
+    const footEl = h('div', { class: 'modal-foot', style: { display: 'none' } }, closeBtn);
+
+    const body = h('div', { class: 'mig-progress-card' },
+      h('div', { class: 'mig-progress-head' }, loader(kind), textEl, pctEl),
+      h('div', { class: 'mig-progress-track' }, fillEl),
+      subEl,
+      errEl
+    );
+    const box = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true' },
+      h('div', { class: 'modal-head' }, titleEl),
+      h('div', { class: 'modal-body' }, body),
+      footEl
+    );
+    const mask = h('div', { class: 'modal-mask' }, box);
+    if (root) root.appendChild(mask);
+
+    function close() {
+      if (mask.parentNode) mask.parentNode.removeChild(mask);
+    }
+    closeBtn.onclick = close;
+
+    return {
+      update({ text, sub, percent }) {
+        if (typeof text === 'string' && text) textEl.textContent = text;
+        if (typeof sub === 'string') subEl.textContent = sub;
+        if (typeof percent === 'number' && Number.isFinite(percent)) {
+          const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+          pctEl.textContent = `${clamped}%`;
+          fillEl.style.width = `${clamped}%`;
+        }
+      },
+      setError(msg) {
+        textEl.textContent = T('操作未完成', 'Operation failed');
+        errEl.textContent = String(msg || '');
+        errEl.style.display = 'block';
+        footEl.style.display = 'flex';
+        closeBtn.style.display = 'inline-flex';
+      },
+      close
+    };
   }
 
   /**
@@ -877,6 +1043,7 @@
 
   window.UI = {
     h, T, fmtBytes, fmtSize: fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
+    withButtonBusy, progressModal,
     skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, askBtn, setLang, onLangChange,
     menu, attachMenu, closeMenu, modal, preview, closePreview,
     pageSize, pageSizePick, PAGE_SIZES,

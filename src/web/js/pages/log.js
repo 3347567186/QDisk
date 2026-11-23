@@ -372,13 +372,17 @@
       async function refresh() {
         state.loading = true;
         paint();
-        await loadFiles();
+        await busy(async () => {
+          await loadFiles();
+        }, T('正在刷新日志列表…', 'Refreshing logs…'), 'log');
         state.loading = false;
         paint();
       }
 
       async function refreshEngine() {
-        await loadEngine();
+        await busy(async () => {
+          await loadEngine();
+        }, T('正在刷新引擎状态…', 'Refreshing engine status…'), 'log');
         paint();
       }
 

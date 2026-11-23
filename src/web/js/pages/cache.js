@@ -762,36 +762,65 @@
           class: 'row wrap',
           style: { gap: '8px', marginTop: '8px' }
         }, ...closeActions.map((act) => {
+          const origLabel = T(act.labelZh, act.labelEn);
           const b = h('button', {
             class: 'btn primary sm',
             type: 'button',
             onclick: async () => {
               b.disabled = true;
-              b.textContent = T('正在优雅退出并重试…', 'Closing & Retrying…');
-              try {
-                const res = await API.engine('process.close', { name: act.proc });
-                if (res && res.warning) {
-                  toast(res.warning, 'warn');
-                  b.disabled = false;
-                  return;
+              const toRetry = failed
+                .filter((f) => act.pat.test(String(f.path || '')))
+                .map((f) => f.path);
+              if (dlg && typeof dlg.close === 'function') dlg.close();
+              const closeRes = await busy(async (ctrl) => {
+                ctrl && ctrl.setProgress(35);
+                ctrl && ctrl.setSub(T('正在等待进程落盘并释放文件占用…', 'Waiting for process to exit and release file locks…'));
+                return await API.engine('process.close', { name: act.proc });
+              }, T('正在优雅退出浏览器…', 'Gracefully closing browser…'), 'cache');
+              if (!closeRes) {
+                b.disabled = false;
+                b.textContent = origLabel;
+                return;
+              }
+              if (closeRes.warning) {
+                toast(closeRes.warning, 'warn');
+                b.disabled = false;
+                b.textContent = origLabel;
+                return;
+              }
+              let forceClose = false;
+              if (closeRes.still_running) {
+                forceClose = await confirm({
+                  title: T('检测到后台驻留进程', 'Background processes still running'),
+                  body: T(
+                    '浏览器仍有后台驻留进程未完全退出，是否强制结束以释放缓存文件锁？',
+                    'Background browser processes are still running. Force close them to release cache locks?'
+                  ),
+                  ok: T('强制关闭并继续清理', 'Force close & retry'),
+                  danger: true
+                });
+              }
+              await busy(async (ctrl) => {
+                if (forceClose) {
+                  ctrl && ctrl.setText(T('正在强制结束残留进程…', 'Force closing remaining processes…'));
+                  ctrl && ctrl.setProgress(25);
+                  await API.engine('process.close', { name: act.proc, force: true });
                 }
-                toast(T('已通知退出，正在重新清理对应缓存…', 'Closed app, retrying cleanup…'), 'ok');
-                if (dlg && typeof dlg.close === 'function') dlg.close();
-                const toRetry = failed
-                  .filter((f) => act.pat.test(String(f.path || '')))
-                  .map((f) => f.path);
+                ctrl && ctrl.setText(T('正在重新清理被占用的缓存…', 'Retrying cache cleanup…'));
+                ctrl && ctrl.setProgress(60);
+                ctrl && ctrl.setSub(T('共 ' + toRetry.length + ' 个缓存项', toRetry.length + ' item(s)'));
                 if (toRetry.length) {
                   await cleanPaths(toRetry, true);
-                  await doLoad(false);
-                } else {
-                  await doLoad(false);
                 }
-              } catch (err) {
-                toast(errText(err), 'error');
-                b.disabled = false;
-              }
+                ctrl && ctrl.setText(T('正在刷新缓存扫描结果…', 'Refreshing scan results…'));
+                ctrl && ctrl.setProgress(90);
+                await doLoad(false);
+                ctrl && ctrl.setProgress(100);
+              }, T('正在重试清理缓存…', 'Retrying cache cleanup…'), 'cache');
+              b.disabled = false;
+              b.textContent = origLabel;
             }
-          }, icon('check', 13), h('span', null, T(act.labelZh, act.labelEn)));
+          }, icon('check', 13), h('span', null, origLabel));
           return b;
         })) : null;
 

@@ -28,6 +28,8 @@
     configSet: (patch) => invoke('config_set', { patch }),
     appInfo: () => invoke('app_info'),
     appCapabilities: () => invoke('app_capabilities'),
+    dataDirMigratePreview: (targetDir) => invoke('data_dir_migrate_preview', { targetDir }),
+    dataDirMigrate: (targetDir) => invoke('data_dir_migrate', { targetDir }),
     engineCapabilities: () => engine('capabilities', {}),
     isAdmin: () => invoke('is_admin'),
     runAsAdmin: () => invoke('run_as_admin'),
