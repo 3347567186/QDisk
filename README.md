@@ -1,62 +1,94 @@
-# 整理助手
+# 我受够了爆红的 C 盘、乱成一团的下载目录和弹广告的解压软件，所以我做了「整理助手」
 
-把散落一地的文件按类型就地收进分类子文件夹的小工具，同时内置压缩包浏览、解压与创建。
-Tauri（Rust + WebView2）外壳，整理逻辑在随包的 Python 引擎里，压缩核心在 Rust 进程内。
+> **完全本地运行、零广告、每一步高危操作都能预览和撤回的 Windows 桌面整理与系统维护工具。**
 
-- 运行副本：本目录 `tidy-assistant.exe`
-- 源码：`src\`（`src-tauri` Rust 外壳 / `web` 前端 / `engine` Python 引擎）
-- 文档：`docs\01-当前版\`
-- 安装包：`release\TidyAssistant_<版本>_x64-setup.exe`
-- 用户数据：`%LOCALAPPDATA%\整理助手数据`
-- 版本号：见 `src\src-tauri\tauri.conf.json`；管理规则见 `docs\01-当前版\版本管理与发布规范.md`
+[![Latest Release](https://img.shields.io/github/v/release/3347567186/TidyAssistant?label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/3347567186/TidyAssistant/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6)](#立刻试用30-秒上手)
 
-## 直接运行
+---
 
-双击 `tidy-assistant.exe`。整个目录可搬到任意**纯英文路径**下，路径含中文 WebView2 起不来。
+## 这工具每天帮我解决什么具体麻烦？（Use Cases）
 
-## 压缩包
+> 💡 *提示：你可以按 [开源发布与社区推广方案](docs/01-当前版/开源发布与社区推广方案.md) 里的分镜，把 3 段 10 秒 GIF 放到 `docs/assets/` 后取消下方图片注释，GitHub 首页立刻变成动态演示。*
 
-侧栏「压缩包」页支持：
+<!--
+![一键整理与撤回演示](docs/assets/demo-organize.gif)
+-->
 
-- **查看**：ZIP/ZIPX、7Z、RAR/RAR5、TAR、TAR.GZ/TGZ、TAR.BZ2/TBZ2、TAR.XZ/TXZ、
-  GZ、BZ2、XZ；目录内浏览、名称筛选、排序、右键解压选中、双击预览。
-- **预览**：文本（2 MiB 上限）、二进制十六进制（4 MiB）、图片、PDF、音频、视频。
-- **解压**：选中条目或全部；覆盖策略支持覆盖/跳过/自动改名；拒绝路径穿越、
-  绝对路径、盘符、UNC、NTFS ADS 与设备保留名。
-- **创建**：ZIP（Deflate-6、可选 AES-256）、7Z（LZMA2、可选 AES-256）、TAR、TAR.GZ。
-- **四档性能模式**：节约（1 线程）、平衡（2 线程）、高性能（4 线程）、超线程（8 线程）。
-  仅影响 7Z，ZIP/TAR 固定单线程以控制内存。
+### 1. 下载文件夹堆了 500 个文件，每次找一份 PDF 像大海捞针
+- **以前**：手动建文件夹、一个个拖，怕拖错快捷方式或正在下载的 `.crdownload`。
+- **现在**：点一下「扫描预览」→ 按文档/图片/安装包/压缩包/代码自动归类，自动跳过系统文件与下载中临时文件 → 执行完觉得不满意，**点一下「撤销」全部原路还原**。
 
-RAR 读取使用 RARLAB 官方 UnRAR64.dll。该 DLL 不随安装包分发，首次打开 RAR 时
-自动下载并校验 SHA-256；网络不可用或校验失败时只禁用 RAR，不影响其他格式。
-许可与校验值见 `THIRD_PARTY.md`。
+### 2. C 盘又红了，但不敢乱删，也不知道哪些大软件能安全搬到 D 盘
+- **以前**：用某卫士清完微信聊天记录没了；手动剪贴软件目录导致程序打不开。
+- **现在**：
+  - **缓存 & 截图清理**：只清明确可重建的缓存与过期截图，系统目录与个人文档多重硬闸门锁死；
+  - **跨盘数据迁移**：复制 → 校验哈希 → 原子替换 → 事务日志记录，**中途断电/取消能续跑，搬完不满意整任务一键回滚**；
+  - **大文件排行 & 空目录清理**：带时间预算扫描不卡死，自动保护程序依赖空目录与目录联接。
 
-## 重新构建
+### 3. 解压 / 压缩大文件时，老牌软件弹广告、界面卡死、想暂停停不下来
+- **现在**：内置零广告高速压缩包工具，支持 **ZIP / 7Z / RAR / TAR / TAR.GZ / BZ2 / XZ** 查看、双击预览（文本/图片/PDF/音视频/十六进制）、解压与创建：
+  - **四档自适应性能**：节约 / 平衡 / 高性能 / 超线程，按本机 CPU 核数动态阶梯调速，超线程满核零限速；
+  - **真·随时暂停与秒级取消**：毫秒级响应暂停与取消，绝不卡死界面；
+  - **同名冲突提示 + 撤回**：遇到同名文件/文件夹可选择「直接覆盖」或「二者并存（自动重命名）」，解压或压缩完发现搞错了还能**一键安全撤回**。
+
+### 4. 想问「我 D 盘到底是什么占了 80 GB」，但不想把电脑控制权交给黑盒 AI
+- **现在**：内置本地优先的 **AI 助手**（自带密钥、仅直连你自己配置的大模型端点）：
+  - 它可以帮你扫目录、查大文件、找残留、解释整理规则、搜索全盘文件；
+  - **任何会改文件、删文件、动系统的动作都必须先走「审批提案卡」**：写清要动哪些路径、总大小和风险等级，你勾选批准才会执行，不批准一个字节都不会碰。
+
+---
+
+## 立刻试用（30 秒上手）
+
+前往 **[Releases 页面](https://github.com/3347567186/TidyAssistant/releases/latest)** 下载任意一种版本：
+
+| 版本形态 | 文件名 | 适合谁 | 在线更新 |
+|---|---|---|---|
+| **安装版（推荐）** | `TidyAssistant_x.y.z_x64-setup.exe` | 日常长期使用，自带快捷方式与干净卸载 | 设置页一键检查、SHA-256 校验并覆盖升级 |
+| **便携版** | `整理助手_x.y.z_便携版.zip` | 解压到纯英文目录即用，拷进 U 盘也能带走 | 设置页一键下载、自动备份旧版原子替换（失败自动回滚） |
+
+> ⚠️ **注意**：用户所有配置、历史与数据独立存放在 `%LOCALAPPDATA%\整理助手数据`，软件更新或卸载不会抹掉你的规则与记录。
+
+---
+
+## 为什么我敢让它碰我自己的硬盘？（安全底线）
+
+1. **所有高危动作默认先预演（Dry-Run）**，确认后才落盘。
+2. **多重硬编码保护闸门**：盘符根目录、`Windows`、`Program Files`、`.git`/`.ssh`、NTFS 数据流、符号链接/目录联接穿越、压缩炸弹（32 GiB / 50 万条目上限）全部在底层硬拦截。
+3. **在线更新强制 HTTPS + SHA-256 校验**：仅连接官方 GitHub Releases，下载前校验域名与跳转，安装前二次复核 SHA-256 与二进制文件头，防篡改、防降级。
+4. **零遥测、零广告、零捆绑**：除你主动点击检查更新、安装官方 UnRAR 组件或使用自配 AI 模型外，不发任何联网请求。
+
+---
+
+## 给提建议和反馈的朋友
+
+这个工具还在持续打磨中，如果你遇到了：
+- 某个常见软件缓存没识别到 / 误判了
+- 某种奇葩压缩包打不开
+- 觉得某个界面步骤太啰嗦
+
+欢迎直接提 [Issue](https://github.com/3347567186/TidyAssistant/issues)，我会按大家的真实使用反馈持续迭代，更新后你在软件「设置 → 版本与在线更新」里直接点一下就能升到新版。
+
+---
+
+<details>
+<summary>🛠️ 给开发者：源码结构与本地构建说明（普通用户无需关心）</summary>
+
+- `src/src-tauri/`：Tauri v2（Rust）原生外壳、压缩包核心、在线更新引擎、WinHTTP 网关与系统安全桥接
+- `src/engine/`：本地整理、缓存清理、软件残留、索引搜索与事务迁移引擎（Python + Rust 遍历器 `indexwalk`）
+- `src/web/`：零框架原生前端（12 个功能页 + AI 助手与离线自测套件）
+- `tools/publish-release.ps1`：一键生成 `latest.json` / `SHA256SUMS.txt` 并发布到 GitHub Releases
 
 ```powershell
-.\build.ps1                    # 重建 exe
-.\build.ps1 -Bump patch        # 版本号 +1 后重建（修 bug 用 patch，新功能用 minor）
-.\build.ps1 -Bundle -Portable  # 出安装包 + 便携包，自动只留最新与上一版
-.\build.ps1 -Engine            # 只重建 Python 引擎
+# 全量测试门禁（Python 234 项 + 前端 7 套自测 + Rust 55 项单测 + 0 警告构建）+ 打包安装包与便携版
+pwsh -File .\build.ps1 -Bump patch
+
+# 一键发布到 GitHub Releases（自动上传安装包、便携包、latest.json、SHA256SUMS.txt）
+pwsh -File .\tools\publish-release.ps1 -UploadGitHub
 ```
 
-依赖：`gnu-d` Rust 工具链、`D:\Tool\binutils\mingw64`、`py -V:Astral\CPython3.11.15` +
-PyInstaller 6.22.3。细节见 `docs\01-当前版\打包与发布.md`。
+第三方组件与开源许可详见 [THIRD_PARTY.md](THIRD_PARTY.md)，发包细节见 [发包与在线更新指南](docs/01-当前版/发包与在线更新指南.md)。
 
-## 目录
-
-```
-TidyAssistant\
-├── tidy-assistant.exe
-├── WebView2Loader.dll
-├── 引擎\                    运行用引擎（exe + _internal）
-├── src\
-│   ├── src-tauri\           Rust 外壳 + 压缩核心
-│   ├── web\                 前端 10 页
-│   └── engine\              Python 引擎源码
-├── docs\                    01-当前版 / 02-历史-旧版
-├── release\                 安装包
-├── tools\                   cargo-tauri.exe
-├── build.ps1
-└── AGENTS.md                给 AI 会话的指路说明
-```
+</details>

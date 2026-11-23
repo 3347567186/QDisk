@@ -82,8 +82,7 @@
     updaterStatus: () => invoke('updater_status'),
     updaterConfigGet: () => invoke('updater_config_get'),
     updaterConfigSet: (patch) => invoke('updater_config_set', { patch }),
-    updaterCheck: (feedUrl, channel) => invoke('updater_check', {
-      feedUrl: feedUrl || null,
+    updaterCheck: (channel) => invoke('updater_check', {
       channel: channel || null
     }),
     updaterDownload: (opts) => invoke('updater_download', {

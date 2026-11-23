@@ -23,7 +23,7 @@ param(
   [ValidateSet('stable', 'beta')]
   [string]$Channel = 'stable',
   [string]$BaseUrl = '',
-  [string]$GitHubRepo = '',
+  [string]$GitHubRepo = '3347567186/TidyAssistant',
   [string]$Notes = '',
   [string]$MinVersion = '',
   [switch]$UploadGitHub,
@@ -133,14 +133,20 @@ if ($hasInst) {
 if ($hasPort) {
   $sha = Get-Sha256Lower $portPath
   $len = (Get-Item -LiteralPath $portPath).Length
-  $url = Format-AssetUrl $BaseUrl $portFile
+  # 红队防 404：GitHub Releases 会改写含中文字符的附件名，上传到 GitHub 时统一使用纯 ASCII 文件名
+  $remotePortFile = if (-not $ServeLocal -and $GitHubRepo) {
+    "TidyAssistant_${Version}_x64-portable.zip"
+  } else {
+    $portFile
+  }
+  $url = Format-AssetUrl $BaseUrl $remotePortFile
   $manifest['portable'] = [ordered]@{
-    file   = $portFile
+    file   = $remotePortFile
     url    = $url
     size   = $len
     sha256 = $sha
   }
-  $sums.Add("$sha  $portFile")
+  $sums.Add("$sha  $remotePortFile")
 }
 
 $enc = New-Object Text.UTF8Encoding($false)
@@ -159,15 +165,26 @@ if ($UploadGitHub) {
   if (-not $gh) { throw '未找到 GitHub CLI (gh)，请先安装并执行 gh auth login' }
   $files = @($latestPath, $sumsPath)
   if ($hasInst) { $files += $instPath }
-  if ($hasPort) { $files += $portPath }
+  $tmpAsciiPort = $null
+  if ($hasPort) {
+    # 使用纯 ASCII 临时副本上传，保证 GitHub Releases 下载地址与 latest.json 100% 字节对齐、绝不 404
+    $tmpAsciiPort = Join-Path ([IO.Path]::GetTempPath()) "TidyAssistant_${Version}_x64-portable.zip"
+    Copy-Item -LiteralPath $portPath -Destination $tmpAsciiPort -Force
+    $files += $tmpAsciiPort
+  }
   $tag = "v$Version"
   $args = @('release', 'create', $tag) + $files + @('--repo', $GitHubRepo, '--title', "TidyAssistant $tag", '--notes', $Notes)
   if ($Channel -eq 'beta') { $args += '--prerelease' }
   Write-Host "正在上传 Release $tag 到 GitHub ($GitHubRepo)…" -ForegroundColor Cyan
-  & $gh @args
-  if ($LASTEXITCODE -ne 0) { throw "gh release create 失败（退出码 $LASTEXITCODE）" }
+  try {
+    & $gh @args
+    if ($LASTEXITCODE -ne 0) { throw "gh release create 失败（退出码 $LASTEXITCODE）" }
+  } finally {
+    if ($tmpAsciiPort -and (Test-Path -LiteralPath $tmpAsciiPort)) {
+      Remove-Item -LiteralPath $tmpAsciiPort -Force -ErrorAction SilentlyContinue
+    }
+  }
   Write-Host "GitHub Release 发布成功：https://github.com/$GitHubRepo/releases/tag/$tag" -ForegroundColor Green
-  Write-Host "客户端更新源地址可填：https://github.com/$GitHubRepo/releases/latest/download/latest.json" -ForegroundColor Yellow
 }
 
 if ($ServeLocal) {

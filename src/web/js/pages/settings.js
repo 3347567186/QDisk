@@ -113,9 +113,8 @@
            secAssistant 整块重建，闭包变量留不住，弹窗就再也关不掉了。 */
         modelModal: null,
         aiKeyShown: false,
-        /* 在线更新状态：完全独立，不影响现有任何设置项 */
+        /* 在线更新状态：完全独立，内置官方 GitHub Releases 源，不暴露任何网址输入框 */
         updStatus: null,
-        updFeedDraft: '',
         updChannel: 'stable',
         updAutoCheck: true,
         updChecking: false,
@@ -2140,13 +2139,7 @@
         state.updProgDom = { wrap: progWrap, fill: progFill, meta: progMeta, cancelBtn };
         syncUpdaterProgressDom();
 
-        const feedInput = h('input', {
-          class: 'input upd-feed-input',
-          type: 'url',
-          value: state.updFeedDraft,
-          placeholder: 'https://your-domain.com/releases/latest.json  或  https://api.github.com/repos/owner/repo/releases/latest',
-          oninput: (e) => { state.updFeedDraft = e.target.value; }
-        });
+        const releasesPage = (st && st.releasesPage) || 'https://github.com/3347567186/TidyAssistant/releases';
 
         const resultCard = (() => {
           if (state.updError) {
@@ -2231,24 +2224,6 @@
             )
           ),
           h('div', { class: 'set-card' },
-            setRow(T('更新源地址', 'Update feed URL'),
-              h('div', { class: 'stack upd-feed-col' },
-                h('div', { class: 'row upd-feed-row' },
-                  feedInput,
-                  h('button', {
-                    type: 'button',
-                    class: 'btn sm',
-                    disabled: state.updChecking || state.updDownloading,
-                    onclick: saveUpdaterFeed
-                  }, h('span', { text: T('保存源', 'Save') }))
-                ),
-                h('div', {
-                  class: 'small muted',
-                  text: T('支持自建 HTTPS / Gitee / OSS 的 latest.json，或 GitHub Releases API 地址；远端强制 HTTPS + SHA-256 校验。',
-                    'Supports static HTTPS latest.json or GitHub Releases API; enforces HTTPS + SHA-256 verification.')
-                })
-              )
-            ),
             setRow(T('更新通道', 'Channel'),
               h('div', { class: 'row wrap' },
                 [
@@ -2272,7 +2247,7 @@
                   checked: !!state.updAutoCheck,
                   onchange: (e) => onUpdaterAutoCheck(e.target.checked)
                 }),
-                h('span', { text: T('仅在已配置更新源时后台检查，不阻塞启动', 'Checks silently when a feed URL is configured') })
+                h('span', { text: T('后台自动检查官方新版本，不阻塞启动', 'Checks for official updates silently in the background') })
               )
             )
           ),
@@ -2283,7 +2258,7 @@
               class: 'small muted',
               text: cacheBytes > 0
                 ? T('本地更新缓存：', 'Update cache: ') + fmtSize(cacheBytes)
-                : T('更新下载完成后将自动核验 SHA-256，校验通过才允许安装', 'SHA-256 is verified before installation')
+                : T('更新包下载后自动核验 SHA-256，校验通过才允许安装', 'SHA-256 is verified before installation')
             }),
             h('div', { class: 'spacer' }),
             cacheBytes > 0
@@ -2294,6 +2269,11 @@
                 onclick: clearUpdaterCache
               }, h('span', { text: T('清理缓存', 'Clear cache') }))
               : null,
+            h('button', {
+              type: 'button',
+              class: 'btn sm ghost',
+              onclick: () => openExternalUrl(releasesPage)
+            }, h('span', { text: T('查看发布页', 'Release page') })),
             h('button', {
               type: 'button',
               class: 'btn sm primary',
@@ -2323,29 +2303,20 @@
           state.updStatus = st;
           state.updDownloading = !!(st && st.busy);
           if (st && st.config) {
-            state.updFeedDraft = st.config.feedUrl || '';
             state.updChannel = st.config.channel === 'beta' ? 'beta' : 'stable';
             state.updAutoCheck = st.config.autoCheck !== false;
           }
         } catch (e) { /* 离线或测试环境无此命令时静默忽略 */ }
       }
 
+      async function openExternalUrl(url) {
+        if (!url) return;
+        try { await API.openPath(url); } catch (e) { toast(errText(e), 'error'); }
+      }
+
       function clearSettingsUpdateDot() {
         const navBtn = document.querySelector && document.querySelector('.nav-item[data-id="settings"]');
         if (navBtn && navBtn.classList) navBtn.classList.remove('has-update');
-      }
-
-      async function saveUpdaterFeed() {
-        try {
-          const saved = await API.updaterConfigSet({ feedUrl: state.updFeedDraft.trim() });
-          state.updFeedDraft = (saved && saved.feedUrl) || '';
-          state.updError = null;
-          await loadUpdater();
-          toast(T('更新源地址已保存', 'Update feed URL saved'), 'ok');
-          paint();
-        } catch (e) {
-          toast(errText(e), 'error');
-        }
       }
 
       async function onUpdaterChannel(channel) {
@@ -2371,17 +2342,11 @@
 
       async function checkForUpdates() {
         if (state.updChecking || state.updDownloading) return;
-        const url = state.updFeedDraft.trim();
-        if (!url) {
-          toast(T('请先填写在线更新源地址（latest.json 或 GitHub Releases 地址）', 'Enter an update feed URL first'), 'warn');
-          return;
-        }
         state.updChecking = true;
         state.updError = null;
         paint();
         try {
-          await API.updaterConfigSet({ feedUrl: url, channel: state.updChannel });
-          const res = await API.updaterCheck(url, state.updChannel);
+          const res = await API.updaterCheck(state.updChannel);
           state.updCheck = res;
           if (App) App._pendingUpdate = (res && res.hasUpdate) ? res : null;
           await loadUpdater();

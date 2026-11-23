@@ -86,12 +86,12 @@
       await navigate(start, false);
       pollEngine(true);
       this._pollTimer = setInterval(() => pollEngine(false), 15000);
-      /* 启动后延迟 6 秒静默检查一次更新（仅当用户配置了更新源且开启自动检查） */
+      /* 启动后延迟 6 秒静默检查一次官方 GitHub Releases 更新（无需用户配置任何网址） */
       this._updTimer = setTimeout(() => {
         if (document.hidden || typeof API.updaterStatus !== 'function' || typeof API.updaterCheck !== 'function') return;
         API.updaterStatus().then((st) => {
-          if (!st || !st.config || !st.config.autoCheck || !st.config.feedUrl) return null;
-          return API.updaterCheck(st.config.feedUrl, st.config.channel);
+          if (!st || !st.config || !st.config.autoCheck) return null;
+          return API.updaterCheck(st.config.channel);
         }).then((res) => {
           if (!res || !res.hasUpdate || res.isIgnored) return;
           App._pendingUpdate = res;

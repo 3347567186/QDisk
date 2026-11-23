@@ -29,6 +29,16 @@ pub const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 /// 最大重定向跳数。
 const MAX_REDIRECTS: usize = 5;
 
+/// 官方内置 GitHub Releases 更新源（无需用户在设置中手动填写任何网址）。
+pub const OFFICIAL_FEED_URL: &str =
+    "https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json";
+pub const OFFICIAL_API_LATEST_URL: &str =
+    "https://api.github.com/repos/3347567186/TidyAssistant/releases/latest";
+pub const OFFICIAL_API_RELEASES_URL: &str =
+    "https://api.github.com/repos/3347567186/TidyAssistant/releases?per_page=8";
+pub const OFFICIAL_RELEASES_PAGE: &str =
+    "https://github.com/3347567186/TidyAssistant/releases";
+
 static PART_SEQ: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------- 可扩展抽象接口
@@ -173,7 +183,6 @@ fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdaterConfig {
-    pub feed_url: String,
     pub channel: String,
     pub auto_check: bool,
     pub ignored_version: String,
@@ -183,7 +192,6 @@ pub struct UpdaterConfig {
 impl Default for UpdaterConfig {
     fn default() -> Self {
         Self {
-            feed_url: String::new(),
             channel: "stable".into(),
             auto_check: true,
             ignored_version: String::new(),
@@ -264,6 +272,7 @@ pub struct UpdaterStatusSnapshot {
     pub install_kind: String,
     pub busy: bool,
     pub config: UpdaterConfig,
+    pub releases_page: String,
     pub updates_dir: String,
     pub cache_bytes: u64,
     pub staged: Option<StagedInfo>,
@@ -362,7 +371,37 @@ pub fn sanitize_file_name(raw: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
-/// 严格校验更新 URL：远端强制 HTTPS；仅本机回环（127.0.0.1 / localhost / ::1）放行 HTTP 用于本地发包联调。
+/// 仅信任 GitHub 官方发布域名与本机回环（联调）；防止任意第三方域名劫持或恶意跳转。
+pub fn is_trusted_release_host(host: &str) -> bool {
+    let low = host.to_ascii_lowercase();
+    is_local_host(&low)
+        || matches!(
+            low.as_str(),
+            "github.com"
+                | "api.github.com"
+                | "objects.githubusercontent.com"
+                | "release-assets.githubusercontent.com"
+                | "codeload.github.com"
+        )
+        || low.ends_with(".githubusercontent.com")
+}
+
+/// 开发者本机联调覆盖：仅放行指向回环（127.0.0.1 / localhost / ::1）的环境变量 `TIDY_UPDATE_FEED`。
+fn dev_loopback_feed() -> Option<String> {
+    let raw = std::env::var("TIDY_UPDATE_FEED").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (_, host, _, _) = split_url(trimmed).ok()?;
+    if is_local_host(&host) {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+/// 严格校验更新 URL：远端强制 HTTPS 且仅限官方 GitHub 域名；仅本机回环放行 HTTP 用于本地发包联调。
 /// 当 `origin_is_remote_https` 为 true 时（重定向场景），禁止跨回环降级到本机 HTTP（防 SSRF + 降级）。
 pub fn validate_update_url(url: &str, origin_is_remote_https: bool) -> Result<(bool, String, u16, String)> {
     let trimmed = url.trim();
@@ -378,7 +417,24 @@ pub fn validate_update_url(url: &str, origin_is_remote_https: bool) -> Result<(b
     }
     let local = is_local_host(&host);
     if !secure && !local {
-        bail!("出于安全要求，远端更新地址必须使用 https://（仅本机联调允许 http://127.0.0.1）");
+        bail!("出于安全要求，远端更新地址必须使用 https://");
+    }
+    if !local && !is_trusted_release_host(&host) {
+        bail!("安全拦截：拒绝连接非官方受信任更新域名（{host}）");
+    }
+    if host.eq_ignore_ascii_case("github.com")
+        && !path
+            .to_ascii_lowercase()
+            .starts_with("/3347567186/tidyassistant/")
+    {
+        bail!("安全拦截：拒绝从非官方仓库路径下载更新（{path}）");
+    }
+    if host.eq_ignore_ascii_case("api.github.com")
+        && !path
+            .to_ascii_lowercase()
+            .starts_with("/repos/3347567186/tidyassistant/")
+    {
+        bail!("安全拦截：拒绝访问非官方仓库 API（{path}）");
     }
     if origin_is_remote_https && (!secure || local) {
         bail!("拒绝从远端 HTTPS 重定向到非 HTTPS 或本机回环地址");
@@ -820,13 +876,23 @@ pub fn parse_static_manifest(manifest_url: &str, v: &Value) -> Result<ReleaseMan
     })
 }
 
-/// 解析 GitHub Releases API JSON（`/repos/{owner}/{repo}/releases/latest`）。
+/// 解析 GitHub Releases API JSON（支持 `/releases/latest` 单对象与 `/releases?per_page=8` 数组）。
 /// 优先使用附件中的 `latest.json`，其次使用资产原生 `digest`（sha256）或 `SHA256SUMS.txt`。
 #[cfg(windows)]
 fn fetch_and_parse_manifest(feed_url: &str) -> Result<ReleaseManifest> {
     let (_status, bytes, final_url) =
         winhttp_fetch_bytes(feed_url, MAX_MANIFEST_BYTES, 15_000, "application/json, application/vnd.github+json")?;
-    let v: Value = serde_json::from_slice(&bytes).context("更新清单不是合法的 JSON 格式")?;
+    let raw_v: Value = serde_json::from_slice(&bytes).context("更新清单不是合法的 JSON 格式")?;
+
+    // 支持 GitHub `/releases?per_page=8` 列表（beta 通道取最新一条非 draft 发布）
+    let v = if let Some(arr) = raw_v.as_array() {
+        arr.iter()
+            .find(|item| !item.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
+            .cloned()
+            .context("当前仓库尚未发布任何公开版本")?
+    } else {
+        raw_v
+    };
 
     // 判断是否为 GitHub Releases API 响应（含 tag_name + assets 数组）
     if v.get("tag_name").is_some() && v.get("assets").and_then(|a| a.as_array()).is_some() {
@@ -962,12 +1028,6 @@ pub fn read_updater_config() -> UpdaterConfig {
     let u = cfg.get("updater");
     let def = UpdaterConfig::default();
     UpdaterConfig {
-        feed_url: u
-            .and_then(|x| x.get("feed_url").or_else(|| x.get("feedUrl")))
-            .and_then(|x| x.as_str())
-            .unwrap_or(&def.feed_url)
-            .trim()
-            .to_string(),
         channel: match u
             .and_then(|x| x.get("channel"))
             .and_then(|x| x.as_str())
@@ -1000,12 +1060,6 @@ pub fn save_updater_config(patch: Value) -> Result<UpdaterConfig, String> {
     let mut cfg = read_config();
     let cur = cfg.get("updater").cloned().unwrap_or_else(|| json!({}));
     let mut next = UpdaterConfig {
-        feed_url: cur
-            .get("feed_url")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string(),
         channel: match cur.get("channel").and_then(|x| x.as_str()).unwrap_or("stable") {
             "beta" => "beta".into(),
             _ => "stable".into(),
@@ -1026,17 +1080,6 @@ pub fn save_updater_config(patch: Value) -> Result<UpdaterConfig, String> {
     };
 
     if let Some(obj) = patch.as_object() {
-        if let Some(url) = obj
-            .get("feedUrl")
-            .or_else(|| obj.get("feed_url"))
-            .and_then(|x| x.as_str())
-        {
-            let trimmed = url.trim();
-            if !trimmed.is_empty() {
-                validate_update_url(trimmed, false).map_err(|e| format!("{e:#}"))?;
-            }
-            next.feed_url = trimmed.to_string();
-        }
         if let Some(ch) = obj.get("channel").and_then(|x| x.as_str()) {
             next.channel = if ch == "beta" { "beta".into() } else { "stable".into() };
         }
@@ -1064,7 +1107,6 @@ pub fn save_updater_config(patch: Value) -> Result<UpdaterConfig, String> {
     }
 
     cfg["updater"] = json!({
-        "feed_url": next.feed_url,
         "channel": next.channel,
         "auto_check": next.auto_check,
         "ignored_version": next.ignored_version,
@@ -1542,6 +1584,7 @@ pub fn updater_status(state: State<'_, UpdaterState>) -> UpdaterStatusSnapshot {
         install_kind: detect_install_kind().to_string(),
         busy: state.busy.load(Ordering::SeqCst),
         config: read_updater_config(),
+        releases_page: OFFICIAL_RELEASES_PAGE.to_string(),
         updates_dir: dir.to_string_lossy().to_string(),
         cache_bytes: dir_size_bytes(&dir),
         staged,
@@ -1558,20 +1601,32 @@ pub fn updater_config_set(patch: Value) -> Result<UpdaterConfig, String> {
     save_updater_config(patch)
 }
 
+#[cfg(windows)]
+fn fetch_official_manifest(channel: &str) -> Result<ReleaseManifest> {
+    if let Some(local_feed) = dev_loopback_feed() {
+        return fetch_and_parse_manifest(&local_feed);
+    }
+    let endpoints: &[&str] = if channel == "beta" {
+        &[OFFICIAL_API_RELEASES_URL, OFFICIAL_FEED_URL]
+    } else {
+        &[OFFICIAL_FEED_URL, OFFICIAL_API_LATEST_URL]
+    };
+    let mut last_err = None;
+    for ep in endpoints {
+        match fetch_and_parse_manifest(ep) {
+            Ok(m) => return Ok(m),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("无法连接官方 GitHub 更新源，请检查网络或代理")))
+}
+
 #[tauri::command]
 pub async fn updater_check(
     state: State<'_, UpdaterState>,
-    feed_url: Option<String>,
     channel: Option<String>,
 ) -> Result<UpdateCheckResult, String> {
     let cfg = read_updater_config();
-    let url = feed_url
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(cfg.feed_url);
-    if url.is_empty() {
-        return Err("尚未配置在线更新源地址（请填写 latest.json 或 GitHub Releases 地址）".into());
-    }
     let ch = channel
         .map(|s| if s == "beta" { "beta".to_string() } else { "stable".to_string() })
         .unwrap_or(cfg.channel);
@@ -1579,7 +1634,7 @@ pub async fn updater_check(
     let staged = state.staged.lock().ok().and_then(|g| g.clone());
 
     let res = tauri::async_runtime::spawn_blocking(move || -> Result<UpdateCheckResult, String> {
-        let manifest = fetch_and_parse_manifest(&url).map_err(|e| format!("{e:#}"))?;
+        let manifest = fetch_official_manifest(&ch).map_err(|e| format!("{e:#}"))?;
         let mut res = evaluate_manifest(
             env!("CARGO_PKG_VERSION"),
             detect_install_kind(),
@@ -1847,21 +1902,28 @@ mod tests {
     }
 
     #[test]
-    fn url_security_blocks_remote_http_and_downgrade_redirects() {
-        assert!(validate_update_url("https://releases.example.com/latest.json", false).is_ok());
+    fn url_security_blocks_remote_http_untrusted_hosts_and_downgrade_redirects() {
+        assert!(validate_update_url(OFFICIAL_FEED_URL, false).is_ok());
+        assert!(validate_update_url(OFFICIAL_API_LATEST_URL, false).is_ok());
+        assert!(validate_update_url("https://objects.githubusercontent.com/github-production-release-asset/a.exe", false).is_ok());
         assert!(validate_update_url("http://127.0.0.1:18765/latest.json", false).is_ok());
         assert!(validate_update_url("http://localhost:18765/latest.json", false).is_ok());
-        assert!(validate_update_url("http://evil.com/latest.json", false).is_err());
-        assert!(validate_update_url("https://user:pass@evil.com/latest.json", false).is_err());
-        assert!(validate_update_url("https://evil.com/a\r\nX: 1", false).is_err());
+        // 非官方第三方域名与非官方仓库路径一律拦截，防任意下载劫持
+        assert!(validate_update_url("https://evil.com/latest.json", false).is_err());
+        assert!(validate_update_url("https://fakegithub.com/latest.json", false).is_err());
+        assert!(validate_update_url("https://github.com/attacker/malware/releases/download/v1/a.exe", false).is_err());
+        assert!(validate_update_url("https://api.github.com/repos/attacker/malware/releases/latest", false).is_err());
+        assert!(validate_update_url("http://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json", false).is_err());
+        assert!(validate_update_url("https://user:pass@github.com/latest.json", false).is_err());
+        assert!(validate_update_url("https://github.com/a\r\nX: 1", false).is_err());
         // 远端 HTTPS 禁止重定向到 HTTP 或本机回环（防 SSRF + 降级攻击）
         assert!(validate_update_url("http://127.0.0.1:8080/a.exe", true).is_err());
         assert!(validate_update_url("https://127.0.0.1:8443/a.exe", true).is_err());
-        assert!(validate_update_url("https://cdn.example.com/a.exe", true).is_ok());
+        assert!(validate_update_url("https://release-assets.githubusercontent.com/a.exe", true).is_ok());
 
         assert_eq!(
-            resolve_asset_url("https://cdn.example.com/app/latest.json", "Tidy_1.0_x64-setup.exe").unwrap(),
-            "https://cdn.example.com/app/Tidy_1.0_x64-setup.exe"
+            resolve_asset_url("https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json", "Tidy_1.0_x64-setup.exe").unwrap(),
+            "https://github.com/3347567186/TidyAssistant/releases/latest/download/Tidy_1.0_x64-setup.exe"
         );
     }
 

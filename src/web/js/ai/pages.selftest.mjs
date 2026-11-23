@@ -1446,11 +1446,11 @@ function findNodes(rootNode, pred, out = []) {
     }
   });
   sandbox.API.updaterStatus = async () => ({
-    currentVersion: '1.43.12',
+    currentVersion: '1.43.13',
     installKind: 'portable',
     busy: false,
+    releasesPage: 'https://github.com/3347567186/TidyAssistant/releases',
     config: {
-      feedUrl: 'https://releases.example.com/latest.json',
       channel: 'stable',
       autoCheck: true,
       ignoredVersion: '',
@@ -1461,14 +1461,13 @@ function findNodes(rootNode, pred, out = []) {
     staged: null
   });
   sandbox.API.updaterConfigSet = async (p) => Object.assign({
-    feedUrl: 'https://releases.example.com/latest.json',
     channel: 'stable',
     autoCheck: true,
     ignoredVersion: '',
     lastCheckAt: ''
   }, p || {});
   sandbox.API.updaterCheck = async () => ({
-    currentVersion: '1.43.12',
+    currentVersion: '1.43.13',
     latestVersion: '9.9.9',
     hasUpdate: true,
     isIgnored: false,
@@ -1478,11 +1477,11 @@ function findNodes(rootNode, pred, out = []) {
     channel: 'stable',
     pubDate: '2026-11-23',
     notes: '红队验证版本更新说明',
-    downloadUrl: 'https://releases.example.com/app.zip',
+    downloadUrl: 'https://github.com/3347567186/TidyAssistant/releases/download/v9.9.9/app.zip',
     fileName: '整理助手_9.9.9_便携版.zip',
     size: 25 * 1024 * 1024,
     sha256: fakeSha,
-    manifestUrl: 'https://releases.example.com/latest.json',
+    manifestUrl: 'https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json',
     staged: null
   });
   sandbox.API.updaterDownload = () => new Promise((res, rej) => {
@@ -1499,6 +1498,12 @@ function findNodes(rootNode, pred, out = []) {
   await new Promise((r) => setTimeout(r, 20));
 
   const checkBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('立即检查更新'))[0];
+  const urlInputs = findNodes(rootSet, (n) => n.tagName === 'INPUT' && (n.type === 'url' || (n.classList && n.classList.contains('upd-feed-input'))));
+  const saveFeedBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('保存源'))[0];
+  if (urlInputs.length > 0 || saveFeedBtn) {
+    console.error(`[在线更新回归] 设置页不得出现填网址功能: urlInputs=${urlInputs.length}, saveFeedBtn=${!!saveFeedBtn}`);
+    process.exit(1);
+  }
   if (!checkBtn) {
     console.error('[在线更新回归] 设置页缺少「立即检查更新」按钮');
     process.exit(1);

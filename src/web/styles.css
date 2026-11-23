@@ -5404,9 +5404,6 @@ html[data-theme="dark"] .ai-tnav-pop {
   content: ''; position: absolute; top: 7px; right: 8px;
   width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
 }
-.upd-feed-col { width: 100%; gap: 6px; }
-.upd-feed-row { width: 100%; gap: 8px; }
-.upd-feed-input { flex: 1 1 auto; min-width: 0; font-family: var(--mono); font-size: 12px; }
 .upd-box {
   padding: 12px 14px; border-radius: var(--radius);
   background: var(--surface-2); border: 1px solid var(--line);
