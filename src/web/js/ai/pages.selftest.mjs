@@ -1165,5 +1165,148 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流与冲突撤回全链路校验通过）`);
+// 回归 10：压缩包能力发现动态核心文案、getCapabilities 深拷贝隔离、生命周期钩子异常隔离与 off 解绑
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const rootArc = new FakeElement('div');
+  const modalRoot = sandbox.document._byId['modal-root'];
+  modalRoot.children = [];
+  const origCfgGet = sandbox.API.configGet;
+  const origCfgSet = sandbox.API.configSet;
+  const origCaps = sandbox.API.archiveCapabilities;
+  const origOpen = sandbox.API.archiveOpen;
+  const origCheckExt = sandbox.API.archiveCheckExtractConflicts;
+  const origExtract = sandbox.API.archiveExtract;
+  const origOpenPath = sandbox.API.openPath;
+
+  sandbox.API.configGet = async () => ({ archive_mode: 'balanced', archive_extract_dir: 'D:\\下载', archive_extract_open: false });
+  sandbox.API.configSet = async () => {};
+  sandbox.API.openPath = async () => {};
+  sandbox.API.archiveCapabilities = async () => ({
+    schemaVersion: 1,
+    cpuCores: 12,
+    formats: [{ id: 'zip', label: 'ZIP', canRead: true, canExtract: true, canCreate: true }],
+    modes: [
+      { id: 'saver', threads: 1, ioDutyPct: 25, cpuDutyPct: 35, smartStore: false },
+      { id: 'balanced', threads: 4, ioDutyPct: 50, cpuDutyPct: 65, smartStore: false },
+      { id: 'performance', threads: 8, ioDutyPct: 75, cpuDutyPct: 85, smartStore: true },
+      { id: 'hyper', threads: 12, ioDutyPct: 100, cpuDutyPct: 100, smartStore: true }
+    ],
+    limits: { maxUndoRecords: 1, maxEntries: 500000 },
+    rarReady: true
+  });
+  sandbox.API.archiveOpen = async (p) => ({
+    path: p,
+    format: 'ZIP',
+    entries: [{ index: 0, name: 'a.txt', isDir: false, size: 128, packed: 64, modified: '2026-11-23 12:00:00', encrypted: false, crc: 1 }],
+    totalSize: 128,
+    totalPacked: 64,
+    encrypted: false,
+    solid: false,
+    comment: '',
+    needsRar: false,
+    rarReady: true
+  });
+  sandbox.API.archiveCheckExtractConflicts = async () => ({
+    hasConflicts: false, outDirExists: false, outDirIsFile: false, suggestedOutDir: 'D:\\下载\\demo', fileConflicts: 0, dirConflicts: 0, samples: []
+  });
+  sandbox.API.archiveExtract = async (path, outDir) => ({
+    files: 1, dirs: 0, bytes: 128, skipped: 0, warnings: [], outDir, undoId: 'u-hook-1', canUndo: true, backupIncomplete: false, backupBytes: 0
+  });
+
+  const received = [];
+  const capEvents = [];
+  const throwingHook = () => { throw new Error('故意抛错的第三方钩子'); };
+  const okHook = (rep) => { received.push(rep && rep.undoId); };
+  const unsubCap = sandbox.Pages.archive.on('capabilities:ready', (c) => capEvents.push(c && c.cpuCores));
+  const unsubThrow = sandbox.Pages.archive.on('extract:done', throwingHook);
+  sandbox.Pages.archive.on('extract:done', okHook);
+
+  const beforeKey = (docListeners.get('keydown') || []).length;
+  const beforeInt = activeIntervals.size;
+  const ret = await sandbox.Pages.archive.mount(rootArc);
+  await new Promise((r) => setTimeout(r, 30));
+
+  // 1. 校验四档动态核心文案按 12 核后端能力渲染
+  const modeCards = findNodes(rootArc, (n) => n.classList && n.classList.contains('arc-mode')).map(txt);
+  if (!modeCards.some((s) => s.includes('1 核')) || !modeCards.some((s) => s.includes('4 核')) || !modeCards.some((s) => s.includes('8 核')) || !modeCards.some((s) => s.includes('12 核满核'))) {
+    console.error(`[压缩包扩展回归] 模式卡片未按后端 12 核能力动态渲染: ${JSON.stringify(modeCards)}`);
+    process.exit(1);
+  }
+  if (capEvents.length !== 1 || capEvents[0] !== 12) {
+    console.error(`[压缩包扩展回归] capabilities:ready 钩子未触发或数据不对: ${JSON.stringify(capEvents)}`);
+    process.exit(1);
+  }
+
+  // 2. 校验 getCapabilities() 深拷贝隔离（外部篡改不得污染内部状态）
+  const snap1 = sandbox.Pages.archive.getCapabilities();
+  snap1.modes[0].threads = 999;
+  snap1.limits.maxEntries = 0;
+  const snap2 = sandbox.Pages.archive.getCapabilities();
+  if (!snap2 || snap2.modes[0].threads !== 1 || snap2.limits.maxEntries !== 500000) {
+    console.error(`[压缩包扩展回归] getCapabilities() 未深拷贝隔离外部修改: ${JSON.stringify(snap2)}`);
+    process.exit(1);
+  }
+
+  // 3. 校验异常钩子隔离 + 正常钩子触发 + off() 生效
+  await sandbox.Pages.archive.jump({ paths: ['D:\\demo.zip'] });
+  const extractBtn = findNodes(rootArc, (n) => n.tagName === 'BUTTON' && txt(n).includes('解压全部'))[0];
+  clickBtn(extractBtn);
+  const startBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始解压')).pop();
+  clickBtn(startBtn);
+  await new Promise((r) => setTimeout(r, 40));
+  if (received.length !== 1 || received[0] !== 'u-hook-1') {
+    console.error(`[压缩包扩展回归] 异常钩子阻断了正常 extract:done 钩子执行: ${JSON.stringify(received)}`);
+    process.exit(1);
+  }
+  const closeDone = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  if (closeDone) clickBtn(closeDone);
+  await new Promise((r) => setTimeout(r, 30));
+
+  unsubCap();
+  unsubThrow();
+  sandbox.Pages.archive.off('extract:done', okHook);
+  clickBtn(extractBtn);
+  const startBtn2 = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始解压')).pop();
+  clickBtn(startBtn2);
+  await new Promise((r) => setTimeout(r, 40));
+  if (received.length !== 1) {
+    console.error(`[压缩包扩展回归] off() 解绑后钩子仍被触发: ${JSON.stringify(received)}`);
+    process.exit(1);
+  }
+  const closeDone2 = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  if (closeDone2) clickBtn(closeDone2);
+  await new Promise((r) => setTimeout(r, 30));
+
+  if (typeof ret === 'function') ret();
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.configSet = origCfgSet;
+  sandbox.API.archiveCapabilities = origCaps;
+  sandbox.API.archiveOpen = origOpen;
+  sandbox.API.archiveCheckExtractConflicts = origCheckExt;
+  sandbox.API.archiveExtract = origExtract;
+  sandbox.API.openPath = origOpenPath;
+  await new Promise((r) => setTimeout(r, 220));
+  const afterKey = (docListeners.get('keydown') || []).length;
+  const afterInt = activeIntervals.size;
+  if (afterKey !== beforeKey || afterInt !== beforeInt) {
+    console.error(`[压缩包扩展回归] unmount 后资源未回收: keydown=${afterKey - beforeKey}, intervals=${afterInt - beforeInt}`);
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回与能力扩展钩子全链路校验通过）`);
 process.exit(0);

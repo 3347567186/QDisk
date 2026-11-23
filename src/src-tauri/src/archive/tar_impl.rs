@@ -17,8 +17,8 @@ use lzma_rust2::XzReader;
 use super::undo::UndoTracker;
 use super::util::{
     collect_sources, copy_controlled, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join, safe_join_mapped, Budget, ControlledReader, Overwrite, PerfProfile, Progress,
-    TaskControl, ThreadPriorityGuard, WorkPacer,
+    safe_join, safe_join_mapped, verify_no_ancestor_reparse, Budget, ControlledReader, Overwrite,
+    PerfProfile, Progress, TaskControl, ThreadPriorityGuard, WorkPacer,
 };
 use super::{ArchiveInfo, CreateReport, EntryInfo, ExtractReport, Kind};
 
@@ -41,6 +41,12 @@ pub fn list(path: &Path, kind: Kind, _password: Option<&str>) -> Result<ArchiveI
     let mut total_packed = 0u64;
     let mut idx = 0usize;
     for item in ar.entries().context("TAR 读取失败")? {
+        if idx >= super::util::MAX_ARCHIVE_ENTRIES {
+            bail!(
+                "压缩包条目数超过上限（{} 条），已中止读取以保护内存",
+                super::util::MAX_ARCHIVE_ENTRIES
+            );
+        }
         let entry = match item {
             Ok(e) => e,
             Err(_) => continue,
@@ -193,6 +199,7 @@ pub fn extract(
                     if let Some(u) = undo {
                         u.ensure_dir(&dir)?;
                     } else {
+                        verify_no_ancestor_reparse(out_dir, &dir, true)?;
                         fs::create_dir_all(&dir)?;
                     }
                     report.dirs += 1;

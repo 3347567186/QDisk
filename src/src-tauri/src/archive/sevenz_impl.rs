@@ -16,8 +16,8 @@ use sevenz_rust2::{
 use super::undo::UndoTracker;
 use super::util::{
     collect_sources, copy_controlled, ensure_parent, filetime_to_local_parts, resolve_dest,
-    safe_join_mapped, Budget, ControlledReader, Overwrite, PerfProfile, Progress, SourceItem,
-    TaskControl, ThreadPriorityGuard,
+    safe_join_mapped, verify_no_ancestor_reparse, Budget, ControlledReader, Overwrite,
+    PerfProfile, Progress, SourceItem, TaskControl, ThreadPriorityGuard,
 };
 use super::{modified_string, ArchiveInfo, CreateReport, EntryInfo, ExtractReport};
 
@@ -50,6 +50,13 @@ pub fn list(path: &Path, pw: Option<&str>) -> Result<ArchiveInfo> {
         .with_context(|| "7Z 压缩包损坏，或密码不正确")?;
     reader.set_thread_count(2);
     let archive = reader.archive();
+    if archive.files.len() > super::util::MAX_ARCHIVE_ENTRIES {
+        bail!(
+            "压缩包条目数过多（{} 条，超过上限 {} 条），已中止读取以保护内存",
+            archive.files.len(),
+            super::util::MAX_ARCHIVE_ENTRIES
+        );
+    }
     let mut entries = Vec::with_capacity(archive.files.len());
     for (i, e) in archive.files.iter().enumerate() {
         // 7Z 头里存的是 Windows FILETIME（100ns since 1601），只有条目确实带
@@ -397,13 +404,15 @@ fn extract_with_budget(
             if selected_names.contains(&entry.name) {
                 match safe_join_mapped(out_dir, &raw, dir_map) {
                     Ok(dir) => {
-                        let ok = if let Some(u) = undo {
-                            u.ensure_dir(&dir).is_ok()
+                        let res = if let Some(u) = undo {
+                            u.ensure_dir(&dir)
                         } else {
-                            fs::create_dir_all(&dir).is_ok()
+                            verify_no_ancestor_reparse(out_dir, &dir, true)
+                                .and_then(|()| fs::create_dir_all(&dir).map_err(Into::into))
                         };
-                        if ok {
-                            report.dirs += 1;
+                        match res {
+                            Ok(()) => report.dirs += 1,
+                            Err(e) => report.warnings.push(format!("{e}")),
                         }
                     }
                     Err(e) => report.warnings.push(format!("{e}")),

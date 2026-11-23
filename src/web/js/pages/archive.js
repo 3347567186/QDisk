@@ -35,6 +35,7 @@
     sortDir: 1,
     preview: null,
     previewLoading: false,
+    caps: null,
     rar: null,
     rarBusy: false,
     busy: false,
@@ -73,6 +74,59 @@
   let dropLayer = null;
   let destroyed = false;
   let keyHandler = null;
+  const hooks = new Map();
+
+  function onHook(event, fn) {
+    if (typeof event !== 'string' || !event || typeof fn !== 'function') return () => {};
+    let set = hooks.get(event);
+    if (!set) { set = new Set(); hooks.set(event, set); }
+    set.add(fn);
+    return () => offHook(event, fn);
+  }
+
+  function offHook(event, fn) {
+    const set = hooks.get(event);
+    if (!set) return;
+    if (fn) set.delete(fn);
+    else set.clear();
+    if (!set.size) hooks.delete(event);
+  }
+
+  function cloneCaps(caps) {
+    if (!caps || typeof caps !== 'object') return null;
+    try { return JSON.parse(JSON.stringify(caps)); } catch { return Object.assign({}, caps); }
+  }
+
+  function emitHook(event, payload) {
+    const set = hooks.get(event);
+    if (!set || !set.size) return;
+    for (const fn of Array.from(set)) {
+      try { fn(payload); } catch { /* 外部扩展钩子异常不得阻断核心流程 */ }
+    }
+  }
+
+  function modeHint(m) {
+    const caps = S.caps;
+    const spec = caps && Array.isArray(caps.modes)
+      ? caps.modes.find((x) => x && x.id === m.id)
+      : null;
+    if (!spec || !Number.isFinite(spec.threads)) return m.hint;
+    const threads = Math.max(1, Math.round(spec.threads));
+    const duty = Number.isFinite(spec.ioDutyPct) ? Math.round(spec.ioDutyPct) : null;
+    if (m.id === 'saver') {
+      return T(`${threads} 核 · 约 ${duty || 25}% 负载，省电静音`, `${threads} core · ~${duty || 25}% load, quiet`);
+    }
+    if (m.id === 'balanced') {
+      return T(`${threads} 核 · 约 ${duty || 50}% 负载，体积速度兼顾`, `${threads} cores · ~${duty || 50}% load, balanced`);
+    }
+    if (m.id === 'performance') {
+      return T(`${threads} 核 · 约 ${duty || 75}% 负载，媒体免重压`, `${threads} cores · ~${duty || 75}% load, smart store`);
+    }
+    if (m.id === 'hyper') {
+      return T(`${threads} 核满核 · 100% 零限速极速引擎`, `${threads} cores · 100% unthrottled`);
+    }
+    return m.hint;
+  }
 
   /* 拖放：只认这些后缀，其余交给后端报错反而看不懂。
      .tar.* 系列先按整体匹配，避免被 .gz / .bz2 / .xz 抢先。 */
@@ -1307,6 +1361,7 @@
       record.undoReport = urep;
       record.undoSummary = formatUndoSummary(urep);
       if (S.activeUndoId === record.undoId) S.activeUndoId = null;
+      emitHook('undo:done', { kind, record, report: urep });
       const label = kind === 'create' ? T('已撤回压缩：', 'Reverted compression: ') : T('已撤回解压：', 'Reverted extraction: ');
       const hasWarn = Array.isArray(urep.warnings) && urep.warnings.length > 0;
       toast(label + record.undoSummary + (hasWarn ? `（${urep.warnings[0]}）` : ''), hasWarn ? 'warn' : 'ok', 6500);
@@ -1412,6 +1467,7 @@
       S.activeUndoId = (report.canUndo && report.undoId) ? report.undoId : null;
       renderLastExtract();
       renderLastCreate();
+      emitHook('extract:done', report);
       const body = h('div', { class: 'arc-report' },
         h('div', null, T('解压完成', 'Extraction complete')),
         h('div', { class: 'small muted' },
@@ -1994,7 +2050,7 @@
           renderCreateChoices();
           API.configSet({ archive_mode: m.id }).catch(() => {});
         }
-      }, h('strong', null, T(m.zh, m.en)), h('span', { class: 'small muted' }, m.hint));
+      }, h('strong', null, T(m.zh, m.en)), h('span', { class: 'small muted' }, modeHint(m)));
       els.modeBox.appendChild(b);
     });
     if (els.modeSel && typeof els.modeSel.setValue === 'function') {
@@ -2192,6 +2248,7 @@
       S.activeUndoId = (report.canUndo && report.undoId) ? report.undoId : null;
       renderLastCreate();
       renderLastExtract();
+      emitHook('create:done', report);
       // 创建完的压缩包是从待压缩列表里「出货」了：清掉列表，避免再点一次生成重复包
       S.create.sources = [];
       S.create.dest = '';
@@ -2403,6 +2460,17 @@
       }
     } catch { /* ignore */ }
 
+    if (typeof API.archiveCapabilities === 'function') {
+      try {
+        const caps = await API.archiveCapabilities();
+        if (!destroyed && caps && typeof caps === 'object') {
+          S.caps = cloneCaps(caps);
+          renderCreateChoices();
+          emitHook('capabilities:ready', cloneCaps(S.caps));
+        }
+      } catch { /* 能力查询失败时平滑退回默认文案 */ }
+    }
+
     refreshRar();
     if (S.info) renderOpen();
     setActions();
@@ -2451,11 +2519,16 @@
     title: ['压缩包', 'Archives'],
     subtitle: ['压缩、解压与查看', 'Compress, extract, preview'],
     mount,
+    getCapabilities() {
+      return cloneCaps(S.caps);
+    },
+    on: onHook,
+    off: offHook,
     /* AI 说「这几个压缩包可以看看」时，跳进来要直接把这个包打开，
        而不是停在一个让你自己再选一次的空页面。 */
     jump(payload) {
       const paths = ((payload && payload.paths) || []).filter(Boolean).map(String);
-      const arc = paths.find((p) => /\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst)$/i.test(p));
+      const arc = paths.find((p) => isArchivePath(p) || /\.zst$/i.test(p));
       if (!arc) return undefined;
       const run = openArchive(arc, null);
       return run && typeof run.catch === 'function' ? run.catch(() => {}) : run;

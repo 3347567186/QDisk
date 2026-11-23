@@ -2364,6 +2364,7 @@ fn main() {
             archive::archive_cancel,
             archive::archive_preview,
             archive::archive_preview_clear,
+            archive::archive_capabilities,
             archive::archive_rar_status,
             archive::archive_rar_install,
             archive::pick_archive,

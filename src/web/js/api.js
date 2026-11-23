@@ -73,6 +73,7 @@
       path, index, password: password || null, name: name || null, size: size || null,
     }),
     archivePreviewClear: () => invoke('archive_preview_clear'),
+    archiveCapabilities: () => invoke('archive_capabilities'),
     archiveRarStatus: () => invoke('archive_rar_status'),
     archiveRarInstall: () => invoke('archive_rar_install'),
   logRead: (path, maxBytes) => invoke('log_read', { path, maxBytes: maxBytes || null }),

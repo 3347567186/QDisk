@@ -16,7 +16,8 @@ use super::download;
 use super::undo::UndoTracker;
 use super::util::{
     ensure_parent, resolve_dest, safe_join_mapped, safe_relative, sha256_file, utf16_to_string,
-    wide_path, Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard, WorkPacer,
+    verify_no_ancestor_reparse, wide_path, Overwrite, PerfProfile, Progress, TaskControl,
+    ThreadPriorityGuard, WorkPacer,
 };
 use super::{ArchiveInfo, EntryInfo, ExtractReport, RarStatus};
 
@@ -403,6 +404,7 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
     }
     let api = RarApi::load(&dll)?;
     let handle = api.open_archive(path, RAR_OM_LIST)?;
+    let _guard = HandleGuard { api: &api, handle };
     if let Some(pw) = password.filter(|p| !p.is_empty()) {
         api.set_password(handle, pw);
     }
@@ -413,12 +415,17 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
     let mut solid = false;
     let mut index = 0usize;
     loop {
+        if index >= super::util::MAX_ARCHIVE_ENTRIES {
+            bail!(
+                "压缩包条目数超过上限（{} 条），已中止读取以保护内存",
+                super::util::MAX_ARCHIVE_ENTRIES
+            );
+        }
         let (header, rc) = api.header(handle)?;
         if rc == 10 {
             break;
         }
         if rc != 0 {
-            api.close(handle);
             bail!("RAR 读取失败: {}", rar_error(rc));
         }
         let Some(h) = header else { break };
@@ -469,11 +476,9 @@ pub fn list(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
         index += 1;
         let skip = api.process(handle, RAR_SKIP, None, None);
         if skip != 0 {
-            api.close(handle);
             bail!("RAR 跳过条目失败: {}", rar_error(skip));
         }
     }
-    api.close(handle);
     Ok(ArchiveInfo {
         path: path.display().to_string(),
         format: "RAR".into(),
@@ -589,14 +594,22 @@ pub fn extract(
             continue;
         }
         if is_dir {
-            if let Ok(dir) = safe_join_mapped(out_dir, &name, dir_map) {
-                let ok = if let Some(u) = undo {
-                    u.ensure_dir(&dir).is_ok()
-                } else {
-                    fs::create_dir_all(&dir).is_ok()
-                };
-                if ok {
-                    report.dirs += 1;
+            match safe_join_mapped(out_dir, &name, dir_map) {
+                Ok(dir) => {
+                    let res = if let Some(u) = undo {
+                        u.ensure_dir(&dir)
+                    } else {
+                        verify_no_ancestor_reparse(out_dir, &dir, true)
+                            .and_then(|()| fs::create_dir_all(&dir).map_err(Into::into))
+                    };
+                    match res {
+                        Ok(()) => report.dirs += 1,
+                        Err(e) => report.warnings.push(format!("{e}")),
+                    }
+                }
+                Err(e) => {
+                    report.skipped += 1;
+                    report.warnings.push(format!("{e}"));
                 }
             }
             let _ = api.process(handle, RAR_SKIP, None, None);

@@ -14,8 +14,9 @@ use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 use super::undo::UndoTracker;
 use super::util::{
     collect_sources, copy_controlled, copy_controlled_abortable, dos_datetime, ensure_parent,
-    is_incompressible_ext, resolve_dest, safe_join_mapped, zip_datetime, Budget, Overwrite,
-    PerfProfile, Progress, SourceItem, TaskControl, ThreadPriorityGuard, WorkPacer,
+    is_incompressible_ext, resolve_dest, safe_join_mapped, verify_no_ancestor_reparse,
+    zip_datetime, Budget, Overwrite, PerfProfile, Progress, SourceItem, TaskControl,
+    ThreadPriorityGuard, WorkPacer,
 };
 use super::{CreateReport, ExtractReport};
 
@@ -1153,6 +1154,7 @@ fn extract_sequential(
             if let Some(u) = undo {
                 u.ensure_dir(&target)?;
             } else {
+                verify_no_ancestor_reparse(out_dir, &target, true)?;
                 fs::create_dir_all(&target)?;
             }
             report.dirs += 1;
@@ -1322,6 +1324,7 @@ fn extract_parallel(
         if let Some(u) = undo {
             u.ensure_dir(d)?;
         } else {
+            verify_no_ancestor_reparse(out_dir, d, true)?;
             fs::create_dir_all(d)?;
         }
     }

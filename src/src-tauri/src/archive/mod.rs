@@ -1,6 +1,7 @@
 mod download;
 mod preview;
 mod rar;
+mod registry;
 mod sevenz_impl;
 mod tar_impl;
 mod undo;
@@ -18,6 +19,11 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+#[allow(unused_imports)]
+pub use registry::{
+    ArchiveCapabilities, ArchiveCodec, CreateOptions, ExtractOptions, FormatSpec, ModeSpec,
+    TaskObserver,
+};
 pub use undo::{UndoReport, UndoTracker};
 pub use util::{Overwrite, PerfProfile, Progress, TaskControl, ThreadPriorityGuard};
 
@@ -350,20 +356,38 @@ pub fn detect(path: &Path) -> Result<Kind> {
         .file_name()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    if let Some(k) = kind_of_suffix(&name) {
-        return Ok(k);
-    }
-    // 后缀靠不住时（被改过、或者干脆没有后缀）再看文件头。
-    sniff(path)
+    let suffix_kind = kind_of_suffix(&name);
+    // 魔数优先：网盘或论坛常把 .rar/.7z/.tar.gz 改名成 .zip 或去后缀传输，
+    // 优先嗅探真实文件头，仅在无魔数命中（如老式 v7 tar、自解压包等）时回退后缀。
+    sniff(path, suffix_kind)
 }
 
-fn sniff(path: &Path) -> Result<Kind> {
+/// 解压前 512 字节探测内部是否为 POSIX/GNU TAR (`ustar` 位于偏移 257..262)，
+/// 用于区分改名或无后缀的 `.tar.gz`/`.tar.bz2`/`.tar.xz` 与单文件 `.gz`/`.bz2`/`.xz`。
+fn peek_tar_ustar(path: &Path, single_kind: Kind) -> bool {
+    let Ok(mut r) = tar_impl::single_reader_pub(path, single_kind) else {
+        return false;
+    };
+    let mut buf = [0u8; 512];
+    let mut got = 0usize;
+    while got < buf.len() {
+        match r.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(_) => return false,
+        }
+    }
+    got >= 262 && &buf[257..262] == b"ustar"
+}
+
+fn sniff(path: &Path, suffix_kind: Option<Kind>) -> Result<Kind> {
     use std::io::Read;
     let mut f = fs::File::open(path).with_context(|| format!("无法打开 {}", path.display()))?;
     let mut head = [0u8; 512];
     let n = f.read(&mut head)?;
     let b = &head[..n];
-    if b.starts_with(b"PK\x03\x04") || b.starts_with(b"PK\x05\x06") {
+    if b.starts_with(b"PK\x03\x04") || b.starts_with(b"PK\x05\x06") || b.starts_with(b"PK\x07\x08")
+    {
         return Ok(Kind::Zip);
     }
     if b.starts_with(b"7z\xbc\xaf\x27\x1c") {
@@ -373,16 +397,28 @@ fn sniff(path: &Path) -> Result<Kind> {
         return Ok(Kind::Rar);
     }
     if b.starts_with(b"\x1f\x8b") {
+        if matches!(suffix_kind, Some(Kind::TarGz)) || peek_tar_ustar(path, Kind::Gz) {
+            return Ok(Kind::TarGz);
+        }
         return Ok(Kind::Gz);
     }
     if b.starts_with(b"BZh") {
+        if matches!(suffix_kind, Some(Kind::TarBz2)) || peek_tar_ustar(path, Kind::Bz2) {
+            return Ok(Kind::TarBz2);
+        }
         return Ok(Kind::Bz2);
     }
     if b.starts_with(b"\xfd7zXZ\x00") {
+        if matches!(suffix_kind, Some(Kind::TarXz)) || peek_tar_ustar(path, Kind::Xz) {
+            return Ok(Kind::TarXz);
+        }
         return Ok(Kind::Xz);
     }
     if b.len() >= 262 && &b[257..262] == b"ustar" {
         return Ok(Kind::Tar);
+    }
+    if let Some(k) = suffix_kind {
+        return Ok(k);
     }
     bail!("无法识别的压缩包格式；支持 ZIP / 7Z / TAR / TAR.GZ / TAR.BZ2 / TAR.XZ / GZ / BZ2 / XZ / RAR")
 }
@@ -425,50 +461,47 @@ fn zip_entry_info<R: std::io::Read + ?Sized>(
     }
 }
 
+pub(crate) fn list_zip(path: &Path) -> Result<ArchiveInfo> {
+    let mut zip = zip_impl::open(path)?;
+    if zip.len() > util::MAX_ARCHIVE_ENTRIES {
+        bail!(
+            "压缩包条目数过多（{} 条，超过上限 {} 条），已中止读取以保护内存",
+            zip.len(),
+            util::MAX_ARCHIVE_ENTRIES
+        );
+    }
+    let mut entries = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let e = zip.by_index_raw(i)?;
+        entries.push(zip_entry_info(i, &e));
+    }
+    let total_size = entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+    let total_packed = entries.iter().filter(|e| !e.is_dir).map(|e| e.packed).sum();
+    let encrypted = entries.iter().any(|e| e.encrypted);
+    Ok(ArchiveInfo {
+        path: path.display().to_string(),
+        format: Kind::Zip.label().into(),
+        entries,
+        total_size,
+        total_packed,
+        encrypted,
+        solid: false,
+        comment: String::new(),
+        needs_rar: false,
+        rar_ready: true,
+    })
+}
+
 pub fn list_archive(path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
     let kind = detect(path)?;
-    match kind {
-        Kind::Zip => {
-            let mut zip = zip_impl::open(path)?;
-            let mut entries = Vec::with_capacity(zip.len());
-            for i in 0..zip.len() {
-                let e = zip.by_index_raw(i)?;
-                entries.push(zip_entry_info(i, &e));
-            }
-            let total_size = entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
-            let total_packed = entries.iter().filter(|e| !e.is_dir).map(|e| e.packed).sum();
-            let encrypted = entries.iter().any(|e| e.encrypted);
-            Ok(ArchiveInfo {
-                path: path.display().to_string(),
-                format: kind.label().into(),
-                entries,
-                total_size,
-                total_packed,
-                encrypted,
-                solid: false,
-                comment: String::new(),
-                needs_rar: false,
-                rar_ready: true,
-            })
-        }
-        Kind::SevenZ => sevenz_impl::list(path, password),
-        Kind::Tar | Kind::TarGz | Kind::TarBz2 | Kind::TarXz => {
-            tar_impl::list(path, kind, password)
-        }
-        Kind::Gz | Kind::Bz2 | Kind::Xz => tar_impl::list_single(path, kind),
-        Kind::Rar => rar::list(path, password),
-    }
+    registry::codec_for(kind).list(path, password)
 }
 
 fn resolve_selected_indices(info: &ArchiveInfo, indices: Option<Vec<usize>>) -> HashSet<usize> {
     let mut selected: HashSet<usize> = match indices {
         Some(v) => v.into_iter().collect(),
-        None => info
-            .entries
-            .iter()
-            .filter(|e| !e.is_dir)
-            .map(|e| e.index)
-            .collect(),
+        // 「解压全部」必须包含目录条目本身，避免压缩包里的空文件夹被静默丢弃。
+        None => info.entries.iter().map(|e| e.index).collect(),
     };
     let dirs: Vec<String> = info
         .entries
@@ -692,68 +725,18 @@ pub fn extract_archive(
         .ensure_dir(out_dir)
         .with_context(|| format!("无法创建目标目录 {}", out_dir.display()))?;
 
-    let res = match kind {
-        Kind::Zip => zip_impl::extract(
-            path,
-            out_dir,
-            &selected,
-            password,
-            policy,
-            profile,
-            &dir_map,
-            Some(&tracker),
-            progress,
-            control,
-        ),
-        Kind::SevenZ => sevenz_impl::extract(
-            path,
-            out_dir,
-            &selected,
-            password,
-            policy,
-            profile,
-            &dir_map,
-            Some(&tracker),
-            progress,
-            control,
-        ),
-        Kind::Tar | Kind::TarGz | Kind::TarBz2 | Kind::TarXz => tar_impl::extract(
-            path,
-            out_dir,
-            kind,
-            &selected,
-            password,
-            policy,
-            profile,
-            &dir_map,
-            Some(&tracker),
-            progress,
-            control,
-        ),
-        Kind::Gz | Kind::Bz2 | Kind::Xz => tar_impl::extract_single(
-            path,
-            out_dir,
-            kind,
-            &selected,
-            policy,
-            profile,
-            Some(&tracker),
-            progress,
-            control,
-        ),
-        Kind::Rar => rar::extract(
-            path,
-            out_dir,
-            &selected,
-            password,
-            policy,
-            profile,
-            &dir_map,
-            Some(&tracker),
-            progress,
-            control,
-        ),
-    };
+    let res = registry::codec_for(kind).extract(
+        path,
+        out_dir,
+        &selected,
+        password,
+        policy,
+        profile,
+        &dir_map,
+        Some(&tracker),
+        progress,
+        control,
+    );
 
     match res {
         Ok(mut report) => {
@@ -1156,6 +1139,13 @@ pub async fn archive_preview(
 #[tauri::command]
 pub fn archive_preview_clear(state: State<'_, ArchiveCtx>) {
     clear_preview(state.inner());
+}
+
+#[tauri::command]
+pub async fn archive_capabilities(_app: AppHandle) -> Result<ArchiveCapabilities, String> {
+    tauri::async_runtime::spawn_blocking(move || Ok(registry::capabilities(&data_dir())))
+        .await
+        .map_err(|e| format!("任务失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1603,6 +1593,172 @@ mod tests {
         assert!(bdir3.exists());
         ctx.clear_undo();
         assert!(!bdir3.exists(), "应用退出 clear_undo 必须清光备份目录");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detect_magic_first_handles_renamed_zip_tgz_and_gz() {
+        let root = std::env::temp_dir().join(format!(
+            "tidy_rt2_detect_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("hello.txt"), b"magic-first-ok").unwrap();
+
+        // 1. 真实 ZIP 改名成 .rar 与无后缀文件：魔数优先识别为 Kind::Zip 并正常解压
+        let real_zip = root.join("real.zip");
+        let p = Arc::new(Progress::detached());
+        let c = Arc::new(TaskControl::default());
+        create_archive(
+            None,
+            &[src.join("hello.txt")],
+            &real_zip,
+            "zip",
+            "balanced",
+            None,
+            &p,
+            &c,
+        )
+        .unwrap();
+        let fake_rar = root.join("disguised.rar");
+        fs::copy(&real_zip, &fake_rar).unwrap();
+        assert_eq!(detect(&fake_rar).unwrap(), Kind::Zip);
+        let out_zip = root.join("out_zip");
+        let rep_zip = extract_archive(
+            None,
+            &fake_rar,
+            &out_zip,
+            None,
+            None,
+            Overwrite::Overwrite,
+            "balanced",
+            &p,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(rep_zip.files, 1);
+        assert_eq!(fs::read(out_zip.join("hello.txt")).unwrap(), b"magic-first-ok");
+
+        // 2. 真实 TAR.GZ 改名成 .zip 与无后缀 .bin：解压探测 ustar 识别为 Kind::TarGz
+        let real_tgz = root.join("real.tar.gz");
+        create_archive(
+            None,
+            &[src.join("hello.txt")],
+            &real_tgz,
+            "tgz",
+            "balanced",
+            None,
+            &p,
+            &c,
+        )
+        .unwrap();
+        let fake_bin = root.join("mystery.bin");
+        fs::copy(&real_tgz, &fake_bin).unwrap();
+        assert_eq!(detect(&fake_bin).unwrap(), Kind::TarGz);
+        let out_tgz = root.join("out_tgz");
+        let rep_tgz = extract_archive(
+            None,
+            &fake_bin,
+            &out_tgz,
+            None,
+            None,
+            Overwrite::Overwrite,
+            "balanced",
+            &p,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(rep_tgz.files, 1);
+        assert_eq!(fs::read(out_tgz.join("hello.txt")).unwrap(), b"magic-first-ok");
+
+        // 3. 单文件纯 GZ（非 TAR）改名成 .bin：探测无 ustar，识别为 Kind::Gz
+        let plain_gz = root.join("plain_gz.bin");
+        {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let f = fs::File::create(&plain_gz).unwrap();
+            let mut enc = GzEncoder::new(f, Compression::fast());
+            enc.write_all(b"just plain text, not tar").unwrap();
+            enc.finish().unwrap();
+        }
+        assert_eq!(detect(&plain_gz).unwrap(), Kind::Gz);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extract_all_preserves_empty_dirs_and_capabilities_schema() {
+        let root = std::env::temp_dir().join(format!(
+            "tidy_rt2_emptydir_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        // 构造含 2 个空目录 + 1 个文件的 ZIP
+        let zip_path = root.join("with_empty_dirs.zip");
+        {
+            use std::io::Write;
+            let f = fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.add_directory("empty_top/", opts).unwrap();
+            zw.add_directory("sub/empty_nested/", opts).unwrap();
+            zw.start_file("sub/a.txt", opts).unwrap();
+            zw.write_all(b"hello").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let out = root.join("out");
+        let p = Arc::new(Progress::detached());
+        let c = Arc::new(TaskControl::default());
+        let rep = extract_archive(
+            None,
+            &zip_path,
+            &out,
+            None,
+            None,
+            Overwrite::Overwrite,
+            "balanced",
+            &p,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(rep.files, 1);
+        assert!(rep.dirs >= 2, "解压全部必须保留空目录，实际 dirs={}", rep.dirs);
+        assert!(out.join("empty_top").is_dir(), "顶层空目录丢失");
+        assert!(out.join("sub").join("empty_nested").is_dir(), "嵌套空目录丢失");
+        assert_eq!(fs::read(out.join("sub").join("a.txt")).unwrap(), b"hello");
+
+        // 校验扩展能力清单 schema 与编解码器注册表
+        let caps = registry::capabilities(&root);
+        assert_eq!(caps.schema_version, 1);
+        assert!(caps.cpu_cores >= 1);
+        assert_eq!(caps.formats.len(), 10);
+        assert_eq!(caps.modes.len(), 4);
+        assert_eq!(caps.modes[0].id, "saver");
+        assert_eq!(caps.modes[1].id, "balanced");
+        assert_eq!(caps.modes[2].id, "performance");
+        assert_eq!(caps.modes[3].id, "hyper");
+        assert!(
+            caps.modes[0].io_duty_pct < caps.modes[1].io_duty_pct
+                && caps.modes[1].io_duty_pct < caps.modes[2].io_duty_pct
+                && caps.modes[2].io_duty_pct < caps.modes[3].io_duty_pct
+        );
+        assert_eq!(caps.limits.max_undo_records, 1);
+        assert_eq!(caps.limits.max_entries, util::MAX_ARCHIVE_ENTRIES);
+        assert_eq!(registry::codec_for(Kind::Zip).spec().id, "zip");
+        assert_eq!(registry::codec_for(Kind::TarGz).spec().id, "tgz");
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter};
 
 pub const MAX_TOTAL_UNPACKED: u64 = 32 * 1024 * 1024 * 1024;
 pub const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+/// 单次打开/列出压缩包允许的最大条目数，防止百万级空条目炸弹耗尽内存。
+pub const MAX_ARCHIVE_ENTRIES: usize = 500_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PerfProfile {
@@ -848,6 +850,12 @@ pub fn safe_relative(raw: &str) -> Result<PathBuf> {
         if part.chars().any(|c| c < ' ' || c == '\u{7f}') {
             bail!("拒绝包含控制字符的文件名: {raw}");
         }
+        if part
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
+            bail!("拒绝包含 Windows 非法字符的文件名: {raw}");
+        }
         if is_reserved(part) {
             bail!("拒绝 Windows 保留设备名: {raw}");
         }
@@ -869,6 +877,32 @@ fn is_reserved(part: &str) -> bool {
             && base.as_bytes()[3] != b'0')
 }
 
+/// 校验 `root` 之下通往 `target` 的路径链中不存在任何符号链接或目录联接（reparse point），
+/// 防止中间目录联接逃逸解压根目录。`root` 本身不在此列（用户可能显式选择了联接目录作为目标）。
+pub fn verify_no_ancestor_reparse(
+    root: &Path,
+    target: &Path,
+    include_target: bool,
+) -> Result<()> {
+    let Ok(rel) = target.strip_prefix(root) else {
+        return Ok(());
+    };
+    let comps: Vec<_> = rel.components().collect();
+    let check_len = if include_target {
+        comps.len()
+    } else {
+        comps.len().saturating_sub(1)
+    };
+    let mut cur = root.to_path_buf();
+    for c in comps.into_iter().take(check_len) {
+        cur.push(c.as_os_str());
+        if is_reparse(&cur) {
+            bail!("拒绝穿越符号链接或目录联接: {}", cur.display());
+        }
+    }
+    Ok(())
+}
+
 pub fn safe_join(root: &Path, raw: &str) -> Result<PathBuf> {
     let rel = safe_relative(raw)?;
     let joined = root.join(&rel);
@@ -878,6 +912,7 @@ pub fn safe_join(root: &Path, raw: &str) -> Result<PathBuf> {
             bail!("拒绝不安全的路径: {raw}");
         }
     }
+    verify_no_ancestor_reparse(root, &joined, false)?;
     Ok(joined)
 }
 
@@ -893,21 +928,27 @@ pub fn safe_join_mapped(
             bail!("拒绝不安全的路径: {raw}");
         }
     }
-    if dir_map.is_empty() {
-        return Ok(root.join(&rel));
-    }
-    let mut comps = rel.components();
-    let Some(Component::Normal(first)) = comps.next() else {
-        return Ok(root.join(&rel));
+    let out = if dir_map.is_empty() {
+        root.join(&rel)
+    } else {
+        let mut comps = rel.components();
+        let Some(Component::Normal(first)) = comps.next() else {
+            let joined = root.join(&rel);
+            verify_no_ancestor_reparse(root, &joined, false)?;
+            return Ok(joined);
+        };
+        let key = first.to_string_lossy().to_lowercase();
+        if let Some(mapped_first) = dir_map.get(&key) {
+            let mut mapped = root.join(mapped_first);
+            for c in comps {
+                mapped.push(c.as_os_str());
+            }
+            mapped
+        } else {
+            root.join(&rel)
+        }
     };
-    let key = first.to_string_lossy().to_lowercase();
-    let Some(mapped_first) = dir_map.get(&key) else {
-        return Ok(root.join(&rel));
-    };
-    let mut out = root.join(mapped_first);
-    for c in comps {
-        out.push(c.as_os_str());
-    }
+    verify_no_ancestor_reparse(root, &out, false)?;
     Ok(out)
 }
 
@@ -944,16 +985,21 @@ impl Overwrite {
 /// 全白费。判据用 `symlink_metadata`（不跟随），查不到就当普通文件。
 pub fn resolve_dest(path: PathBuf, is_dir: bool, policy: Overwrite) -> Result<Option<PathBuf>> {
     if is_dir {
+        if is_reparse(&path) {
+            bail!("拒绝穿越符号链接或目录联接: {}", path.display());
+        }
         return Ok(Some(path));
     }
-    if !path.exists() {
+    // 用 symlink_metadata 而非 path.exists()：悬空符号链接的 exists() 为 false，
+    // 会绕过 is_reparse() 检查导致 File::create 跟随链接在解压目录外建文件。
+    let Ok(meta) = fs::symlink_metadata(&path) else {
         return Ok(Some(path));
-    }
+    };
     match policy {
         Overwrite::Overwrite => {
-            if is_reparse(&path) {
-                // 不顺着链接覆盖：改名放旁边，用户能看见、也不会写到自己
-                // 没指定的地方去。
+            // 不顺着链接覆盖，也避免用普通文件直接覆盖同名目录触发 Access Denied：
+            // 改名放旁边，用户能看见且不会越权或中途崩盘。
+            if is_reparse(&path) || meta.is_dir() {
                 return Ok(Some(unique_path(&path)));
             }
             Ok(Some(path))
@@ -1629,5 +1675,94 @@ mod tests {
             t_saver.as_millis() >= t_hyper.as_millis() * 2,
             "节约档与超线程档差距应清晰拉开 (>=2x): hyper={t_hyper:?}, saver={t_saver:?}"
         );
+    }
+
+    #[test]
+    fn safe_relative_rejects_windows_illegal_chars_and_blocks_junction_escape() {
+        for bad in [
+            "a<b.txt",
+            "a>b.txt",
+            "a\"b.txt",
+            "a|b.txt",
+            "a?b.txt",
+            "a*b.txt",
+            "dir/sub|bad/file.txt",
+        ] {
+            assert!(
+                safe_relative(bad).is_err(),
+                "Windows 非法字符文件名应被拒绝: {bad}"
+            );
+        }
+        assert_eq!(
+            safe_relative("./中文目录/文档 (1).txt").unwrap(),
+            PathBuf::from("中文目录").join("文档 (1).txt")
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "tidy_rt2_util_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let out_dir = root.join("out");
+        let outside_dir = root.join("outside");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        // 覆盖模式下普通文件与同名目录碰撞：必须自动改名落盘，绝不返回目录本身导致 Access Denied
+        let clash_dir = out_dir.join("clash");
+        fs::create_dir_all(&clash_dir).unwrap();
+        let resolved = resolve_dest(clash_dir.clone(), false, Overwrite::Overwrite)
+            .unwrap()
+            .expect("目录碰撞应自动改名而非跳过");
+        assert_ne!(resolved, clash_dir, "不得把普通文件覆盖写向同名目录");
+        assert!(resolved
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("clash ("));
+
+        // Windows 目录联接（mklink /J 无需管理员权限）逃逸拦截验证
+        #[cfg(windows)]
+        {
+            let junction = out_dir.join("escape_link");
+            let status = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &junction.to_string_lossy(),
+                    &outside_dir.to_string_lossy(),
+                ])
+                .status();
+            if status.is_ok_and(|s| s.success()) && is_reparse(&junction) {
+                assert!(
+                    safe_join(&out_dir, "escape_link/pwn.txt").is_err(),
+                    "safe_join 必须拦截中间目录联接穿越"
+                );
+                assert!(
+                    safe_join_mapped(
+                        &out_dir,
+                        "escape_link/nested/pwn.txt",
+                        &std::collections::HashMap::new()
+                    )
+                    .is_err(),
+                    "safe_join_mapped 必须拦截中间目录联接穿越"
+                );
+                assert!(
+                    resolve_dest(junction.clone(), true, Overwrite::Overwrite).is_err(),
+                    "resolve_dest(is_dir=true) 必须拦截目标目录联接"
+                );
+                assert!(
+                    verify_no_ancestor_reparse(&out_dir, &out_dir, true).is_ok(),
+                    "不得误杀根目录自身"
+                );
+                let _ = fs::remove_dir(&junction);
+            }
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

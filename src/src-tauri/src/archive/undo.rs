@@ -8,19 +8,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use super::util::{is_reparse, metadata_filetime, safe_relative, Overwrite};
+use super::util::{
+    is_reparse, metadata_filetime, safe_relative, verify_no_ancestor_reparse, Overwrite,
+};
 
 /// 仅保留最近 1 次操作的可撤回记录，杜绝多次大文件覆盖造成磁盘体积膨胀。
 #[allow(dead_code)]
 pub const MAX_UNDO_RECORDS: usize = 1;
 /// 同盘覆盖走 O(1) rename（零拷贝开销），但总备份仍封顶 1 GiB，防止超大文件长期占满磁盘。
-const SAME_DRIVE_BACKUP_CAP: u64 = 1024 * 1024 * 1024;
+pub(crate) const SAME_DRIVE_BACKUP_CAP: u64 = 1024 * 1024 * 1024;
 /// 跨盘覆盖需实际复制（如 D: -> C: AppData），严格封顶总计 128 MiB、单文件 64 MiB，兼顾性能与系统盘空间。
-const CROSS_DRIVE_BACKUP_CAP: u64 = 128 * 1024 * 1024;
-const CROSS_DRIVE_SINGLE_FILE_CAP: u64 = 64 * 1024 * 1024;
+pub(crate) const CROSS_DRIVE_BACKUP_CAP: u64 = 128 * 1024 * 1024;
+pub(crate) const CROSS_DRIVE_SINGLE_FILE_CAP: u64 = 64 * 1024 * 1024;
 /// 内存账本上限：超过 5 万个新建文件或 2 万个新建目录自动放弃追踪，防极端巨包撑爆内存。
-const MAX_TRACKED_FILES: usize = 50_000;
-const MAX_TRACKED_DIRS: usize = 20_000;
+pub(crate) const MAX_TRACKED_FILES: usize = 50_000;
+pub(crate) const MAX_TRACKED_DIRS: usize = 20_000;
 static UNDO_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +169,7 @@ impl UndoTracker {
     /// 原子检测并创建目录链：只把调用前确实不存在的目录记入 `created_dirs`，
     /// 绝不误记用户原本就存在的目录。
     pub fn ensure_dir(&self, dir: &Path) -> Result<()> {
+        verify_no_ancestor_reparse(&self.root_dir, dir, true)?;
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if g.tracking_overflow {
             fs::create_dir_all(dir)
