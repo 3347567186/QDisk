@@ -320,6 +320,7 @@ pub fn extract_single(
             undo_id: None,
             can_undo: false,
             backup_incomplete: false,
+            backup_bytes: 0,
         });
     };
     if let Some(u) = undo {
@@ -678,6 +679,7 @@ pub fn create_tgz(
             undo_id: None,
             can_undo: false,
             backup_incomplete: false,
+            backup_bytes: 0,
         });
     }
 
