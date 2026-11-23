@@ -470,8 +470,7 @@ impl Progress {
         }
     }
 
-    /// 无 AppHandle 的进度对象：只保留计数，不发事件。仅供单元测试使用。
-    #[cfg(test)]
+    /// 无 AppHandle 的进度对象：只保留计数，不发 UI 事件（供测试及便携更新等后台静默解压使用）。
     pub fn detached() -> Self {
         Self {
             app: None,
