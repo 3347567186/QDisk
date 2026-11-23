@@ -29,6 +29,7 @@ jobs:
           mkdir -p _site/assets/screenshots
           cp -r website/* _site/
           cp -r docs/assets/screenshots/* _site/assets/screenshots/
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/latest/download/latest.json" -o _site/latest.json || true
           touch _site/.nojekyll
       - name: Setup Pages
         uses: actions/configure-pages@v5

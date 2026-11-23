@@ -12,7 +12,7 @@
   const REPO_SLUG = '3347567186/QDisk';
   const STORAGE_SCHEME = 'qdisk-site-scheme';
   const STORAGE_LANG = 'qdisk-site-lang';
-  const API_LATEST_URL = `https://api.github.com/repos/${REPO_SLUG}/releases/latest`;
+  const SAME_ORIGIN_MANIFEST = './latest.json';
 
   const COPY = {
     zh: {
@@ -479,43 +479,39 @@
     });
   }
 
-  /* ---- Auto-Hydrate Latest Release Metadata via CORS-Enabled GitHub Releases API ---- */
+  /* ---- Auto-Hydrate Latest Release Metadata from Same-Origin latest.json (0 CORS / 0 Rate-Limit) ---- */
   function fmtMiB(bytes) {
     const n = Number(bytes) || 0;
     return n > 0 ? (n / (1024 * 1024)).toFixed(1) + ' MB' : '';
   }
 
-  fetch(API_LATEST_URL, { mode: 'cors', headers: { Accept: 'application/vnd.github+json' } })
+  fetch(SAME_ORIGIN_MANIFEST, { cache: 'no-cache' })
     .then((r) => (r.ok ? r.json() : null))
-    .then((rel) => {
-      if (!rel || !rel.tag_name) return;
-      const ver = 'v' + String(rel.tag_name).replace(/^v/i, '');
+    .then((m) => {
+      if (!m || !m.version) return;
+      const ver = 'v' + String(m.version).replace(/^v/i, '');
       currentVer = ver;
-      const assets = Array.isArray(rel.assets) ? rel.assets : [];
-      const exe = assets.find((a) => /setup\.exe$/i.test(a.name || ''));
-      const zip = assets.find((a) => /portable\.zip$/i.test(a.name || ''));
-      const sha = assets.find((a) => /^SHA256SUMS\.txt$/i.test(a.name || ''));
       const setTxt = (id, v) => { const el = document.getElementById(id); if (el && v) el.textContent = v; };
       const setHref = (id, u) => { const el = document.getElementById(id); if (el && u) el.href = u; };
 
       setTxt('dl-exe-ver', ver);
       setTxt('dl-zip-ver', ver);
       setTxt('win-chrome-title', curLang === 'en' ? `QDisk ${ver}` : `轻盘 QDisk ${ver}`);
-      if (exe && exe.browser_download_url) {
-        const sz = fmtMiB(exe.size);
-        setHref('hero-dl-installer', exe.browser_download_url);
-        setHref('dl-btn-exe', exe.browser_download_url);
+      if (m.installer && m.installer.url) {
+        const sz = fmtMiB(m.installer.size);
+        setHref('hero-dl-installer', m.installer.url);
+        setHref('dl-btn-exe', m.installer.url);
         setTxt('hero-exe-size', sz);
-        setTxt('dl-exe-name', exe.name + (sz ? ' · ' + sz : ''));
+        setTxt('dl-exe-name', m.installer.file + (sz ? ' · ' + sz : ''));
       }
-      if (zip && zip.browser_download_url) {
-        const sz = fmtMiB(zip.size);
-        setHref('hero-dl-portable', zip.browser_download_url);
-        setHref('dl-btn-zip', zip.browser_download_url);
+      if (m.portable && m.portable.url) {
+        const sz = fmtMiB(m.portable.size);
+        setHref('hero-dl-portable', m.portable.url);
+        setHref('dl-btn-zip', m.portable.url);
         setTxt('hero-zip-size', sz);
-        setTxt('dl-zip-name', zip.name + (sz ? ' · ' + sz : ''));
+        setTxt('dl-zip-name', m.portable.file + (sz ? ' · ' + sz : ''));
       }
-      setHref('dl-sha-link', (sha && sha.browser_download_url) || `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
+      setHref('dl-sha-link', `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
     })
     .catch(() => { /* Static v1.43.18 fallback already rendered */ });
 })();
