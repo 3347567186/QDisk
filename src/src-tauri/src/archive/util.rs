@@ -42,10 +42,10 @@ impl PerfProfile {
     pub fn from_mode_with_cores(raw: &str, avail: usize) -> Self {
         let avail = avail.max(1);
         let hyper_t = avail.clamp(1, 32);
-        let perf_t = ((avail * 6 + 5) / 10)
-            .max(if avail >= 3 { 2 } else { 1 })
+        let perf_t = ((avail * 65 + 50) / 100)
+            .max(if avail >= 4 { 3 } else if avail >= 3 { 2 } else { 1 })
             .min(hyper_t.saturating_sub(1).max(1));
-        let bal_t = ((avail * 3 + 5) / 10)
+        let bal_t = ((avail * 35 + 50) / 100)
             .max(if avail >= 4 { 2 } else { 1 })
             .min(perf_t.saturating_sub(1).max(1));
 
