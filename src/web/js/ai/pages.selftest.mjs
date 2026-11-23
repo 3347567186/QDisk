@@ -1308,5 +1308,99 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回与能力扩展钩子全链路校验通过）`);
+// 回归 11：应用外壳 app.js 极速切页异步 _unmount 竞态防泄漏 + App.registerPage / App.on 扩展体系
+{
+  const appCode = fs.readFileSync(path.join(root, 'src/web/js/app.js'), 'utf8');
+  const pageEl = new FakeElement('div');
+  pageEl.id = 'page';
+  sandbox.document._byId['page'] = pageEl;
+  const titleEl = new FakeElement('div');
+  titleEl.id = 'page-title';
+  sandbox.document._byId['page-title'] = titleEl;
+  const subEl = new FakeElement('div');
+  subEl.id = 'page-sub';
+  sandbox.document._byId['page-sub'] = subEl;
+  const navEl = new FakeElement('div');
+  navEl.id = 'nav';
+  sandbox.document._byId['nav'] = navEl;
+  const origApp = sandbox.App;
+  const origNav = sandbox.navigate;
+  const origCfgSet = sandbox.API.configSet;
+  sandbox.API.configSet = async () => {};
+  sandbox.history = sandbox.history || { replaceState() {} };
+  sandbox.location = sandbox.location || { hash: '' };
+  sandbox.matchMedia = () => ({ matches: true });
+  vm.runInContext(appCode, sandbox, { filename: 'app.js' });
+
+  // 1. 内置页面防覆盖/防注销校验
+  let blockedBuiltinPage = false;
+  try { sandbox.App.registerPage({ id: 'organize', zh: '伪造' }, { mount: () => {} }, { overwrite: true }); } catch { blockedBuiltinPage = true; }
+  let blockedBuiltinUnreg = false;
+  try { sandbox.App.unregisterPage('organize'); } catch { blockedBuiltinUnreg = true; }
+  if (!blockedBuiltinPage || !blockedBuiltinUnreg) {
+    console.error('[外壳扩展回归] 未拦截对内置页面的覆盖或注销');
+    process.exit(1);
+  }
+
+  // 2. 极速切页异步竞态：ext_slow 挂载未完时切去 ext_fast，随后 ext_slow resolve 必须立刻卸载且不得覆盖 ext_fast 的 _unmount
+  let releaseSlow = null;
+  let slowUnmounted = 0;
+  let fastUnmounted = 0;
+  const mountedEvents = [];
+  const unsubThrow = sandbox.App.on('page:mounted', () => { throw new Error('故意抛错的扩展钩子'); });
+  const unsubOk = sandbox.App.on('page:mounted', (ev) => mountedEvents.push(ev && ev.id));
+
+  const unregSlow = sandbox.App.registerPage({ id: 'ext_slow', zh: '慢扩展页', en: 'Slow' }, {
+    title: ['慢扩展页', 'Slow'],
+    mount: () => new Promise((res) => { releaseSlow = () => res(() => { slowUnmounted++; }); })
+  });
+  const unregFast = sandbox.App.registerPage({ id: 'ext_fast', zh: '快扩展页', en: 'Fast' }, {
+    title: ['快扩展页', 'Fast'],
+    mount: () => () => { fastUnmounted++; }
+  });
+  if (!sandbox.App.listPages().some((p) => p.id === 'ext_slow' && p.builtin === false)) {
+    console.error('[外壳扩展回归] registerPage 未写入 listPages');
+    process.exit(1);
+  }
+
+  const pSlow = sandbox.navigate('ext_slow', false, { force: true });
+  await new Promise((r) => setTimeout(r, 10));
+  await sandbox.navigate('ext_fast', false, { force: true });
+  if (releaseSlow) releaseSlow();
+  await pSlow;
+
+  if (slowUnmounted !== 1 || fastUnmounted !== 0 || sandbox.App._mountedId !== 'ext_fast') {
+    console.error(`[外壳竞态回归] 过期慢页未立即卸载或覆盖了当前页: slowUnmounted=${slowUnmounted}, fastUnmounted=${fastUnmounted}, mounted=${sandbox.App._mountedId}`);
+    process.exit(1);
+  }
+  if (!mountedEvents.includes('ext_fast') || mountedEvents.includes('ext_slow')) {
+    console.error(`[外壳钩子回归] page:mounted 事件触发异常: ${JSON.stringify(mountedEvents)}`);
+    process.exit(1);
+  }
+
+  // 切走 ext_fast 必须触发 fastUnmounted === 1（证明 _unmount 没被 ext_slow 踩掉）
+  const pSlow2 = sandbox.navigate('ext_slow', false, { force: true });
+  await new Promise((r) => setTimeout(r, 10));
+  if (releaseSlow) releaseSlow();
+  await pSlow2;
+  if (fastUnmounted !== 1) {
+    console.error(`[外壳竞态回归] fastUnmounted=${fastUnmounted}，证明 App._unmount 被过期慢页覆盖泄漏`);
+    process.exit(1);
+  }
+
+  unsubThrow();
+  unsubOk();
+  unregSlow();
+  unregFast();
+  if (sandbox.App.listPages().some((p) => p.id === 'ext_slow' || p.id === 'ext_fast')) {
+    console.error('[外壳扩展回归] unregisterPage 未从导航列表移除');
+    process.exit(1);
+  }
+  if (sandbox.App._enterTimer) clearTimeout(sandbox.App._enterTimer);
+  sandbox.API.configSet = origCfgSet;
+  sandbox.App = origApp;
+  sandbox.navigate = origNav;
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子与外壳竞态回归全链路校验通过）`);
 process.exit(0);

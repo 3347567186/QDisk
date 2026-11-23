@@ -299,6 +299,39 @@ const pRule = await props.propose({ action: 'rules.draft', args: { yaml: "rules:
 const cRule = pRule.ok ? await props.commit(pRule.proposal.id, { approvedBy: 'user' }) : { ok: false };
 ok('rules.draft 校验并跳转填充编辑器', pRule.ok && cRule.ok && calls.some((c) => c[0] === 'AIRulesDraft.fill') && calls.some((c) => c[0] === 'App.jump' && c[1] === 'rules'));
 
+/* 18 红队加固与扩展接口：AIGuard 拦截 ADS/设备名/控制字符 + AIRegistry 动态注册与内置保护 */
+ok('AIGuard 拒绝 NTFS ADS 数据流', !!sandbox.AIGuard.denyWhy('D:\\safe\\doc.txt:hidden'));
+ok('AIGuard 拒绝 Windows 保留设备名', !!sandbox.AIGuard.denyWhy('D:\\safe\\CON.txt') && !!sandbox.AIGuard.denyWhy('D:\\safe\\NUL'));
+ok('AIGuard 拒绝控制字符路径', !!sandbox.AIGuard.denyWhy('D:\\safe\\a\x01b.txt'));
+
+let blockedBuiltinOverwrite = false;
+try {
+  actions.register('files.delete', { risk: 'low', plan: async () => ({}), run: async () => ({}) }, { overwrite: true });
+} catch { blockedBuiltinOverwrite = true; }
+ok('AIRegistry 拒绝覆盖内置动作', blockedBuiltinOverwrite);
+
+let blockedBadRisk = false;
+try {
+  actions.register('ext.bad', { risk: 'extreme', plan: async () => ({}), run: async () => ({}) });
+} catch { blockedBadRisk = true; }
+ok('AIRegistry 拒绝非法 risk 等级', blockedBadRisk);
+
+const unregExt = actions.register('ext.ping', {
+  cat: 'ext',
+  label: '扩展测试',
+  desc: '测试扩展动作',
+  risk: 'low',
+  schema: { msg: { type: 'string', req: true } },
+  plan: async (a) => ({ summary: a.msg }),
+  run: async (a) => ({ ok: true, msg: a.msg })
+});
+ok('AIRegistry 动态注册扩展动作同步进入 ids/list/catalog',
+  actions.ids.includes('ext.ping')
+  && actions.list().some((x) => x.id === 'ext.ping' && x.builtin === false)
+  && actions.catalog().includes('ext.ping | 测试扩展动作'));
+unregExt();
+ok('AIRegistry 注销扩展动作干净回收', !actions.ids.includes('ext.ping') && actions.get('ext.ping') === null);
+
 console.log(out.join('\n'));
 const failed = out.filter((x) => x.startsWith('FAIL')).length;
 console.log('\n' + (out.length - failed) + '/' + out.length + ' 通过，失败 ' + failed);

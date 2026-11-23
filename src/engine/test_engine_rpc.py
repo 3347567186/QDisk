@@ -3429,6 +3429,45 @@ class TestSystemPerformance(EngineCase):
         if not r["ok"]:
             self.assertTrue("管理员权限" in r["error"] or "拒绝访问" in r["error"] or r.get("code") == "admin_required")
 
+    def test_engine_capabilities_and_extension_registry(self):
+        # 1. RPC 端 capabilities 端点返回完整能力清单
+        caps = self.rpc_ok("capabilities", {})
+        self.assertEqual(caps["schema_version"], 1)
+        self.assertIn("ping", caps["methods"])
+        self.assertIn("capabilities", caps["methods"])
+        self.assertGreaterEqual(caps["builtin_count"], 40)
+
+        # 2. 进程内验证扩展方法注册表（含内置防覆盖、非法名拦截、注销还原）
+        import tidy as T
+        with self.assertRaises(ValueError):
+            T.register_engine_method("ping", lambda p: {})
+        with self.assertRaises(ValueError):
+            T.register_engine_method("ping", lambda p: {}, overwrite=True)
+        with self.assertRaises(ValueError):
+            T.register_engine_method("Bad Name!", lambda p: {})
+        with self.assertRaises(ValueError):
+            T.unregister_engine_method("ping")
+
+        T.register_engine_method(
+            "ext.echo",
+            lambda p: {"echo": p.get("msg", "")},
+            meta={"owner": "selftest"},
+        )
+        try:
+            out = T._engine_dispatch({"method": "ext.echo", "params": {"msg": "hi"}})
+            self.assertEqual(out, {"echo": "hi"})
+            c2 = T._engine_capabilities({})
+            self.assertIn("ext.echo", c2["methods"])
+            self.assertTrue(any(x["name"] == "ext.echo" for x in c2["extensions"]))
+            with self.assertRaises(ValueError):
+                T.register_engine_method("ext.echo", lambda p: {})
+            # 允许显式 overwrite 替换自定义扩展
+            T.register_engine_method("ext.echo", lambda p: {"v": 2}, overwrite=True)
+            self.assertEqual(T._engine_dispatch({"method": "ext.echo", "params": {}}), {"v": 2})
+        finally:
+            self.assertTrue(T.unregister_engine_method("ext.echo"))
+        self.assertNotIn("ext.echo", T.list_engine_methods())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -26,6 +26,8 @@
     configGet: () => invoke('config_get'),
     configSet: (patch) => invoke('config_set', { patch }),
     appInfo: () => invoke('app_info'),
+    appCapabilities: () => invoke('app_capabilities'),
+    engineCapabilities: () => engine('capabilities', {}),
     isAdmin: () => invoke('is_admin'),
     runAsAdmin: () => invoke('run_as_admin'),
     toggleFullscreen: () => invoke('toggle_fullscreen'),

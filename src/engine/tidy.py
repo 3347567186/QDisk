@@ -249,7 +249,7 @@ def save_settings(s):
         d = os.path.normpath(s.get("data_dir") or DEFAULT_DATA)
         sd, sp = settings_paths_for(d)
         os.makedirs(sd, exist_ok=True)
-        tmp = sp + ".tmp"
+        tmp = f"{sp}.{os.getpid()}.{threading.get_ident()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(s, f, ensure_ascii=False, indent=1)
         os.replace(tmp, sp)
@@ -9169,8 +9169,73 @@ def _engine_rules_explain(params):
     return out
 
 
+_ENGINE_BUILTIN_METHODS = frozenset({
+    "ping", "capabilities", "settings.get", "scan", "organize", "undo",
+    "files.delete", "shots.scan", "shots.thumb", "shots.clean",
+    "cache.list", "cache.clean", "clean.auto",
+    "apps.list", "apps.icons", "apps.uninstall", "apps.registry",
+    "apps.delete_entry", "apps.force_remove", "apps.leftovers", "apps.cleanup",
+    "startup.list", "startup.toggle", "startup.delete",
+    "process.close", "process.list", "system.performance",
+    "search.status", "search.index", "search.query", "search.top",
+    "search.folders", "search.add", "search.remove", "search.selfcheck", "search.hot",
+    "prune.run", "settings.set", "rules.validate", "rules.preview",
+    "rules.run", "rules.explain", "migrate.plan", "migrate.apply",
+})
+
+_ENGINE_EXTENSION_META = {}
+
+
+def _engine_capabilities(_params):
+    """capabilities：暴露引擎版本、已注册 RPC 方法与扩展插件元数据。"""
+    methods = sorted(_ENGINE_METHODS.keys())
+    extensions = [
+        {"name": k, "meta": dict(v)}
+        for k, v in sorted(_ENGINE_EXTENSION_META.items())
+        if k in _ENGINE_METHODS
+    ]
+    return {
+        "schema_version": 1,
+        "engine": "tidy",
+        "python": sys.version.split()[0],
+        "methods": methods,
+        "extensions": extensions,
+        "builtin_count": len(_ENGINE_BUILTIN_METHODS),
+        "extension_count": len(extensions),
+    }
+
+
+def register_engine_method(name, handler, meta=None, overwrite=False):
+    """预留拓展接口：允许外部模块注册自定义 RPC 方法而无需修改核心分发器。"""
+    if not isinstance(name, str) or not re.match(r"^[a-z0-9][a-z0-9._-]{1,63}$", name):
+        raise ValueError("扩展方法名须为 2-64 位小写字母/数字/._- 组合")
+    if not callable(handler):
+        raise TypeError("handler 必须是可调用对象")
+    if name in _ENGINE_BUILTIN_METHODS:
+        raise ValueError("内置引擎方法不可被扩展覆盖：%s" % name)
+    if name in _ENGINE_METHODS and not overwrite:
+        raise ValueError("扩展方法已存在：%s" % name)
+    _ENGINE_METHODS[name] = handler
+    _ENGINE_EXTENSION_META[name] = dict(meta) if isinstance(meta, dict) else {}
+    return name
+
+
+def unregister_engine_method(name):
+    """注销自定义扩展 RPC 方法（保护核心内置方法不可被注销）。"""
+    if name in _ENGINE_BUILTIN_METHODS:
+        raise ValueError("内置引擎方法不可注销：%s" % name)
+    removed = _ENGINE_METHODS.pop(name, None) is not None
+    _ENGINE_EXTENSION_META.pop(name, None)
+    return removed
+
+
+def list_engine_methods():
+    return sorted(_ENGINE_METHODS.keys())
+
+
 _ENGINE_METHODS = {
     "ping": lambda _params: _engine_ping(),
+    "capabilities": _engine_capabilities,
     "settings.get": lambda _params: _engine_settings(),
     "scan": _engine_scan,
     "organize": _engine_organize,

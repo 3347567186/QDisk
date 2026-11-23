@@ -20,6 +20,33 @@
     { id: 'settings', zh: '设置', en: 'Settings', icon: 'settings' }
   ];
 
+  const BUILTIN_NAV_IDS = new Set(NAV.map((n) => n.id));
+  const appHooks = new Map();
+
+  function onAppHook(event, fn) {
+    if (typeof event !== 'string' || !event || typeof fn !== 'function') return () => {};
+    let set = appHooks.get(event);
+    if (!set) { set = new Set(); appHooks.set(event, set); }
+    set.add(fn);
+    return () => offAppHook(event, fn);
+  }
+
+  function offAppHook(event, fn) {
+    const set = appHooks.get(event);
+    if (!set) return;
+    if (fn) set.delete(fn);
+    else set.clear();
+    if (!set.size) appHooks.delete(event);
+  }
+
+  function emitAppHook(event, payload) {
+    const set = appHooks.get(event);
+    if (!set || !set.size) return;
+    for (const fn of Array.from(set)) {
+      try { fn(payload); } catch { /* 外部钩子异常不得中断主应用流程 */ }
+    }
+  }
+
   /* 只在轻量页播光标搭建动画：数据页的 canvas/clip-path 会额外吃数秒 CPU */
 
   const App = {
@@ -84,6 +111,7 @@
     async setTheme(theme) {
       applyTheme(theme);
       this.cfg = { ...(this.cfg || {}), theme };
+      emitAppHook('theme:changed', UI.state.theme);
       try { await API.configSet({ theme }); } catch { /* ignore */ }
     },
     async setLang(lang) {
@@ -92,6 +120,7 @@
       try { await API.configSet({ lang }); } catch { /* ignore */ }
       buildNav(this);
       renderChrome(this.current, this.cfg);
+      emitAppHook('lang:changed', lang);
     },
     async setPageSize(n) {
       const sizes = [15, 30, 60, 100, 200];
@@ -113,7 +142,63 @@
       this.cfg = { ...(this.cfg || {}), power_mode: m };
       const motion = m === 'silent' ? 'lite' : (['lite', 'off'].includes(this.cfg.motion) ? this.cfg.motion : 'full');
       applyMotion(motion);
+      emitAppHook('power:changed', m);
       try { await API.configSet({ power_mode: m }); } catch { /* ignore */ }
+    },
+    on: onAppHook,
+    off: offAppHook,
+    /** 预留拓展接口：注册自定义页面到导航与 Pages 注册表，无需修改 app.js 核心代码。 */
+    registerPage(meta, pageModule, opts) {
+      const o = opts || {};
+      const m = meta || {};
+      const id = String(m.id || '').trim();
+      if (!/^[a-z0-9][a-z0-9_-]{1,31}$/.test(id)) {
+        throw new Error('扩展页面 id 须为 2-32 位小写字母/数字/_/- 组合');
+      }
+      if (!pageModule || typeof pageModule.mount !== 'function') {
+        throw new Error('扩展页面必须提供 mount(node) 函数');
+      }
+      if (BUILTIN_NAV_IDS.has(id)) {
+        throw new Error('内置页面不可被扩展覆盖：' + id);
+      }
+      if (NAV.some((n) => n.id === id) && !o.overwrite) {
+        throw new Error('扩展页面已存在：' + id);
+      }
+      window.Pages = window.Pages || {};
+      window.Pages[id] = pageModule;
+      const entry = {
+        id,
+        zh: String(m.zh || m.label || id),
+        en: String(m.en || m.label || id),
+        icon: String(m.icon || 'tools')
+      };
+      const idx = NAV.findIndex((n) => n.id === id);
+      if (idx >= 0) NAV[idx] = entry;
+      else NAV.push(entry);
+      if (document.getElementById('nav')) buildNav(this);
+      emitAppHook('page:registered', { id, meta: entry });
+      return () => this.unregisterPage(id);
+    },
+    unregisterPage(id) {
+      const key = String(id || '').trim();
+      if (BUILTIN_NAV_IDS.has(key)) {
+        throw new Error('内置页面不可注销：' + key);
+      }
+      const idx = NAV.findIndex((n) => n.id === key);
+      if (idx < 0) return false;
+      NAV.splice(idx, 1);
+      if (window.Pages && Object.prototype.hasOwnProperty.call(window.Pages, key)) {
+        delete window.Pages[key];
+      }
+      if (document.getElementById('nav')) buildNav(this);
+      emitAppHook('page:unregistered', { id: key });
+      if (App._mountedId === key && document.getElementById('page')) {
+        navigate('organize', true).catch(() => {});
+      }
+      return true;
+    },
+    listPages() {
+      return NAV.map((n) => Object.assign({}, n, { builtin: BUILTIN_NAV_IDS.has(n.id) }));
     },
     async setMotion(mode) {
       const v = ['full', 'lite', 'off'].includes(mode) ? mode : 'full';
@@ -474,9 +559,11 @@
     const token = (App._navToken = (App._navToken || 0) + 1);
     if (updateHash && location.hash !== '#' + id) history.replaceState(null, '', '#' + id);
     // 离开上一页：让页面释放事件监听、临时预览文件与后台任务
+    const prevId = App._mountedId || null;
     if (App._unmount) {
       try { App._unmount(); } catch { /* 页面清理失败不应阻塞切页 */ }
       App._unmount = null;
+      if (prevId) emitAppHook('page:unmounted', { id: prevId });
     }
     /* 页面级钩子只属于刚卸载的那一页，切页时清掉，避免改到别的页 */
     App._onPageSize = null;
@@ -507,6 +594,14 @@
     const slow = setTimeout(() => setNavLoading(true), 180);
     try {
       const unmount = await page.mount(holder);
+      // 红队竞态防护：若挂载在途期间用户已切到新页面，必须立刻卸载过期页面，
+      // 绝不能覆盖当前新页面的 App._unmount 导致资源永久泄漏！
+      if (token !== App._navToken) {
+        if (typeof unmount === 'function') {
+          try { unmount(); } catch { /* ignore */ }
+        }
+        return;
+      }
       App._unmount = typeof unmount === 'function' ? unmount : null;
     } catch (e) {
       if (navBtn) navBtn.classList.remove('loading');
@@ -525,6 +620,7 @@
     clearTimeout(App._enterTimer);
     App._enterTimer = setTimeout(() => { delete holder.dataset.enter; }, 700);
     App._mountedId = id;
+    emitAppHook('page:mounted', { id });
     App.cfg = { ...(App.cfg || {}), last_page: id };
     API.configSet({ last_page: id }).catch(() => {});
   }

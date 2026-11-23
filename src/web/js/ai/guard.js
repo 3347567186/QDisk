@@ -28,12 +28,15 @@
   const SEG_DENY = ['.git', '.ssh', '.gnupg', '.aws', '.kube', '.docker', '.azure'];
   const NAME_DENY = ['pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'bootmgr',
     'bootmgr.efi', 'ntldr', 'boot.ini', 'ntuser.dat', 'ntuser.ini'];
+  const RESERVED_DEV = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9]|LPT[1-9])(?:\.|$)/i;
 
   const PERSONAL = ['Desktop', 'Documents', 'Downloads', 'Pictures', 'Videos', 'Music', 'OneDrive'];
 
   function norm(raw) {
     let s = String(raw || '').trim();
     if (!s) return '';
+    /* 拦截控制字符与 NTFS 备用数据流（盘符之后再出现冒号） */
+    if (/[\x00-\x1f\x7f]/.test(s)) return '';
     /* 环境变量先落地：模型偶尔会给 %USERPROFILE%\Desktop 这种写法 */
     s = s.replace(/%([A-Za-z_]+)%/g, (m, name) => {
       const k = String(name).toUpperCase();
@@ -50,6 +53,7 @@
     if (/^\\\\[?.]\\/.test(s)) return '';
     if (/^\\\\/.test(s)) return '';
     if (!/^[A-Za-z]:\\/.test(s)) return '';
+    if (s.slice(2).indexOf(':') >= 0) return '';
     const parts = s.split('\\');
     const drive = String(parts.shift() || '').toUpperCase();
     const out = [];
@@ -99,6 +103,7 @@
     const segs = p.split('\\').slice(1);
     for (const seg of segs) {
       if (SEG_DENY.indexOf(low(seg)) >= 0) return '这是版本库或凭据目录（' + seg + '），不能由 AI 改动';
+      if (RESERVED_DEV.test(seg.trim())) return 'Windows 保留设备名（' + seg + '）不能操作';
     }
     const base = segs.length ? segs[segs.length - 1] : '';
     if (NAME_DENY.indexOf(low(base)) >= 0) return '系统关键文件（' + base + '）不能由 AI 改动';

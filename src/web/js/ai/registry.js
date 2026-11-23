@@ -1337,21 +1337,67 @@
       return { ok: false, message: '这个操作没有自动撤销' };
     }
 
+    const builtinIds = new Set(Object.keys(table));
+    const VALID_RISKS = new Set(['low', 'med', 'high']);
+
+    /* 预留拓展接口：允许外部模块动态注册/注销自定义 AI 动作，并强制风险等级与回调校验。 */
+    function register(id, spec, opts) {
+      const o = opts || {};
+      const key = String(id || '').trim();
+      if (!/^[a-z0-9][a-z0-9._-]{1,47}$/.test(key)) {
+        throw new Error('扩展动作 id 须为 2-48 位小写字母/数字/._- 组合');
+      }
+      if (builtinIds.has(key)) {
+        throw new Error('内置 AI 动作不可被扩展覆盖：' + key);
+      }
+      if (Object.prototype.hasOwnProperty.call(table, key) && !o.overwrite) {
+        throw new Error('扩展 AI 动作已存在：' + key);
+      }
+      if (!spec || typeof spec !== 'object') {
+        throw new Error('扩展动作定义无效');
+      }
+      if (!VALID_RISKS.has(spec.risk)) {
+        throw new Error('扩展动作 risk 必须为 low / med / high');
+      }
+      if (typeof spec.plan !== 'function' || typeof spec.run !== 'function') {
+        throw new Error('扩展动作必须提供 plan 与 run 函数');
+      }
+      table[key] = Object.assign({
+        cat: 'extension',
+        label: key,
+        desc: key,
+        schema: {}
+      }, spec);
+      return () => unregister(key);
+    }
+
+    function unregister(id) {
+      const key = String(id || '').trim();
+      if (builtinIds.has(key)) {
+        throw new Error('内置 AI 动作不可注销：' + key);
+      }
+      if (!Object.prototype.hasOwnProperty.call(table, key)) return false;
+      delete table[key];
+      return true;
+    }
+
     /* 给系统提示词用的动作目录：一行一个，紧凑 */
     function catalog() {
       return Object.keys(table).map((id) => {
         const a = table[id];
-        const args = Object.keys(a.schema).map((k) => a.schema[k].req ? k : k + '?').join(', ');
+        const args = Object.keys(a.schema || {}).map((k) => a.schema[k].req ? k : k + '?').join(', ');
         return id + ' | ' + a.desc + ' | ' + args + ' | 风险' + a.risk;
       }).join('\n');
     }
 
     return {
       get: (id) => table[id] || null,
-      ids: Object.keys(table),
+      get ids() { return Object.keys(table); },
       list: () => Object.keys(table).map((id) => ({
-        id, cat: table[id].cat, label: table[id].label, risk: table[id].risk
+        id, cat: table[id].cat, label: table[id].label, risk: table[id].risk, builtin: builtinIds.has(id)
       })),
+      register,
+      unregister,
       catalog,
       bind,
       applyUndo,

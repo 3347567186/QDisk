@@ -132,7 +132,11 @@
          而不是交给浏览器（WebView2 里那一步什么都不会发生） */
       if (/^file:/i.test(href)) {
         const p = fileUrlToPath(href);
-        if (asPath(p)) return put(pathAnchor(p, resolve(emphasis(label)) || p));
+        if (asPath(p)) {
+          // fileUrlToPath 做了解码与反转义，拼回 HTML 属性前必须重新转义，防二次反转义 XSS
+          const safeP = escape(p);
+          return put(pathAnchor(safeP, resolve(emphasis(label)) || safeP));
+        }
         return label;
       }
       if (!SAFE_URL.test(href)) {

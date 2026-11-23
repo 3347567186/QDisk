@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,10 @@ static ADMIN_CACHE: OnceLock<bool> = OnceLock::new();
 /// 商店应用枚举（PowerShell Get-AppxPackage）约 1 秒，缓存 5 分钟。
 static STORE_CACHE: Mutex<Option<(Instant, Vec<Value>)>> = Mutex::new(None);
 const STORE_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// 全局配置读写锁与原子写临时文件序号，防止并发 config_set / schedule_set 互相覆盖或写半截。
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 // ---------------------------------------------------------------- paths
 
@@ -155,20 +159,43 @@ fn read_config() -> Value {
     })
 }
 
+fn write_file_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = target
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
+    let tmp = target.with_file_name(format!("{name}.{}.{seq}.tmp", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入临时文件失败：{e}"));
+    }
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("替换目标文件失败：{e}"));
+    }
+    Ok(())
+}
+
 fn write_config(cfg: &Value) -> Result<(), String> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败：{e}"))?;
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(config_path(), text).map_err(|e| format!("写入配置失败：{e}"))
+    write_file_atomic(&config_path(), text.as_bytes()).map_err(|e| format!("写入配置失败：{e}"))
 }
 
 #[tauri::command]
 fn config_get() -> Value {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     read_config()
 }
 
 #[tauri::command]
 fn config_set(patch: Value) -> Result<Value, String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut cfg = read_config();
     if let (Some(dst), Some(src)) = (cfg.as_object_mut(), patch.as_object()) {
         for (k, v) in src {
@@ -243,25 +270,46 @@ fn call_raw(engine: &mut Engine, method: &str, params: Value) -> Result<Value, S
         .write_all(line.as_bytes())
         .map_err(|e| format!("写引擎失败：{e}"))?;
     engine.stdin.flush().map_err(|e| e.to_string())?;
-    let mut resp = String::new();
-    engine
-        .stdout
-        .read_line(&mut resp)
-        .map_err(|e| format!("读引擎失败：{e}"))?;
-    if resp.trim().is_empty() {
-        return Err("引擎没有返回（可能已退出）".into());
+    for _ in 0..8 {
+        let mut resp = String::new();
+        engine
+            .stdout
+            .read_line(&mut resp)
+            .map_err(|e| format!("读引擎失败：{e}"))?;
+        let trimmed = resp.trim();
+        if trimmed.is_empty() {
+            return Err("引擎没有返回（可能已退出）".into());
+        }
+        let v: Value = match serde_json::from_str(trimmed) {
+            Ok(val) => val,
+            Err(e) => {
+                // 以 '{' 开头却解析失败说明是损坏的 JSON 响应，立即报错防死等；
+                // 非 '{' 开头的杂散调试输出跳过继续读真正的响应行。
+                if trimmed.starts_with('{') {
+                    return Err(format!("引擎返回非法 JSON：{e}"));
+                }
+                continue;
+            }
+        };
+        if let Some(rid) = v.get("id").and_then(|x| x.as_u64()) {
+            if rid != id {
+                if rid < id {
+                    continue;
+                }
+                return Err(format!("引擎响应序号错位（期望 {id}，收到 {rid}）"));
+            }
+        }
+        return if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+            Ok(v.get("result").cloned().unwrap_or(Value::Null))
+        } else {
+            Err(v
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("引擎调用失败")
+                .to_string())
+        };
     }
-    let v: Value =
-        serde_json::from_str(resp.trim()).map_err(|e| format!("引擎返回非法 JSON：{e}"))?;
-    if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-        Ok(v.get("result").cloned().unwrap_or(Value::Null))
-    } else {
-        Err(v
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("引擎调用失败")
-            .to_string())
-    }
+    Err("引擎返回协议失步或非法 JSON".into())
 }
 
 /// 真正跑引擎调用的同步逻辑。只能在 spawn_blocking 的线程里调用：
@@ -288,6 +336,7 @@ fn engine_call_blocking(
             append_log("warn", &format!("引擎异常，重启：{e}"));
             if let Some(mut old) = guard.take() {
                 let _ = old.child.kill();
+                let _ = old.child.wait();
             }
             *guard = Some(spawn_engine(app)?);
             call_raw(guard.as_mut().unwrap(), method, params)
@@ -320,6 +369,7 @@ async fn engine_restart(state: State<'_, AppState>, app: tauri::AppHandle) -> Re
         let mut guard = engine.lock().map_err(|_| "引擎锁失败")?;
         if let Some(mut old) = guard.take() {
             let _ = old.child.kill();
+            let _ = old.child.wait();
         }
         *guard = Some(spawn_engine(&app)?);
         Ok(true)
@@ -416,35 +466,91 @@ fn reveal(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 打开一个本地位置或网址。
-///
-/// 以前这里不做任何检查：路径不存在也照样返回 Ok，用户点完看到的是
-/// 「什么都没发生」，然后是「这软件没用」。现在先把话说明白——
-/// 文件不在了就说不在，没权限就说没权限，能打开才打开。
-#[tauri::command]
-fn open_path(path: String) -> Result<(), String> {
-    let raw = path.trim().to_string();
+#[derive(Debug, PartialEq, Eq)]
+enum OpenTarget {
+    Url,
+    SafeShell,
+    LocalPath,
+}
+
+/// 严格校验 open_path 目标，拒绝危险协议与控制字符；放行安全网页、白名单回收站 shell URI 与已存在的本地路径。
+fn validate_open_target(raw: &str) -> Result<OpenTarget, String> {
     if raw.is_empty() {
         return Err("路径是空的".into());
     }
-    /* 控制字符与引号不进命令行：那不是路径，是把参数拼坏的写法 */
-    if raw.chars().any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20) {
+    if raw
+        .chars()
+        .any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20)
+    {
         return Err("路径里有不能用的字符".into());
     }
-    #[cfg(windows)]
-    {
-        let is_url = raw.starts_with("http://")
-            || raw.starts_with("https://")
-            || raw.starts_with("mailto:");
-        if !is_url && !Path::new(&raw).exists() {
-            return Err(format!("这个位置已经不在了：{raw}"));
+    let low = raw.to_ascii_lowercase();
+    if low.starts_with("http://") || low.starts_with("https://") || low.starts_with("mailto:") {
+        return Ok(OpenTarget::Url);
+    }
+    if low == "shell:recyclebinfolder" {
+        return Ok(OpenTarget::SafeShell);
+    }
+    // 识别非盘符的自定义协议头（如 javascript: / ms-msdt: / cmd: / file: / 未白名单 shell:）并一律拒绝
+    let is_drive = raw.len() >= 2
+        && raw.as_bytes()[0].is_ascii_alphabetic()
+        && raw.as_bytes()[1] == b':';
+    let is_unc = raw.starts_with("\\\\");
+    if !is_drive && !is_unc {
+        if let Some(colon) = raw.find(':') {
+            let scheme = &raw[..colon];
+            if !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            {
+                return Err(format!("不支持打开该协议：{scheme}:"));
+            }
         }
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "start", ""]);
-        /* 显式加引号：带空格的路径（Program Files）不加就会被 cmd 拆成两截 */
-        cmd.raw_arg(format!("\"{raw}\""));
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.spawn().map_err(|e| format!("打不开：{e}"))?;
+    }
+    if !Path::new(raw).exists() {
+        return Err(format!("这个位置已经不在了：{raw}"));
+    }
+    Ok(OpenTarget::LocalPath)
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+extern "system" {
+    fn ShellExecuteW(
+        hwnd: isize,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show_cmd: i32,
+    ) -> isize;
+}
+
+/// 打开一个本地位置、安全网址或白名单系统位置（如回收站）。
+/// 直接调用 Win32 ShellExecuteW，完全绕开 cmd.exe 壳解析，杜绝 %VAR%/&/|/^ 注入。
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let raw = path.trim().to_string();
+    let _kind = validate_open_target(&raw)?;
+    #[cfg(target_os = "windows")]
+    {
+        let op: Vec<u16> = "open\0".encode_utf16().collect();
+        let file: Vec<u16> = raw.encode_utf16().chain(std::iter::once(0)).collect();
+        const SW_SHOWNORMAL: i32 = 1;
+        let rc = unsafe {
+            ShellExecuteW(
+                0,
+                op.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if rc <= 32 {
+            return Err(format!("打不开（ShellExecute 错误码 {rc}）：{raw}"));
+        }
     }
     Ok(())
 }
@@ -456,6 +562,33 @@ fn app_info() -> Value {
         "exe_dir": exe_dir().to_string_lossy().to_string(),
         "data_dir": data_dir().to_string_lossy().to_string(),
         "log_dir": log_dir().to_string_lossy().to_string(),
+    })
+}
+
+/// 统一全软件能力发现清单（schemaVersion=1）：为前端页面、AI 助手与未来扩展插件提供单一真相源。
+#[tauri::command]
+fn app_capabilities() -> Value {
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+    let arc_caps = archive::capabilities_snapshot();
+    json!({
+        "schemaVersion": 1,
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "cpuCores": cpu_cores,
+        "dataDir": data_dir().to_string_lossy().to_string(),
+        "logDir": log_dir().to_string_lossy().to_string(),
+        "archive": arc_caps,
+        "extensions": {
+            "pages": true,
+            "aiActions": true,
+            "engineMethods": true,
+            "archiveCodecs": true,
+            "lifecycleHooks": true
+        }
     })
 }
 
@@ -629,6 +762,7 @@ async fn run_as_admin(app: tauri::AppHandle, state: State<'_, AppState>) -> Resu
     if let Ok(mut guard) = state.engine.lock() {
         if let Some(mut old) = guard.take() {
             let _ = old.child.kill();
+            let _ = old.child.wait();
         }
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -714,13 +848,36 @@ fn set_autostart(enabled: bool) -> Result<bool, String> {
 
 const TASK_NAME: &str = "整理助手_定时清理";
 
+fn validate_schedule_time(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    let Some((hh, mm)) = t.split_once(':') else {
+        return Err("定时时间格式必须为 HH:MM（如 03:00）".into());
+    };
+    if hh.len() != 2
+        || mm.len() != 2
+        || !hh.bytes().all(|b| b.is_ascii_digit())
+        || !mm.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err("定时时间格式必须为 HH:MM（如 03:00）".into());
+    }
+    let h: u8 = hh.parse().map_err(|_| "小时无效".to_string())?;
+    let m: u8 = mm.parse().map_err(|_| "分钟无效".to_string())?;
+    if h > 23 || m > 59 {
+        return Err("定时时间范围应为 00:00 至 23:59".into());
+    }
+    Ok(format!("{h:02}:{m:02}"))
+}
+
 #[tauri::command(async)]
 fn schedule_set(enabled: bool, time: String, days: i64, cache: bool, screenshots: bool) -> Result<bool, String> {
+    let time = validate_schedule_time(&time)?;
+    let days = days.clamp(1, 3650);
     if !enabled {
         let _ = Command::new("schtasks")
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = read_config();
         cfg["clean_schedule"] = json!({ "enabled": false, "time": time, "days": days, "cache": cache, "screenshots": screenshots });
         write_config(&cfg)?;
@@ -739,6 +896,7 @@ fn schedule_set(enabled: bool, time: String, days: i64, cache: bool, screenshots
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cfg = read_config();
         cfg["clean_schedule"] = json!({ "enabled": true, "time": time, "days": days, "cache": cache, "screenshots": screenshots });
         write_config(&cfg)?;
@@ -796,19 +954,33 @@ fn log_list() -> Vec<Value> {
     out
 }
 
-/// 读取任意文本文件（规则 YAML、迁移报告等），带大小上限。
+/// 读取任意文本文件（规则 YAML、迁移报告、日志尾部等），带大小上限且按 UTF-8 字符边界对齐。
+/// 修复旧版 seek 到 `len - limit` 落在多字节中文中间导致 `read_to_string` 报非法 UTF-8 失败的问题。
+fn read_tail_utf8(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let limit = max_bytes.min(len);
+    let truncated = len > limit;
+    if truncated {
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::Start(len - limit))
+            .map_err(|e| e.to_string())?;
+    }
+    let mut buf = Vec::with_capacity(limit as usize);
+    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let mut start = 0usize;
+    if truncated {
+        // 跳过最多 3 个 UTF-8 续字节（10xxxxxx），对齐到下一个完整字符起始位
+        while start < buf.len() && start < 3 && (buf[start] & 0xC0) == 0x80 {
+            start += 1;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf[start..]).into_owned())
+}
+
 #[tauri::command(async)]
 fn read_text(path: String, max_bytes: Option<u64>) -> Result<String, String> {
-    let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let limit = max_bytes.unwrap_or(512 * 1024).min(len);
-    if len > limit {
-        use std::io::Seek;
-        f.seek(std::io::SeekFrom::Start(len - limit)).map_err(|e| e.to_string())?;
-    }
-    let mut s = String::new();
-    f.read_to_string(&mut s).map_err(|e| e.to_string())?;
-    Ok(s)
+    read_tail_utf8(Path::new(&path), max_bytes.unwrap_or(512 * 1024))
 }
 
 /// 只读日志目录内的文件，避免前端拿到任意路径后读取系统文件。
@@ -1231,24 +1403,63 @@ fn empty_dir_denied(path: &Path) -> Option<&'static str> {
     None
 }
 
+fn is_reparse_point(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => {
+            if m.file_type().is_symlink() {
+                return true;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return true;
+                }
+            }
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn strip_extended_prefix(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 #[tauri::command(async)]
 fn remove_empty_dirs(paths: Vec<String>) -> Result<Value, String> {
     let mut removed = 0usize;
     let mut failed: Vec<Value> = Vec::new();
     for p in paths {
         let path = std::path::PathBuf::from(&p);
-        if let Some(why) = empty_dir_denied(&path).or_else(|| empty_dir_risky(&path)) {
+        if is_reparse_point(&path) {
+            failed.push(json!({ "path": p, "why": "拒绝删除符号链接或目录联接" }));
+            continue;
+        }
+        // 先规范化真实路径再过安全闸，防止通过 `..` 绕过系统目录检查
+        let check_path = std::fs::canonicalize(&path)
+            .map(|c| strip_extended_prefix(&c))
+            .unwrap_or_else(|_| path.clone());
+        if let Some(why) = empty_dir_denied(&check_path).or_else(|| empty_dir_risky(&check_path)) {
             failed.push(json!({ "path": p, "why": why }));
             continue;
         }
-        let is_empty = std::fs::read_dir(&path)
+        let is_empty = std::fs::read_dir(&check_path)
             .map(|mut r| r.next().is_none())
             .unwrap_or(false);
         if !is_empty {
             failed.push(json!({ "path": p, "why": "目录不为空或不存在" }));
             continue;
         }
-        match std::fs::remove_dir(&path) {
+        match std::fs::remove_dir(&check_path) {
             Ok(_) => removed += 1,
             Err(e) => failed.push(json!({ "path": p, "why": e.to_string() })),
         }
@@ -1382,10 +1593,9 @@ fn ai_store(op: String, name: Option<String>, content: Option<String>) -> Result
             if body.len() > 8 * 1024 * 1024 {
                 return Err("内容过大（超过 8 MB）".into());
             }
-            // 先写临时文件再改名：中途崩溃不会留下半个会话文件
-            let tmp = dir.join(format!("{n}.tmp"));
-            std::fs::write(&tmp, body.as_bytes()).map_err(|e| format!("写入失败：{e}"))?;
-            std::fs::rename(&tmp, dir.join(&n)).map_err(|e| format!("写入失败：{e}"))?;
+            // 先写进程+序号唯一临时文件再原子替换：并发写入不撞车，中途崩溃不留半截会话
+            write_file_atomic(&dir.join(&n), body.as_bytes())
+                .map_err(|e| format!("写入失败：{e}"))?;
             Ok(json!({ "name": n, "size": body.len() }))
         }
         "append" => {
@@ -1653,8 +1863,14 @@ fn agent_roots() -> Value {
     json!({ "roots": roots, "home": home })
 }
 
-/// 解析 http(s) 地址：返回 (是否 https, host, port, path+query)
+/// 解析 http(s) 地址：返回 (是否 https, host, port, path+query)；支持 IPv6 字面量并拦截控制字符。
 fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || (c as u32) < 0x20 || c == '\u{7f}')
+    {
+        return Err("地址包含非法空白或控制字符".into());
+    }
     let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
         (true, r)
     } else if let Some(r) = url.strip_prefix("http://") {
@@ -1669,12 +1885,39 @@ fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
     if authority.is_empty() {
         return Err("地址缺少主机名".into());
     }
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, pt)) if !h.is_empty() && !pt.is_empty() && pt.chars().all(|c| c.is_ascii_digit()) => (
-            h.to_string(),
-            pt.parse::<u16>().map_err(|_| "端口不合法".to_string())?,
-        ),
-        _ => (authority.to_string(), if secure { 443 } else { 80 }),
+    let default_port = if secure { 443 } else { 80 };
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let Some(close) = after_open.find(']') else {
+            return Err("IPv6 地址缺少闭合括号".into());
+        };
+        let h = &after_open[..close];
+        if h.is_empty() {
+            return Err("地址缺少主机名".into());
+        }
+        let rem = &after_open[close + 1..];
+        let pt = if rem.is_empty() {
+            default_port
+        } else if let Some(pstr) = rem.strip_prefix(':') {
+            if pstr.is_empty() || !pstr.chars().all(|c| c.is_ascii_digit()) {
+                return Err("端口不合法".into());
+            }
+            pstr.parse::<u16>().map_err(|_| "端口不合法".to_string())?
+        } else {
+            return Err("IPv6 地址格式不合法".into());
+        };
+        (h.to_string(), pt)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, pt))
+                if !h.is_empty() && !pt.is_empty() && pt.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                (
+                    h.to_string(),
+                    pt.parse::<u16>().map_err(|_| "端口不合法".to_string())?,
+                )
+            }
+            _ => (authority.to_string(), default_port),
+        }
     };
     let path = if tail.starts_with('/') {
         tail.to_string()
@@ -1682,6 +1925,10 @@ fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
         format!("/{tail}")
     };
     Ok((secure, host, port, path))
+}
+
+fn is_local_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host.starts_with("127.") || host == "::1"
 }
 
 /// 一次请求：不重试、不改写内容。返回 (状态码, 响应体文本)
@@ -1717,8 +1964,8 @@ fn http_post(
         .map(|(k, v)| format!("{k}: {v}\r\n"))
         .collect();
     let header_w = wide(&header_text);
-    // 本地端点走直连，避免系统代理把 127.0.0.1 也劫走
-    let local = host.eq_ignore_ascii_case("localhost") || host.starts_with("127.");
+    // 本地端点走直连，避免系统代理把 127.0.0.1 / ::1 也劫走
+    let local = is_local_host(&host);
     let access = if local {
         WINHTTP_ACCESS_TYPE_NO_PROXY
     } else {
@@ -1924,7 +2171,7 @@ fn http_post_cb(
         .map(|(k, v)| format!("{k}: {v}\r\n"))
         .collect();
     let header_w = wide(&header_text);
-    let local = host.eq_ignore_ascii_case("localhost") || host.starts_with("127.");
+    let local = is_local_host(&host);
     let access = if local {
         WINHTTP_ACCESS_TYPE_NO_PROXY
     } else {
@@ -2166,19 +2413,29 @@ fn store_apps() -> Result<Vec<Value>, String> {
     Ok(list)
 }
 
+fn validate_store_package(raw: &str) -> Result<String, String> {
+    let pkg = raw.trim();
+    if pkg.is_empty() || pkg.len() > 256 {
+        return Err("包名无效".into());
+    }
+    if pkg.contains("..")
+        || !pkg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+    {
+        return Err("商店包名包含非法字符".into());
+    }
+    Ok(pkg.to_string())
+}
+
 /// 卸载商店应用：Remove-AppxPackage（当前用户范围）。
 #[tauri::command(async)]
 fn remove_store_app(package: String, confirm: bool) -> Result<Value, String> {
-    let package = package.trim().to_string();
+    let package = validate_store_package(&package)?;
     if !confirm {
         return Ok(json!({ "dry_run": true, "package": package }));
     }
-    if package.is_empty() {
-        return Err("缺少包名".into());
-    }
-    // 单引号包裹 + 内部单引号翻倍，避免 PowerShell 注入
-    let quoted = package.replace('\'', "''");
-    let script = format!("Remove-AppxPackage -Package '{quoted}'");
+    let script = format!("Remove-AppxPackage -Package '{package}'");
     let out = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .creation_flags(CREATE_NO_WINDOW)
@@ -2322,6 +2579,7 @@ fn main() {
             reveal,
             open_path,
             app_info,
+            app_capabilities,
             is_admin,
             run_as_admin,
             toggle_fullscreen,
@@ -2522,7 +2780,139 @@ fn main() {
         .run(|handle, event| {
             if let tauri::RunEvent::Exit = event {
                 handle.state::<archive::ArchiveCtx>().clear_undo();
+                if let Ok(mut guard) = handle.state::<AppState>().engine.lock() {
+                    if let Some(mut old) = guard.take() {
+                        let _ = old.child.kill();
+                        let _ = old.child.wait();
+                    }
+                }
             }
         });
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn validate_open_target_blocks_dangerous_schemes_and_allows_recycle_bin() {
+        assert_eq!(
+            validate_open_target("shell:RecycleBinFolder").unwrap(),
+            OpenTarget::SafeShell
+        );
+        assert_eq!(
+            validate_open_target("SHELL:RecycleBinFolder").unwrap(),
+            OpenTarget::SafeShell
+        );
+        assert_eq!(
+            validate_open_target("https://example.com/a?x=1&y=2").unwrap(),
+            OpenTarget::Url
+        );
+        for bad in [
+            "",
+            "javascript:alert(1)",
+            "ms-msdt:/id PCWDiagnostic",
+            "file:///C:/Windows/win.ini",
+            "shell:Startup",
+            "cmd:/c calc",
+            "C:\\Windows\\notepad.exe\" & calc",
+            "https://example.com\nX-Inject: 1",
+        ] {
+            assert!(
+                validate_open_target(bad).is_err(),
+                "危险或非法 open_path 目标必须被拒绝: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_schedule_time_and_store_package_reject_injection() {
+        assert_eq!(validate_schedule_time("03:00").unwrap(), "03:00");
+        assert_eq!(validate_schedule_time("23:59").unwrap(), "23:59");
+        assert_eq!(validate_schedule_time("00:00").unwrap(), "00:00");
+        for bad_t in ["24:00", "03:60", "3:00", "03:00 & calc", "ab:cd", ""] {
+            assert!(
+                validate_schedule_time(bad_t).is_err(),
+                "非法定时时间应被拒绝: {bad_t}"
+            );
+        }
+
+        assert_eq!(
+            validate_store_package("Microsoft.Paint_11.2302.18.0_x64__8wekyb3d8bbwe").unwrap(),
+            "Microsoft.Paint_11.2302.18.0_x64__8wekyb3d8bbwe"
+        );
+        for bad_p in ["", "pkg'; calc; '", "pkg name", "a..b", "pkg$(calc)", "pkg|dir"] {
+            assert!(
+                validate_store_package(bad_p).is_err(),
+                "非法商店包名应被拒绝: {bad_p}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_tail_utf8_handles_multibyte_chinese_boundary() {
+        let root = std::env::temp_dir().join(format!(
+            "tidy_shell_utf8_{}_{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("zh.log");
+        let mut content = String::new();
+        for i in 0..300 {
+            content.push_str(&format!("[2026-11-23] 第{i:03}条中文日志记录——安全稳定\n"));
+        }
+        std::fs::write(&file, content.as_bytes()).unwrap();
+        // 连续 3 个字节偏移必命中 3 字节 UTF-8 中文字符的起始与中间续字节
+        for cut in [99u64, 100u64, 101u64] {
+            let tail = read_tail_utf8(&file, cut).expect("截断多字节 UTF-8 尾部绝不可报错");
+            assert!(
+                tail.contains("第299条中文日志记录"),
+                "尾部内容缺失 (cut={cut}): {tail}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn split_url_handles_ipv6_and_blocks_control_chars() {
+        let (sec, host, port, path) = split_url("http://[::1]:11434/v1/chat?s=1").unwrap();
+        assert!(!sec);
+        assert_eq!(host, "::1");
+        assert_eq!(port, 11434);
+        assert_eq!(path, "/v1/chat?s=1");
+        assert!(is_local_host(&host));
+        assert!(split_url("https://api.example.com/v1\r\nX: 1").is_err());
+        assert!(split_url("http://[::1").is_err());
+    }
+
+    #[test]
+    fn write_file_atomic_and_app_capabilities_schema() {
+        let root = std::env::temp_dir().join(format!(
+            "tidy_shell_atomic_{}_{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let target = root.join("config.json");
+        write_file_atomic(&target, b"{\"v\":1}").unwrap();
+        write_file_atomic(&target, b"{\"v\":2}").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"v\":2}");
+        let leftover_tmp = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!leftover_tmp, "原子写入后不应残留 .tmp 文件");
+
+        let caps = app_capabilities();
+        assert_eq!(caps["schemaVersion"], json!(1));
+        assert!(caps["cpuCores"].as_u64().unwrap_or(0) >= 1);
+        assert_eq!(caps["extensions"]["pages"], json!(true));
+        assert_eq!(caps["extensions"]["aiActions"], json!(true));
+        assert_eq!(caps["extensions"]["engineMethods"], json!(true));
+        assert_eq!(caps["extensions"]["archiveCodecs"], json!(true));
+        assert_eq!(caps["archive"]["schemaVersion"], json!(1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 

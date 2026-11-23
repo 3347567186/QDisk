@@ -383,6 +383,13 @@ test('代码块语言名不能注入', (fail) => {
   has(html, '<code', fail);
 });
 
+test('file:// 链接二次反转义不能注入属性或原始引号', (fail) => {
+  const html = AIMd.render('[看](file:///D:/a%27onmouseover=alert(1)) 与 [](file:///D:/dir%26x)');
+  lacks(html, "'onmouseover=", fail, 'file:// 单引号必须重新转义');
+  has(html, '&#39;onmouseover=', fail, 'file:// 单引号应转为实体');
+  has(html, 'dir&amp;x', fail, 'file:// & 应重新转义');
+});
+
 /* ---------------- 汇总 ---------------- */
 
 const pass = results.filter((r) => r.pass).length;

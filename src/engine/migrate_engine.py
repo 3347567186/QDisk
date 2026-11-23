@@ -45,6 +45,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -143,11 +144,42 @@ def read_link(path):
 
 
 def make_junction(link, target):
-    """junction 不需要管理员权限，是最稳的跨卷链接重建方式。"""
-    if os.path.exists(link):
+    """junction 不需要管理员权限，是最稳的跨卷链接重建方式。
+
+    严禁拼串调 os.system（含 &/%/^/" 的路径会触发 cmd 注入并闪黑窗）：
+    常规路径走无窗 subprocess(cmd /d /c mklink /J)，含 cmd 元字符路径改经
+    环境变量交给 PowerShell New-Item -ItemType Junction，彻底杜绝命令注入。
+    """
+    for val in (link, target):
+        if not val or any(c in val for c in '\r\n\0"'):
+            raise OSError("链接路径包含非法字符：%r" % (val,))
+    if os.path.lexists(link):
         raise OSError("链接位置已被占用：%s" % link)
-    rc = os.system('cmd /c mklink /J "%s" "%s" >nul 2>nul' % (link, target))
-    if rc != 0 or not os.path.exists(link):
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
+    has_cmd_meta = any(c in s for s in (link, target) for c in "&|^%!<>")
+    if has_cmd_meta:
+        env = dict(os.environ)
+        env["_TIDY_MJ_LINK"] = link
+        env["_TIDY_MJ_TARGET"] = target
+        res = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "New-Item -ItemType Junction -Path $env:_TIDY_MJ_LINK "
+                "-Target $env:_TIDY_MJ_TARGET | Out-Null",
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+    else:
+        res = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", link, target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+    if res.returncode != 0 or not os.path.lexists(link):
         raise OSError("重建 junction 失败：%s -> %s" % (link, target))
 
 
@@ -427,13 +459,20 @@ def _is_protected(path):
     win = os.environ.get("WINDIR", r"C:\Windows").lower().rstrip("\\")
     if low == win or low.startswith(win + "\\"):
         return "Windows 目录"
-    for name in ("program files", "program files (x86)", "programdata"):
+    for name in ("program files", "program files (x86)", "programdata",
+                 "$recycle.bin", "system volume information", "recovery", "boot"):
         base = os.path.join(drive + "\\", name)
         if low == base.lower() or low.startswith(base.lower() + "\\"):
-            return "系统程序目录"
+            return "系统关键目录"
     profile = os.path.expanduser("~").lower().rstrip("\\")
     if low == profile:
         return "用户目录根"
+    startup = os.path.join(
+        profile, "appdata", "roaming", "microsoft", "windows",
+        "start menu", "programs", "startup"
+    )
+    if low == startup or low.startswith(startup + "\\"):
+        return "系统开机启动目录"
     return ""
 
 

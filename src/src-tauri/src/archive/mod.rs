@@ -1141,6 +1141,10 @@ pub fn archive_preview_clear(state: State<'_, ArchiveCtx>) {
     clear_preview(state.inner());
 }
 
+pub fn capabilities_snapshot() -> ArchiveCapabilities {
+    registry::capabilities(&data_dir())
+}
+
 #[tauri::command]
 pub async fn archive_capabilities(_app: AppHandle) -> Result<ArchiveCapabilities, String> {
     tauri::async_runtime::spawn_blocking(move || Ok(registry::capabilities(&data_dir())))

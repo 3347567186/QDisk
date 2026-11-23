@@ -287,6 +287,43 @@ class TestSafety(Base):
         self.assertEqual(len(os.listdir(self.dst)), 40)
         self.assertFalse([f for f in os.listdir(self.dst) if f.endswith(".tmp")])
 
+    def test_make_junction_safe_against_cmd_injection_and_protected_dirs(self):
+        # 1. 非法控制字符与引号必须直接拒绝
+        for bad in ('a"b', "a\nb", "a\0b"):
+            with self.assertRaises(OSError):
+                M.make_junction(os.path.join(self.root, bad), self.dst)
+
+        # 2. 含 cmd 元字符 & 的目录名不得触发命令注入，且能正常重建 junction
+        marker = os.path.join(self.root, "pwned_marker.txt")
+        tricky_target = os.path.join(self.root, "R&D_target")
+        os.makedirs(tricky_target, exist_ok=True)
+        with open(os.path.join(tricky_target, "ok.txt"), "w", encoding="utf-8") as f:
+            f.write("safe")
+        tricky_link = os.path.join(self.root, "R&D_link")
+        M.make_junction(tricky_link, tricky_target)
+        try:
+            self.assertTrue(os.path.lexists(tricky_link))
+            self.assertTrue(os.path.isfile(os.path.join(tricky_link, "ok.txt")))
+            self.assertFalse(os.path.exists(marker))
+            # 已占用的链接路径再次创建必须报错
+            with self.assertRaises(OSError):
+                M.make_junction(tricky_link, tricky_target)
+        finally:
+            try:
+                os.rmdir(tricky_link)
+            except OSError:
+                pass
+
+        # 3. 扩展后的受保护系统目录校验
+        self.assertTrue(M._is_protected(r"C:\$Recycle.Bin"))
+        self.assertTrue(M._is_protected(r"C:\Recovery\WindowsRE"))
+        self.assertTrue(M._is_protected(r"C:\Boot"))
+        startup = os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming", "Microsoft",
+            "Windows", "Start Menu", "Programs", "Startup"
+        )
+        self.assertTrue(M._is_protected(startup))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
