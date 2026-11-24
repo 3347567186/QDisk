@@ -67,7 +67,8 @@ a {
   text-decoration: none;
 }
 
-img {
+img,
+video {
   max-width: 100%;
   height: auto;
   display: block;
@@ -1303,13 +1304,13 @@ dialog.sponsor-dialog[open]:where(:not([data-closing]))::backdrop {
 /* ---------------- Act I.5: Seamless Editorial Product Film Stage ---------------- */
 .film-section {
   position: relative;
-  padding: 64px 0 96px;
+  padding: 48px 0 84px;
 }
 
 .film-head {
   text-align: center;
-  max-width: 720px;
-  margin: 0 auto 36px;
+  max-width: 700px;
+  margin: 0 auto 28px;
 }
 
 .film-head .section-desc {
@@ -1317,7 +1318,7 @@ dialog.sponsor-dialog[open]:where(:not([data-closing]))::backdrop {
 }
 
 .film-stage {
-  max-width: 1020px;
+  max-width: 960px;
   margin: 0 auto;
   position: relative;
 }
@@ -1440,33 +1441,34 @@ dialog.sponsor-dialog[open]:where(:not([data-closing]))::backdrop {
 .film-facade-scrim {
   position: absolute;
   inset: 0;
-  background: radial-gradient(circle at 50% 50%, rgba(14, 14, 12, 0.42) 0%, rgba(14, 14, 12, 0.14) 50%, rgba(14, 14, 12, 0.36) 100%);
+  background: radial-gradient(circle at 50% 42%, rgba(14, 14, 12, 0.24) 0%, rgba(14, 14, 12, 0.08) 48%, rgba(14, 14, 12, 0.34) 100%);
   transition: background-color 0.25s ease;
 }
 
 .film-play-center {
   position: absolute;
   inset: 0;
+  padding-bottom: 10%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 12px;
   pointer-events: none;
 }
 
 .film-play-medallion {
-  width: 74px;
-  height: 74px;
+  width: 68px;
+  height: 68px;
   border-radius: 50%;
   display: grid;
   place-items: center;
   color: #ffffff;
   background: linear-gradient(145deg, #eb6238 0%, #d44b24 55%, #b83b17 100%);
   box-shadow:
-    0 0 0 8px rgba(20, 20, 18, 0.42),
-    0 0 0 9px rgba(255, 255, 255, 0.16),
-    0 20px 44px -10px rgba(212, 75, 36, 0.65);
+    0 0 0 7px rgba(20, 20, 18, 0.44),
+    0 0 0 8px rgba(255, 255, 255, 0.16),
+    0 18px 42px -8px rgba(212, 75, 36, 0.65);
   transition: transform 0.32s var(--ease-out), box-shadow 0.32s var(--ease-out);
 }
 
@@ -1671,6 +1673,7 @@ dialog.cinema-dialog[open]:where(:not([data-closing]))::backdrop {
 .cinema-sheet {
   display: flex;
   flex-direction: column;
+  max-height: calc(100dvh - 32px);
 }
 
 .cinema-bar {
@@ -1678,8 +1681,9 @@ dialog.cinema-dialog[open]:where(:not([data-closing]))::backdrop {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid rgba(255, 252, 245, 0.1);
+  flex-shrink: 0;
 }
 
 .cinema-title-wrap {
@@ -1720,15 +1724,20 @@ dialog.cinema-dialog[open]:where(:not([data-closing]))::backdrop {
 .cinema-stage {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  max-height: calc(100dvh - 156px);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  place-items: center;
   background: #080807;
+  overflow: hidden;
 }
 
 .cinema-video {
   display: block;
   width: 100%;
-  height: 100%;
+  height: auto;
+  max-height: calc(100dvh - 156px);
+  aspect-ratio: 16 / 9;
   object-fit: contain;
   background: #080807;
 }
@@ -1736,10 +1745,12 @@ dialog.cinema-dialog[open]:where(:not([data-closing]))::backdrop {
 .cinema-chapters {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-top: 1px solid rgba(255, 252, 245, 0.1);
   background: rgba(255, 252, 245, 0.03);
+  flex-shrink: 0;
 }
 
 .cinema-chip {
@@ -1768,15 +1779,15 @@ dialog.cinema-dialog[open]:where(:not([data-closing]))::backdrop {
   color: #ffffff;
 }
 
-/* ---------------- Shared-Element Image Lightbox Dialog ---------------- */
+/* ---------------- Shared-Element Full-Viewport Floating Image Lightbox ---------------- */
 ::view-transition-group(qdisk-zoom-media) {
-  animation-duration: 420ms;
-  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  animation-duration: 440ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   z-index: 2;
 }
 
 html[data-vt-media="close"]::view-transition-group(qdisk-zoom-media) {
-  animation-duration: 360ms;
+  animation-duration: 340ms;
 }
 
 ::view-transition-old(qdisk-zoom-media),
@@ -1786,13 +1797,13 @@ html[data-vt-media="close"]::view-transition-group(qdisk-zoom-media) {
   object-fit: contain;
   border-radius: 14px;
   overflow: hidden;
-  box-shadow: 0 28px 80px -22px rgba(0, 0, 0, 0.34);
+  box-shadow: 0 32px 96px -20px rgba(0, 0, 0, 0.55);
 }
 
 html[data-vt-media]::view-transition-old(root),
 html[data-vt-media]::view-transition-new(root) {
   animation-duration: 320ms;
-  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1804,18 +1815,21 @@ html[data-vt-media]::view-transition-new(root) {
 }
 
 dialog.media-lightbox {
-  margin: auto;
+  position: fixed;
+  inset: 0;
+  margin: 0;
   padding: 0;
-  width: min(1240px, calc(100vw - 28px));
-  max-height: calc(100dvh - 28px);
-  border-radius: 22px;
-  border: 1px solid var(--line-strong);
-  background: light-dark(rgba(249, 248, 244, 0.97), rgba(18, 18, 16, 0.97));
-  color: var(--ink);
-  box-shadow: 0 38px 100px -24px rgba(0, 0, 0, 0.62);
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #f4f2ec;
   overflow: hidden;
   opacity: 0;
-  transition-property: opacity, transform, display, overlay;
+  transition-property: opacity, display, overlay;
   transition-duration: 0.28s;
   transition-timing-function: var(--ease-out);
   transition-behavior: allow-discrete;
@@ -1829,22 +1843,13 @@ dialog.media-lightbox:modal {
   overscroll-behavior: contain;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  dialog.media-lightbox {
-    transform: translateY(10px) scale(0.96);
-  }
-  dialog.media-lightbox[data-vt-active] {
-    transform: none;
-  }
-}
-
 dialog.media-lightbox::backdrop {
   background-color: rgba(10, 10, 9, 0);
   backdrop-filter: blur(0px);
   overflow: hidden;
   overscroll-behavior: contain;
   transition-property: background-color, backdrop-filter, display, overlay;
-  transition-duration: 0.28s;
+  transition-duration: 0.3s;
   transition-timing-function: var(--ease-out);
   transition-behavior: allow-discrete;
 }
@@ -1859,20 +1864,9 @@ dialog.media-lightbox[open]:where(:not([data-closing])) {
   }
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  dialog.media-lightbox[open]:where(:not([data-closing])) {
-    transform: translateY(0) scale(1);
-  }
-  @starting-style {
-    dialog.media-lightbox[open]:where(:not([data-closing])) {
-      transform: translateY(10px) scale(0.96);
-    }
-  }
-}
-
 dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
-  background-color: rgba(10, 10, 9, 0.72);
-  backdrop-filter: blur(12px);
+  background-color: rgba(10, 10, 9, 0.88);
+  backdrop-filter: blur(20px);
 }
 
 @starting-style {
@@ -1890,19 +1884,40 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
 }
 
 .lb-shell {
-  display: flex;
-  flex-direction: column;
-  max-height: calc(100dvh - 28px);
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 16px 20px;
+  gap: 12px;
+}
+
+.lb-topbar,
+.lb-foot,
+.lb-nav {
+  transition: opacity 0.22s ease, transform 0.24s var(--ease-out);
+}
+
+dialog.media-lightbox[data-vt-active] .lb-topbar,
+dialog.media-lightbox[data-vt-active] .lb-foot,
+dialog.media-lightbox[data-vt-active] .lb-nav {
+  opacity: 0;
 }
 
 .lb-topbar {
+  justify-self: center;
+  width: min(1160px, 100%);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-alt);
+  gap: 14px;
+  padding: 8px 10px 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 252, 245, 0.14);
+  background: rgba(22, 22, 20, 0.76);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 36px -12px rgba(0, 0, 0, 0.55);
+  z-index: 4;
 }
 
 .lb-meta {
@@ -1915,18 +1930,19 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
 .lb-counter {
   font-size: 11.5px;
   font-weight: 700;
-  color: var(--accent);
-  padding: 3px 9px;
+  color: #ff8a65;
+  padding: 4px 10px;
   border-radius: 999px;
-  background: var(--accent-soft);
+  background: rgba(240, 110, 71, 0.18);
+  border: 1px solid rgba(240, 110, 71, 0.28);
   flex-shrink: 0;
 }
 
 .lb-title {
   margin: 0;
-  font-size: 14.5px;
-  font-weight: 700;
-  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  color: #f4f2ec;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1945,11 +1961,11 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
   align-items: center;
   gap: 6px;
   height: 34px;
-  padding: 0 12px;
+  padding: 0 13px;
   border-radius: 999px;
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  color: var(--ink);
+  border: 1px solid rgba(255, 252, 245, 0.16);
+  background: rgba(255, 252, 245, 0.08);
+  color: #f4f2ec;
   font: 600 12.5px/1 var(--font-sans);
   cursor: pointer;
   transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
@@ -1957,43 +1973,54 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
 
 .lb-tool-btn:hover,
 .lb-tool-btn[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent);
+  border-color: rgba(240, 110, 71, 0.6);
+  background: rgba(240, 110, 71, 0.22);
+  color: #ffffff;
+}
+
+.media-lightbox .dialog-close-btn {
+  background: rgba(255, 252, 245, 0.08);
+  border-color: rgba(255, 252, 245, 0.16);
+  color: #f4f2ec;
+}
+
+.media-lightbox .dialog-close-btn:hover {
+  background: #f4f2ec;
+  color: #141412;
+  border-color: #f4f2ec;
 }
 
 .lb-body {
   position: relative;
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr) 52px;
+  grid-template-columns: 56px minmax(0, 1fr) 56px;
   align-items: center;
-  gap: 8px;
-  padding: 14px 12px;
+  gap: 12px;
   min-height: 0;
-  flex: 1 1 auto;
-  background: light-dark(#eeebe3, #111110);
+  width: 100%;
+  height: 100%;
 }
 
 .lb-viewport {
   position: relative;
   width: 100%;
-  height: min(72dvh, 720px);
+  height: 100%;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border-radius: 14px;
 }
 
 .lb-img {
-  max-width: 100%;
+  max-width: min(100%, 1320px);
   max-height: 100%;
   width: auto;
   height: auto;
   object-fit: contain;
   border-radius: 14px;
-  border: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-lg);
+  border: 1px solid rgba(255, 252, 245, 0.14);
+  box-shadow: 0 36px 100px -20px rgba(0, 0, 0, 0.75);
   cursor: zoom-in;
   user-select: none;
   -webkit-user-drag: none;
@@ -2017,51 +2044,60 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
 
 .lb-nav {
   appearance: none;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  border: 1px solid var(--line-strong);
-  background: var(--surface);
-  color: var(--ink);
+  border: 1px solid rgba(255, 252, 245, 0.16);
+  background: rgba(22, 22, 20, 0.72);
+  backdrop-filter: blur(14px);
+  color: #f4f2ec;
   display: inline-grid;
   place-items: center;
   cursor: pointer;
   justify-self: center;
-  box-shadow: var(--shadow-sm);
+  z-index: 4;
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.55);
   transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, transform 0.22s var(--ease-out);
 }
 
 .lb-nav:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
+  border-color: rgba(240, 110, 71, 0.65);
+  color: #ffffff;
+  background: rgba(240, 110, 71, 0.28);
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .lb-nav:hover {
-    transform: scale(1.06);
+    transform: scale(1.07);
   }
 }
 
 .lb-foot {
-  display: flex;
+  justify-self: center;
+  max-width: min(100%, 1040px);
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 11px 18px;
-  border-top: 1px solid var(--line);
-  background: var(--bg-alt);
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 9px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 252, 245, 0.12);
+  background: rgba(22, 22, 20, 0.72);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.5);
+  z-index: 4;
 }
 
 .lb-caption {
   margin: 0;
   font-size: 13px;
-  color: var(--ink-2);
+  color: #e4e1d8;
 }
 
 .lb-keys {
   font-size: 11.5px;
-  color: var(--ink-3);
+  color: #9e998e;
   white-space: nowrap;
 }
 
@@ -2604,15 +2640,21 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
 
 @media (max-width: 600px) {
   .brand-cn { display: none; }
-  .star-pill { padding: 0 9px; gap: 5px; }
+  .header-actions { gap: 5px; }
+  .header-actions .btn.sm { padding: 0 11px; font-size: 12px; }
+  .star-pill { padding: 0 9px; gap: 0; }
   .star-pill .star-gh,
+  .star-pill .star-label,
   .star-pill .star-count { display: none; }
   .hero { padding: 48px 0 64px; }
   .title-accent { white-space: normal; }
   .section { padding: 72px 0; }
   .film-section { padding: 24px 0 64px; }
   .film-spec-pill { display: none; }
-  .film-play-medallion { width: 58px; height: 58px; }
+  .film-play-center { padding-bottom: 0; gap: 8px; }
+  .film-play-medallion { width: 48px; height: 48px; }
+  .film-play-medallion svg { width: 18px; height: 18px; }
+  .film-play-label { padding: 5px 11px; font-size: 11.5px; }
   .film-chapters { grid-template-columns: 1fr; }
   .story-stack { gap: 64px; }
   .stat-quad { grid-template-columns: 1fr; }
@@ -2628,21 +2670,22 @@ dialog.media-lightbox[open]:where(:not([data-closing]))::backdrop {
     right: auto;
     bottom: auto;
   }
+  .lb-shell { padding: 12px; gap: 10px; }
   .lb-body {
     grid-template-columns: minmax(0, 1fr);
-    padding: 10px;
+    padding: 0;
   }
-  .lb-viewport { height: min(62dvh, 460px); }
   .lb-nav {
     position: absolute;
     top: 50%;
     transform: translateY(-50%);
-    z-index: 3;
-    background: light-dark(rgba(255, 255, 255, 0.88), rgba(24, 24, 22, 0.86));
-    backdrop-filter: blur(8px);
+    z-index: 4;
+    background: rgba(22, 22, 20, 0.8);
+    backdrop-filter: blur(10px);
   }
-  .lb-prev { left: 16px; }
-  .lb-next { right: 16px; }
+  .lb-prev { left: 10px; }
+  .lb-next { right: 10px; }
+  .lb-foot { border-radius: 16px; padding: 8px 14px; }
   .code-block { padding-right: 18px; padding-bottom: 52px; }
   .copy-btn { top: auto; bottom: 10px; right: 10px; }
 }

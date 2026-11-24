@@ -27,19 +27,26 @@ for (const ref of assetHrefs) {
     if (!ids.has(anchor)) fail(`发现断链锚点 href="${ref}"`);
     continue;
   }
-  if (ref === 'assets/media/qdisk-promo.mp4') {
+  const cleanRef = ref.split('?')[0];
+  if (cleanRef === 'assets/media/qdisk-promo.mp4') {
     if (!pagesYml.includes('_site/assets/media/qdisk-promo.mp4')) {
       fail('index.html 引用了 assets/media/qdisk-promo.mp4，但 pages.yml 未配置拉取步骤');
     }
     continue;
   }
-  const direct = path.join(siteDir, ref);
-  const fromDocs = ref.startsWith('assets/screenshots/')
-    ? path.join(repoRoot, 'docs', ref)
+  const direct = path.join(siteDir, cleanRef);
+  const fromDocs = cleanRef.startsWith('assets/screenshots/')
+    ? path.join(repoRoot, 'docs', cleanRef)
     : '';
   if (!fs.existsSync(direct) && !(fromDocs && fs.existsSync(fromDocs))) {
     fail(`缺失官网静态资源: ${ref}`);
   }
+}
+if (!/href="styles\.css\?v=/.test(html) || !/src="app\.js\?v=/.test(html)) {
+  fail('index.html 必须为 styles.css 和 app.js 附带 ?v= 缓存破除参数，防止 GitHub Pages 10 分钟旧缓存错位');
+}
+if (!pagesYml.includes('GITHUB_SHA')) {
+  fail('pages.yml 必须自动为 _site/index.html 写入提交哈希缓存破除版本');
 }
 for (const m of appJs.matchAll(/assets\/screenshots\/[^'"\s]+/g)) {
   const fromDocs = path.join(repoRoot, 'docs', m[0]);

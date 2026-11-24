@@ -47,7 +47,7 @@
       'lightbox.hint': '查看大图',
       'lightbox.zoomIn': '2× 细节',
       'lightbox.zoomOut': '适应窗口',
-      'lightbox.keys': '← / → 切换 · 点击图片 2× 细节 · Esc 关闭',
+      'lightbox.keys': '← / → 切换 · 滚轮/点击缩放 · Esc 关闭',
       'story.eyebrow': 'CRAFTED FOR CLARITY · 核心体验',
       'story.title': '把四件高频麻烦事，做到透明且零焦虑',
       'story.s1Title': '可审计本地 AI 助手',
@@ -140,7 +140,7 @@
       'lightbox.hint': 'Inspect',
       'lightbox.zoomIn': '2× Detail',
       'lightbox.zoomOut': 'Fit Screen',
-      'lightbox.keys': '← / → Navigate · Click image for 2× · Esc to close',
+      'lightbox.keys': '← / → Navigate · Wheel/Click zoom · Esc close',
       'story.eyebrow': 'CRAFTED FOR CLARITY',
       'story.title': 'Four daily disk headaches, solved with total transparency',
       'story.s1Title': 'Auditable Local-First AI Assistant',
@@ -1120,6 +1120,8 @@
   ];
 
   const lightboxDialog = document.getElementById('media-lightbox');
+  const lbShell = document.getElementById('lb-shell');
+  const lbBody = document.getElementById('lb-body');
   const lbViewport = document.getElementById('lb-viewport');
   const lbImg = document.getElementById('lb-img');
   const lbTitle = document.getElementById('lb-title');
@@ -1139,6 +1141,7 @@
   let lbOriginImg = null;
   let lbOriginId = '';
   let lbZoomed = false;
+  let lbScale = 1;
   let lbPanX = 0;
   let lbPanY = 0;
   let lbDragging = false;
@@ -1167,11 +1170,32 @@
     if (lightboxDialog) lightboxDialog.removeAttribute('data-vt-active');
   }
 
+  function clampPan(x, y) {
+    const scale = lbScale;
+    if (scale <= 1.02 || !lbViewport || !lbImg || typeof lbViewport.getBoundingClientRect !== 'function') {
+      return { x: 0, y: 0 };
+    }
+    const vr = lbViewport.getBoundingClientRect();
+    const maxX = Math.max(120, Math.round(vr.width * (scale - 1) * 0.55));
+    const maxY = Math.max(90, Math.round(vr.height * (scale - 1) * 0.55));
+    return {
+      x: Math.max(-maxX, Math.min(maxX, x)),
+      y: Math.max(-maxY, Math.min(maxY, y))
+    };
+  }
+
   function applyZoomTransform() {
     if (!lbImg || !lbImg.style) return;
+    lbZoomed = lbScale > 1.02;
     if (lbZoomed) {
-      lbImg.style.transform = `translate3d(${lbPanX}px, ${lbPanY}px, 0) scale(2)`;
+      const clamped = clampPan(lbPanX, lbPanY);
+      lbPanX = clamped.x;
+      lbPanY = clamped.y;
+      lbImg.style.transform = `translate3d(${lbPanX}px, ${lbPanY}px, 0) scale(${lbScale.toFixed(2)})`;
     } else {
+      lbScale = 1;
+      lbPanX = 0;
+      lbPanY = 0;
       lbImg.style.transform = '';
     }
     if (lbViewport) lbViewport.classList.toggle('is-zoomed', lbZoomed);
@@ -1183,6 +1207,7 @@
 
   function resetLightboxZoom() {
     lbZoomed = false;
+    lbScale = 1;
     lbPanX = 0;
     lbPanY = 0;
     lbDragging = false;
@@ -1425,8 +1450,8 @@
 
   if (lbZoomBtn) {
     lbZoomBtn.addEventListener('click', () => {
-      lbZoomed = !lbZoomed;
-      if (!lbZoomed) { lbPanX = 0; lbPanY = 0; }
+      lbScale = lbZoomed ? 1 : 2;
+      if (lbScale <= 1) { lbPanX = 0; lbPanY = 0; }
       applyZoomTransform();
     });
   }
@@ -1437,8 +1462,8 @@
         lbDidDrag = false;
         return;
       }
-      lbZoomed = !lbZoomed;
-      if (!lbZoomed) { lbPanX = 0; lbPanY = 0; }
+      lbScale = lbZoomed ? 1 : 2;
+      if (lbScale <= 1) { lbPanX = 0; lbPanY = 0; }
       applyZoomTransform();
     });
 
@@ -1455,6 +1480,16 @@
     });
   }
 
+  if (lbViewport) {
+    lbViewport.addEventListener('wheel', (e) => {
+      if (!lightboxDialog || !lightboxDialog.open) return;
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 0.25 : -0.25;
+      lbScale = Math.max(1, Math.min(2.5, Number((lbScale + delta).toFixed(2))));
+      applyZoomTransform();
+    }, { passive: false });
+  }
+
   window.addEventListener('pointermove', (e) => {
     if (!lbDragging || !lbZoomed) return;
     const nextX = e.clientX - lbDragStartX;
@@ -1462,9 +1497,9 @@
     if (Math.abs(nextX - lbPanX) > 3 || Math.abs(nextY - lbPanY) > 3) {
       lbDidDrag = true;
     }
-    const maxPan = 420;
-    lbPanX = Math.max(-maxPan, Math.min(maxPan, nextX));
-    lbPanY = Math.max(-maxPan, Math.min(maxPan, nextY));
+    const clamped = clampPan(nextX, nextY);
+    lbPanX = clamped.x;
+    lbPanY = clamped.y;
     applyZoomTransform();
   });
 
@@ -1485,13 +1520,19 @@
       }
     });
 
+    // Clicking anywhere on the dark backdrop outside image & floating HUD closes smoothly
+    lightboxDialog.addEventListener('click', (event) => {
+      const t = event.target;
+      if (t === lightboxDialog || t === lbShell || t === lbBody || t === lbViewport) {
+        closeLightbox();
+      }
+    });
+
     // Always route Esc & light-dismiss cancel through reverse shared-element morph
     lightboxDialog.addEventListener('cancel', (event) => {
       event.preventDefault();
       closeLightbox();
     });
-
-    wireLightDismissFallback(lightboxDialog, closeLightbox);
   }
 
   mediaUiReady = true;

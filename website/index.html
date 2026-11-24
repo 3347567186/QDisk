@@ -16,7 +16,7 @@
   </script>
   <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
   <link rel="icon" type="image/png" sizes="256x256" href="assets/icon-256.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20261124v2">
 </head>
 <body>
   <!-- Scroll-Driven Reading Progress Hairline -->
@@ -208,7 +208,7 @@
                 preload="none"
                 width="1920"
                 height="1080"
-                poster="assets/media/promo-poster.jpg"
+                poster="assets/media/promo-poster.jpg?v=20261124v2"
                 aria-label="轻盘 QDisk 56 秒官方实机宣传片"
               >
                 <source src="assets/media/qdisk-promo.mp4" type="video/mp4">
@@ -216,7 +216,7 @@
               </video>
 
               <button type="button" class="film-facade" id="film-play-facade" aria-label="播放 56 秒官方实机宣传片">
-                <img src="assets/media/promo-poster.jpg" alt="轻盘 QDisk 56 秒官方宣传片封面" width="1920" height="1080" loading="lazy" decoding="async">
+                <img src="assets/media/promo-poster.jpg?v=20261124v2" alt="轻盘 QDisk 56 秒官方宣传片封面" width="1920" height="1080" loading="lazy" decoding="async">
                 <span class="film-facade-scrim" aria-hidden="true"></span>
                 <span class="film-play-center" aria-hidden="true">
                   <span class="film-play-medallion">
@@ -639,7 +639,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
           preload="none"
           width="1920"
           height="1080"
-          poster="assets/media/promo-poster.jpg"
+          poster="assets/media/promo-poster.jpg?v=20261124v2"
           aria-label="轻盘 QDisk 56 秒官方实机宣传片（影院模式）"
         >
           <source src="assets/media/qdisk-promo.mp4" type="video/mp4">
@@ -656,9 +656,9 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
     </div>
   </dialog>
 
-  <!-- Shared-Element Seamless Image Lightbox Dialog -->
+  <!-- Shared-Element Full-Viewport Floating Image Lightbox Dialog -->
   <dialog class="media-lightbox" id="media-lightbox" closedby="any" aria-labelledby="lb-title">
-    <div class="lb-shell">
+    <div class="lb-shell" id="lb-shell">
       <div class="lb-topbar">
         <div class="lb-meta">
           <span class="lb-counter mono" id="lb-counter">1 / 5</span>
@@ -675,7 +675,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
         </div>
       </div>
 
-      <div class="lb-body">
+      <div class="lb-body" id="lb-body">
         <button type="button" class="lb-nav lb-prev" id="lb-prev" aria-label="上一张截图">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
         </button>
@@ -691,12 +691,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
 
       <div class="lb-foot">
         <p class="lb-caption" id="lb-caption">透明查证 · 0.31 ms 真停止 · 四档权限审批</p>
-        <span class="lb-keys mono" data-i18n="lightbox.keys">← / → 切换 · 点击图片 2× 细节 · Esc 关闭</span>
+        <span class="lb-keys mono" data-i18n="lightbox.keys">← / → 切换 · 滚轮/点击缩放 · Esc 关闭</span>
       </div>
       <span class="sr-only" id="lb-live" aria-live="polite"></span>
     </div>
   </dialog>
 
-  <script src="app.js" defer></script>
+  <script src="app.js?v=20261124v2" defer></script>
 </body>
 </html>
