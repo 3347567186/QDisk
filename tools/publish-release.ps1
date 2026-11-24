@@ -62,7 +62,30 @@ if (-not $hasInst -and -not $hasPort) {
 }
 
 function Get-Sha256Lower([string]$p) {
-  return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant()
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $fs = New-Object System.IO.FileStream($p, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 262144)
+  try {
+    $hash = $sha.ComputeHash($fs)
+    return ([BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant())
+  } finally {
+    $fs.Dispose()
+    $sha.Dispose()
+  }
+}
+
+function Start-Sha256Task([string]$p) {
+  $pathCopy = $p
+  return [System.Threading.Tasks.Task[string]]::Run([Func[string]]{
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs = New-Object System.IO.FileStream($pathCopy, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 262144)
+    try {
+      $hash = $sha.ComputeHash($fs)
+      return ([BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant())
+    } finally {
+      $fs.Dispose()
+      $sha.Dispose()
+    }
+  })
 }
 
 function Get-NotesFromChangelog([string]$ver, [string]$path) {
@@ -117,8 +140,11 @@ $manifest = [ordered]@{
 
 $sums = New-Object System.Collections.Generic.List[string]
 
+$instShaTask = if ($hasInst) { Start-Sha256Task $instPath } else { $null }
+$portShaTask = if ($hasPort) { Start-Sha256Task $portPath } else { $null }
+
 if ($hasInst) {
-  $sha = Get-Sha256Lower $instPath
+  $sha = $instShaTask.GetAwaiter().GetResult()
   $len = (Get-Item -LiteralPath $instPath).Length
   $url = Format-AssetUrl $BaseUrl $instFile
   $manifest['installer'] = [ordered]@{
@@ -139,7 +165,7 @@ if ($hasInst) {
 }
 
 if ($hasPort) {
-  $sha = Get-Sha256Lower $portPath
+  $sha = $portShaTask.GetAwaiter().GetResult()
   $len = (Get-Item -LiteralPath $portPath).Length
   # 纯 ASCII 文件名，确保 GitHub Releases 下载地址与 latest.json 100% 字节对齐、绝不 404
   $remotePortFile = "QDisk_${Version}_x64-portable.zip"

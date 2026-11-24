@@ -3042,7 +3042,12 @@
       }
 
       async function onUpdaterChannel(channel) {
+        const changed = state.updChannel !== channel;
         state.updChannel = channel;
+        if (changed && !state.updDownloading) {
+          state.updCheck = null;
+          state.updError = null;
+        }
         try {
           await API.updaterConfigSet({ channel });
           await loadUpdater();

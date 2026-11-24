@@ -115,23 +115,111 @@ function Next-Version([string]$cur, [string]$kind) {
 
 # 版本号的实际读写放在主流程里（必须先拿到构建锁，否则两个会话会互相覆盖）
 
+# ---------------------------------------------------------------- 性能与耗时辅助
+
+function Format-CompactDuration([double]$TotalSeconds) {
+  if ([double]::IsNaN($TotalSeconds) -or [double]::IsInfinity($TotalSeconds) -or $TotalSeconds -lt 0) {
+    return '0.0s'
+  }
+  $tenths = [long][Math]::Round($TotalSeconds * 10.0, [MidpointRounding]::AwayFromZero)
+  if ($tenths -lt 600) {
+    return ('{0:0.0}s' -f ($tenths / 10.0))
+  }
+  $sec = [long][Math]::Floor($tenths / 10.0)
+  $days = [long][Math]::Floor($sec / 86400)
+  $rem = $sec % 86400
+  $hours = [long][Math]::Floor($rem / 3600)
+  $rem = $rem % 3600
+  $mins = [long][Math]::Floor($rem / 60)
+  $s = $rem % 60
+  if ($days -gt 0) { return "${days}d${hours}h${mins}m${s}s" }
+  if ($hours -gt 0) { return "${hours}h${mins}m${s}s" }
+  return "${mins}m${s}s"
+}
+
+# 自动探测当前 gnu-d 工具链内置的 rust-lld (gcc-ld\ld.lld.exe)，找不到时无感回退默认 GNU ld
+function Enable-FastRustLinker {
+  try {
+    $sysroot = (& rustc --print sysroot 2>$null | Select-Object -First 1)
+    if ($sysroot) {
+      $lldDir = Join-Path $sysroot.Trim() 'lib\rustlib\x86_64-pc-windows-gnu\bin\gcc-ld'
+      $lldExe = Join-Path $lldDir 'ld.lld.exe'
+      if (Test-Path -LiteralPath $lldExe) {
+        if ($env:Path -notlike "*$lldDir*") {
+          $env:Path = "$lldDir;$env:Path"
+        }
+        $curFlags = [string]$env:RUSTFLAGS
+        if ($curFlags -notmatch '-fuse-ld=') {
+          $env:RUSTFLAGS = (($curFlags.Trim() + ' -C link-arg=-fuse-ld=lld').Trim())
+        }
+        return $true
+      }
+    }
+  } catch {}
+  return $false
+}
+
+function Start-AsyncGateProcess {
+  param(
+    [string]$Kind,
+    [string]$Name,
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [string]$WorkingDirectory,
+    [hashtable]$EnvVars = @{}
+  )
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  $psi.WorkingDirectory = $WorkingDirectory
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+  foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add([string]$a) }
+  foreach ($k in $EnvVars.Keys) { $psi.Environment[$k] = [string]$EnvVars[$k] }
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  [void]$proc.Start()
+  return [pscustomobject]@{
+    Kind   = $Kind
+    Name   = $Name
+    Proc   = $proc
+    OutTsk = $proc.StandardOutput.ReadToEndAsync()
+    ErrTsk = $proc.StandardError.ReadToEndAsync()
+  }
+}
+
 # ---------------------------------------------------------------- 构建步骤
 
 function Build-IndexWalk {
+  $proj = Join-Path $engineSrc 'walkr'
+  $dstExe = Join-Path $engineSrc 'indexwalk.exe'
+  $built = 'D:\Builds\indexwalk-target\release\indexwalk.exe'
+  if (-not $Clean -and (Test-Path -LiteralPath $dstExe)) {
+    $exeTime = (Get-Item -LiteralPath $dstExe).LastWriteTimeUtc
+    $newerWalk = Get-ChildItem $proj -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Extension -in @('.rs', '.toml', '.lock') -and $_.FullName -notmatch '\\target\\' -and $_.LastWriteTimeUtc -gt $exeTime }
+    if (-not $newerWalk) {
+      Write-Host ('[0/2] 跳过 indexwalk 重编（源码未变，复用现存 {0:N0} KB）' -f ((Get-Item -LiteralPath $dstExe).Length / 1KB)) -ForegroundColor DarkGray
+      return $dstExe
+    }
+  }
+
   Write-Host '[0/2] 编译 Rust 遍历器 indexwalk…' -ForegroundColor Cyan
   $env:RUSTUP_TOOLCHAIN = 'gnu-d'
   $env:CARGO_HOME       = 'D:\Tool\cargo-ascii'
   $env:CARGO_TARGET_DIR = 'D:\Builds\indexwalk-target'
   $env:Path             = 'D:\Tool\binutils\mingw64\bin;' + $env:Path
+  [void](Enable-FastRustLinker)
 
-  $proj = Join-Path $engineSrc 'walkr'
   & cargo build --release --manifest-path (Join-Path $proj 'Cargo.toml')
   if ($LASTEXITCODE -ne 0) { throw 'indexwalk 构建失败' }
 
-  $built = 'D:\Builds\indexwalk-target\release\indexwalk.exe'
   if (-not (Test-Path $built)) { throw 'indexwalk.exe 未生成' }
   # 源码目录也放一份：直接跑 tidy.py 时能找到它，不必设环境变量
-  Copy-Item $built (Join-Path $engineSrc 'indexwalk.exe') -Force
+  Copy-Item $built $dstExe -Force
   Write-Host ('  遍历器：{0:N0} KB' -f ((Get-Item $built).Length / 1KB)) -ForegroundColor DarkGray
   return $built
 }
@@ -168,7 +256,12 @@ function Test-EngineStale {
 function Build-Engine {
   Write-Host '[1/2] 打包 Python 引擎…' -ForegroundColor Cyan
   $work = 'D:\Builds\tidyassistant-engine'
-  Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+  if ($Clean) {
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+  } else {
+    # 增量保留 PyInstaller 分析缓存 ($work\build)，仅清空输出目录 ($work\dist) 保证零残留
+    Remove-Item (Join-Path $work 'dist') -Recurse -Force -ErrorAction SilentlyContinue
+  }
   $walkExe = Build-IndexWalk
   # 构建用的解释器：优先用带齐运行期依赖的 venv（pillow/docx/pypdf/pystray…），
   # 没有就退回裸 py 标签。裸环境缺依赖时 PyInstaller 会静默跳过那些包，
@@ -176,11 +269,13 @@ function Build-Engine {
   $enginePy = 'D:\Builds\engine-venv\Scripts\python.exe'
   Push-Location $engineSrc
   try {
+    $pyiArgs = @('-m', 'PyInstaller', '--noconfirm', '--log-level', 'WARN', '--distpath', "$work\dist", '--workpath', "$work\build", '整理助手引擎.spec')
+    if ($Clean) { $pyiArgs = @('-m', 'PyInstaller', '--noconfirm', '--clean', '--log-level', 'WARN', '--distpath', "$work\dist", '--workpath', "$work\build", '整理助手引擎.spec') }
     if (Test-Path $enginePy) {
-      & $enginePy -m PyInstaller --noconfirm --distpath "$work\dist" --workpath "$work\build" '整理助手引擎.spec'
+      & $enginePy @pyiArgs
     } else {
       Write-Host '  警告：没找到 engine-venv，用裸环境打包（可能缺 PIL/docx 等）' -ForegroundColor Yellow
-      & py -V:$pyTag -m PyInstaller --noconfirm --distpath "$work\dist" --workpath "$work\build" '整理助手引擎.spec'
+      & py -V:$pyTag @pyiArgs
     }
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 构建失败' }
   } finally {
@@ -208,6 +303,9 @@ function Build-App {
   $env:CARGO_HOME       = 'D:\Tool\cargo-ascii'
   $env:CARGO_TARGET_DIR = $target
   $env:Path             = 'D:\Tool\binutils\mingw64\bin;' + $env:Path
+  if (Enable-FastRustLinker) {
+    Write-Host '  链接加速器：已启用 rust-lld + 多核 ThinLTO' -ForegroundColor DarkGray
+  }
 
   $cli = Join-Path $root 'tools\cargo-tauri.exe'
   Push-Location $tauriDir
@@ -279,7 +377,13 @@ RAR：首次打开 RAR 时会自动下载官方 UnRAR64.dll 并校验，需要�
   $zip = Join-Path $root "release\QDisk_${current}_x64-portable.zip"
   New-Item -ItemType Directory -Force -Path (Join-Path $root 'release') | Out-Null
   Remove-Item $zip -Force -ErrorAction SilentlyContinue
-  Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  [System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $stage,
+    $zip,
+    [System.IO.Compression.CompressionLevel]::Optimal,
+    $false
+  )
   Write-Host ('便携包：release\{0}（{1:N1} MiB）' -f (Split-Path $zip -Leaf), ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
 }
 
@@ -293,71 +397,16 @@ RAR：首次打开 RAR 时会自动下载官方 UnRAR64.dll 并校验，需要�
 # 没有门禁的时候，「改完不跑测试」和「跑完不看结果」都不留痕迹；
 # 加了门禁之后，坏掉的代码进不了 release\。
 function Invoke-TidyTestGate {
-  Write-Host '跑测试门禁…' -ForegroundColor Cyan
+  $gateSw = [Diagnostics.Stopwatch]::StartNew()
+  Write-Host '跑测试门禁（Python + Node + Rust 多核并行）…' -ForegroundColor Cyan
   $py = 'D:\Builds\engine-venv\Scripts\python.exe'
   if (-not (Test-Path $py)) {
     Write-Host '  警告：没找到 engine-venv，用裸 py 跑引擎测试' -ForegroundColor Yellow
-    $py = 'py'
+    $py = (Get-Command py -ErrorAction Stop).Source
   }
   $failed = @()
 
-  # 临时目录固定在 D:\Builds\temp\sub1\sub2（纯 ASCII 且避开 AppData 与中文路径）
-  $testTemp = 'D:\Builds\temp\sub1\sub2'
-  if (-not (Test-Path $testTemp)) { New-Item -ItemType Directory -Path $testTemp -Force | Out-Null }
-  $prevEnvTemp = $env:TEMP
-  $prevEnvTmp = $env:TMP
-  $prevPyBytecode = $env:PYTHONDONTWRITEBYTECODE
-  $env:TEMP = $testTemp
-  $env:TMP = $testTemp
-  $env:PYTHONDONTWRITEBYTECODE = '1'
-
-  $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
-  Push-Location $engineSrc
-  try {
-    foreach ($m in $modules) {
-      $out = & $py -B -m unittest $m 2>&1
-      $code = $LASTEXITCODE
-      $tail = ($out | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
-      if ($code -ne 0) {
-        $failed += "引擎测试 $m 未通过（$tail）"
-        Write-Host ("  [红] {0}：{1}" -f $m, $tail) -ForegroundColor Red
-      } else {
-        Write-Host ("  [绿] {0}：{1}" -f $m, $tail) -ForegroundColor DarkGray
-      }
-    }
-  } finally {
-    Pop-Location
-    $env:TEMP = $prevEnvTemp
-    $env:TMP = $prevEnvTmp
-    $env:PYTHONDONTWRITEBYTECODE = $prevPyBytecode
-  }
-
-  # 前端自测：6 个 *.selftest.mjs 各自 process.exit(非0) 表示失败
-  $node = (Get-Command node -ErrorAction SilentlyContinue).Source
-  if (-not $node) {
-    Write-Host '  警告：没找到 node，跳过前端自测' -ForegroundColor Yellow
-  } else {
-    $aiDir = Join-Path $root 'src\web\js\ai'
-    foreach ($f in (Get-ChildItem $aiDir -Filter '*.selftest.mjs' -File | Sort-Object Name)) {
-      $out = & $node $f.FullName 2>&1
-      $code = $LASTEXITCODE
-      $last = ($out | Where-Object { $_ -match '结果：' } | Select-Object -Last 1)
-      if (-not $last) { $last = ($out | Where-Object { $_ -match '\S' -and $_ -notmatch '^[─━-]+$' } | Select-Object -Last 1) }
-      if ($code -ne 0) {
-        $failed += "前端自测 $($f.Name) 未通过（$last）"
-        Write-Host ("  [红] {0}：{1}" -f $f.Name, $last) -ForegroundColor Red
-      } else {
-        Write-Host ("  [绿] {0}：{1}" -f $f.Name, $last) -ForegroundColor DarkGray
-      }
-    }
-  }
-
-  # Rust 侧单元测试与零警告门禁：按源码与依赖内容指纹判定（剥离 package version 字段），
-  # 避免「只递增版本号 / 只改前端或 Python」误触发 5 分钟全量重编。
-  # 真正改动了 Rust 代码、依赖或 Tauri 权限配置时：
-  #   1) cargo test（默认开发配置，增量极快且保留 debug_assertions）跑全部单测并检出 cfg(test) 警告；
-  #   2) cargo check --release（关闭 cfg(test) 与 release CFG，100% 检出死代码与发布警告，但跳过 3 分钟 LTO 链接，
-  #      最终正式发布产物仍由 cargo-tauri build 完整执行 lto=true + codegen-units=1）。
+  # 1. 先计算 Rust 源码与依赖内容指纹（~30ms），若需要跑 Rust 测试则与 Python/Node 并发执行
   $rustDir = Join-Path $root 'src\src-tauri'
   $stampPath = 'D:\Builds\.rust-test-stamp'
   $rustFp = & {
@@ -396,6 +445,10 @@ function Invoke-TidyTestGate {
         $norm = [regex]::Replace($raw, '("version"\s*:\s*")[^"]+(")', '${1}<VER>${2}', 1)
         $items.Add([pscustomobject]@{ Key = 'tauri.conf.json'; Text = $norm })
       }
+      $cc = Join-Path $rustDir '.cargo\config.toml'
+      if (Test-Path $cc) {
+        $items.Add([pscustomobject]@{ Key = '.cargo/config.toml'; Text = [IO.File]::ReadAllText($cc, [Text.Encoding]::UTF8) })
+      }
 
       foreach ($it in ($items | Sort-Object Key)) {
         [void]$sb.Append($it.Key).Append("`0").Append($it.Text).Append("`0")
@@ -408,63 +461,166 @@ function Invoke-TidyTestGate {
     }
   }
   $prevStamp = if (Test-Path $stampPath) { (Get-Content -Path $stampPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue).Trim() } else { '' }
-  if ($rustFp -ne $prevStamp) {
-    $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-    if (-not $cargo) {
-      Write-Host '  警告：没找到 cargo，跳过 Rust 测试' -ForegroundColor Yellow
+  $needRust = ($rustFp -ne $prevStamp)
+
+  # 2. 并发启动 4 个隔离 Python 单测 + 8 个前端/官网自测 +（若指纹变化）Rust cargo test
+  $testTemp = 'D:\Builds\temp\sub1\sub2'
+  if (-not (Test-Path $testTemp)) { New-Item -ItemType Directory -Path $testTemp -Force | Out-Null }
+  $workerTemps = New-Object System.Collections.Generic.List[string]
+  $pyJobs = New-Object System.Collections.Generic.List[object]
+  $nodeJobs = New-Object System.Collections.Generic.List[object]
+  $rustJob = $null
+  $cargo = $null
+
+  try {
+    $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
+    foreach ($m in $modules) {
+      $wTmp = Join-Path $testTemp ("w_{0}_{1}" -f $PID, $m)
+      New-Item -ItemType Directory -Path $wTmp -Force | Out-Null
+      $workerTemps.Add($wTmp)
+      $pyJobs.Add((Start-AsyncGateProcess -Kind 'py' -Name $m -FilePath $py `
+        -Arguments @('-B', '-m', 'unittest', $m) `
+        -WorkingDirectory $engineSrc `
+        -EnvVars @{
+          TEMP                    = $wTmp
+          TMP                     = $wTmp
+          PYTHONDONTWRITEBYTECODE = '1'
+          PYTHONUTF8              = '1'
+          PYTHONIOENCODING        = 'utf-8'
+        }))
+    }
+
+    $node = (Get-Command node -ErrorAction SilentlyContinue).Source
+    if (-not $node) {
+      Write-Host '  警告：没找到 node，跳过前端自测' -ForegroundColor Yellow
     } else {
-      # 与 Build-IndexWalk 用同一套工具链变量：gnu-d 工具链、ASCII 的 CARGO_HOME、
-      # 独立 target 目录（不和正式构建共用，避免互相把对方的产物判成过期）。
-      $env:RUSTUP_TOOLCHAIN = 'gnu-d'
-      $env:CARGO_HOME = 'D:\Tool\cargo-ascii'
-      $env:CARGO_TARGET_DIR = 'D:\Builds\tidyassistant-test-target'
-      $env:PATH = "D:\Tool\binutils\mingw64\bin;$env:PATH"
-      $out = & $cargo test --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
-      $code = $LASTEXITCODE
+      $aiDir = Join-Path $root 'src\web\js\ai'
+      foreach ($f in (Get-ChildItem $aiDir -Filter '*.selftest.mjs' -File | Sort-Object Name)) {
+        $nodeJobs.Add((Start-AsyncGateProcess -Kind 'node' -Name $f.Name -FilePath $node `
+          -Arguments @($f.FullName) `
+          -WorkingDirectory $root))
+      }
+    }
+
+    if ($needRust) {
+      $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+      if (-not $cargo) {
+        Write-Host '  警告：没找到 cargo，跳过 Rust 测试' -ForegroundColor Yellow
+      } else {
+        $env:RUSTUP_TOOLCHAIN = 'gnu-d'
+        $env:CARGO_HOME = 'D:\Tool\cargo-ascii'
+        $env:CARGO_TARGET_DIR = 'D:\Builds\tidyassistant-test-target'
+        $env:PATH = "D:\Tool\binutils\mingw64\bin;$env:PATH"
+        [void](Enable-FastRustLinker)
+        $rustEnv = @{
+          RUSTUP_TOOLCHAIN = 'gnu-d'
+          CARGO_HOME       = 'D:\Tool\cargo-ascii'
+          CARGO_TARGET_DIR = 'D:\Builds\tidyassistant-test-target'
+          PATH             = $env:PATH
+        }
+        if ($env:RUSTFLAGS) { $rustEnv['RUSTFLAGS'] = $env:RUSTFLAGS }
+        $rustJob = Start-AsyncGateProcess -Kind 'rust' -Name 'cargo test' -FilePath $cargo `
+          -Arguments @('test', '--manifest-path', (Join-Path $rustDir 'Cargo.toml')) `
+          -WorkingDirectory $rustDir `
+          -EnvVars $rustEnv
+      }
+    }
+
+    # 3. 按确定顺序收集并输出 Python 测试结果
+    foreach ($j in $pyJobs) {
+      $j.Proc.WaitForExit()
+      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
+      $code = $j.Proc.ExitCode
+      $tail = ($combined | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
+      if ($code -ne 0) {
+        $failed += "引擎测试 $($j.Name) 未通过（$tail）"
+        Write-Host ("  [红] {0}：{1}" -f $j.Name, $tail) -ForegroundColor Red
+        ($combined | Select-String -Pattern '^(FAIL:|ERROR:|AssertionError)' |
+            Select-Object -First 6 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
+      } else {
+        Write-Host ("  [绿] {0}：{1}" -f $j.Name, $tail) -ForegroundColor DarkGray
+      }
+    }
+
+    # 4. 按确定顺序收集并输出 Node 自测结果
+    foreach ($j in $nodeJobs) {
+      $j.Proc.WaitForExit()
+      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
+      $code = $j.Proc.ExitCode
+      $last = ($combined | Where-Object { $_ -match '结果：' } | Select-Object -Last 1)
+      if (-not $last) { $last = ($combined | Where-Object { $_ -match '\S' -and $_ -notmatch '^[─━-]+$' } | Select-Object -Last 1) }
+      if ($code -ne 0) {
+        $failed += "前端自测 $($j.Name) 未通过（$last）"
+        Write-Host ("  [红] {0}：{1}" -f $j.Name, $last) -ForegroundColor Red
+      } else {
+        Write-Host ("  [绿] {0}：{1}" -f $j.Name, $last) -ForegroundColor DarkGray
+      }
+    }
+
+    # 5. 收集 Rust 测试结果，并跑非 cfg(test) 的 cargo check --release 零警告门禁
+    if (-not $needRust) {
+      Write-Host '  [跳过] cargo test / check：Rust 源码与依赖指纹未变（仅版本或非 Rust 文件变动）' -ForegroundColor DarkGray
+    } elseif ($rustJob) {
+      $rustJob.Proc.WaitForExit()
+      $out = (($rustJob.OutTsk.GetAwaiter().GetResult() + "`n" + $rustJob.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
+      $code = $rustJob.Proc.ExitCode
       $tail = ($out | Select-String -Pattern '^test result' | ForEach-Object { $_.Line }) -join ' '
       $warns = ($out | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
       if ($code -ne 0) {
         $failed += "Rust 测试未通过（$tail）"
         Write-Host ("  [红] cargo test：{0}" -f $tail) -ForegroundColor Red
+        ($out | Select-String -Pattern '^(test .+ FAILED|error(\[E\d+\])?:|thread .+ panicked|  assertion)' |
+            Select-Object -First 12 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
       } else {
         Write-Host ("  [绿] cargo test：{0}" -f $tail) -ForegroundColor DarkGray
       }
-      # 警告不再「忍着」：0 是这个项目的基线。允许的唯一例外是被 #[allow(dead_code)]
-      # 显式标注意图的函数（它们不算 warning）。
       if ($warns -gt 0) {
         $failed += "Rust 编译有 $warns 条警告（基线是 0）"
         Write-Host ("  [红] cargo 警告：{0} 条" -f $warns) -ForegroundColor Red
       }
 
-      # 还要单独看一次「不带 cfg(test)」的发布配置检查：cargo check --release 与真正发出去的 exe
-      # 同为非 cfg(test) 且关闭 debug_assertions，可 100% 检出死代码与发布警告，但跳过 3 分钟 LTO 链接。
-      $bout = & $cargo check --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
-      $bcode = $LASTEXITCODE
-      $bwarns = ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
-      if ($bcode -ne 0) {
-        $failed += "Rust 发布检查失败（cargo check --release 退出码 $bcode）"
-        Write-Host ("  [红] cargo check --release：退出码 {0}" -f $bcode) -ForegroundColor Red
-      } elseif ($bwarns -gt 0) {
-        $failed += "Rust 发布检查有 $bwarns 条警告（基线是 0；注意这与 cargo test 的警告不是一回事）"
-        Write-Host ("  [红] cargo check 警告：{0} 条" -f $bwarns) -ForegroundColor Red
-        ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } |
-            Select-Object -First 5 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
-      } else {
-        Write-Host '  [绿] cargo check --release：0 条警告' -ForegroundColor DarkGray
+      $bcode = 0
+      $bwarns = 0
+      if ($code -eq 0 -or $tail) {
+        $bout = & $cargo check --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
+        $bcode = $LASTEXITCODE
+        $bwarns = ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
+        if ($bcode -ne 0) {
+          $failed += "Rust 发布检查失败（cargo check --release 退出码 $bcode）"
+          Write-Host ("  [红] cargo check --release：退出码 {0}" -f $bcode) -ForegroundColor Red
+          ($bout | Select-String -Pattern '^error(\[E\d+\])?:' |
+              Select-Object -First 8 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
+        } elseif ($bwarns -gt 0) {
+          $failed += "Rust 发布检查有 $bwarns 条警告（基线是 0；注意这与 cargo test 的警告不是一回事）"
+          Write-Host ("  [红] cargo check 警告：{0} 条" -f $bwarns) -ForegroundColor Red
+          ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } |
+              Select-Object -First 5 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
+        } else {
+          Write-Host '  [绿] cargo check --release：0 条警告' -ForegroundColor DarkGray
+        }
       }
 
       if ($code -eq 0 -and $warns -eq 0 -and $bcode -eq 0 -and $bwarns -eq 0) {
         Set-Content -Path $stampPath -Value $rustFp -Encoding UTF8
       }
     }
-  } else {
-    Write-Host '  [跳过] cargo test / check：Rust 源码与依赖指纹未变（仅版本或非 Rust 文件变动）' -ForegroundColor DarkGray
+  } finally {
+    foreach ($j in @($pyJobs) + @($nodeJobs) + @($rustJob)) {
+      if ($null -ne $j -and $null -ne $j.Proc) {
+        try { if (-not $j.Proc.HasExited) { $j.Proc.Kill($true) } } catch {}
+        try { $j.Proc.Dispose() } catch {}
+      }
+    }
+    foreach ($wTmp in $workerTemps) {
+      Remove-Item -LiteralPath $wTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 
+  $gateSw.Stop()
   if ($failed.Count -gt 0) {
     throw ("测试门禁不通过（{0} 项）：`n  {1}" -f $failed.Count, ($failed -join "`n  "))
   }
-  Write-Host '测试门禁通过' -ForegroundColor Green
+  Write-Host ("测试门禁通过（耗时 {0}）" -f (Format-CompactDuration $gateSw.Elapsed.TotalSeconds)) -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------- 只留最新与上一版
@@ -598,7 +754,16 @@ try {
     & $pubScript -Version $current -Channel $Channel -BaseUrl $ReleaseBaseUrl
   }
 
-  # 产物自检：版本、二进制、安装包三者必须对得上
+  # 产物自检：复用 publish-release.ps1 已落盘的 SHA256SUMS.txt，避免二次重算 47MB 产物哈希
+  $knownSha = @{}
+  $sumsFile = Join-Path $root 'release\SHA256SUMS.txt'
+  if (Test-Path -LiteralPath $sumsFile) {
+    foreach ($line in (Get-Content -LiteralPath $sumsFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+      if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') {
+        $knownSha[$Matches[2].Trim()] = $Matches[1].ToLowerInvariant()
+      }
+    }
+  }
   $exe = Join-Path $root 'tidy-assistant.exe'
   if (Test-Path $exe) {
     $record.exe = Get-TidyFileSha256 $exe
@@ -608,12 +773,16 @@ try {
   if ($Bundle) {
     $pkg = Join-Path $root ("release\QDisk_{0}_x64-setup.exe" -f $current)
     if (-not (Test-Path $pkg)) { throw "安装包缺失：$pkg" }
-    $releases += @{ name = (Split-Path $pkg -Leaf); sha256 = (Get-TidyFileSha256 $pkg) }
+    $leaf = Split-Path $pkg -Leaf
+    $sha = if ($knownSha.ContainsKey($leaf)) { $knownSha[$leaf] } else { Get-TidyFileSha256 $pkg }
+    $releases += @{ name = $leaf; sha256 = $sha }
   }
   if ($Portable) {
     $zip = Join-Path $root ("release\QDisk_{0}_x64-portable.zip" -f $current)
     if (-not (Test-Path $zip)) { throw "便携包缺失：$zip" }
-    $releases += @{ name = (Split-Path $zip -Leaf); sha256 = (Get-TidyFileSha256 $zip) }
+    $leaf = Split-Path $zip -Leaf
+    $sha = if ($knownSha.ContainsKey($leaf)) { $knownSha[$leaf] } else { Get-TidyFileSha256 $zip }
+    $releases += @{ name = $leaf; sha256 = $sha }
   }
   $record.releases = $releases
 
@@ -627,7 +796,7 @@ try {
 
   $record.result = 'ok'
 } catch {
-  $record.duration = ('{0:N1}s' -f ((Get-Date) - $startedAt).TotalSeconds)
+  $record.duration = Format-CompactDuration ((Get-Date) - $startedAt).TotalSeconds
   $record.note = $_.Exception.Message
   Write-TidyBuildRecord -Root $root -Record $record
   Write-Host ("构建失败：{0}" -f $_.Exception.Message) -ForegroundColor Red
@@ -636,7 +805,7 @@ try {
   Exit-TidyBuildLock
 }
 
-$record.duration = ('{0:N1}s' -f ((Get-Date) - $startedAt).TotalSeconds)
+$record.duration = Format-CompactDuration ((Get-Date) - $startedAt).TotalSeconds
 Write-TidyBuildRecord -Root $root -Record $record
 
 $tagged = Tag-TidyBuild -Root $root -Version $current -Commit $snapshot

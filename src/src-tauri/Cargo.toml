@@ -1,6 +1,6 @@
 [package]
 name = "tidy-assistant"
-version = "1.46.9"
+version = "1.46.10"
 edition = "2021"
 
 [build-dependencies]
@@ -26,8 +26,8 @@ zip = { version = "9.6", default-features = false, features = ["deflate-flate2",
 
 [profile.release]
 opt-level = "s"
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 8
 panic = "abort"
 strip = true
 

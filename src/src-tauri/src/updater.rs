@@ -2833,16 +2833,348 @@ pub fn parse_embedded_changelog(raw: &str, current_version: &str) -> Vec<Changel
     merged
 }
 
-#[cfg(windows)]
-fn fetch_remote_changelog_entries(current_version: &str) -> Result<Vec<ChangelogEntry>> {
-    let (_status, bytes, _final_url) = winhttp_fetch_bytes(
-        OFFICIAL_API_CHANGELOG_URL,
-        MAX_MANIFEST_BYTES,
-        6_500,
-        "application/vnd.github+json, application/json",
-    )?;
+fn decode_xml_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let Some(semi) = after.find(';') else {
+            out.push('&');
+            rest = after;
+            continue;
+        };
+        if semi == 0 || semi > 16 {
+            out.push('&');
+            rest = after;
+            continue;
+        }
+        let ent = &after[..semi];
+        let decoded = match ent {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            _ if ent.starts_with("#x") || ent.starts_with("#X") => {
+                u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+            }
+            _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32),
+            _ => None,
+        };
+        if let Some(ch) = decoded {
+            out.push(ch);
+            rest = &after[semi + 1..];
+        } else {
+            out.push('&');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn extract_xml_tag_inner<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open_pat = format!("<{tag}");
+    let close_pat = format!("</{tag}>");
+    let mut rest = xml;
+    while let Some(pos) = rest.find(&open_pat) {
+        let after = &rest[pos + open_pat.len()..];
+        let next = after.as_bytes().first().copied().unwrap_or(0);
+        if !matches!(next, b'>' | b' ' | b'\t' | b'\r' | b'\n' | b'/') {
+            rest = after;
+            continue;
+        }
+        let gt = after.find('>')?;
+        if after[..gt].trim_end().ends_with('/') {
+            rest = &after[gt + 1..];
+            continue;
+        }
+        let inner_start = &after[gt + 1..];
+        let end = inner_start.find(&close_pat)?;
+        return Some(&inner_start[..end]);
+    }
+    None
+}
+
+fn html_to_changelog_markdown(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    let mut skip_leading_ws = true;
+
+    let ensure_nl = |buf: &mut String| {
+        if !buf.is_empty() && !buf.ends_with('\n') {
+            buf.push('\n');
+        }
+    };
+
+    while !rest.is_empty() {
+        if let Some(lt) = rest.find('<') {
+            if lt > 0 {
+                let text = decode_xml_entities(&rest[..lt]);
+                let slice = if skip_leading_ws {
+                    text.trim_start()
+                } else {
+                    text.as_str()
+                };
+                if !slice.is_empty() {
+                    out.push_str(slice);
+                    skip_leading_ws = false;
+                }
+            }
+            let after_lt = &rest[lt + 1..];
+            // 查找标签闭合 '>'，跳过属性值引号内的 '>'
+            let mut quote: Option<u8> = None;
+            let mut gt_pos = None;
+            for (idx, b) in after_lt.bytes().enumerate() {
+                if let Some(q) = quote {
+                    if b == q {
+                        quote = None;
+                    }
+                } else if b == b'"' || b == b'\'' {
+                    quote = Some(b);
+                } else if b == b'>' {
+                    gt_pos = Some(idx);
+                    break;
+                }
+            }
+            let Some(gt) = gt_pos else {
+                break;
+            };
+            let raw_tag = after_lt[..gt].trim();
+            rest = &after_lt[gt + 1..];
+
+            let is_close = raw_tag.starts_with('/');
+            let name = raw_tag
+                .trim_start_matches('/')
+                .split(|c: char| c.is_ascii_whitespace() || c == '/')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+
+            match (is_close, name.as_str()) {
+                (false, "h1" | "h2") => {
+                    ensure_nl(&mut out);
+                    if !out.is_empty() && !out.ends_with("\n\n") {
+                        out.push('\n');
+                    }
+                    out.push_str("## ");
+                    skip_leading_ws = true;
+                }
+                (false, "h3" | "h4" | "h5" | "h6") => {
+                    ensure_nl(&mut out);
+                    if !out.is_empty() && !out.ends_with("\n\n") {
+                        out.push('\n');
+                    }
+                    out.push_str("### ");
+                    skip_leading_ws = true;
+                }
+                (false, "li") => {
+                    ensure_nl(&mut out);
+                    out.push_str("- ");
+                    skip_leading_ws = true;
+                }
+                (false, "p" | "div" | "blockquote" | "pre") => {
+                    if !skip_leading_ws {
+                        ensure_nl(&mut out);
+                    }
+                }
+                (false, "br") => {
+                    out.push('\n');
+                    skip_leading_ws = true;
+                }
+                (false, "hr") => {
+                    ensure_nl(&mut out);
+                    out.push_str("---\n");
+                    skip_leading_ws = true;
+                }
+                (_, "strong" | "b") => {
+                    out.push_str("**");
+                    skip_leading_ws = false;
+                }
+                (_, "code") => {
+                    out.push('`');
+                    skip_leading_ws = false;
+                }
+                (true, "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "p" | "li" | "div" | "tr" | "pre" | "blockquote") => {
+                    if !skip_leading_ws {
+                        ensure_nl(&mut out);
+                        skip_leading_ws = true;
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            let text = decode_xml_entities(rest);
+            let slice = if skip_leading_ws {
+                text.trim_start()
+            } else {
+                text.as_str()
+            };
+            if !slice.is_empty() {
+                out.push_str(slice);
+            }
+            break;
+        }
+    }
+
+    let mut clean: Vec<String> = Vec::new();
+    let mut blank_run = 0usize;
+    for line in out.lines() {
+        let t = line.trim_end();
+        if t.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 && !clean.is_empty() {
+                clean.push(String::new());
+            }
+        } else {
+            blank_run = 0;
+            clean.push(t.to_string());
+        }
+    }
+    clean.join("\n").trim().to_string()
+}
+
+fn normalize_remote_changelog_title(raw_name: &str, ver: &str) -> String {
+    sanitize_changelog_title(
+        raw_name
+            .trim()
+            .trim_start_matches("轻盘")
+            .trim_start_matches([' ', '·', '-'])
+            .trim_start_matches("QDisk")
+            .trim_start_matches([' ', '·', '-', 'v', 'V'])
+            .trim_start_matches(ver)
+            .trim_start_matches([' ', '—', '–', '-', '：', ':']),
+    )
+}
+
+/// 从 GitHub `releases.atom` 零限流订阅源解析结构化更新日志（自动忽略 `build-*` 等非 SemVer 标签并拦截正文伪造链接）。
+pub fn parse_atom_changelog_entries(xml: &str, current_version: &str) -> Vec<ChangelogEntry> {
+    const ABS_PREFIX: &str = "https://github.com/3347567186/QDisk/releases/tag/";
+    const REL_PREFIX: &str = "/3347567186/QDisk/releases/tag/";
+    let mut parsed: Vec<(SemVer, ChangelogEntry)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut rest = xml;
+    while let Some(entry_start) = rest.find("<entry") {
+        let after_tag = &rest[entry_start + "<entry".len()..];
+        let next_ch = after_tag.as_bytes().first().copied().unwrap_or(0);
+        if !matches!(next_ch, b'>' | b' ' | b'\t' | b'\r' | b'\n') {
+            rest = after_tag;
+            continue;
+        }
+        let Some(gt) = after_tag.find('>') else {
+            break;
+        };
+        let body_start = &after_tag[gt + 1..];
+        let entry_body = match body_start.find("</entry>") {
+            Some(end) => {
+                rest = &body_start[end + "</entry>".len()..];
+                &body_start[..end]
+            }
+            None => {
+                rest = "";
+                body_start
+            }
+        };
+
+        // 仅在 <entry> 头部（截断 <content>/<summary> 之前）解析发布链接、标题与时间，防正文伪造
+        let header_end = [entry_body.find("<content"), entry_body.find("<summary")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(entry_body.len());
+        let header = &entry_body[..header_end];
+
+        let mut matched_tag: Option<(SemVer, String)> = None;
+        let mut hrest = header;
+        while let Some(lpos) = hrest.find("<link") {
+            let after_l = &hrest[lpos + "<link".len()..];
+            let lnext = after_l.as_bytes().first().copied().unwrap_or(0);
+            if !matches!(lnext, b' ' | b'\t' | b'\r' | b'\n') {
+                hrest = after_l;
+                continue;
+            }
+            let Some(lend) = after_l.find('>') else {
+                break;
+            };
+            let attrs = &after_l[..lend];
+            hrest = &after_l[lend + 1..];
+
+            let Some(href_val) = extract_xml_href_attr(attrs) else {
+                continue;
+            };
+            let trimmed_href = href_val.trim();
+            let prefix_ok = (trimmed_href.len() > ABS_PREFIX.len()
+                && trimmed_href[..ABS_PREFIX.len()].eq_ignore_ascii_case(ABS_PREFIX))
+                || (trimmed_href.len() > REL_PREFIX.len()
+                    && trimmed_href[..REL_PREFIX.len()].eq_ignore_ascii_case(REL_PREFIX));
+            if !prefix_ok {
+                continue;
+            }
+            if let Some(tag) = extract_tag_from_release_location(trimmed_href) {
+                let ver_str = tag.trim_start_matches(['v', 'V']);
+                if let Ok(sv) = SemVer::parse(ver_str) {
+                    matched_tag = Some((sv, tag));
+                    break;
+                }
+            }
+        }
+
+        let Some((sv, tag)) = matched_tag else {
+            continue;
+        };
+        let ver = tag.trim_start_matches(['v', 'V']).to_string();
+        let id = ver.to_ascii_lowercase();
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+
+        let date = extract_xml_tag_inner(header, "updated")
+            .and_then(extract_inline_date)
+            .unwrap_or_default();
+        let raw_title = extract_xml_tag_inner(header, "title")
+            .map(decode_xml_entities)
+            .unwrap_or_default();
+        let title = normalize_remote_changelog_title(&raw_title, &ver);
+
+        let raw_content = extract_xml_tag_inner(entry_body, "content")
+            .or_else(|| extract_xml_tag_inner(entry_body, "summary"))
+            .unwrap_or("");
+        let unescaped_html = decode_xml_entities(raw_content);
+        let md_body = html_to_changelog_markdown(&unescaped_html);
+        let body = sanitize_changelog_body(&md_body);
+        let summary = extract_summary_line(&title, &body);
+        let kind = infer_release_kind(&ver, "");
+        let is_prerelease = sv.is_prerelease();
+        let url = format!("{OFFICIAL_RELEASES_PAGE}/tag/{tag}");
+
+        parsed.push((
+            sv,
+            ChangelogEntry {
+                id,
+                version: ver.clone(),
+                kind,
+                title,
+                summary,
+                body,
+                date,
+                is_current: ver == current_version,
+                is_prerelease,
+                source: "remote".into(),
+                url,
+            },
+        ));
+    }
+
+    parsed.sort_by(|a, b| b.0.cmp(&a.0));
+    parsed.into_iter().map(|(_, entry)| entry).collect()
+}
+
+fn parse_github_changelog_json(bytes: &[u8], current_version: &str) -> Result<Vec<ChangelogEntry>> {
     let arr: Vec<Value> =
-        serde_json::from_slice(&bytes).context("远端发布列表不是合法的 JSON 数组")?;
+        serde_json::from_slice(bytes).context("远端发布列表不是合法的 JSON 数组")?;
     let mut out = Vec::new();
     for item in arr {
         if item.get("draft").and_then(|d| d.as_bool()).unwrap_or(false) {
@@ -2869,15 +3201,7 @@ fn fetch_remote_changelog_entries(current_version: &str) -> Result<Vec<Changelog
         let raw_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
         let raw_body = item.get("body").and_then(|v| v.as_str()).unwrap_or("");
         let body = sanitize_changelog_body(raw_body);
-        let title = sanitize_changelog_title(
-            raw_name
-                .trim_start_matches("轻盘")
-                .trim_start_matches([' ', '·', '-'])
-                .trim_start_matches("QDisk")
-                .trim_start_matches([' ', '·', '-', 'v', 'V'])
-                .trim_start_matches(ver.as_str())
-                .trim_start_matches([' ', '—', '–', '-', '：', ':']),
-        );
+        let title = normalize_remote_changelog_title(raw_name, &ver);
         let summary = extract_summary_line(&title, &body);
         let url = item
             .get("html_url")
@@ -2901,6 +3225,69 @@ fn fetch_remote_changelog_entries(current_version: &str) -> Result<Vec<Changelog
         });
     }
     Ok(out)
+}
+
+#[cfg(windows)]
+fn fetch_remote_changelog_from_urls(
+    atom_url: &str,
+    api_url: &str,
+    current_version: &str,
+) -> Result<Vec<ChangelogEntry>> {
+    // 1. 优先走零限流官方 releases.atom 订阅源，彻底规避匿名 api.github.com 60次/小时 HTTP 403 限流
+    let atom_err = match winhttp_fetch_bytes(
+        atom_url,
+        MAX_MANIFEST_BYTES,
+        6_500,
+        "application/atom+xml, application/xml, text/xml",
+    ) {
+        Ok((_status, bytes, _final_url)) => {
+            let xml = String::from_utf8_lossy(&bytes);
+            let entries = parse_atom_changelog_entries(&xml, current_version);
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+            Some(anyhow::anyhow!("官方发布订阅未包含有效版本日志"))
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if is_dns_err(&msg) {
+                return Err(e);
+            }
+            Some(e)
+        }
+    };
+
+    if let Some(ref e) = atom_err {
+        append_log("warn", &format!("更新日志 Atom 订阅同步失败，切换 GitHub API 重试：{e:#}"));
+    }
+
+    // 2. Atom 失败或无有效版本时回退 GitHub Releases API
+    match winhttp_fetch_bytes(
+        api_url,
+        MAX_MANIFEST_BYTES,
+        6_500,
+        "application/vnd.github+json, application/json",
+    )
+    .and_then(|(_status, bytes, _final_url)| parse_github_changelog_json(&bytes, current_version))
+    {
+        Ok(entries) => Ok(entries),
+        Err(api_err) => {
+            if let Some(ae) = atom_err {
+                Err(anyhow::anyhow!("{api_err:#}（订阅源：{ae:#}）"))
+            } else {
+                Err(api_err)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn fetch_remote_changelog_entries(current_version: &str) -> Result<Vec<ChangelogEntry>> {
+    fetch_remote_changelog_from_urls(
+        OFFICIAL_RELEASES_ATOM_URL,
+        OFFICIAL_API_CHANGELOG_URL,
+        current_version,
+    )
 }
 
 fn merge_local_and_remote_changelogs(
@@ -3553,5 +3940,162 @@ mod tests {
         assert!(SemVer::parse(&m.version).unwrap() >= SemVer::parse("1.46.7-beta.1").unwrap());
         let eval = evaluate_manifest("1.46.2", "installer", "beta", "", &m, None).unwrap();
         assert!(eval.has_update, "v1.46.2 在测试版通道必须检测到新包 {}", m.version);
+    }
+
+    #[test]
+    fn atom_changelog_parsing_converts_html_filters_build_tags_and_blocks_spoofing() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <updated>2026-11-24T12:58:44Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.8"/>
+    <title>轻盘 QDisk v1.46.8 — 更新源加固</title>
+    <content type="html">&lt;h2&gt;本版亮点&lt;/h2&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;strong&gt;测试版更新 &amp;amp; 零限流&lt;/strong&gt;&lt;/p&gt;
+&lt;ul&gt;&lt;li&gt;使用 &lt;code&gt;releases.atom&lt;/code&gt; 避开 403&lt;/li&gt;&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;开发者 3347567186@qq.com 隐私行必须剔除&lt;/p&gt;
+&lt;link href="https://github.com/3347567186/QDisk/releases/tag/v9.9.9"/&gt;</content>
+  </entry>
+  <entry>
+    <updated>2026-11-24T12:21:47Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.7-beta.1"/>
+    <title>QDisk v1.46.7-beta.1</title>
+    <content type="html">&lt;p&gt;预发布验证&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <updated>2026-11-24T12:49:01Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/build-1.46.8"/>
+    <title>build-1.46.8</title>
+    <content type="html">&lt;p&gt;pre-build 1.46.8 (full)&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <updated>2026-11-24T13:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://evil.com/3347567186/QDisk/releases/tag/v99.0.0"/>
+    <title>Evil v99.0.0</title>
+    <content type="html">&lt;p&gt;spoof&lt;/p&gt;</content>
+  </entry>
+</feed>"#;
+
+        let list = parse_atom_changelog_entries(xml, "1.46.8");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].version, "1.46.8");
+        assert!(list[0].is_current);
+        assert!(!list[0].is_prerelease);
+        assert_eq!(list[0].date, "2026-11-24");
+        assert_eq!(list[0].title, "更新源加固");
+        assert_eq!(
+            list[0].url,
+            "https://github.com/3347567186/QDisk/releases/tag/v1.46.8"
+        );
+        assert!(list[0].body.contains("## 本版亮点"));
+        assert!(list[0].body.contains("- **测试版更新 & 零限流**"));
+        assert!(list[0].body.contains("- 使用 `releases.atom` 避开 403"));
+        assert!(!list[0].body.contains("3347567186@qq.com"));
+
+        assert_eq!(list[1].version, "1.46.7-beta.1");
+        assert!(list[1].is_prerelease);
+        assert!(!list[1].is_current);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn end_to_end_remote_changelog_bypasses_api_403_via_atom_and_falls_back_to_api() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let atom_ok = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <updated>2026-11-24T13:52:12Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.9"/>
+    <title>轻盘 QDisk v1.46.9 — 整理预设修复</title>
+    <content type="html">&lt;p&gt;修复整理文件预设高亮&lt;/p&gt;</content>
+  </entry>
+</feed>"#
+            .to_string();
+        let atom_only_builds = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <updated>2026-11-24T13:52:12Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/build-1.46.9"/>
+    <title>build-1.46.9</title>
+  </entry>
+</feed>"#
+            .to_string();
+        let api_ok = r#"[{"tag_name":"v1.46.9","name":"轻盘 QDisk v1.46.9","draft":false,"prerelease":false,"published_at":"2026-11-24T13:52:12Z","body":"API 回退日志","html_url":"https://github.com/3347567186/QDisk/releases/tag/v1.46.9"}]"#
+            .to_string();
+
+        let srv = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut req_buf = [0u8; 2048];
+                let n = stream.read(&mut req_buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&req_buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let (code, ctype, body) = match path {
+                    "/atom-ok" => ("200 OK", "application/atom+xml", atom_ok.as_str()),
+                    "/atom-empty" => ("200 OK", "application/atom+xml", atom_only_builds.as_str()),
+                    "/api-403" => ("403 Forbidden", "application/json", r#"{"message":"API rate limit exceeded"}"#),
+                    "/api-ok" => ("200 OK", "application/json", api_ok.as_str()),
+                    _ => ("404 Not Found", "text/plain", "missing"),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {code}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // 场景 1：API 处于 403 限流状态时，直接通过 Atom 零限流成功同步
+        let r1 = fetch_remote_changelog_from_urls(
+            &format!("{base}/atom-ok"),
+            &format!("{base}/api-403"),
+            "1.46.8",
+        )
+        .expect("API 403 时应直接通过 Atom 同步成功");
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0].version, "1.46.9");
+        assert!(r1[0].body.contains("修复整理文件预设高亮"));
+
+        // 场景 2：Atom 仅含 build-* 标签无有效正式版本时，自动回退 GitHub API
+        let r2 = fetch_remote_changelog_from_urls(
+            &format!("{base}/atom-empty"),
+            &format!("{base}/api-ok"),
+            "1.46.8",
+        )
+        .expect("Atom 无有效版本时应自动回退 API 通道");
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r2[0].version, "1.46.9");
+        assert!(r2[0].body.contains("API 回退日志"));
+
+        let _ = srv.join();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_remote_changelog_bypasses_api_403() {
+        let entries = fetch_remote_changelog_entries("1.46.8")
+            .expect("实网更新日志线上同步应绕过 api.github.com 403 限流成功拉取");
+        assert!(!entries.is_empty(), "应解析出至少一条官方远端版本日志");
+        assert!(
+            entries.iter().any(|e| e.version == "1.46.8"),
+            "远端日志列表应包含 v1.46.8"
+        );
     }
 }
