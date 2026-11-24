@@ -1537,7 +1537,7 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.Pages.settings.jump({ section: 'updater' });
   await new Promise((r) => setTimeout(r, 20));
 
-  const checkBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('立即检查更新'))[0];
+  const checkBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('检查更新'))[0];
   const urlInputs = findNodes(rootSet, (n) => n.tagName === 'INPUT' && (n.type === 'url' || (n.classList && n.classList.contains('upd-feed-input'))));
   const saveFeedBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('保存源'))[0];
   if (urlInputs.length > 0 || saveFeedBtn) {
@@ -1545,28 +1545,55 @@ function findNodes(rootNode, pred, out = []) {
     process.exit(1);
   }
   if (!checkBtn) {
-    console.error('[在线更新回归] 设置页缺少「立即检查更新」按钮');
+    console.error('[在线更新回归] 设置页缺少「检查更新」按钮');
     process.exit(1);
   }
-  clickBtn(checkBtn);
+  const segBtns = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('upd-seg-btn'));
+  if (segBtns.length !== 2 || !txt(segBtns[0]).includes('稳定版') || !txt(segBtns[1]).includes('测试版')) {
+    console.error(`[在线更新回归] 设置页缺少融合的「稳定版 / 测试版」切换控件: count=${segBtns.length}`);
+    process.exit(1);
+  }
+  let lastSavedCh = 'stable';
+  const origCfgSetSnap = sandbox.API.updaterConfigSet;
+  sandbox.API.updaterConfigSet = async (p) => {
+    if (p && p.channel) lastSavedCh = p.channel;
+    return origCfgSetSnap(p);
+  };
+  const origStatusSnap = sandbox.API.updaterStatus;
+  sandbox.API.updaterStatus = async () => {
+    const base = await origStatusSnap();
+    base.config.channel = lastSavedCh;
+    return base;
+  };
+  clickBtn(segBtns[1]);
+  await new Promise((r) => setTimeout(r, 20));
+  const segAfterBeta = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('upd-seg-btn'));
+  if (lastSavedCh !== 'beta' || !segAfterBeta[1].classList.contains('active')) {
+    console.error(`[在线更新回归] 切换融合「测试版」通道失败: ch=${lastSavedCh}`);
+    process.exit(1);
+  }
+  clickBtn(segAfterBeta[0]);
+  await new Promise((r) => setTimeout(r, 20));
+  const checkBtnNow = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('检查更新'))[0];
+  clickBtn(checkBtnNow || checkBtn);
   await new Promise((r) => setTimeout(r, 30));
 
   const dlBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('下载更新包'))[0];
-  const notesBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('查看更新日志'))[0];
+  const notesBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('更新内容'))[0];
   const inlineRawPre = findNodes(rootSet, (n) => n.tagName === 'PRE' && n.classList && n.classList.contains('upd-notes'));
   if (!dlBtn || !notesBtn || inlineRawPre.length > 0 || !txt(rootSet).includes('v9.9.9') || !txt(rootSet).includes('红队验证版本更新说明')) {
-    console.error(`[在线更新回归] 检查更新后卡片简化或更新日志入口异常: dl=${!!dlBtn}, notesBtn=${!!notesBtn}, rawPre=${inlineRawPre.length}`);
+    console.error(`[在线更新回归] 检查更新后卡片简化或更新内容入口异常: dl=${!!dlBtn}, notesBtn=${!!notesBtn}, rawPre=${inlineRawPre.length}`);
     process.exit(1);
   }
-  // 点击「查看更新日志」必须打开独立窗口展示，且关闭后彻底清理
+  // 点击「更新内容」必须打开独立卡片时间轴窗口展示，且点击「知道了」彻底清理
   clickBtn(notesBtn);
   await new Promise((r) => setTimeout(r, 15));
-  const notesViewer = findNodes(modalRoot, (n) => n.classList && n.classList.contains('upd-log-viewer'))[0];
-  if (!notesViewer || !txt(modalRoot).includes('v9.9.9 更新日志')) {
-    console.error('[在线更新回归] 点击「查看更新日志」未打开独立更新日志窗口');
+  const notesFeed = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-feed'))[0];
+  if (!notesFeed || !txt(modalRoot).includes('更新内容') || !txt(modalRoot).includes('v9.9.9')) {
+    console.error('[在线更新回归] 点击「更新内容」未打开独立更新内容弹窗');
     process.exit(1);
   }
-  const closeNotesBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '关闭').pop();
+  const closeNotesBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n) === '知道了').pop();
   if (closeNotesBtn) clickBtn(closeNotesBtn);
   await new Promise((r) => setTimeout(r, 15));
 
@@ -2617,61 +2644,62 @@ function findNodes(rootNode, pred, out = []) {
     cacheBytes: 0,
     staged: null
   });
-  sandbox.API.updaterChangelog = async () => ({
-    currentVersion: '1.46.0',
-    total: 3,
-    remoteSynced: false,
-    remoteError: '',
-    releasesPage: 'https://github.com/3347567186/QDisk/releases',
-    entries: [
-      { id: '1.46.0', version: '1.46.0', kind: 'minor', title: '全能文件预览与一键全盘索引', summary: '全能文件预览', body: '### 新功能\n- 完整更新日志弹窗', date: '2026-11-24', isCurrent: true, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.46.0' },
-      { id: '1.45.0', version: '1.45.0', kind: 'minor', title: '软件内优先打开重构', summary: '软件内优先打开', body: '### 历史版本内容\n- 真实磁盘探测', date: '2026-11-24', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.45.0' },
-      { id: '1.44.1', version: '1.44.1', kind: 'patch', title: '极简更新卡片', summary: '极简更新卡片', body: '### 修复\n- 极简更新体验', date: '2026-11-23', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.44.1' }
-    ]
-  });
+  let clRemoteCalls = 0;
+  sandbox.API.updaterChangelog = async (includeRemote) => {
+    if (includeRemote) clRemoteCalls++;
+    return {
+      currentVersion: '1.46.0',
+      total: 3,
+      remoteSynced: !!includeRemote,
+      remoteError: '',
+      releasesPage: 'https://github.com/3347567186/QDisk/releases',
+      entries: [
+        { id: '1.46.0', version: '1.46.0', kind: 'minor', title: '全能文件预览与一键全盘索引', summary: '全能文件预览', body: '### 新功能\n- 完整更新内容弹窗', date: '2026-11-24', isCurrent: true, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.46.0' },
+        { id: '1.45.0', version: '1.45.0', kind: 'minor', title: '软件内优先打开重构', summary: '软件内优先打开', body: '### 历史版本内容\n- 真实磁盘探测', date: '2026-11-24', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.45.0' },
+        { id: '1.44.1', version: '1.44.1', kind: 'patch', title: '极简更新卡片', summary: '极简更新卡片', body: '### 修复\n- 极简更新体验', date: '2026-11-23', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.44.1' }
+      ]
+    };
+  };
   const setHost17 = new FakeElement('div');
   const umSet17 = await sandbox.Pages.settings.mount(setHost17);
   sandbox.Pages.settings.jump({ section: 'updater' });
   await new Promise((r) => setTimeout(r, 25));
-  const openClBtn = findNodes(setHost17, (n) => n.tagName === 'BUTTON' && txt(n).includes('查看更新日志'))[0];
+  const openClBtn = findNodes(setHost17, (n) => n.tagName === 'BUTTON' && txt(n).includes('更新内容'))[0];
   if (!openClBtn) {
-    console.error('[红队回归 17] 设置页「版本与在线更新」在未发现新版本时缺少「查看更新日志」按钮');
+    console.error('[红队回归 17] 设置页「版本与在线更新」在未发现新版本时缺少「更新内容」按钮');
     process.exit(1);
   }
   clickBtn(openClBtn);
   await new Promise((r) => setTimeout(r, 25));
   const clDialog = findNodes(modalRoot, (n) => n.tagName === 'DIALOG' && n.classList && n.classList.contains('cl-dialog'))[0];
-  const clItems = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-item'));
-  if (!clDialog || clDialog.getAttribute('closedby') !== 'any' || clItems.length !== 3) {
-    console.error(`[红队回归 17] 更新日志弹窗未以原生 <dialog closedby="any"> 渲染全部历史版本: dialog=${!!clDialog}, items=${clItems.length}`);
+  const clCards = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-card'));
+  if (!clDialog || clDialog.getAttribute('closedby') !== 'any' || clCards.length !== 3) {
+    console.error(`[红队回归 17] 更新内容弹窗未以原生 <dialog closedby="any"> 渲染全部历史版本卡片: dialog=${!!clDialog}, cards=${clCards.length}`);
     process.exit(1);
   }
-  // 切换到历史版本 v1.45.0
-  clickBtn(clItems[1]);
-  await new Promise((r) => setTimeout(r, 15));
   const clModalText = txt(modalRoot);
-  const clMdNode = findNodes(modalRoot, (n) => n.classList && n.classList.contains('upd-log-md'))[0];
-  const clMdHtml = (clMdNode && (clMdNode._innerHTML || txt(clMdNode))) || '';
-  if (!clModalText.includes('v1.45.0 更新日志') || !clMdHtml.includes('真实磁盘探测')) {
-    console.error(`[红队回归 17] 点击历史版本 v1.45.0 未切换展示对应正文: hasHead=${clModalText.includes('v1.45.0 更新日志')}, md=${clMdHtml.slice(0, 120)}`);
+  if (!clModalText.includes('v1.46.0') || !clModalText.includes('当前版本') || !clModalText.includes('真实磁盘探测') || !clModalText.includes('v1.44.1')) {
+    console.error(`[红队回归 17] 更新内容时间轴卡片缺少版本标签、当前版本徽章或正文条目`);
     process.exit(1);
   }
-  // 筛选修复版本（patch）
-  const fixTab = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-ftab') && txt(n).includes('修复'))[0];
-  clickBtn(fixTab);
-  await new Promise((r) => setTimeout(r, 15));
-  const clFiltered = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-item'));
-  if (clFiltered.length !== 1 || !txt(clFiltered[0]).includes('v1.44.1')) {
-    console.error(`[红队回归 17] 更新日志按「修复」筛选结果异常: count=${clFiltered.length}`);
+  const clSyncBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('同步线上'))[0];
+  if (!clSyncBtn) {
+    console.error('[红队回归 17] 更新内容弹窗缺少「同步线上」按钮');
+    process.exit(1);
+  }
+  clickBtn(clSyncBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  if (clRemoteCalls !== 1) {
+    console.error(`[红队回归 17] 点击「同步线上」未触发远端同步: calls=${clRemoteCalls}`);
     process.exit(1);
   }
   if (/白林|3347567186@qq\.com|是个帅气的男孩/.test(txt(modalRoot))) {
-    console.error('[红队回归 17] 更新日志弹窗暴露了开发者隐私信息');
+    console.error('[红队回归 17] 更新内容弹窗暴露了开发者隐私信息');
     process.exit(1);
   }
   umSet17();
   if (findNodes(modalRoot, (n) => n.tagName === 'DIALOG' && n.classList && n.classList.contains('cl-dialog')).length !== 0) {
-    console.error('[红队回归 17] 设置页 unmount 后未彻底回收更新日志 <dialog>');
+    console.error('[红队回归 17] 设置页 unmount 后未彻底回收更新内容 <dialog>');
     process.exit(1);
   }
 

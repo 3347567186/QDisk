@@ -2269,18 +2269,108 @@
           return '';
         }
 
-        function kindBadgeInfo(kind) {
-          if (kind === 'major') return { cls: 'badge accent', text: T('大版本', 'Major') };
-          if (kind === 'minor') return { cls: 'badge accent', text: T('功能更新', 'Feature') };
-          if (kind === 'patch') return { cls: 'badge', text: T('优化修复', 'Fix') };
-          if (kind === 'legacy') return { cls: 'badge', text: T('早期版本', 'Legacy') };
-          return { cls: 'badge', text: T('版本', 'Release') };
-        }
-
         function formatVersionTag(ver) {
           const s = String(ver || '').trim();
           if (!s) return '—';
           return /^[vVaAbB]/.test(s) ? s : 'v' + s;
+        }
+
+        function extractChangelogBullets(item) {
+          const rawBody = String((item && item.body) || '');
+          const lines = rawBody.split(/\r?\n/);
+          const out = [];
+          let inFence = false;
+          for (let i = 0; i < lines.length; i++) {
+            const rawLine = lines[i];
+            const trimmed = rawLine.trim();
+            if (trimmed.startsWith('```')) {
+              inFence = !inFence;
+              continue;
+            }
+            if (inFence || !trimmed) continue;
+            if (/^[-*_]{3,}$/.test(trimmed)) continue;
+            if (/^\|[\s:|-]+\|$/.test(trimmed)) continue;
+            if (/^#{1,2}\s+/.test(trimmed)) continue;
+            if (/^#{3,6}\s+/.test(trimmed)) {
+              const heading = trimmed.replace(/^#{3,6}\s+/, '').trim();
+              if (!heading) continue;
+              // 若紧跟子列表，则跳过纯分组标题，让具体条目直接呈现在红点列表中
+              let hasFollowingBullet = false;
+              for (let j = i + 1; j < lines.length; j++) {
+                const nt = lines[j].trim();
+                if (!nt) continue;
+                if (/^([-*+]|\d+[.)])\s+/.test(nt)) hasFollowingBullet = true;
+                break;
+              }
+              if (!hasFollowingBullet) out.push(heading);
+              continue;
+            }
+            const bulletMatch = rawLine.match(/^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/);
+            if (bulletMatch) {
+              const indent = bulletMatch[1].length;
+              const content = bulletMatch[2].trim();
+              if (!content) continue;
+              // 若为「总括短语：」且下一行是更深缩进的子条目，跳过空壳父标题避免割裂
+              if (/[：:]$/.test(content)) {
+                let hasSub = false;
+                for (let j = i + 1; j < lines.length; j++) {
+                  const nl = lines[j];
+                  if (!nl.trim()) continue;
+                  const subM = nl.match(/^(\s*)(?:[-*+]|\d+[.)])\s+/);
+                  if (subM && subM[1].length > indent) hasSub = true;
+                  break;
+                }
+                if (hasSub) continue;
+              }
+              out.push(content);
+              continue;
+            }
+            if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+              const cells = trimmed.slice(1, -1).split('|').map((c) => c.trim()).filter(Boolean);
+              if (cells.length >= 2) out.push(cells.join('：'));
+              continue;
+            }
+            out.push(trimmed);
+          }
+          if (!out.length) {
+            const fallback = String((item && (item.title || item.summary)) || '').trim();
+            if (fallback) out.push(fallback);
+            else out.push(T('常规功能优化与稳定性修复', 'General improvements and bug fixes'));
+          }
+          return out;
+        }
+
+        function renderInlineBulletText(text) {
+          const frag = document.createDocumentFragment ? document.createDocumentFragment() : h('span');
+          const src = String(text || '');
+          const re = /(\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))/g;
+          let last = 0;
+          let m;
+          while ((m = re.exec(src)) !== null) {
+            if (m.index > last) {
+              frag.appendChild(document.createTextNode(src.slice(last, m.index)));
+            }
+            if (m[2] !== undefined) {
+              frag.appendChild(h('strong', null, m[2]));
+            } else if (m[3] !== undefined) {
+              frag.appendChild(h('code', { class: 'cl-code' }, m[3]));
+            } else if (m[4] !== undefined && m[5] !== undefined) {
+              const href = m[5];
+              frag.appendChild(h('a', {
+                href,
+                class: 'cl-link',
+                onclick: (e) => {
+                  e.preventDefault();
+                  openExternalUrl(href);
+                }
+              }, m[4]));
+            }
+            last = re.lastIndex;
+          }
+          if (last < src.length) {
+            frag.appendChild(document.createTextNode(src.slice(last)));
+          }
+          return frag;
         }
 
         function closeActiveChangelogDialog() {
@@ -2302,15 +2392,12 @@
           dialog.setAttribute('aria-labelledby', 'cl-dialog-title');
 
           let entries = [];
-          let selectedId = '';
-          let userPicked = false;
-          let filterQuery = '';
-          let filterKind = 'all'; // all | minor | patch | legacy
           let loading = true;
           let syncing = false;
           let remoteSynced = false;
           let closed = false;
           let loadSeq = 0;
+          const expandedCards = new Set();
 
           const updateCtx = fo.ver ? {
             ver: String(fo.ver),
@@ -2372,8 +2459,8 @@
                 kind: 'minor',
                 title: T('当前运行版本', 'Current installed version'),
                 summary: T('当前版本更新记录', 'Current version notes'),
-                body: T('暂无可展示的离线更新日志，可点击右上角「同步线上」或前往 GitHub 发布页查看。',
-                  'No offline release notes available. Click Sync or open GitHub Releases.'),
+                body: T('暂无可展示的离线更新记录，可点击右上角「同步线上」获取最新发布内容。',
+                  'No offline release notes available. Click Sync to fetch from GitHub.'),
                 date: '',
                 isCurrent: true,
                 isUpdate: false,
@@ -2384,361 +2471,131 @@
             return list;
           }
 
-          function filteredEntries() {
-            const q = String(filterQuery || '').trim().toLowerCase();
-            return entries.filter((it) => {
-              if (filterKind !== 'all') {
-                if (filterKind === 'minor' && it.kind !== 'minor' && it.kind !== 'major') return false;
-                if (filterKind === 'patch' && it.kind !== 'patch') return false;
-                if (filterKind === 'legacy' && it.kind !== 'legacy') return false;
-              }
-              if (!q) return true;
-              const hay = [it.version, it.title, it.summary, it.date, it.body].join('\n').toLowerCase();
-              return hay.includes(q);
-            });
-          }
-
-          const titleCountEl = h('span', { class: 'badge' }, '');
           const syncBtn = h('button', {
             type: 'button',
-            class: 'btn ghost sm',
-            title: T('从官方 GitHub Releases 同步最新发版日期与远端日志', 'Sync release dates & latest notes from GitHub'),
+            class: 'cl-sync-btn',
+            title: T('同步线上最新发布内容与日期', 'Sync latest release notes from GitHub'),
             onclick: () => loadChangelog(true)
           }, icon('refresh', 13), h('span', { text: T('同步线上', 'Sync') }));
-          const curJumpBtn = h('button', {
-            type: 'button',
-            class: 'btn ghost sm',
-            onclick: () => {
-              userPicked = true;
-              filterQuery = '';
-              filterKind = 'all';
-              searchInput.value = '';
-              searchClearBtn.hidden = true;
-              const hit = entries.find((x) => x.isCurrent || x.version === curVer) || entries[0];
-              if (hit) selectedId = hit.id;
-              renderAll(true);
-            }
-          }, h('span', { text: T('当前版本', 'Current') }));
+
           const closeIconBtn = h('button', {
             type: 'button',
-            class: 'btn ghost icon sm',
+            class: 'cl-close-x',
             title: T('关闭', 'Close'),
             'aria-label': T('关闭', 'Close'),
             onclick: () => closeDialog()
-          }, icon('close', 14));
+          }, icon('close', 16));
 
           const headEl = h('header', { class: 'cl-head' },
-            h('div', { class: 'cl-head-left' },
-              h('h1', { id: 'cl-dialog-title', class: 'cl-title' }, T('更新日志', 'Changelog')),
-              titleCountEl,
-              h('span', { class: 'badge ok mono' }, T('当前 ', 'Now ') + formatVersionTag(curVer))
-            ),
-            h('div', { class: 'cl-head-right' },
-              curJumpBtn,
-              syncBtn,
-              h('button', {
-                type: 'button',
-                class: 'btn ghost sm',
-                onclick: () => openExternalUrl(releasesPage)
-              }, icon('external', 13), h('span', { text: 'GitHub' })),
-              closeIconBtn
-            )
+            h('h1', { id: 'cl-dialog-title', class: 'cl-title' }, T('更新内容', "What's New")),
+            h('div', { class: 'cl-head-right' }, syncBtn, closeIconBtn)
           );
 
-          const searchInput = h('input', {
-            type: 'search',
-            class: 'input cl-search-input',
+          const feedEl = h('div', { class: 'cl-feed', 'aria-live': 'polite' });
+          const footInfoEl = h('span', { class: 'cl-foot-hint small muted' }, '');
+          const okBtn = h('button', {
+            type: 'button',
+            class: 'cl-ok-btn',
             autofocus: true,
-            spellcheck: 'false',
-            placeholder: T('筛选版本号或关键词…', 'Filter version or keyword…'),
-            'aria-label': T('筛选版本号或关键词', 'Filter version or keyword'),
-            oninput: (e) => {
-              filterQuery = e.target.value || '';
-              searchClearBtn.hidden = !filterQuery;
-              renderAll(false);
-            }
-          });
-          const searchClearBtn = h('button', {
-            type: 'button',
-            class: 'btn ghost icon sm cl-search-clear',
-            hidden: true,
-            title: T('清空筛选', 'Clear'),
-            'aria-label': T('清空筛选', 'Clear'),
-            onclick: () => {
-              filterQuery = '';
-              searchInput.value = '';
-              searchClearBtn.hidden = true;
-              renderAll(false);
-              searchInput.focus();
-            }
-          }, icon('close', 12));
-
-          const filterTabsEl = h('div', { class: 'cl-filter-tabs', role: 'tablist' });
-          const listEl = h('div', { class: 'cl-list', role: 'listbox', 'aria-label': T('历史版本列表', 'Version history') });
-          const sidebarEl = h('aside', { class: 'cl-sidebar' },
-            h('div', { class: 'cl-search-wrap' }, icon('search', 13), searchInput, searchClearBtn),
-            filterTabsEl,
-            listEl
-          );
-
-          const detailEl = h('section', { class: 'cl-detail', 'aria-live': 'polite' });
-          const mainEl = h('div', { class: 'cl-main' }, sidebarEl, detailEl);
-
-          const footInfoEl = h('span', { class: 'small muted' }, '');
-          const prevVerBtn = h('button', {
-            type: 'button',
-            class: 'btn ghost sm',
-            onclick: () => stepSelected(-1)
-          }, icon('chevron-left', 12), h('span', { text: T('更新一版', 'Newer') }));
-          const nextVerBtn = h('button', {
-            type: 'button',
-            class: 'btn ghost sm',
-            onclick: () => stepSelected(1)
-          }, h('span', { text: T('更早一版', 'Older') }), icon('chevron-right', 12));
-          const closeBtn = h('button', {
-            type: 'button',
-            class: 'btn sm primary',
             onclick: () => closeDialog()
-          }, T('关闭', 'Close'));
+          }, T('知道了', 'Got it'));
 
           const footEl = h('footer', { class: 'cl-foot' },
             footInfoEl,
             h('div', { class: 'spacer' }),
-            prevVerBtn,
-            nextVerBtn,
-            closeBtn
+            okBtn
           );
 
-          dialog.appendChild(h('div', { class: 'cl-shell' }, headEl, mainEl, footEl));
+          dialog.appendChild(h('div', { class: 'cl-shell' }, headEl, feedEl, footEl));
 
-          function stepSelected(delta) {
-            const vis = filteredEntries();
-            if (!vis.length) return;
-            const idx = Math.max(0, vis.findIndex((x) => x.id === selectedId));
-            const nextIdx = Math.max(0, Math.min(vis.length - 1, idx + delta));
-            if (vis[nextIdx] && vis[nextIdx].id !== selectedId) {
-              userPicked = true;
-              selectedId = vis[nextIdx].id;
-              renderAll(true);
-            }
-          }
-
-          const onListKey = (e) => {
-            if (e.key === 'ArrowDown') { e.preventDefault(); stepSelected(1); }
-            else if (e.key === 'ArrowUp') { e.preventDefault(); stepSelected(-1); }
-          };
-          listEl.addEventListener('keydown', onListKey);
-
-          function renderFilterTabs() {
-            const defs = [
-              { k: 'all', zh: '全部', en: 'All' },
-              { k: 'minor', zh: '功能', en: 'Feature' },
-              { k: 'patch', zh: '修复', en: 'Fix' },
-              { k: 'legacy', zh: '早期', en: 'Legacy' }
-            ];
-            filterTabsEl.replaceChildren(...defs.map((d) => h('button', {
-              type: 'button',
-              role: 'tab',
-              'aria-selected': filterKind === d.k ? 'true' : 'false',
-              class: 'cl-ftab' + (filterKind === d.k ? ' active' : ''),
-              onclick: () => { filterKind = d.k; renderAll(false); }
-            }, T(d.zh, d.en))));
-          }
-
-          function renderDetail(item, visIndex, visTotal) {
-            detailEl.replaceChildren();
-            if (loading && !entries.length) {
-              detailEl.appendChild(skeleton(6, 'log'));
-              return;
-            }
-            if (!item) {
-              detailEl.appendChild(empty(
-                T('没有匹配的历史版本', 'No matching versions'),
-                T('换个版本号或关键词试试', 'Try another version or keyword'),
-                'search'
-              ));
-              return;
-            }
-            const kb = kindBadgeInfo(item.kind);
+          function renderCard(item) {
             const verTag = formatVersionTag(item.version);
+            const isCur = !!(item.isCurrent || (curVer && item.version === curVer));
             const isUpdItem = !!(updateCtx && item.version.toLowerCase() === updateCtx.ver.toLowerCase());
-            const metaBits = [
-              item.date || '',
-              isUpdItem && updateCtx.pkgSize > 0 ? fmtSize(updateCtx.pkgSize) : '',
-              isUpdItem ? (updateCtx.pkgKind === 'installer' ? T('安装版', 'Installer') : T('便携版', 'Portable')) : ''
-            ].filter(Boolean).join(' · ');
+            const bullets = extractChangelogBullets(item);
+            const collapseLimit = 6;
+            const isExpanded = expandedCards.has(item.id) || bullets.length <= collapseLimit;
+            const visibleBullets = isExpanded ? bullets : bullets.slice(0, collapseLimit);
 
-            const headerBadges = [
-              h('span', { class: kb.cls }, kb.text),
-              item.isUpdate ? h('span', { class: 'badge ok' }, T('发现新版本', 'New release')) : null,
-              item.isCurrent ? h('span', { class: 'badge ok' }, T('当前运行', 'Installed')) : null,
-              item.isPrerelease ? h('span', { class: 'badge warn' }, T('预发布', 'Prerelease')) : null
-            ].filter(Boolean);
-
-            const copyTextBody = `# ${verTag}${item.title ? ' — ' + item.title : ''}\n\n${item.body || ''}`.trim();
-
-            const detailHead = h('div', { class: 'cl-detail-head' },
-              h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center' } },
-                h('h2', { class: 'cl-ver-heading mono' }, T(`${verTag} 更新日志`, `${verTag} Release Notes`)),
-                ...headerBadges,
-                h('div', { class: 'spacer' }),
-                h('button', {
-                  type: 'button',
-                  class: 'btn ghost sm',
-                  onclick: () => UI.copy(copyTextBody, T('已复制本版更新日志', 'Release notes copied'))
-                }, icon('copy', 13), h('span', { text: T('复制', 'Copy') })),
-                item.url ? h('button', {
-                  type: 'button',
-                  class: 'btn ghost sm',
-                  onclick: () => openExternalUrl(item.url)
-                }, icon('external', 13), h('span', { text: T('发布页', 'Tag') })) : null
+            const cardHead = h('div', { class: 'cl-card-head' },
+              h('div', { class: 'cl-card-title-row' },
+                h('span', { class: 'cl-card-ver mono' }, verTag),
+                isCur ? h('span', { class: 'cl-card-pill' }, T('当前版本', 'Current')) : null,
+                item.isUpdate ? h('span', { class: 'cl-card-pill is-new' }, T('新版本', 'New')) : null,
+                item.isPrerelease ? h('span', { class: 'cl-card-pill is-beta' }, T('测试版', 'Beta')) : null
               ),
-              item.title ? h('div', { class: 'cl-ver-sub' }, item.title) : null,
-              metaBits ? h('div', { class: 'small muted' }, metaBits) : null
+              item.date ? h('span', { class: 'cl-card-date mono' }, item.date) : null
             );
 
-            const updBanner = isUpdItem ? h('div', { class: 'cl-upd-bar' },
-              h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center' } },
-                updateCtx.isReady
-                  ? h('button', {
-                    type: 'button',
-                    class: 'btn primary sm',
-                    disabled: state.updInstalling || state.updDownloading,
-                    onclick: () => { closeDialog(); installStagedUpdate(updateCtx.ver, updateCtx.pkgKind); }
-                  }, icon('refresh', 13), h('span', { text: T('立即重启并安装更新', 'Restart & install') }))
-                  : h('button', {
-                    type: 'button',
-                    class: 'btn primary sm',
-                    disabled: state.updDownloading || state.updChecking,
-                    onclick: () => { closeDialog(); startUpdateDownload(); }
-                  }, icon('download', 13), h('span', { text: T('下载更新包', 'Download update') })),
-                updateCtx.isReady && updateCtx.stagedPath
-                  ? h('button', {
-                    type: 'button',
-                    class: 'btn ghost sm',
-                    onclick: () => reveal(updateCtx.stagedPath)
-                  }, icon('folder', 13), h('span', { text: T('打开安装包目录', 'Show in folder') }))
-                  : null,
-                !updateCtx.isReady
-                  ? h('button', {
-                    type: 'button',
-                    class: 'btn ghost sm',
-                    disabled: state.updDownloading,
-                    onclick: async () => { closeDialog(); await skipUpdateVersion(updateCtx.ver); }
-                  }, h('span', { text: T('跳过此版本', 'Skip this version') }))
-                  : null
-              ),
-              updateCtx.pkgSha ? h('details', { class: 'upd-details' },
-                h('summary', { class: 'small muted', text: T('SHA-256 校验信息', 'SHA-256 checksum') }),
-                h('div', { class: 'upd-details-body' },
-                  h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
-                    h('span', { class: 'small muted mono upd-sha', text: 'SHA-256: ' + updateCtx.pkgSha }),
-                    h('button', {
-                      type: 'button',
-                      class: 'btn ghost sm',
-                      onclick: () => UI.copy(updateCtx.pkgSha, T('已复制 SHA-256', 'SHA-256 copied'))
-                    }, h('span', { text: T('复制', 'Copy') }))
-                  )
-                )
-              ) : null
+            const updActions = isUpdItem ? h('div', { class: 'cl-card-upd' },
+              updateCtx.isReady
+                ? h('button', {
+                  type: 'button',
+                  class: 'btn primary sm',
+                  disabled: state.updInstalling || state.updDownloading,
+                  onclick: () => { closeDialog(); installStagedUpdate(updateCtx.ver, updateCtx.pkgKind); }
+                }, icon('refresh', 13), h('span', { text: T('立即重启并安装更新', 'Restart & install') }))
+                : h('button', {
+                  type: 'button',
+                  class: 'btn primary sm',
+                  disabled: state.updDownloading || state.updChecking,
+                  onclick: () => { closeDialog(); startUpdateDownload(); }
+                }, icon('download', 13), h('span', { text: T('下载更新包', 'Download update') })),
+              updateCtx.isReady && updateCtx.stagedPath
+                ? h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  onclick: () => reveal(updateCtx.stagedPath)
+                }, icon('folder', 13), h('span', { text: T('打开安装包目录', 'Show in folder') }))
+                : null,
+              !updateCtx.isReady
+                ? h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  disabled: state.updDownloading,
+                  onclick: async () => { closeDialog(); await skipUpdateVersion(updateCtx.ver); }
+                }, h('span', { text: T('跳过此版本', 'Skip') }))
+                : null
             ) : null;
 
-            const notesEl = h('div', {
-              class: 'upd-log-md',
-              onclick: (e) => {
-                const a = e && e.target && e.target.closest ? e.target.closest('a[href]') : null;
-                if (!a) return;
-                const href = a.getAttribute('href') || '';
-                if (/^https?:\/\//i.test(href)) {
-                  e.preventDefault();
-                  openExternalUrl(href);
-                } else {
-                  e.preventDefault();
-                }
-              }
-            });
-            if (window.AIMd && typeof window.AIMd.render === 'function' && item.body) {
-              const rendered = window.AIMd.render(String(item.body));
-              if (typeof UI.safeSetHtml === 'function') UI.safeSetHtml(notesEl, rendered);
-              else notesEl.innerHTML = rendered;
-            } else {
-              notesEl.textContent = item.body || T('该版本暂无详细变更记录', 'No detailed release notes for this version');
-            }
-
-            const viewer = h('div', { class: 'upd-log-viewer cl-log-viewer' }, notesEl);
-            detailEl.appendChild(detailHead);
-            if (updBanner) detailEl.appendChild(updBanner);
-            detailEl.appendChild(viewer);
-            if (viewer.scrollTop) viewer.scrollTop = 0;
-
-            footInfoEl.textContent = T(
-              `第 ${visIndex + 1} / ${visTotal} 版` + (remoteSynced ? ' · 已同步线上发布' : ' · 本地完整历史记录'),
-              `#${visIndex + 1} of ${visTotal}` + (remoteSynced ? ' · Synced with GitHub' : ' · Local history')
+            const ul = h('ul', { class: 'cl-card-list' },
+              ...visibleBullets.map((line) => h('li', { class: 'cl-bullet' },
+                h('span', { class: 'cl-bullet-dot', 'aria-hidden': 'true' }),
+                h('span', { class: 'cl-bullet-text' }, renderInlineBulletText(line))
+              ))
             );
+
+            const moreBtn = bullets.length > collapseLimit ? h('button', {
+              type: 'button',
+              class: 'cl-more-btn',
+              onclick: () => {
+                if (expandedCards.has(item.id)) expandedCards.delete(item.id);
+                else expandedCards.add(item.id);
+                renderAll();
+              }
+            }, isExpanded
+              ? T('收起部分内容', 'Show less')
+              : T(`展开其余 ${bullets.length - collapseLimit} 条`, `Show ${bullets.length - collapseLimit} more`)) : null;
+
+            return h('article', {
+              class: 'cl-card' + (isCur ? ' is-current' : '') + (item.isUpdate ? ' is-update' : '')
+            }, cardHead, updActions, ul, moreBtn);
           }
 
-          function renderAll(scrollSelected) {
-            renderFilterTabs();
-            titleCountEl.textContent = T(`共 ${entries.length} 个版本`, `${entries.length} releases`);
-            const vis = filteredEntries();
-            if (vis.length && !vis.some((x) => x.id === selectedId)) {
-              selectedId = vis[0].id;
-            }
-            const hadListFocus = typeof document !== 'undefined'
-              && typeof listEl.contains === 'function'
-              && !!document.activeElement
-              && listEl.contains(document.activeElement);
-            let activeBtnToFocus = null;
-            listEl.replaceChildren();
+          function renderAll() {
+            feedEl.replaceChildren();
             if (loading && !entries.length) {
-              listEl.appendChild(skeleton(6, 'log'));
-            } else if (!vis.length) {
-              listEl.appendChild(h('div', { class: 'small muted', style: { padding: '14px 8px', textAlign: 'center' } },
-                T('无匹配版本', 'No matches')));
+              feedEl.appendChild(skeleton(5, 'log'));
             } else {
-              vis.forEach((it) => {
-                const isSel = it.id === selectedId;
-                const rowBtn = h('button', {
-                  type: 'button',
-                  role: 'option',
-                  'aria-selected': isSel ? 'true' : 'false',
-                  class: 'cl-item' + (isSel ? ' active' : ''),
-                  onclick: () => {
-                    userPicked = true;
-                    selectedId = it.id;
-                    renderAll(false);
-                  }
-                },
-                  h('div', { class: 'cl-item-top' },
-                    h('span', { class: 'cl-item-ver mono' }, formatVersionTag(it.version)),
-                    it.isUpdate ? h('span', { class: 'cl-dot is-new', title: T('新版本', 'New') }) : null,
-                    it.isCurrent ? h('span', { class: 'badge ok cl-mini-badge' }, T('当前', 'Now'))
-                      : (it.isUpdate ? h('span', { class: 'badge accent cl-mini-badge' }, T('新版', 'New')) : null),
-                    h('span', { class: 'spacer' }),
-                    it.date ? h('span', { class: 'cl-item-date mono' }, it.date) : null
-                  ),
-                  h('div', { class: 'cl-item-sub ellipsis', title: it.title || it.summary || '' },
-                    it.title || it.summary || T('查看更新说明', 'View notes'))
-                );
-                listEl.appendChild(rowBtn);
-                if (isSel) {
-                  activeBtnToFocus = rowBtn;
-                  if (scrollSelected && typeof rowBtn.scrollIntoView === 'function') {
-                    rowBtn.scrollIntoView({ block: 'nearest' });
-                  }
-                }
-              });
+              entries.forEach((it) => feedEl.appendChild(renderCard(it)));
             }
-            // 键盘上下切换重建列表后必须将焦点还给新选中项，防止第二次按方向键失焦失效
-            if (hadListFocus && activeBtnToFocus && typeof activeBtnToFocus.focus === 'function') {
-              try { activeBtnToFocus.focus({ preventScroll: true }); } catch (_) { activeBtnToFocus.focus(); }
+            const syncSpan = syncBtn.querySelector && syncBtn.querySelector('span');
+            if (syncSpan) {
+              syncSpan.textContent = syncing ? T('同步中…', 'Syncing…') : T('同步线上', 'Sync');
             }
-
-            const curIdx = vis.findIndex((x) => x.id === selectedId);
-            const activeItem = curIdx >= 0 ? vis[curIdx] : null;
-            prevVerBtn.disabled = curIdx <= 0;
-            nextVerBtn.disabled = curIdx < 0 || curIdx >= vis.length - 1;
-            renderDetail(activeItem, curIdx >= 0 ? curIdx : 0, vis.length);
+            footInfoEl.textContent = remoteSynced
+              ? T('已同步线上发布记录', 'Synced with GitHub Releases')
+              : '';
           }
 
           async function loadChangelog(includeRemote) {
@@ -2747,9 +2604,10 @@
               if (syncing) return;
               syncing = true;
               syncBtn.disabled = true;
+              renderAll();
             } else {
               loading = true;
-              renderAll(false);
+              renderAll();
             }
             try {
               let raw = [];
@@ -2767,25 +2625,16 @@
                 }
               }
               entries = mergeEntries(raw);
-              if (!userPicked || !entries.some((x) => x.id === selectedId)) {
-                const wantVer = fo.ver ? String(fo.ver).toLowerCase() : '';
-                const hit = (wantVer && entries.find((x) => x.version.toLowerCase() === wantVer))
-                  || entries.find((x) => x.isUpdate)
-                  || entries.find((x) => x.isCurrent || x.version === curVer)
-                  || entries[0];
-                selectedId = hit ? hit.id : '';
-              }
             } catch (e) {
               if (closed || mySeq !== loadSeq) return;
               entries = mergeEntries([]);
-              selectedId = entries[0] ? entries[0].id : '';
               if (includeRemote) toast(errText(e), 'warn');
             } finally {
               if (!closed && mySeq === loadSeq) {
                 loading = false;
                 syncing = false;
                 syncBtn.disabled = false;
-                renderAll(true);
+                renderAll();
               }
             }
           }
@@ -2798,11 +2647,15 @@
             return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
           };
           const needLightDismissFallback = typeof HTMLDialogElement === 'undefined' || !('closedBy' in HTMLDialogElement.prototype);
-          const onPointerDown = (e) => { pressedOutside = isOutside(e); };
-          const onPointerUp = (e) => { if (pressedOutside && isOutside(e)) closeDialog(); pressedOutside = false; };
+          const onPointerDown = (e) => { pressedOutside = e.target === dialog && isOutside(e); };
+          const onDialogClick = (e) => {
+            if (e.target !== dialog) { pressedOutside = false; return; }
+            if (pressedOutside && isOutside(e)) closeDialog();
+            pressedOutside = false;
+          };
           if (needLightDismissFallback) {
             dialog.addEventListener('pointerdown', onPointerDown);
-            dialog.addEventListener('pointerup', onPointerUp);
+            dialog.addEventListener('click', onDialogClick);
           }
 
           function cleanupDialog() {
@@ -2811,10 +2664,9 @@
             if (state.changelogClose === closeDialog) state.changelogClose = null;
             if (unregModal) { unregModal(); unregModal = null; }
             try { dialog.returnValue = ''; } catch (_) {}
-            listEl.removeEventListener('keydown', onListKey);
             if (needLightDismissFallback) {
               dialog.removeEventListener('pointerdown', onPointerDown);
-              dialog.removeEventListener('pointerup', onPointerUp);
+              dialog.removeEventListener('click', onDialogClick);
             }
             dialog.removeEventListener('close', cleanupDialog);
             try { dialog.remove(); } catch (_) {}
@@ -2848,15 +2700,8 @@
             dialog.classList.add('cl-dialog-fallback');
           }
 
-          // 若已传入新版本内容，先同步首帧绘制，再异步补齐全部历史版本列表（无闪烁且兼容同步检测）
           entries = mergeEntries([]);
-          if (fo.ver) {
-            const hit = entries.find((x) => x.version.toLowerCase() === String(fo.ver).toLowerCase());
-            if (hit) selectedId = hit.id;
-          } else if (entries[0]) {
-            selectedId = entries[0].id;
-          }
-          renderAll(false);
+          renderAll();
           loadChangelog(false);
         }
 
@@ -2924,87 +2769,98 @@
                   isReady,
                   stagedPath: staged && staged.path
                 })
-              }, icon('log', 13), h('span', { text: T('查看更新日志', 'Release notes') }))
+              }, h('span', { text: T('更新内容', "What's New") }))
             )
           );
         })();
 
+        const lastCheckAt = (st && st.config && st.config.lastCheckAt) || '';
+        const verTooltip = [
+          kindLabel,
+          lastCheckAt ? T('上次检查：', 'Last checked: ') + lastCheckAt : ''
+        ].filter(Boolean).join(' · ');
+
+        const channelSeg = h('div', {
+          class: 'upd-seg',
+          role: 'radiogroup',
+          'aria-label': T('更新通道', 'Update channel')
+        },
+          ...[
+            { value: 'stable', zh: '稳定版', en: 'Stable', tip: T('正式发布版（推荐）', 'Stable releases (recommended)') },
+            { value: 'beta', zh: '测试版', en: 'Beta', tip: T('包含预发布体验版', 'Includes prereleases') }
+          ].map((ch) => {
+            const active = state.updChannel === ch.value;
+            return h('button', {
+              type: 'button',
+              role: 'radio',
+              'aria-checked': active ? 'true' : 'false',
+              class: 'upd-seg-btn' + (active ? ' active' : ''),
+              title: ch.tip,
+              disabled: state.updDownloading || state.updInstalling,
+              onclick: () => { if (!active) onUpdaterChannel(ch.value); }
+            }, T(ch.zh, ch.en));
+          })
+        );
+
         const body = h('div', { class: 'stack' },
-          h('div', { class: 'set-card' },
-            h('dl', { class: 'kv' },
-              kvRow(T('当前版本', 'Current version'), h('div', { class: 'row wrap' },
-                h('span', { class: 'mono', text: 'v' + curVer }),
-                h('span', { class: 'badge', text: kindLabel })
-              )),
-              kvRow(T('上次检查', 'Last checked'), h('span', {
-                class: 'small muted',
-                text: (st && st.config && st.config.lastCheckAt) || T('从未检查', 'Never')
-              }))
-            )
-          ),
-          h('div', { class: 'set-card' },
-            setRow(T('更新通道', 'Channel'),
-              h('div', { class: 'row wrap' },
-                [
-                  { value: 'stable', zh: '稳定版（推荐）', en: 'Stable (recommended)' },
-                  { value: 'beta', zh: '测试版（含预发布）', en: 'Beta (prereleases)' }
-                ].map((ch) => h('label', { class: 'check' },
-                  h('input', {
-                    type: 'radio',
-                    name: 'set-upd-channel',
-                    checked: state.updChannel === ch.value,
-                    onchange: () => onUpdaterChannel(ch.value)
-                  }),
-                  h('span', { text: T(ch.zh, ch.en) })
-                ))
+          h('div', { class: 'set-card upd-card' },
+            h('div', { class: 'upd-main-row' },
+              h('span', { class: 'upd-row-label', text: T('版本', 'Version') }),
+              h('div', { class: 'upd-row-right' },
+                h('span', {
+                  class: 'upd-ver-pill mono',
+                  title: verTooltip,
+                  text: formatVersionTag(curVer)
+                }),
+                channelSeg,
+                h('button', {
+                  type: 'button',
+                  class: 'upd-check-btn',
+                  disabled: state.updChecking || state.updDownloading,
+                  onclick: checkForUpdates
+                },
+                  state.updChecking
+                    ? h('span', { class: 'btn-spin', 'aria-hidden': 'true' })
+                    : icon('refresh', 14),
+                  h('span', { text: state.updChecking ? T('检查中…', 'Checking…') : T('检查更新', 'Check for updates') })
+                ),
+                h('button', {
+                  type: 'button',
+                  class: 'upd-notes-btn',
+                  onclick: () => openChangelogModal()
+                }, T('更新内容', "What's New"))
               )
             ),
-            setRow(T('启动时静默检查', 'Auto-check on launch'),
-              h('label', { class: 'check' },
+            h('div', { class: 'upd-sub-row' },
+              h('label', { class: 'check upd-auto-check' },
                 h('input', {
                   type: 'checkbox',
                   checked: !!state.updAutoCheck,
                   onchange: (e) => onUpdaterAutoCheck(e.target.checked)
                 }),
-                h('span', { text: T('后台自动检查官方新版本，不阻塞启动', 'Checks for official updates silently in the background') })
+                h('span', { text: T('启动时自动检查更新', 'Check for updates on launch') })
+              ),
+              h('div', { class: 'upd-sub-meta' },
+                cacheBytes > 0
+                  ? h('span', { class: 'small muted', text: T('已缓存 ', 'Cache ') + fmtSize(cacheBytes) })
+                  : h('span', {
+                    class: 'small muted',
+                    text: lastCheckAt ? T('上次检查 ', 'Checked ') + lastCheckAt : kindLabel
+                  }),
+                cacheBytes > 0
+                  ? h('button', {
+                    type: 'button',
+                    class: 'upd-link-btn',
+                    disabled: state.updDownloading || state.updInstalling,
+                    onclick: (ev) => clearUpdaterCache(ev && ev.currentTarget)
+                  }, T('清理', 'Clear'))
+                  : null
               )
             )
           ),
           chkWrap,
           progWrap,
-          resultCard,
-          h('div', { class: 'action-bar' },
-            h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center' } },
-              h('span', {
-                class: 'small muted',
-                text: cacheBytes > 0
-                  ? T('本地更新缓存：', 'Update cache: ') + fmtSize(cacheBytes)
-                  : T('自动校验 SHA-256，安全无损升级', 'SHA-256 verified safe upgrades')
-              }),
-              cacheBytes > 0
-                ? h('button', {
-                  type: 'button',
-                  class: 'upd-link-btn',
-                  disabled: state.updDownloading || state.updInstalling,
-                  onclick: (ev) => clearUpdaterCache(ev && ev.currentTarget)
-                }, T('清理缓存', 'Clear'))
-                : null
-            ),
-            h('div', { class: 'spacer' }),
-            h('button', {
-              type: 'button',
-              class: 'btn sm',
-              onclick: () => openChangelogModal()
-            }, icon('log', 14), h('span', { text: T('查看更新日志', 'Changelog') })),
-            h('button', {
-              type: 'button',
-              class: 'btn sm primary',
-              disabled: state.updChecking || state.updDownloading,
-              onclick: checkForUpdates
-            }, state.updChecking ? h('span', { class: 'btn-spin', 'aria-hidden': 'true' }) : icon('refresh', 14), h('span', {
-              text: state.updChecking ? T('检查中…', 'Checking…') : T('立即检查更新', 'Check for updates')
-            }))
-          )
+          resultCard
         );
 
         return section(T('版本与在线更新', 'Version & updates'), body, {

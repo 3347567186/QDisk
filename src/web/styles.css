@@ -5858,6 +5858,137 @@ html[data-theme="dark"] .ai-tnav-pop {
 }
 .upd-prog-row { align-items: center; gap: 8px; }
 
+/* ---------------- 设置页：极简版本与通道融合行 ---------------- */
+.upd-card {
+  padding: 0;
+  overflow: hidden;
+}
+.upd-main-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+}
+.upd-row-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-1);
+}
+.upd-row-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.upd-ver-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1;
+}
+.upd-seg {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  gap: 2px;
+}
+.upd-seg-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.upd-seg-btn:hover:not(:disabled):not(.active) {
+  color: var(--text-1);
+}
+.upd-seg-btn.active {
+  background: var(--surface);
+  color: var(--text-1);
+  font-weight: 500;
+  border-color: var(--line);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.upd-seg-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.upd-check-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.upd-check-btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--text-3);
+}
+.upd-check-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.upd-notes-btn {
+  border: 0;
+  background: transparent;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.upd-notes-btn:hover {
+  color: var(--text-1);
+  background: var(--hover);
+}
+.upd-sub-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 18px;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+.upd-auto-check {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+.upd-sub-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---------------- 整理来源标签 & 文件行内预览按钮 ---------------- */
 .src-bar { align-items: center; }
 .src-label { flex: 0 0 auto; user-select: none; }
@@ -5934,19 +6065,19 @@ tr:hover .org-view-btn, .org-view-btn:focus-visible,
 .fp-fallback.is-err { color: var(--danger); }
 .fp-fallback-title { font-weight: 600; color: var(--text-1); font-size: var(--fs-body); }
 
-/* ---------------- 更新日志独立弹窗（原生 <dialog>，双栏历史浏览） ---------------- */
+/* ---------------- 更新内容独立弹窗（原生 <dialog>，极简卡片时间轴） ---------------- */
 dialog.cl-dialog {
   padding: 0;
   margin: auto;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
   background: var(--surface);
   color: var(--text-1);
   box-shadow: var(--shadow-3);
-  width: min(940px, calc(100vw - 36px));
-  height: min(680px, calc(100vh - 44px));
+  width: min(680px, calc(100vw - 36px));
+  height: min(720px, calc(100vh - 48px));
   max-width: calc(100vw - 36px);
-  max-height: calc(100vh - 44px);
+  max-height: calc(100vh - 48px);
   overflow: hidden;
 }
 /* 严禁无条件设置 display，按现代 dialog 规范仅在 [open] 时启用 flex */
@@ -5974,135 +6105,183 @@ dialog.cl-dialog.cl-dialog-fallback {
 }
 .cl-head {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
+  gap: 12px; padding: 20px 24px 12px;
   background: var(--surface);
   flex: 0 0 auto;
 }
-.cl-head-left, .cl-head-right {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;
+.cl-head-right {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
 }
 .cl-title {
   margin: 0;
-  font-size: var(--fs-title);
+  font-size: 18px;
   font-weight: 600;
   letter-spacing: -.01em;
   color: var(--text-1);
 }
-.cl-main {
-  display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden;
+.cl-sync-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 10px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--text-3);
+  font-family: inherit; font-size: 12px; cursor: pointer;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
-.cl-sidebar {
-  width: 244px; flex: 0 0 244px;
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px;
-  background: var(--surface-2);
-  border-right: 1px solid var(--line);
-  min-height: 0;
-}
-.cl-search-wrap {
-  display: flex; align-items: center; gap: 6px;
-  padding: 0 8px; height: 30px;
-  border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: var(--surface); color: var(--text-3);
-}
-.cl-search-wrap:focus-within { border-color: var(--line-strong); }
-.cl-search-input {
-  flex: 1 1 auto; min-width: 0; height: 26px; padding: 0;
-  border: 0 !important; background: transparent !important;
-  box-shadow: none !important; font-size: var(--fs-small);
-}
-.cl-search-clear { width: 20px; height: 20px; padding: 0; flex: 0 0 auto; }
-.cl-search-clear[hidden] { display: none; }
-.cl-filter-tabs {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-}
-.cl-ftab {
-  height: 24px; padding: 0 4px;
-  border: 1px solid transparent; border-radius: var(--radius-sm);
-  background: transparent; color: var(--text-2);
-  font-family: inherit; font-size: var(--fs-tiny); cursor: pointer;
-  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
-}
-.cl-ftab:hover { background: var(--hover); color: var(--text-1); }
-.cl-ftab.active {
-  background: var(--surface); color: var(--text-1); font-weight: 500;
-  border-color: var(--line);
-}
-.cl-list {
-  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  display: flex; flex-direction: column; gap: 3px;
-  padding-right: 2px;
-}
-.cl-item {
-  position: relative;
-  display: flex; flex-direction: column; gap: 2px;
-  width: 100%; padding: 7px 9px; text-align: left;
-  border: 1px solid transparent; border-radius: var(--radius);
-  background: transparent; color: var(--text-2);
-  font-family: inherit; cursor: pointer;
-  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
-}
-.cl-item:hover { background: var(--hover); color: var(--text-1); }
-.cl-item.active {
-  background: var(--nav-active, var(--surface));
+.cl-sync-btn:hover:not(:disabled) {
   color: var(--text-1);
-  border-color: var(--line);
+  background: var(--hover);
 }
-.cl-item.active::before {
-  content: ''; position: absolute; left: 0; top: 6px; bottom: 6px;
-  width: 2.5px; border-radius: 2px; background: var(--accent);
+.cl-sync-btn:disabled { opacity: 0.55; cursor: default; }
+.cl-close-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: 8px;
+  background: transparent; color: var(--text-2);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
 }
-.cl-item-top {
-  display: flex; align-items: center; gap: 6px; min-width: 0;
-}
-.cl-item-ver { font-size: var(--fs-small); font-weight: 600; color: var(--text-1); }
-.cl-item-date { font-size: 10px; color: var(--text-3); flex: 0 0 auto; }
-.cl-item-sub { font-size: var(--fs-tiny); color: var(--text-3); max-width: 100%; }
-.cl-mini-badge { padding: 0 5px; line-height: 16px; font-size: 10px; }
-.cl-dot {
-  width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto;
-}
-.cl-detail {
-  flex: 1 1 auto; min-width: 0; min-height: 0;
-  display: flex; flex-direction: column; gap: 10px;
-  padding: 14px 18px; overflow: hidden;
-  background: var(--surface);
-}
-.cl-detail-head {
-  display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto;
-  padding-bottom: 10px; border-bottom: 1px solid var(--line);
-}
-.cl-ver-heading {
-  margin: 0; font-size: 16px; font-weight: 600; color: var(--text-1);
-}
-.cl-ver-sub {
-  font-size: var(--fs-small); color: var(--text-2); line-height: 1.5;
-}
-.cl-upd-bar {
-  display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto;
-  padding: 10px 12px; border-radius: var(--radius);
-  background: var(--accent-weak); border: 1px solid var(--accent-ring);
-}
-.cl-log-viewer {
-  flex: 1 1 auto; min-height: 0; max-height: none;
-  padding: 14px 16px;
-  background: var(--surface-2); border: 1px solid var(--line);
-  border-radius: var(--radius); overflow-y: auto; overscroll-behavior: contain;
+.cl-close-x:hover { color: var(--text-1); background: var(--hover); }
+.cl-feed {
+  --cl-sb-thumb: var(--line-strong);
+  --cl-sb-track: transparent;
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 6px 24px 14px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cl-sb-thumb) var(--cl-sb-track);
   -webkit-user-select: text; user-select: text;
 }
-.cl-foot {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 16px; border-top: 1px solid var(--line);
-  background: var(--surface); flex: 0 0 auto;
+@supports not (scrollbar-color: auto) {
+  .cl-feed { scrollbar-width: auto; }
+  .cl-feed::-webkit-scrollbar { width: 8px; height: 8px; }
+  .cl-feed::-webkit-scrollbar-thumb { background: var(--cl-sb-thumb); border-radius: 999px; }
+  .cl-feed::-webkit-scrollbar-track { background: var(--cl-sb-track); }
 }
-@media (max-width: 720px) {
-  .cl-main { flex-direction: column; }
-  .cl-sidebar {
-    width: auto; flex: 0 0 auto; max-height: 200px;
-    border-right: 0; border-bottom: 1px solid var(--line);
-  }
+.cl-card {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 16px 20px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.cl-card.is-update {
+  border-color: var(--accent-ring, var(--accent));
+}
+.cl-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+}
+.cl-card-title-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.cl-card-ver {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: -.01em;
+}
+.cl-card-pill {
+  display: inline-flex; align-items: center;
+  height: 22px; padding: 0 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1;
+}
+.cl-card-pill.is-new {
+  background: var(--accent-weak);
+  border-color: var(--accent-ring, transparent);
+  color: var(--accent-text);
+}
+.cl-card-pill.is-beta {
+  background: var(--surface);
+  color: var(--text-2);
+}
+.cl-card-date {
+  font-size: 12.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.cl-card-upd {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding-bottom: 4px;
+}
+.cl-card-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.cl-bullet {
+  display: flex; align-items: flex-start; gap: 10px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+  word-break: break-word;
+}
+.cl-bullet-dot {
+  width: 5.5px; height: 5.5px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+  margin-top: 8.5px;
+}
+.cl-bullet-text {
+  flex: 1 1 auto; min-width: 0;
+}
+.cl-bullet-text strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+.cl-code {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-1);
+}
+.cl-link {
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.cl-more-btn {
+  align-self: flex-start;
+  border: 0; background: transparent;
+  padding: 2px 0 0 15px;
+  font-family: inherit; font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.cl-more-btn:hover { color: var(--text-1); text-decoration: underline; }
+.cl-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 24px 18px;
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+.cl-ok-btn {
+  height: 34px;
+  padding: 0 20px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.cl-ok-btn:hover {
+  background: var(--hover);
+  border-color: var(--text-3);
 }
 
 /* ---------------- 一键建立全盘索引：磁盘识别确认清单 ---------------- */
@@ -6124,5 +6303,5 @@ dialog.cl-dialog.cl-dialog-fallback {
 
 @media (prefers-reduced-motion: reduce) {
   .pool-row, .pool-chip, .pool-models, .wb-tab, .ai-suggest-prompts, .ai-sp-chip, .log-file-item, .agent-cat-chip, .xdlg-mode,
-  .org-view-btn, .tool-view-btn, .cl-ftab, .cl-item, .ix-drive-row { transition: none; animation: none; }
+  .org-view-btn, .tool-view-btn, .upd-seg-btn, .upd-check-btn, .upd-notes-btn, .cl-sync-btn, .cl-close-x, .cl-ok-btn, .ix-drive-row { transition: none; animation: none; }
 }

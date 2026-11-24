@@ -464,21 +464,23 @@ function Invoke-TidyTestGate {
   $needRust = ($rustFp -ne $prevStamp)
 
   # 2. 并发启动 4 个隔离 Python 单测 + 8 个前端/官网自测 +（若指纹变化）Rust cargo test
-  $testTemp = 'D:\Builds\temp\sub1\sub2'
-  if (-not (Test-Path $testTemp)) { New-Item -ItemType Directory -Path $testTemp -Force | Out-Null }
+  # 注意：每个 worker 独立目录放在 D:\Builds\temp\sub1\w_<pid>_<mod>，与原 sub1\sub2 保持完全相同的目录深度（避免触发 test_app_guard 7 层深度守卫）
+  $testTempRoot = 'D:\Builds\temp\sub1'
+  if (-not (Test-Path $testTempRoot)) { New-Item -ItemType Directory -Path $testTempRoot -Force | Out-Null }
   $workerTemps = New-Object System.Collections.Generic.List[string]
   $pyJobs = New-Object System.Collections.Generic.List[object]
   $nodeJobs = New-Object System.Collections.Generic.List[object]
+  $allJobs = New-Object System.Collections.Generic.List[object]
   $rustJob = $null
   $cargo = $null
 
   try {
     $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
     foreach ($m in $modules) {
-      $wTmp = Join-Path $testTemp ("w_{0}_{1}" -f $PID, $m)
+      $wTmp = Join-Path $testTempRoot ("w_{0}_{1}" -f $PID, $m)
       New-Item -ItemType Directory -Path $wTmp -Force | Out-Null
       $workerTemps.Add($wTmp)
-      $pyJobs.Add((Start-AsyncGateProcess -Kind 'py' -Name $m -FilePath $py `
+      $job = Start-AsyncGateProcess -Kind 'py' -Name $m -FilePath $py `
         -Arguments @('-B', '-m', 'unittest', $m) `
         -WorkingDirectory $engineSrc `
         -EnvVars @{
@@ -487,7 +489,9 @@ function Invoke-TidyTestGate {
           PYTHONDONTWRITEBYTECODE = '1'
           PYTHONUTF8              = '1'
           PYTHONIOENCODING        = 'utf-8'
-        }))
+        }
+      $pyJobs.Add($job)
+      $allJobs.Add($job)
     }
 
     $node = (Get-Command node -ErrorAction SilentlyContinue).Source
@@ -496,9 +500,11 @@ function Invoke-TidyTestGate {
     } else {
       $aiDir = Join-Path $root 'src\web\js\ai'
       foreach ($f in (Get-ChildItem $aiDir -Filter '*.selftest.mjs' -File | Sort-Object Name)) {
-        $nodeJobs.Add((Start-AsyncGateProcess -Kind 'node' -Name $f.Name -FilePath $node `
+        $job = Start-AsyncGateProcess -Kind 'node' -Name $f.Name -FilePath $node `
           -Arguments @($f.FullName) `
-          -WorkingDirectory $root))
+          -WorkingDirectory $root
+        $nodeJobs.Add($job)
+        $allJobs.Add($job)
       }
     }
 
@@ -523,6 +529,7 @@ function Invoke-TidyTestGate {
           -Arguments @('test', '--manifest-path', (Join-Path $rustDir 'Cargo.toml')) `
           -WorkingDirectory $rustDir `
           -EnvVars $rustEnv
+        $allJobs.Add($rustJob)
       }
     }
 
@@ -605,7 +612,7 @@ function Invoke-TidyTestGate {
       }
     }
   } finally {
-    foreach ($j in @($pyJobs) + @($nodeJobs) + @($rustJob)) {
+    foreach ($j in $allJobs) {
       if ($null -ne $j -and $null -ne $j.Proc) {
         try { if (-not $j.Proc.HasExited) { $j.Proc.Kill($true) } } catch {}
         try { $j.Proc.Dispose() } catch {}
