@@ -3180,5 +3180,220 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.inspectPath = origInspect;
 }
 
+// 回归 20：红队专项 —— 设置页全站统一极简设计（5 分区零重复、旧别名兼容跳转、分段胶囊/开关持久化、折叠抽屉防重绘闪关、12 项越界拦截与 AI 权限自动显隐）
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const origCfgGet = sandbox.API.configGet;
+  const origCfgSet = sandbox.API.configSet;
+  const origIsAdmin = sandbox.API.isAdmin;
+  const origSetAuto = sandbox.API.setAutostart;
+  const origEngine = sandbox.API.engine;
+  const origSchedSet = sandbox.API.scheduleSet;
+  const origSchedGet = sandbox.API.scheduleGet;
+  const origAppInfo = sandbox.API.appInfo;
+  const origEngInfo = sandbox.API.engineInfo;
+
+  let savedCfgPatches = [];
+  let savedEngineSets = [];
+  let autostartCalls = [];
+  let schedCalls = [];
+  let mockAdmin = true;
+
+  sandbox.API.configGet = async () => ({
+    theme: 'light', lang: 'zh-CN', close_action: 'tray', power_mode: 'balanced', motion: 'full', gpu_accel: true
+  });
+  sandbox.API.configSet = async (p) => { savedCfgPatches.push(p); return p; };
+  sandbox.API.isAdmin = async () => mockAdmin;
+  sandbox.API.setAutostart = async (want) => { autostartCalls.push(want); return want; };
+  sandbox.API.appInfo = async () => ({ version: '1.46.10', exe_dir: 'D:\\Tool\\QDisk', data_dir: 'D:\\Tool\\QDisk\\配置', log_dir: 'D:\\Tool\\QDisk\\配置\\logs' });
+  sandbox.API.engineInfo = async () => ({ pid: 4321 });
+  sandbox.API.scheduleGet = async () => ({ exists: false, time: '03:00', days: 30, cache: true, screenshots: true });
+  sandbox.API.scheduleSet = async (en, tm, dy, ca, sh) => { schedCalls.push({ en, tm, dy, ca, sh }); return true; };
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'settings.get') {
+      return {
+        data_dir: 'D:\\Tool\\QDisk\\配置',
+        recursive_depth: 1, conflict_policy: 'rename', log_keep_days: 30,
+        default_recursive: false, default_content: true,
+        index_freshness: 'check', index_max_mb: 2048, index_rebuild_idle: true,
+        prune_enabled: true, prune_history_keep: 50, prune_thumbs_mb: 256, prune_backup_keep: 3
+      };
+    }
+    if (method === 'settings.set') {
+      savedEngineSets.push(params);
+      return { ok: true };
+    }
+    return origEngine(method, params);
+  };
+
+  const setHost20 = new FakeElement('div');
+  const um20 = await sandbox.Pages.settings.mount(setHost20);
+  await new Promise((r) => setTimeout(r, 25));
+
+  // 20a. 恰好 5 个分区且无重复数据目录、管理员态隐藏冗余提权按钮
+  const secs = findNodes(setHost20, (n) => n.classList && n.classList.contains('section') && n.dataset && n.dataset.section);
+  const secIds = secs.map((s) => s.dataset.section);
+  if (JSON.stringify(secIds) !== JSON.stringify(['general', 'defaults', 'schedule', 'assistant', 'updater'])) {
+    console.error(`[红队回归 20] 设置页分区应收敛为 5 组: actual=${JSON.stringify(secIds)}`);
+    process.exit(1);
+  }
+  const dataDirLabels = findNodes(setHost20, (n) => n.classList && n.classList.contains('set-label') && txt(n) === '数据目录');
+  if (dataDirLabels.length !== 1) {
+    console.error(`[红队回归 20] 「数据目录」应全局唯一出现 1 次，实际 ${dataDirLabels.length} 次`);
+    process.exit(1);
+  }
+  const adminRestartBtnsWhenAdmin = findNodes(setHost20, (n) => n.tagName === 'BUTTON' && txt(n).includes('以管理员重启'));
+  if (adminRestartBtnsWhenAdmin.length !== 0) {
+    console.error('[红队回归 20] 已是管理员权限时应隐藏无用的「以管理员重启」按钮');
+    process.exit(1);
+  }
+
+  // 20b. 旧分区别名跳转兼容：appearance/behavior/performance -> general, maintenance -> updater
+  for (const [alias, want] of [['maintenance', 'updater'], ['appearance', 'general'], ['behavior', 'general'], ['performance', 'general']]) {
+    sandbox.Pages.settings.jump({ section: alias });
+    const targetSec = findNodes(setHost20, (n) => n.dataset && n.dataset.section === want)[0];
+    if (!targetSec || !targetSec.classList.contains('open')) {
+      console.error(`[红队回归 20] 旧分区别名 ${alias} 未正确映射并展开 ${want}`);
+      process.exit(1);
+    }
+  }
+
+  // 20c. 「通用」分段胶囊与开机自启开关真实生效
+  const quitBtn = findNodes(setHost20, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('set-seg-btn') && txt(n) === '直接退出')[0];
+  clickBtn(quitBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  if (!savedCfgPatches.some((p) => p && p.close_action === 'quit')) {
+    console.error('[红队回归 20] 点击关闭窗口分段胶囊「直接退出」未持久化 close_action');
+    process.exit(1);
+  }
+  const autoSw = findNodes(setHost20, (n) => n.tagName === 'INPUT' && n.attributes && n.attributes['aria-label'] === '开机自动启动')[0];
+  if (!autoSw) {
+    console.error('[红队回归 20] 未找到「开机自动启动」开关控件');
+    process.exit(1);
+  }
+  autoSw.checked = true;
+  autoSw.dispatchEvent({ type: 'change', target: autoSw });
+  await new Promise((r) => setTimeout(r, 20));
+  if (autostartCalls[0] !== true) {
+    console.error(`[红队回归 20] 切换开机自启开关未调用 API.setAutostart(true): ${JSON.stringify(autostartCalls)}`);
+    process.exit(1);
+  }
+
+  // 20d. 「整理与索引」高级折叠抽屉防 paint 闪关 + 越界负值拦截 + 合法保存
+  sandbox.Pages.settings.jump({ section: 'defaults' });
+  const defSec = findNodes(setHost20, (n) => n.dataset && n.dataset.section === 'defaults')[0];
+  const moreDet = findNodes(defSec, (n) => n.tagName === 'DETAILS' && n.classList && n.classList.contains('set-more'))[0];
+  if (!moreDet) {
+    console.error('[红队回归 20] 「整理与索引」缺少原生 <details class="set-more"> 高级抽屉');
+    process.exit(1);
+  }
+  moreDet.open = true;
+  moreDet.dispatchEvent({ type: 'toggle', target: moreDet });
+  const skipBtn = findNodes(defSec, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('set-seg-btn') && txt(n) === '跳过')[0];
+  clickBtn(skipBtn);
+  await new Promise((r) => setTimeout(r, 15));
+  const defSecAfter = findNodes(setHost20, (n) => n.dataset && n.dataset.section === 'defaults')[0];
+  const moreDetAfter = findNodes(defSecAfter, (n) => n.tagName === 'DETAILS' && n.classList && n.classList.contains('set-more'))[0];
+  if (!moreDetAfter || !moreDetAfter.hasAttribute || (!moreDetAfter.attributes || moreDetAfter.attributes.open === undefined)) {
+    console.error('[红队回归 20] 切换分段胶囊触发重绘后，「高级配额与数据保留」<details> 意外被收起');
+    process.exit(1);
+  }
+  // 注入非法负值 prune_history_keep = -5，保存必须拦截
+  const numInputs = findNodes(moreDetAfter, (n) => n.tagName === 'INPUT' && (n.type === 'number' || (n.attributes && n.attributes.type === 'number')));
+  const histIn = numInputs.find((inp) => String(inp.value) === '50');
+  if (!histIn) {
+    console.error('[红队回归 20] 未在高级抽屉中找到「整理历史」输入框');
+    process.exit(1);
+  }
+  histIn.value = '-5';
+  histIn.dispatchEvent({ type: 'input', target: histIn });
+  const saveDefBtn = findNodes(defSecAfter, (n) => n.tagName === 'BUTTON' && txt(n) === '保存')[0];
+  clickBtn(saveDefBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  if (savedEngineSets.length !== 0) {
+    console.error(`[红队回归 20] 负数 prune_history_keep=-5 未被拦截，错误调用了 settings.set`);
+    process.exit(1);
+  }
+  histIn.value = '80';
+  histIn.dispatchEvent({ type: 'input', target: histIn });
+  clickBtn(saveDefBtn);
+  await new Promise((r) => setTimeout(r, 25));
+  if (!savedEngineSets.some((p) => p.key === 'conflict_policy' && p.value === 'skip') ||
+      !savedEngineSets.some((p) => p.key === 'prune_history_keep' && p.value === 80)) {
+    console.error(`[红队回归 20] 合法保存未写入 conflict_policy/prune_history_keep: ${JSON.stringify(savedEngineSets)}`);
+    process.exit(1);
+  }
+
+  // 20e. 「定时清理」未勾选任何范围时拒绝启用；勾选后正常应用
+  sandbox.Pages.settings.jump({ section: 'schedule' });
+  const scSec = findNodes(setHost20, (n) => n.dataset && n.dataset.section === 'schedule')[0];
+  const scEnable = findNodes(scSec, (n) => n.tagName === 'INPUT' && n.attributes && n.attributes['aria-label'] === '启用定时清理')[0];
+  const scChecks = findNodes(scSec, (n) => n.tagName === 'INPUT' && (n.type === 'checkbox' || (n.attributes && n.attributes.type === 'checkbox')) && (!n.attributes || n.attributes.role !== 'switch'));
+  const scApply = findNodes(scSec, (n) => n.tagName === 'BUTTON' && txt(n) === '应用')[0];
+  scEnable.checked = true;
+  scEnable.dispatchEvent({ type: 'change', target: scEnable });
+  scChecks.forEach((cb) => { cb.checked = false; cb.dispatchEvent({ type: 'change', target: cb }); });
+  clickBtn(scApply);
+  await new Promise((r) => setTimeout(r, 20));
+  if (schedCalls.length !== 0) {
+    console.error('[红队回归 20] 定时清理未选缓存/截图时错误调用了 API.scheduleSet');
+    process.exit(1);
+  }
+  scChecks[0].checked = true;
+  scChecks[0].dispatchEvent({ type: 'change', target: scChecks[0] });
+  clickBtn(scApply);
+  await new Promise((r) => setTimeout(r, 25));
+  if (schedCalls.length !== 1 || schedCalls[0].en !== true || schedCalls[0].ca !== true || schedCalls[0].sh !== false) {
+    console.error(`[红队回归 20] 定时清理应用参数异常: ${JSON.stringify(schedCalls)}`);
+    process.exit(1);
+  }
+
+  // 20f. 「AI 助手」切「确认」自动展开权限抽屉，切回「只读」自动收起
+  sandbox.Pages.settings.jump({ section: 'assistant' });
+  const aiSec = findNodes(setHost20, (n) => n.dataset && n.dataset.section === 'assistant')[0];
+  const confirmModeBtn = findNodes(aiSec, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('ai-mode') && txt(n) === '确认')[0];
+  clickBtn(confirmModeBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  const aiSecArmed = findNodes(setHost20, (n) => n.dataset && n.dataset.section === 'assistant')[0];
+  const permDetArmed = findNodes(aiSecArmed, (n) => n.tagName === 'DETAILS' && txt(n).includes('允许范围与安全上限'))[0];
+  if (!permDetArmed || !permDetArmed.attributes || permDetArmed.attributes.open === undefined) {
+    console.error('[红队回归 20] 切换 AI 权限到「确认」后未自动展开「允许范围与安全上限」抽屉');
+    process.exit(1);
+  }
+  const offModeBtn = findNodes(aiSecArmed, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('ai-mode') && txt(n) === '只读')[0];
+  clickBtn(offModeBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  const aiSecOff = findNodes(setHost20, (n) => n.dataset && n.dataset.section === 'assistant')[0];
+  const permDetOff = findNodes(aiSecOff, (n) => n.tagName === 'DETAILS' && txt(n).includes('允许范围与安全上限'))[0];
+  if (!permDetOff || (permDetOff.attributes && permDetOff.attributes.open !== undefined)) {
+    console.error('[红队回归 20] 切回 AI「只读」后未自动收起「允许范围与安全上限」抽屉');
+    process.exit(1);
+  }
+
+  um20();
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.configSet = origCfgSet;
+  sandbox.API.isAdmin = origIsAdmin;
+  sandbox.API.setAutostart = origSetAuto;
+  sandbox.API.engine = origEngine;
+  sandbox.API.scheduleSet = origSchedSet;
+  sandbox.API.scheduleGet = origSchedGet;
+  sandbox.API.appInfo = origAppInfo;
+  sandbox.API.engineInfo = origEngInfo;
+}
+
 console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含后台进程真实关闭核验、开机自启排雷、资源概览实时监控与全站红队回归）`);
 process.exit(0);

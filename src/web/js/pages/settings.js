@@ -70,7 +70,7 @@
 
   window.Pages.settings = {
     title: ['设置', 'Settings'],
-    subtitle: ['外观、默认行为、定时与维护', 'Appearance, defaults, schedule and maintenance'],
+    subtitle: ['通用、整理策略、定时清理、AI 助手与版本数据', 'General, tidy defaults, schedule, AI and updates'],
 
     async mount(root) {
       const cfg = App.cfg || {};
@@ -128,7 +128,8 @@
         updCheckProg: null,
         updCheckDom: null,
         dataMigrating: false,
-        openId: 'appearance'
+        moreOpen: { defaults: false, aiAdv: false, aiPerm: null },
+        openId: 'general'
       };
 
       /* 右键「粘贴」的落点：设置页里最近聚焦过的那个输入框。
@@ -242,46 +243,13 @@
         ];
       });
 
-      const kvRow = (label, value) => [h('dt', { text: label }), h('dd', null, value)];
-
       function openInApp(path) {
         if (!path) return;
         if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(path);
         else reveal(path);
       }
 
-      /* 只读路径 + 双入口按钮（优先软件内打开，同时保留系统文件管理器） */
-      function pathRow(path, onOpen) {
-        return h('div', { class: 'row' },
-          h('input', {
-            class: 'input grow mono',
-            readonly: true,
-            spellcheck: 'false',
-            value: path || '—',
-            title: path || ''
-          }),
-          h('button', {
-            type: 'button',
-            class: 'btn ghost sm icon',
-            title: T('在软件内打开目录', 'Browse folder in app'),
-            'aria-label': T('在软件内打开目录', 'Browse folder in app'),
-            disabled: !path,
-            onclick: () => (typeof onOpen === 'function' ? onOpen(path) : openInApp(path))
-          }, icon('scan', 14)),
-          h('button', {
-            type: 'button',
-            class: 'btn ghost sm icon',
-            title: T('在系统文件管理器中打开', 'Open in system file manager'),
-            'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
-            disabled: !path,
-            onclick: () => reveal(path)
-          }, icon('external', 14))
-        );
-      }
-
-      /* 一张卡、若干行、行间 0.5px 细线：分组标题只在卡内出现一次，
-         不再「每条一块」——那样十几项会散成十几张卡，扫读成本高。
-         放在模块作用域：七个区块都用它，塞进某个区块函数里别的区块就够不着。 */
+      /* 统一极简设置原语：与「版本」卡片同一套设计语言（左标题 + 右控件、分段胶囊、轻量开关、按需折叠抽屉） */
       const setRow = (label, node, desc, tail) => h('div', { class: 'set-row' },
         h('div', { class: 'set-label', text: label }),
         h('div', { class: 'set-body' },
@@ -289,32 +257,82 @@
           desc ? h('div', { class: 'desc', text: desc, title: desc }) : null,
           tail || null)
       );
-      const setCap = (text, tail) => h('div', { class: 'set-cap' },
-        h('span', { class: 'set-cap-text', text }),
-        tail || null);
+      const setLine = (label, ctrl, desc) => h('div', { class: 'set-line' },
+        h('div', { class: 'set-line-info' },
+          h('span', { class: 'set-line-title', text: label }),
+          desc ? h('span', { class: 'set-line-desc', text: desc, title: desc }) : null
+        ),
+        h('div', { class: 'set-line-ctrl' }, ctrl)
+      );
+      const setSeg = (options, activeVal, onSelect, opts) => {
+        const o = opts || {};
+        return h('div', {
+          class: 'set-seg' + (o.className ? ' ' + o.className : ''),
+          role: 'radiogroup',
+          'aria-label': o.label || ''
+        }, ...options.map((item) => {
+          const isOn = item.value === activeVal;
+          return h('button', {
+            type: 'button',
+            role: 'radio',
+            'aria-checked': isOn ? 'true' : 'false',
+            class: 'set-seg-btn' + (isOn ? ' active' : '') + (item.danger ? ' is-danger' : ''),
+            title: item.tip || '',
+            disabled: !!(o.disabled || item.disabled),
+            onclick: () => { if (!isOn && typeof onSelect === 'function') onSelect(item.value); }
+          }, item.label);
+        }));
+      };
+      const setSwitch = (checked, onChange, opts) => {
+        const o = opts || {};
+        const input = h('input', {
+          type: 'checkbox',
+          role: 'switch',
+          class: 'set-switch-in',
+          checked: !!checked,
+          disabled: !!o.disabled,
+          'aria-label': o.ariaLabel || o.label || '',
+          onchange: (e) => { if (typeof onChange === 'function') onChange(!!e.target.checked, e); }
+        });
+        return h('label', {
+          class: 'set-switch' + (o.disabled ? ' is-disabled' : ''),
+          title: o.title || ''
+        },
+          o.label ? h('span', { class: 'set-switch-text', text: o.label }) : null,
+          input,
+          h('span', { class: 'set-switch-track', 'aria-hidden': 'true' })
+        );
+      };
+      const setMore = (title, content, opts) => {
+        const o = opts || {};
+        const det = h('details', {
+          class: 'set-more' + (o.className ? ' ' + o.className : ''),
+          open: o.open ? '' : false,
+          ontoggle: (e) => { if (typeof o.onToggle === 'function') o.onToggle(!!e.target.open); }
+        },
+          h('summary', { class: 'set-more-sum' },
+            h('span', { class: 'set-more-title', text: title }),
+            o.badge ? h('span', { class: 'set-more-meta', text: o.badge }) : null
+          ),
+          h('div', { class: 'set-more-body' }, content)
+        );
+        return det;
+      };
 
-      /* ---------- 顶层 ---------- */
+      /* ---------- 顶层（精简为 5 组极简卡片区块，消除重复设置） ---------- */
       function paint() {
         root.textContent = '';
-        /* 每次重绘都换一批闭包：旧的开窗函数指向上一份草稿，先清掉，
-           免得自动弹窗调到已经不存在的 DOM 上 */
         state.openModelReport = null;
-        /* 弹窗挂在 #modal-root，不随 root 重绘消失：不清掉就会留下一层
-           指着旧 DOM 的窗口。close 是幂等的，重复调用安全。 */
         const staleModal = state.modelModal;
         state.modelModal = null;
         if (staleModal) { try { staleModal.close(); } catch (e) { /* 已经关了 */ } }
-        const holder = h('div', { class: 'stack' });
-        holder.appendChild(secAppearance(holder));
-        holder.appendChild(secBehavior(holder));
+        const holder = h('div', { class: 'stack set-page-stack' });
+        holder.appendChild(secGeneral(holder));
         holder.appendChild(secDefaults(holder));
-        holder.appendChild(secPerformance(holder));
         holder.appendChild(secSchedule(holder));
         holder.appendChild(secAssistant(holder));
         holder.appendChild(secUpdater(holder));
-        holder.appendChild(secMaintenance(holder));
         root.appendChild(holder);
-        /* 刚拉完模型清单：这一帧画完再把弹窗弹出来，否则清单还没进 DOM */
         if (state.autoOpenModels) {
           state.autoOpenModels = false;
           const open = state.openModelReport;
@@ -322,43 +340,103 @@
         }
       }
 
-      function secAppearance(holder) {
-        /* 两行就够：主题一组单选、语言一组单选。原来用 .grid-2 + .field，
-           每组各占半屏宽、说明各占一行，读起来像两篇文章。 */
-        const body = h('div', { class: 'set-card' },
-          setRow(T('主题', 'Theme'),
-            h('div', { class: 'row wrap' }, THEMES.map((t) =>
-              h('label', { class: 'check' },
-                h('input', {
-                  type: 'radio',
-                  name: 'set-theme',
-                  checked: state.theme === t.value,
-                  onchange: () => onTheme(t.value)
-                }),
-                h('span', { text: T(t.zh, t.en) })
-              )
-            )),
-            T('跟随系统会读取 Windows 的深浅色设置', 'System follows the Windows color mode')),
-          setRow(T('界面语言', 'Language'),
-            h('div', { class: 'row wrap' }, LANGS.map((l) =>
-              h('label', { class: 'check' },
-                h('input', {
-                  type: 'radio',
-                  name: 'set-lang',
-                  checked: state.lang === l.value,
-                  onchange: () => onLang(l.value)
-                }),
-                h('span', { text: T(l.zh, l.en) })
-              )
-            )),
-            T('切换后界面文案立即更新', 'The interface switches immediately'))
+      /* ---------- 1. 通用（融合原外观与语言、行为与启动、性能三块） ---------- */
+      function secGeneral(holder) {
+        const modes = [
+          { value: 'balanced', label: T('均衡', 'Balanced'), tip: T('完整动画，隐藏 2 分钟后释放引擎', 'Full motion; releases engine 2 min after hiding') },
+          { value: 'silent', label: T('静默', 'Silent'), tip: T('精简动画，隐藏 20 秒后释放引擎并停轮询', 'Lite motion; releases engine after 20 s') },
+          { value: 'turbo', label: T('高性能', 'Turbo'), tip: T('常驻引擎，切页与扫描响应最快', 'Keeps engine warm for instant responses') }
+        ];
+        const activeMode = modes.find((m) => m.value === state.mode) || modes[0];
+
+        const cardBasic = h('div', { class: 'set-card' },
+          setLine(T('主题', 'Theme'),
+            setSeg(
+              THEMES.map((t) => ({ value: t.value, label: T(t.zh, t.en) })),
+              state.theme,
+              (v) => onTheme(v),
+              { label: T('主题', 'Theme') }
+            )
+          ),
+          setLine(T('界面语言', 'Language'),
+            setSeg(
+              LANGS.map((l) => ({ value: l.value, label: T(l.zh, l.en) })),
+              state.lang,
+              (v) => onLang(v),
+              { label: T('界面语言', 'Language') }
+            )
+          ),
+          setLine(T('关闭窗口时', 'On close'),
+            setSeg(
+              CLOSE_ACTIONS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
+              state.closeAction,
+              (v) => onCloseAction(v),
+              { label: T('关闭窗口时', 'On close') }
+            )
+          ),
+          setLine(T('开机自动启动', 'Start with Windows'),
+            setSwitch(state.autostart, (v) => onAutostart(v), {
+              disabled: state.autostartBusy,
+              ariaLabel: T('开机自动启动', 'Start with Windows')
+            })
+          ),
+          setLine(T('运行权限', 'Privileges'),
+            h('div', { class: 'set-inline-group' },
+              h('span', {
+                class: 'set-pill ' + (state.admin ? 'is-ok' : 'is-warn'),
+                text: state.admin ? T('管理员', 'Administrator') : T('普通权限', 'Standard user')
+              }),
+              !state.admin
+                ? h('button', {
+                  type: 'button',
+                  class: 'set-outline-btn',
+                  onclick: onRunAsAdmin
+                }, icon('shield', 14), h('span', { text: T('以管理员重启', 'Restart as admin') }))
+                : null
+            ),
+            !state.admin ? T('清理系统级目录或管理受保护启动项时需要管理员权限', 'Needed for protected folders or system items') : ''
+          )
         );
-        return section(T('外观与语言', 'Appearance & language'), body, {
-          open: state.openId === 'appearance',
-          hint: T('主题与语言', 'Theme and language'),
-          id: 'appearance',
+
+        const cardPerf = h('div', { class: 'set-card' },
+          setLine(T('运行模式', 'Power mode'),
+            setSeg(modes, state.mode, async (v) => {
+              state.mode = v;
+              await App.setPowerMode(v);
+              state.motion = (App.cfg && App.cfg.motion) || (v === 'silent' ? 'lite' : 'full');
+              paint();
+            }, { label: T('运行模式', 'Power mode') }),
+            activeMode.tip
+          ),
+          setLine(T('动画强度', 'Motion'),
+            setSeg([
+              { value: 'full', label: T('完整', 'Full') },
+              { value: 'lite', label: T('精简', 'Lite') },
+              { value: 'off', label: T('关闭', 'Off') }
+            ], state.motion, (v) => {
+              state.motion = v;
+              App.setMotion(v);
+              paint();
+            }, { label: T('动画强度', 'Motion') })
+          ),
+          setLine(T('GPU 硬件加速', 'GPU acceleration'),
+            setSwitch(!!state.gpu, async (checked) => {
+              state.gpu = checked;
+              App.cfg = Object.assign({}, App.cfg || {}, { gpu_accel: state.gpu });
+              try { await API.configSet({ gpu_accel: state.gpu }); } catch { /* ignore */ }
+              toast(T('GPU 设置已保存，重启软件后生效', 'Saved. Restart the app to apply.'), 'ok');
+            }, { ariaLabel: T('GPU 硬件加速', 'GPU acceleration') }),
+            T('关闭可降低显存占用，重启后生效', 'Lower GPU memory usage; takes effect after restart')
+          )
+        );
+
+        const themeName = (THEMES.find((t) => t.value === state.theme) || THEMES[0]);
+        return section(T('通用', 'General'), h('div', { class: 'stack' }, cardBasic, cardPerf), {
+          open: state.openId === 'general',
+          hint: T(themeName.zh, themeName.en) + ' · ' + activeMode.label,
+          id: 'general',
           accordion: holder,
-          onToggle: (open) => { if (open) state.openId = 'appearance'; }
+          onToggle: (open) => { if (open) state.openId = 'general'; }
         });
       }
 
@@ -388,54 +466,6 @@
         } catch (e) {
           toast(errText(e), 'error');
         }
-      }
-
-      function secBehavior(holder) {
-        const closeSelect = UI.customSelect({
-          options: CLOSE_ACTIONS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
-          value: state.closeAction,
-          title: T('关闭窗口时', 'When closing the window'),
-          onChange: (v) => onCloseAction(v)
-        });
-
-        const body = h('div', { class: 'stack' },
-          h('div', { class: 'set-card' },
-            setRow(T('关闭窗口时', 'On close'), closeSelect,
-              T('最小化到托盘后可从托盘图标重新打开', 'Reopen it from the tray icon')),
-            setRow(T('启动', 'Startup'),
-              h('label', { class: 'check' },
-                h('input', {
-                  type: 'checkbox',
-                  checked: state.autostart,
-                  disabled: state.autostartBusy,
-                  onchange: (e) => onAutostart(e.target.checked)
-                }),
-                h('span', { text: T('开机自动启动', 'Start with Windows') })
-              ),
-              T('随 Windows 登录自动运行轻盘', 'Launch QDisk after Windows sign-in')),
-            setRow(T('权限', 'Privileges'),
-              h('div', { class: 'row wrap' },
-                state.admin
-                  ? h('span', { class: 'badge ok', text: T('管理员', 'Administrator') })
-                  : h('span', { class: 'badge warn', text: T('普通权限', 'Standard user') }),
-                h('button', {
-                  class: 'btn sm',
-                  disabled: state.admin,
-                  onclick: onRunAsAdmin
-                }, icon('shield', 14), h('span', { text: T('以管理员身份重启', 'Restart as administrator') }))),
-              T('整理受保护目录时需要管理员权限', 'Administrator rights are needed for protected folders'))
-          ),
-          h('div', { class: 'note', text: T('单实例运行：再次启动会激活已打开的窗口，不会产生第二个进程。',
-            'Single instance: launching again focuses the open window instead of starting a second process.') })
-        );
-
-        return section(T('行为与启动', 'Behavior & startup'), body, {
-          open: state.openId === 'behavior',
-          hint: T('关闭、自启、权限', 'Close, startup, rights'),
-          id: 'behavior',
-          accordion: holder,
-          onToggle: (open) => { if (open) state.openId = 'behavior'; }
-        });
       }
 
       async function onCloseAction(value) {
@@ -495,18 +525,20 @@
       function secDefaults(holder) {
         let body;
         if (state.loading && !state.settings && !state.settingsError) {
-          body = skeleton(5, 'settings');
+          body = skeleton(4, 'settings');
         } else if (!state.settings) {
           body = h('div', { class: 'stack' },
             empty(T('引擎设置读取失败', 'Could not read engine settings'), state.settingsError || ''),
             h('div', { class: 'toolbar' },
-              h('button', { class: 'btn sm', onclick: retrySettings }, icon('refresh', 14), h('span', { text: T('重试', 'Retry') }))
+              h('button', { class: 'set-outline-btn', type: 'button', onclick: retrySettings },
+                icon('refresh', 14), h('span', { text: T('重试', 'Retry') }))
             )
           );
         } else {
           const s = state.settings;
           const depthInput = h('input', {
-            class: 'input', type: 'number', min: '1', max: '4', step: '1',
+            class: 'input set-num-in', type: 'number', min: '1', max: '4', step: '1',
+            'aria-label': T('递归深度', 'Recursive depth'),
             value: String(s.recursive_depth),
             oninput: (e) => { s.recursive_depth = Number(e.target.value); paintHint(); }
           });
@@ -515,41 +547,11 @@
             value: String(s.log_keep_days),
             oninput: (e) => { s.log_keep_days = Number(e.target.value); paintHint(); }
           });
-          const conflictSelect = UI.customSelect({
-            options: CONFLICTS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
-            value: s.conflict_policy,
-            title: T('同名冲突', 'Name clashes'),
-            onChange: (v) => { s.conflict_policy = v; paintHint(); }
-          });
-
-          /* 索引新鲜度：三个档位对应「多久扫一次热目录」。
-             用户原话是「最好可以可控不然扫磁盘次数多会伤磁盘」——
-             所以这里给的不是一个开关，而是三档明确的扫盘频率。 */
-          const freshSel = UI.customSelect({
-            options: [
-              { value: 'live', label: T('实时（每分钟扫一次热目录）', 'Live (rescan hot folders every minute)') },
-              { value: 'check', label: T('按需（每 10 分钟，默认）', 'On demand (every 10 min, default)') },
-              { value: 'manual', label: T('只手动（不自动扫盘）', 'Manual only (never scans by itself)') }
-            ],
-            value: s.index_freshness,
-            title: T('索引新鲜度', 'Index freshness'),
-            onChange: (v) => { s.index_freshness = v; paintHint(); }
-          });
-
           const capInput = h('input', {
-            class: 'input', type: 'number', min: '0', max: '65536', step: '128',
+            class: 'input set-num-md', type: 'number', min: '0', max: '65536', step: '128',
             value: String(s.index_max_mb),
             oninput: (e) => { s.index_max_mb = Number(e.target.value); paintHint(); }
           });
-
-          const idleCb = h('input', {
-            type: 'checkbox', checked: !!s.index_rebuild_idle,
-            onchange: (e) => { s.index_rebuild_idle = e.target.checked; paintHint(); }
-          });
-
-          /* 本地数据保留的四个控件。数字键都允许 0：
-             历史留 0 份 = 关掉撤销能力（有人就是不要），缩略图 0 = 不限制，
-             备份 0 = 卸载前不留（危险但明确）。语义各异，所以 hint 里写清。 */
           const histKeepInput = h('input', {
             class: 'input', type: 'number', min: '0', max: '10000', step: '10',
             value: String(s.prune_history_keep),
@@ -565,12 +567,7 @@
             value: String(s.prune_backup_keep),
             oninput: (e) => { s.prune_backup_keep = Number(e.target.value); paintHint(); }
           });
-          const pruneEnabledCb = h('input', {
-            type: 'checkbox', checked: s.prune_enabled !== false,
-            onchange: (e) => { s.prune_enabled = e.target.checked; paintHint(); }
-          });
-          /* 预演：只报数字不删。真删的入口不放在设置页 ——
-             用户要的是「不再长」，不是「再给他一个清理按钮」。 */
+
           async function previewPrune(ev) {
             const btn = ev && ev.currentTarget;
             const run = async () => {
@@ -591,88 +588,92 @@
             }
           }
 
-          const unifiedDataDir = (state.app && state.app.data_dir) || s.data_dir || '';
+          const freshOpts = [
+            { value: 'live', label: T('实时', 'Live'), tip: T('每分钟扫一次热目录', 'Rescan hot folders every minute') },
+            { value: 'check', label: T('按需', 'On demand'), tip: T('每 10 分钟检查热目录（默认）', 'Check every 10 min (default)') },
+            { value: 'manual', label: T('手动', 'Manual'), tip: T('不自动后台扫盘', 'Never auto-scan in background') }
+          ];
+          const activeFresh = freshOpts.find((x) => x.value === s.index_freshness) || freshOpts[1];
+          const dirtyCount = dirtyKeys().length;
+
+          const advContent = h('div', { class: 'set-more-inner' },
+            setLine(T('索引上限 (MB)', 'Index cap (MB)'),
+              h('div', { class: 'set-inline-group' },
+                capInput,
+                setSwitch(!!s.index_rebuild_idle, (v) => { s.index_rebuild_idle = v; paintHint(); }, {
+                  label: T('空闲校验重建', 'Idle rebuild')
+                })
+              ),
+              T('0 表示不限制；软件自身整理或删除的文件会即时同步', '0 means unlimited; in-app moves/deletes sync instantly')
+            ),
+            setLine(T('自动精简本地数据', 'Auto-prune local data'),
+              h('div', { class: 'set-inline-group' },
+                h('button', {
+                  type: 'button',
+                  class: 'set-text-btn',
+                  onclick: previewPrune
+                }, T('清理预演', 'Preview')),
+                setSwitch(s.prune_enabled !== false, (v) => { s.prune_enabled = v; paintHint(); }, {
+                  ariaLabel: T('自动精简本地数据', 'Auto-prune local data')
+                })
+              ),
+              T('只保留最新数据，防止历史记录与缩略图缓存无限增长', 'Keep recent history and thumbs bounded automatically')
+            ),
+            h('div', { class: 'set-more-grid-wrap' },
+              h('div', { class: 'set-quad' },
+                h('div', { class: 'field' }, h('label', { text: T('日志保留 (天)', 'Log days') }), keepInput),
+                h('div', { class: 'field' }, h('label', { text: T('整理历史 (份)', 'History keep') }), histKeepInput),
+                h('div', { class: 'field' }, h('label', { text: T('缩略图 (MB)', 'Thumbs MB') }), thumbCapInput),
+                h('div', { class: 'field' }, h('label', { text: T('卸载备份 (份)', 'Backups') }), bakKeepInput)
+              )
+            )
+          );
+
           body = h('div', { class: 'stack' },
             h('div', { class: 'set-card' },
-              setRow(T('数据目录', 'Data folder'),
-                h('div', { class: 'row' },
-                  h('input', {
-                    class: 'input grow mono', readonly: true, spellcheck: 'false',
-                    value: unifiedDataDir || '—', title: unifiedDataDir || ''
+              setLine(T('同名冲突', 'Name clashes'),
+                setSeg(
+                  CONFLICTS.map((c) => ({ value: c.value, label: T(c.zh, c.en) })),
+                  s.conflict_policy,
+                  (v) => { s.conflict_policy = v; paint(); },
+                  { label: T('同名冲突', 'Name clashes') }
+                )
+              ),
+              setLine(T('默认递归子目录', 'Recurse subfolders'),
+                h('div', { class: 'set-inline-group' },
+                  h('span', { class: 'small muted', text: T('深度', 'Depth') }),
+                  depthInput,
+                  setSwitch(!!s.default_recursive, (v) => { s.default_recursive = v; paintHint(); }, {
+                    ariaLabel: T('默认递归子目录', 'Recurse subfolders')
+                  })
+                ),
+                T('深度范围 1–4 层，可在整理页随时临时调整', 'Depth 1–4; can be overridden per scan')
+              ),
+              setLine(T('按内容识别文件类型', 'Detect type by content'),
+                setSwitch(!!s.default_content, (v) => { s.default_content = v; paintHint(); }, {
+                  ariaLabel: T('按内容识别文件类型', 'Detect type by content')
+                }),
+                T('识别无扩展名或改错后缀的文件头，略微增加扫描耗时', 'Inspect file headers when extensions are missing or wrong')
+              ),
+              setLine(T('索引刷新', 'Index refresh'),
+                h('div', { class: 'set-inline-group' },
+                  setSeg(freshOpts, s.index_freshness, (v) => { s.index_freshness = v; paint(); }, {
+                    label: T('索引刷新', 'Index refresh')
                   }),
                   h('button', {
                     type: 'button',
-                    class: 'btn ghost sm icon', disabled: !unifiedDataDir,
-                    title: T('在软件内打开目录', 'Browse folder in app'), 'aria-label': T('在软件内打开目录', 'Browse folder in app'),
-                    onclick: () => openInApp(unifiedDataDir)
-                  }, icon('scan', 14)),
+                    class: 'set-text-btn',
+                    onclick: async () => {
+                      await busy(async (ctrl) => {
+                        ctrl && ctrl.setSub(T('正在扫描桌面/文档/下载等常用目录…', 'Scanning desktop, documents and downloads…'));
+                        await API.engine('search.hot', { force: true });
+                        toast(T('热目录已刷新', 'Hot folders refreshed'), 'ok');
+                      }, T('正在刷新热目录索引…', 'Refreshing hot index…'), 'search');
+                    }
+                  }, T('刷新热目录', 'Refresh hot')),
                   h('button', {
                     type: 'button',
-                    class: 'btn ghost sm icon', disabled: !unifiedDataDir,
-                    title: T('在系统文件管理器中打开', 'Open in system file manager'), 'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
-                    onclick: () => reveal(unifiedDataDir)
-                  }, icon('external', 14)),
-                  h('button', {
-                    class: 'btn sm',
-                    disabled: state.dataMigrating,
-                    onclick: pickDataDir
-                  }, icon('folder', 14),
-                    h('span', { text: state.dataMigrating ? T('迁移中…', 'Migrating…') : T('更改并迁移…', 'Change & migrate…') }))
-                ),
-                T('配置、AI 会话、整理历史与日志统一存放于此；更改后一次性迁移核心数据、在新目录自动重建缓存与索引并自动重启生效',
-                  'Unified folder for config, AI chats, history and logs; changing migrates data, rebuilds cache/index in the new folder and restarts automatically')),
-              /* 三个短字段并一行，与 AI 区块的「参数」行同一套密度 */
-              setRow(T('整理规则', 'Tidy rules'),
-                h('div', { class: 'set-tri' },
-                  h('div', { class: 'field' },
-                    h('label', { text: T('递归深度', 'Recursive depth') }),
-                    depthInput),
-                  h('div', { class: 'field' },
-                    h('label', { text: T('同名冲突', 'Name clashes') }),
-                    conflictSelect),
-                  h('div', { class: 'field' },
-                    h('label', { text: T('日志保留', 'Log retention') }),
-                    keepInput)
-                ),
-                T('递归 1–4 层 · 冲突默认改名 · 日志 1–3650 天', 'Depth 1-4 · clashes rename by default · logs kept 1-3650 days')),
-              setRow(T('默认行为', 'Defaults'),
-                h('div', { class: 'row wrap' },
-                  h('label', { class: 'check' },
-                    h('input', {
-                      type: 'checkbox', checked: s.default_recursive,
-                      onchange: (e) => { s.default_recursive = e.target.checked; paintHint(); }
-                    }),
-                    h('span', { text: T('默认递归子目录', 'Recurse into subfolders by default') })
-                  ),
-                  h('label', { class: 'check' },
-                    h('input', {
-                      type: 'checkbox', checked: s.default_content,
-                      onchange: (e) => { s.default_content = e.target.checked; paintHint(); }
-                    }),
-                    h('span', { text: T('按内容识别文件类型', 'Identify file types by content') })
-                  )
-                )),
-              /* 索引新鲜度三档：不给开关给频率。用户要的是「可控」，
-                 一个「自动/手动」的复选框无法表达「多久扫一次」。 */
-              setRow(T('索引新鲜度', 'Index freshness'),
-                h('div', { class: 'set-tri' },
-                  h('div', { class: 'field' },
-                    h('label', { text: T('自动扫描', 'Auto scan') }),
-                    freshSel),
-                  h('div', { class: 'field' },
-                    h('label', { text: T('索引上限 (MB)', 'Index cap (MB)') }),
-                    capInput),
-                  h('div', { class: 'field' },
-                    h('label', { text: T('后台维护', 'Background') }),
-                    h('label', { class: 'check' },
-                      idleCb,
-                      h('span', { text: T('空闲时校验并重建', 'Verify and rebuild when idle') })
-                    )
-                  )
-                ),
-                h('div', { class: 'row', style: 'gap:8px;align-items:center;margin-top:6px' },
-                  h('button', {
-                    class: 'btn ghost sm', type: 'button',
+                    class: 'set-text-btn',
                     onclick: async () => {
                       await busy(async (ctrl) => {
                         ctrl && ctrl.setSub(T('正在检查并修复异常索引库…', 'Verifying and rebuilding index databases…'));
@@ -681,139 +682,56 @@
                         toast(T('自检完成，重建 ' + n + ' 项', 'Selfcheck done, rebuilt ' + n + ' items'), 'ok');
                       }, T('正在自检索引，请稍候…', 'Checking index…'), 'search');
                     }
-                  }, icon('shield', 13), h('span', { text: T('索引自检与修复', 'Index selfcheck') })),
-                  h('button', {
-                    class: 'btn ghost sm', type: 'button',
-                    onclick: async () => {
-                      await busy(async (ctrl) => {
-                        ctrl && ctrl.setSub(T('正在扫描桌面/文档/下载等常用目录…', 'Scanning desktop, documents and downloads…'));
-                        await API.engine('search.hot', { force: true });
-                        toast(T('热目录已刷新', 'Hot folders refreshed'), 'ok');
-                      }, T('正在刷新热目录索引…', 'Refreshing hot index…'), 'search');
-                    }
-                  }, icon('refresh', 13), h('span', { text: T('刷新热目录', 'Refresh hot folders') }))
+                  }, T('自检修复', 'Selfcheck'))
                 ),
-                T('热目录（桌面/文档/下载等）重扫一次约 0.3 秒 · 上限填 0 表示不限制 · 软件自己整理或删除的文件会立即同步，不靠这里的扫描',
-                  'Hot folders take about 0.3 s to rescan · 0 means no cap · files the app moves or deletes sync instantly without waiting for a scan')),
-              /* 本地数据保留：用户原话是「都做保留最新版数据，不然体积爆炸」。
-                 这里不设「目录清理」那样的扫描按钮 —— 它清的是软件自己在数据
-                 目录里攒的东西，路径固定、体量小，给一份份数的上限就够了。 */
-              setRow(T('本地数据保留', 'Local data retention'),
-              h('div', { class: 'set-tri' },
-                h('div', { class: 'field' },
-                  h('label', { text: T('整理历史', 'History') }),
-                  histKeepInput),
-                h('div', { class: 'field' },
-                  h('label', { text: T('缩略图上限 (MB)', 'Thumbs cap (MB)') }),
-                  thumbCapInput),
-                h('div', { class: 'field' },
-                  h('label', { text: T('卸载备份', 'App backups') }),
-                  bakKeepInput)
-                ),
-              h('div', { class: 'row', style: 'gap:8px;align-items:center' },
-                h('label', { class: 'check' },
-                  pruneEnabledCb,
-                  h('span', { text: T('只保留最新版，不让历史无限增长', 'Keep only the newest, never grow unbounded') })
-                ),
-                h('button', {
-                  class: 'btn ghost sm', type: 'button',
-                  onclick: previewPrune
-                }, icon('search', 14), h('span', { text: T('清理预演', 'Preview') }))
-              )
-            )
+                activeFresh.tip
+              ),
+              setMore(T('高级配额与数据保留', 'Advanced quotas & retention'), advContent, {
+                open: !!state.moreOpen.defaults,
+                onToggle: (open) => { state.moreOpen.defaults = open; }
+              })
             ),
-            h('div', { class: 'action-bar' },
-              h('span', { class: 'small muted', text: T('改动只写入引擎设置，不影响已有文件', 'Changes only affect engine settings') }),
+            h('div', { class: 'action-bar set-foot-bar' },
+              h('span', {
+                class: 'small muted set-dirty-note',
+                text: dirtyCount
+                  ? T(`有 ${dirtyCount} 项待保存更改`, `${dirtyCount} unsaved change(s)`)
+                  : T('改动仅写入引擎策略，不影响已有文件', 'Only updates engine defaults; existing files are untouched')
+              }),
               h('div', { class: 'spacer' }),
               h('button', {
-                class: 'btn primary',
-                disabled: state.saving || !dirtyKeys().length,
+                type: 'button',
+                class: 'btn primary sm',
+                disabled: state.saving || !dirtyCount,
                 onclick: saveDefaults
-              }, icon('check'), h('span', { text: state.saving ? T('保存中…', 'Saving…') : T('保存', 'Save') }))
+              }, h('span', { text: state.saving ? T('保存中…', 'Saving…') : T('保存', 'Save') }))
             )
           );
         }
-        return section(T('整理默认值', 'Tidy defaults'), body, {
+        return section(T('整理与索引', 'Tidy & index'), body, {
           open: state.openId === 'defaults',
-          hint: dirtyKeys().length ? T('有未保存的修改', 'Unsaved changes') : T('磁盘与整理策略', 'Disk and tidy policy'),
+          hint: dirtyKeys().length ? T('有未保存修改', 'Unsaved changes') : T('冲突、扫描与索引', 'Clashes, scan & index'),
           id: 'defaults',
           accordion: holder,
           onToggle: (open) => { if (open) state.openId = 'defaults'; }
         });
       }
 
-      /* 性能：运行模式、动画强度与 GPU（都走 App 的运行时开关，改完即生效） */
-      function secPerformance(holder) {
-        const modes = [
-          { id: 'balanced', name: T('均衡', 'Balanced'), desc: T('完整动画；窗口隐藏 2 分钟后释放引擎，内存回落', 'Full motion; frees the engine 2 min after hiding') },
-          { id: 'silent', name: T('静默', 'Silent'), desc: T('精简动画；隐藏 20 秒后释放引擎并停止轮询，占用最低', 'Lite motion; frees the engine 20 s after hiding') },
-          { id: 'turbo', name: T('高性能', 'Turbo'), desc: T('完整动画；始终保留引擎，切页与扫描最快', 'Full motion; keeps the engine for fastest responses') }
-        ];
-        const chips = modes.map((m) => h('button', {
-          class: 'btn sm' + (state.mode === m.id ? ' primary' : ''),
-          onclick: async () => {
-            state.mode = m.id;
-            await App.setPowerMode(m.id);
-            state.motion = (App.cfg && App.cfg.motion) || (m.id === 'silent' ? 'lite' : 'full');
-            paint();
-          }
-        }, h('span', { text: m.name })));
-
-        const motionSel = UI.customSelect({
-          options: [
-            { value: 'full', label: T('完整', 'Full') },
-            { value: 'lite', label: T('精简', 'Lite') },
-            { value: 'off', label: T('关闭', 'Off') }
-          ],
-          value: state.motion,
-          className: 'sm',
-          title: T('动效强度', 'Motion'),
-          onChange: (v) => { state.motion = v; App.setMotion(v); }
-        });
-
-        const gpuCb = h('input', {
-          type: 'checkbox',
-          checked: !!state.gpu,
-          onchange: async () => {
-            state.gpu = !!gpuCb.checked;
-            App.cfg = Object.assign({}, App.cfg || {}, { gpu_accel: state.gpu });
-            try { await API.configSet({ gpu_accel: state.gpu }); } catch { /* ignore */ }
-            toast(T('GPU 设置已保存，重启软件后生效', 'Saved. Restart the app to apply.'), 'ok');
-          }
-        });
-
-        const active = modes.find((m) => m.id === state.mode) || modes[0];
-        const body = h('div', { class: 'stack' },
-          h('div', { class: 'set-card' },
-            setRow(T('运行模式', 'Power mode'),
-              h('div', { class: 'row wrap' }, ...chips),
-              active.desc),
-            setRow(T('动画强度', 'Motion'), motionSel,
-              T('静默模式自动使用精简动画；「关闭」让所有过渡立即完成', 'Silent uses lite automatically; Off makes every transition instant')),
-            setRow(T('GPU 加速', 'GPU'),
-              h('label', { class: 'check' }, gpuCb, h('span', { text: T('启用 GPU 加速', 'Use GPU acceleration') })),
-              T('关闭可降低显存与内存占用，重启后生效', 'Lower GPU and memory use. Restart to apply.'))
-          ),
-          h('div', { class: 'desc', text: T('窗口隐藏或最小化后自动进入静默：暂停引擎轮询、按模式释放引擎进程；再次打开会立即恢复', 'Hiding or minimizing enters idle: polling pauses and the engine is released by mode; it resumes instantly when shown again') })
-        );
-
-        return section(T('性能', 'Performance'), body, {
-          open: state.openId === 'performance',
-          hint: T('运行模式与图形', 'Power and graphics'),
-          id: 'performance',
-          accordion: holder,
-          onToggle: (open) => { if (open) state.openId = 'performance'; }
-        });
-      }
-
-      /* 仅更新当前区块的 hint，避免整页重绘丢失输入焦点 */
+      /* 仅更新当前区块的 hint 与保存态，避免整页重绘丢失输入焦点 */
       function paintHint() {
         const sec = root.querySelector('[data-section="defaults"]');
         if (!sec) return;
+        const n = dirtyKeys().length;
         const hint = sec.querySelector('.section-head .hint');
-        if (hint) hint.textContent = dirtyKeys().length ? T('有未保存的修改', 'Unsaved changes') : T('磁盘与整理策略', 'Disk and tidy policy');
+        if (hint) hint.textContent = n ? T('有未保存修改', 'Unsaved changes') : T('冲突、扫描与索引', 'Clashes, scan & index');
+        const note = sec.querySelector('.set-dirty-note');
+        if (note) {
+          note.textContent = n
+            ? T(`有 ${n} 项待保存更改`, `${n} unsaved change(s)`)
+            : T('改动仅写入引擎策略，不影响已有文件', 'Only updates engine defaults; existing files are untouched');
+        }
         const btn = sec.querySelector('.action-bar .btn.primary');
-        if (btn) btn.disabled = state.saving || !dirtyKeys().length;
+        if (btn) btn.disabled = state.saving || !n;
       }
 
       async function retrySettings() {
@@ -908,10 +826,23 @@
           return;
         }
         const maxMb = Number(s.index_max_mb);
-        /* 0 是合法的「不限制」，但负数和小数不是：超限判断靠它做分母，
-           写成 -1 会让 index_quota_ok() 永远返回超限，索引从此再也不刷新。 */
         if (!Number.isInteger(maxMb) || maxMb < 0 || maxMb > 65536) {
           toast(T('索引上限需为 0 到 65536 的整数（0 表示不限制）', 'Index cap must be an integer from 0 to 65536 (0 means no limit)'), 'warn');
+          return;
+        }
+        const histKeep = Number(s.prune_history_keep);
+        if (!Number.isInteger(histKeep) || histKeep < 0 || histKeep > 10000) {
+          toast(T('整理历史保留份数需为 0 到 10000 的整数', 'History retention must be an integer from 0 to 10000'), 'warn');
+          return;
+        }
+        const thumbsMb = Number(s.prune_thumbs_mb);
+        if (!Number.isInteger(thumbsMb) || thumbsMb < 0 || thumbsMb > 65536) {
+          toast(T('缩略图上限需为 0 到 65536 的整数', 'Thumbs cap must be an integer from 0 to 65536'), 'warn');
+          return;
+        }
+        const bakKeep = Number(s.prune_backup_keep);
+        if (!Number.isInteger(bakKeep) || bakKeep < 0 || bakKeep > 1000) {
+          toast(T('卸载备份保留份数需为 0 到 1000 的整数', 'Backup retention must be an integer from 0 to 1000'), 'warn');
           return;
         }
         const patch = {
@@ -947,15 +878,17 @@
         paint();
       }
 
-      /* ---------- 定时清理（缓存 + 截图，替代原定时整理） ---------- */
+      /* ---------- 3. 定时清理（极简单卡融合） ---------- */
       function secSchedule(holder) {
         const sc = state.schedule;
         const timeInput = h('input', {
-          class: 'input', type: 'time', value: sc.time || '03:00',
+          class: 'input set-time-in', type: 'time', value: sc.time || '03:00',
+          'aria-label': T('执行时间', 'Run time'),
           oninput: (e) => { sc.time = e.target.value; }
         });
         const daysInput = h('input', {
-          class: 'input', type: 'number', min: '1', max: '3650', value: String(sc.days || 30),
+          class: 'input set-num-in', type: 'number', min: '1', max: '3650', value: String(sc.days || 30),
+          'aria-label': T('截图保留天数', 'Screenshot keep days'),
           oninput: (e) => { sc.days = Math.max(1, Number(e.target.value) || 30); }
         });
         const cacheCb = h('input', {
@@ -967,44 +900,40 @@
           onchange: (e) => { sc.screenshots = e.target.checked; }
         });
 
-        const body = h('div', { class: 'stack' },
-          h('div', { class: 'set-card' },
-            setRow(T('运行时间', 'Run time'), timeInput,
-              T('每天执行一次，使用 Windows 计划任务；关闭应用后也会运行', 'Runs daily through a Windows scheduled task, even when the app is closed')),
-            setRow(T('截图保留', 'Screenshots'), daysInput,
-              T('只清理早于这个天数的截图；缓存不受影响', 'Only screenshots older than this are removed; cache is unaffected')),
-            setRow(T('清理范围', 'What to clean'),
-              h('div', { class: 'row wrap' },
-                h('label', { class: 'check' }, cacheCb,
-                  h('span', { text: T('清理缓存（仅安全项）', 'Clean cache (safe items only)') })),
-                h('label', { class: 'check' }, shotsCb,
-                  h('span', { text: T('清理截图', 'Clean screenshots') }))
-              ),
-              T('删除内容会进回收站，可在回收站还原；谨慎/高级项不会被自动清理', 'Removed items go to the Recycle Bin. Caution/advanced items are never auto-cleaned.'))
-          ),
-          h('div', { class: 'action-bar' },
-            h('label', { class: 'check' },
-              h('input', {
-                type: 'checkbox', checked: !!sc.enabled,
-                onchange: (e) => { sc.enabled = e.target.checked; }
+        const body = h('div', { class: 'set-card' },
+          setLine(T('每日定时清理', 'Daily scheduled clean'),
+            h('div', { class: 'set-inline-group' },
+              h('span', {
+                class: 'set-pill ' + (state.scheduleExists ? 'is-ok' : ''),
+                text: state.scheduleExists ? T('已启用', 'Active') : T('未启用', 'Off')
               }),
-              h('span', { text: T('启用定时清理', 'Enable scheduled clean') })
+              setSwitch(!!sc.enabled, (v) => { sc.enabled = v; }, {
+                ariaLabel: T('启用定时清理', 'Enable scheduled clean')
+              }),
+              h('button', {
+                type: 'button',
+                class: 'set-outline-btn',
+                disabled: state.scheduleBusy,
+                onclick: saveSchedule
+              }, h('span', { text: state.scheduleBusy ? T('应用中…', 'Applying…') : T('应用', 'Apply') }))
             ),
-            h('span', {
-              class: 'badge ' + (state.scheduleExists ? 'ok' : ''),
-              text: state.scheduleExists ? T('计划任务已创建', 'Task created') : T('计划任务未创建', 'No task')
-            }),
-            h('div', { class: 'spacer' }),
-            h('button', {
-              class: 'btn primary', disabled: state.scheduleBusy,
-              onclick: saveSchedule
-            }, icon('play', 14), h('span', { text: state.scheduleBusy ? T('应用中…', 'Applying…') : T('立即应用', 'Apply now') }))
+            T('通过 Windows 计划任务每日运行，关闭软件也会执行', 'Runs daily via Windows Task Scheduler even when closed')
+          ),
+          setLine(T('执行时间', 'Run time'), timeInput),
+          setLine(T('清理范围', 'Scope'),
+            h('div', { class: 'set-inline-group' },
+              h('label', { class: 'check' }, cacheCb, h('span', { text: T('安全缓存', 'Safe cache') })),
+              h('label', { class: 'check' }, shotsCb, h('span', { text: T('早于', 'Screenshots >') })),
+              daysInput,
+              h('span', { class: 'small muted', text: T('天的截图', 'days') })
+            ),
+            T('删除内容进入回收站可随时还原；谨慎/高级项不会自动清理', 'Items move to Recycle Bin; caution/advanced items are never auto-cleaned')
           )
         );
 
         return section(T('定时清理', 'Scheduled clean'), body, {
           open: state.openId === 'schedule',
-          hint: state.scheduleExists ? T('已创建', 'Created') : T('未创建', 'Not created'),
+          hint: state.scheduleExists ? T('每日 ' + (sc.time || '03:00'), 'Daily ' + (sc.time || '03:00')) : T('未启用', 'Off'),
           id: 'schedule',
           accordion: holder,
           onToggle: (open) => { if (open) state.openId = 'schedule'; }
@@ -1417,15 +1346,6 @@
           oninput: (e) => { d.temperature = Math.min(2, Math.max(0, Number(e.target.value) || 0)); }
         });
 
-        const enabledCb = h('input', {
-          type: 'checkbox', checked: d.enabled !== false,
-          onchange: (e) => { d.enabled = e.target.checked; }
-        });
-        const jsonCb = h('input', {
-          type: 'checkbox', checked: d.jsonMode !== false,
-          onchange: (e) => { d.jsonMode = e.target.checked; }
-        });
-
         const modelCtxMap = (d.modelCtx && typeof d.modelCtx === 'object') ? d.modelCtx : {};
         const reported = Number(modelCtxMap[d.model] || 0);
         const guessed = AIStore.inferCtx(d.model) || 0;
@@ -1445,16 +1365,16 @@
 
         const test = state.aiTest;
         const testBadge = state.aiTesting
-          ? h('span', { class: 'badge', text: T('测试中…', 'Testing…') })
+          ? h('span', { class: 'set-pill', text: T('测试中…', 'Testing…') })
           : (test
             ? (test.ok
               ? (test.warn
-                ? h('span', { class: 'badge warn', text: T('连通，但格式不合规', 'Connected, format mismatch') })
-                : h('span', { class: 'badge ok', text: T('连接正常', 'Connected') + ' · ' + test.ms + ' ms' }))
-              : h('span', { class: 'badge warn', text: T('连接失败', 'Failed') }))
+                ? h('span', { class: 'set-pill is-warn', text: T('连通但格式异常', 'Format mismatch') })
+                : h('span', { class: 'set-pill is-ok', text: T('连接正常', 'Connected') + ' · ' + test.ms + ' ms' }))
+              : h('span', { class: 'set-pill is-warn', text: T('连接失败', 'Failed') }))
             : (AIStore.isConfigured(d)
-              ? h('span', { class: 'badge', text: T('已填写，未测试', 'Set, untested') })
-              : h('span', { class: 'badge warn', text: T('未配置', 'Not configured') })));
+              ? h('span', { class: 'set-pill', text: T('已配置', 'Configured') })
+              : h('span', { class: 'set-pill is-warn', text: T('未配置', 'Not configured') })));
 
         /* ---- 能动手到什么程度（默认关闭） ---- */
         const pol = state.agentDraft
@@ -1472,6 +1392,9 @@
           const next = window.AIProposals
             ? AIProposals.normalizePolicy(Object.assign({}, base, patch))
             : Object.assign({}, base, patch);
+          if (patch && Object.prototype.hasOwnProperty.call(patch, 'mode') && patch.mode !== base.mode) {
+            state.moreOpen.aiPerm = next.mode !== 'off';
+          }
           state.agentDraft = next;
           /* 这一栏不进「保存」，改一下立刻生效：它是权限开关，不该有「改了没保存」的中间态 */
           Promise.resolve(AIStore.saveUi({ agent: next })).catch((e) => toast(errText(e), 'error'));
@@ -1509,7 +1432,7 @@
         });
 
         const agentBadge = h('span', {
-          class: 'badge' + (pol.mode === 'off' ? '' : (pol.mode === 'full' ? ' warn' : ' ok')),
+          class: 'set-pill' + (pol.mode === 'off' ? '' : (pol.mode === 'full' ? ' is-warn' : ' is-ok')),
           text: pol.mode === 'off' ? T('只读', 'Read-only') : T('已开启', 'Enabled')
         });
 
@@ -1524,25 +1447,19 @@
              3. 一键切回去比「记住上一个选的是谁」有用得多 —— 常年在
                 两三家之间来回切的用户，这一步能省掉「翻地址、粘贴、保存」。
            故意不显示完整 Key：这块界面会被截图，掩码就够了。 */
-        function providerMemoryBox() {
-          const rows = (AIStore.listProviders ? AIStore.listProviders() : []);
-          if (!rows.length) {
-            return h('div', { class: 'small muted', text: T(
-              '保存过一次后，这里会记住各家的 Key 与上次用的模型，切回来时自动带出',
-              'After the first save, each provider keeps its key and last model here and is restored when you switch back') });
-          }
-          return h('div', { class: 'stack' }, ...rows.map((it) => {
+        const savedProviders = (AIStore.listProviders ? AIStore.listProviders() : []);
+        const savedProviderStrip = savedProviders.length
+          ? h('div', { class: 'ai-saved-chips' }, ...savedProviders.map((it) => {
             const usable = !!it.endpoint;
-            return h('div', { class: 'row' },
-              h('div', { class: 'stack', style: 'flex:1' },
-                h('span', { class: 'mono', text: it.host }),
-                h('span', { class: 'small muted', text: (it.model ? it.model + ' · ' : '') + (it.masked || T('无 Key', 'no key')) })),
+            return h('span', { class: 'ai-saved-chip' },
               h('button', {
-                class: 'btn ghost sm', type: 'button',
+                type: 'button',
+                class: 'ai-saved-use',
                 disabled: !usable,
                 title: usable
-                  ? T('切回这一家的地址、模型与 Key', 'Switch back to this provider’s endpoint, model and key')
-                  : T('这条只记了模型，没有可用的地址', 'This entry has no endpoint recorded'),
+                  ? T(`切回 ${it.host}（${it.model || '默认模型'} · ${it.masked || '无 Key'}）`,
+                    `Switch to ${it.host} (${it.model || 'default'} · ${it.masked || 'no key'})`)
+                  : T('无可用地址', 'No endpoint saved'),
                 onclick: () => {
                   if (!usable) return;
                   d.endpoint = it.endpoint;
@@ -1553,10 +1470,12 @@
                   paint();
                   toast(T('已切回 ' + it.host, 'Switched to ' + it.host), 'ok');
                 }
-              }, icon('undo', 13), h('span', { text: T('切回', 'Use') })),
+              }, h('span', { class: 'mono', text: it.host })),
               h('button', {
-                class: 'btn ghost sm', type: 'button',
+                type: 'button',
+                class: 'ai-saved-del',
                 title: T('忘掉这一家的记录', 'Forget this provider'),
+                'aria-label': T('忘掉 ' + it.host, 'Forget ' + it.host),
                 onclick: async () => {
                   try {
                     await AIStore.forgetProvider(it.host);
@@ -1564,42 +1483,11 @@
                     paint();
                   } catch (e) { toast(errText(e), 'error'); }
                 }
-              }, icon('trash', 13))
+              }, icon('close', 11))
             );
-          }));
-        }
+          }))
+          : null;
 
-        const cardConn = h('div', { class: 'set-card' },
-            setCap(T('连接', 'Connection'), h('span', { class: 'set-cap-tail', text: AIStore.isConfigured(d) ? T('已配置', 'Configured') : T('未配置', 'Not configured') })),
-            setRow(T('服务商', 'Provider'), provBox),
-            setRow(T('接口地址', 'Endpoint'), endpointIn,
-              T('OpenAI 兼容的 /chat/completions 地址；本地 Ollama 可用 127.0.0.1', 'Any OpenAI-compatible /chat/completions URL; local Ollama works too')),
-            setRow(T('API Key', 'API key'),
-              h('div', { class: 'row' },
-                keyIn,
-                h('button', {
-                  class: 'btn ghost sm', title: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show'),
-                  onclick: () => { state.aiKeyShown = !state.aiKeyShown; paint(); }
-                }, h('span', { text: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show') }))
-              ),
-              T('只保存在本机 app.json，不写日志、不随会话导出；请求直接发往上面这个地址', 'Stored only in local app.json; never logged or exported')),
-            setRow(T('已记住的厂商', 'Saved providers'), providerMemoryBox(),
-              T('按接口域名记住，切回时自动填好地址、模型和 Key', 'Keyed by endpoint host; switching back restores endpoint, model and key'))
-        );
-
-        const cardModel = h('div', { class: 'set-card' },
-            setCap(T('模型', 'Model'), h('span', { class: 'set-cap-tail', text: winSrc })),
-            setRow(T('模型名', 'Model'),
-              h('div', { class: 'row' }, modelIn, fetchBtn),
-              T('填接口文档里的模型名，也可以点「获取模型」让端点自己报', 'Type a model name, or let the endpoint list them'),
-              h('div', null,
-                state.aiModelsErr ? h('div', { class: 'small', style: 'color:var(--danger)', text: state.aiModelsErr }) : null,
-                modelReport))
-        );
-        /* 备用端点：主端点限流/欠费/模型下线时按顺序往后切。
-           放在「模型」这张卡里而不是单开一张：它和主模型是同一件事的两级 ——
-           「用哪个模型答」的完整答案包含「主的不行时用哪个」。
-           上限 5 条，与 store.js normalize 的截断一致，改一处要同时改两处。 */
         const fbList = () => (Array.isArray(d.fallbacks) ? d.fallbacks : []);
         const fbRowOf = (item, idx) => h('div', { class: 'row' },
           h('input', {
@@ -1607,7 +1495,6 @@
             placeholder: T('备用接口地址', 'Fallback endpoint'),
             'aria-label': T('备用接口地址', 'Fallback endpoint'),
             oninput: (e) => { item.endpoint = e.target.value.trim(); state.aiTest = null; },
-            /* 和主地址一样：控制台复制来的是 base URL，失焦补全免得保存后 404 */
             onblur: (e) => {
               const v = normEndpoint(e.target.value);
               if (v && v !== e.target.value) { e.target.value = v; item.endpoint = v; }
@@ -1637,7 +1524,6 @@
             ? h('button', {
               class: 'btn ghost sm', type: 'button',
               onclick: () => {
-                /* 只加空行、不落盘：没填完的空白条目在保存时会被 normalize 丢掉 */
                 d.fallbacks = fbList().concat([{ endpoint: '', model: '' }]);
                 paint();
               }
@@ -1645,112 +1531,24 @@
             : h('div', { class: 'small muted', text: T('最多 5 个', 'Up to 5') })
         );
 
-        cardModel.appendChild(setRow(T('备用模型', 'Fallbacks'), fbBox,
-          T('主端点限流、欠费或模型下线时，按顺序自动往后切，答案顶部会写明切到了哪个。留空表示不切换',
-            'When the primary is rate-limited, out of credit or gone, these are tried in order; the answer states which one answered')));
-
-        /* 三个数字字段并一行：窗口 / 温度 / 轮数都是短值，
-           各占一整行会白掉三行高度。说明文字各自压进 title。 */
-        cardModel.appendChild(h('div', { class: 'set-row' },
-          h('div', { class: 'set-label', text: T('参数', 'Params') }),
-          h('div', { class: 'set-body' },
-            h('div', { class: 'set-tri' },
-              h('div', { class: 'field' },
-                h('label', {
-                  title: reported
-                    ? T('读自端点 /models 的 max context length；历史超过窗口 50% 起按需裁剪，85% 压成摘要，不会失忆', 'Read from the endpoint; history is trimmed past 50% of the window and summarized at 85%')
-                    : T('端点没有报告这个值：按模型名推断，推断不出按 1M。历史超过窗口 50% 起自动裁剪，85% 压成摘要', 'Not reported; inferred from the model name, else 1M. History is trimmed past 50% and summarized at 85%'),
-                  text: T('上下文窗口', 'Context')
-                }),
-                ctxIn),
-              h('div', { class: 'field' },
-                h('label', {
-                  title: d.tempAuto !== false
-                    ? T('自动：查文件 0.1 · 算数字 0 · 写文案 0.85。温度管「答案有多发散」，与思考强度无关', 'Auto: 0.1 for files, 0 for math, 0.85 for writing. Temperature controls variety, not effort')
-                    : T('手填值对所有任务生效；推理模型会锁死温度，那时这个数字不发送', 'Applies to every task; reasoning models lock temperature and this value is not sent'),
-                  text: T('温度', 'Temp')
-                }),
-                h('div', { class: 'row wrap' },
-                  tempIn,
-                  h('label', { class: 'check', title: T('按任务自动选温度', 'Pick temperature by task') }, tempAutoCb, h('span', { text: T('自动', 'Auto') })))),
-              h('div', { class: 'field' },
-                h('label', {
-                  title: T('这是防一路跑飞的安全闸，不是强度；超了会先给结论，不会无限查。与强度档位取小：关 6 / 低 8 / 中 10 / 高 14', 'A safety cap, not effort; it stops with a conclusion instead of looping. Capped by level: off 6 / low 8 / medium 10 / high 14'),
-                  text: T('查证轮数', 'Steps')
-                }),
-                h('input', {
-                  class: 'input', type: 'number', min: '1', max: '30', step: '1',
-                  value: String(d.maxSteps),
-                  onchange: (e) => {
-                    const n = Math.max(1, Math.min(30, Math.round(Number(e.target.value) || 12)));
-                    d.maxSteps = n;
-                    AIStore.save({ maxSteps: n });
-                    paint();
-                  }
-                }))
-            )
-          )
-        ));
-
-        const cardAct = h('div', { class: 'set-card' },
-            setCap(T('行为与权限', 'Behaviour & permissions'), agentBadge),
-            setRow(T('开关', 'Switches'),
-              h('div', { class: 'ai-switch-row' },
-                h('label', { class: 'check' }, enabledCb, h('span', { text: T('启用 AI 助手', 'Enable AI assistant') })),
-                h('label', { class: 'check' }, jsonCb, h('span', { text: T('要求 JSON 模式', 'Request JSON mode') })))),
-            setRow(T('档位', 'Mode'),
-              h('div', { class: 'ai-modes' }, ...modeBtns),
-              MODE_TIP[pol.mode] || ''),
-            setRow(T('允许范围', 'Scope'),
-              h('div', { class: 'agent-cats' }, ...catBoxes),
-              pol.mode === 'off' ? T('档位在「只读」时这些开关不生效', 'Inactive while the mode is read-only') : ''),
-            setRow(T('安全上限', 'Safety limits'),
-              h('div', { class: 'agent-limits' },
-                h('div', { class: 'field' },
-                  h('label', { text: T('每轮提案', 'Per turn') }),
-                  numIn('maxOpsPerTurn', 1, 10, 2)),
-                h('div', { class: 'field' },
-                  h('label', { text: T('每会话执行', 'Per session') }),
-                  numIn('maxOpsPerSession', 1, 200, 30)),
-                h('div', { class: 'field' },
-                  h('label', { text: T('单次项目', 'Max items') }),
-                  numIn('maxItems', 10, 20000, 200))
-              ),
-              T('每次执行均写入 ai\\journal 审计日志；切回「只读」立刻停止动手权限',
-                'Every action is logged to ai\\journal; switching to read-only revokes write access'))
-        );
-
-        const ollamaCb = h('input', {
-          type: 'checkbox',
-          checked: d.ollamaFallback === true,
-          onchange: (e) => { d.ollamaFallback = e.target.checked; paint(); }
-        });
         const ollamaModelIn = h('input', {
           class: 'input mono ai-ollama-in',
           placeholder: 'qwen2.5:7b',
           value: String(d.ollamaModel || ''),
           oninput: (e) => { d.ollamaModel = e.target.value.trim(); }
         });
-        cardModel.appendChild(setRow(T('本机兜底', 'Local fallback'),
-          h('div', { class: 'ai-ollama-row' },
-            h('label', { class: 'check' }, ollamaCb,
-              h('span', { text: T('云端不可用时切换 Ollama', 'Fallback to Ollama if offline') })),
-            ollamaModelIn
-          ),
-          T('需本机已运行 Ollama（127.0.0.1:11434）；留空默认 qwen2.5:7b',
-            'Requires local Ollama at 127.0.0.1:11434; empty defaults to qwen2.5:7b')));
 
         const nowMs = Date.now();
         const capsObj = (d.caps && typeof d.caps === 'object') ? d.caps : {};
         const capKeys = Object.keys(capsObj);
         const cooledKeys = capKeys.filter((k) => (Number(capsObj[k] && capsObj[k].cooldownUntil) || 0) > nowMs);
         const capStatusBadge = cooledKeys.length > 0
-          ? h('span', { class: 'badge warn', text: T(`${cooledKeys.length} 个端点冷却中`, `${cooledKeys.length} cooled down`) })
+          ? h('span', { class: 'set-pill is-warn', text: T(`${cooledKeys.length} 个冷却中`, `${cooledKeys.length} cooled`) })
           : (capKeys.length > 0
-            ? h('span', { class: 'badge ok', text: T(`已学习 ${capKeys.length} 个端点特性`, `${capKeys.length} learned`) })
-            : h('span', { class: 'badge', text: T('暂无学习缓存', 'No cached caps') }));
+            ? h('span', { class: 'set-pill is-ok', text: T(`已学习 ${capKeys.length} 个端点`, `${capKeys.length} learned`) })
+            : h('span', { class: 'set-pill', text: T('暂无缓存', 'Empty') }));
         const capResetBtn = h('button', {
-          class: 'btn sm',
+          class: 'set-text-btn',
           type: 'button',
           disabled: capKeys.length === 0,
           onclick: async () => {
@@ -1774,49 +1572,184 @@
               toast(errText(err), 'error');
             }
           }
-        }, icon('refresh', 12), h('span', {
-          text: cooledKeys.length > 0
-            ? T(`解除冷却 (${cooledKeys.length})`, `Clear cooldown (${cooledKeys.length})`)
-            : T(`重置缓存 (${capKeys.length})`, `Reset cache (${capKeys.length})`)
-        }));
-        cardConn.appendChild(setRow(T('节点健康', 'Health & caps'),
-          h('div', { class: 'row wrap', style: 'gap: 8px; align-items: center;' }, capStatusBadge, capResetBtn),
-          T('自动记住端点流式/工具支持与限流冷却期；重连异常时可手动重置',
-            'Remembers stream/tool capability & rate-limit cooldowns; reset when troubleshooting')));
+        }, cooledKeys.length > 0
+          ? T(`解除冷却 (${cooledKeys.length})`, `Clear cooldown (${cooledKeys.length})`)
+          : T(`重置缓存 (${capKeys.length})`, `Reset cache (${capKeys.length})`));
 
-        const body = h('div', { class: 'stack set-stack' },
-          h('div', { class: 'set-cols' }, cardConn, cardModel),
-          cardAct,
-          test && !test.ok
-            ? h('div', { class: 'small', style: 'color:var(--danger)', text: test.msg })
-            : null,
-          test && test.ok && test.warn
-            ? h('div', { class: 'small', style: 'color:var(--warn)', text: test.warn })
-            : null,
-          test && test.ok && test.note
-            ? h('div', { class: 'small muted', text: test.note })
-            : null,
-          test && test.ok && test.hint
-            ? h('div', { class: 'small muted', text: test.hint })
-            : null,
-          h('div', { class: 'action-bar ai-set-bar' },
-            testBadge,
-            h('div', { class: 'spacer' }),
+        const aiTopRow = h('div', { class: 'upd-main-row ai-set-bar' },
+          h('div', { class: 'set-inline-group' },
+            h('span', { class: 'upd-row-label', text: T('AI 助手', 'AI assistant') }),
+            testBadge
+          ),
+          h('div', { class: 'upd-row-right' },
+            setSwitch(d.enabled !== false, (v) => { d.enabled = v; }, {
+              label: T('启用', 'Enable')
+            }),
             h('button', {
-              class: 'btn sm', disabled: state.aiTesting, onclick: testAi
-            }, icon('play', 14), h('span', { text: state.aiTesting ? T('测试中…', 'Testing…') : T('测试连接', 'Test connection') })),
+              type: 'button',
+              class: 'set-outline-btn',
+              disabled: state.aiTesting,
+              onclick: testAi
+            }, icon('play', 13), h('span', { text: state.aiTesting ? T('测试中…', 'Testing…') : T('测试连接', 'Test') })),
             h('button', {
-              class: 'btn sm ghost ai-set-danger', onclick: clearAiData
-            }, icon('trash', 14), h('span', { text: T('清空对话记录', 'Clear chats') })),
-            h('button', {
-              class: 'btn primary sm', disabled: state.aiBusy, onclick: saveAi
+              type: 'button',
+              class: 'btn primary sm',
+              disabled: state.aiBusy,
+              onclick: saveAi
             }, h('span', { text: state.aiBusy ? T('保存中…', 'Saving…') : T('保存', 'Save') }))
           )
         );
 
+        const aiConnCard = h('div', { class: 'set-card' },
+          aiTopRow,
+          setRow(T('服务商', 'Provider'), provBox, null, savedProviderStrip),
+          setRow(T('接口地址', 'Endpoint'), endpointIn,
+            T('OpenAI 兼容 /chat/completions 地址，支持本机 Ollama', 'OpenAI-compatible /chat/completions URL (local Ollama supported)')),
+          setRow(T('API Key', 'API key'),
+            h('div', { class: 'row' },
+              keyIn,
+              h('button', {
+                type: 'button',
+                class: 'set-text-btn',
+                title: state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show'),
+                onclick: () => { state.aiKeyShown = !state.aiKeyShown; paint(); }
+              }, state.aiKeyShown ? T('隐藏', 'Hide') : T('显示', 'Show'))
+            ),
+            T('仅保存在本机 app.json，不写日志、不随导出泄露', 'Stored locally in app.json only; never logged or exported')),
+          setRow(T('模型', 'Model'),
+            h('div', { class: 'row' }, modelIn, fetchBtn),
+            null,
+            h('div', null,
+              state.aiModelsErr ? h('div', { class: 'small', style: 'color:var(--danger);margin-top:4px', text: state.aiModelsErr }) : null,
+              modelReport))
+        );
+
+        const permOpen = state.moreOpen.aiPerm !== null ? !!state.moreOpen.aiPerm : (pol.mode !== 'off');
+        const aiPermCard = h('div', { class: 'set-card' },
+          setLine(T('动手权限', 'Action mode'),
+            h('div', { class: 'set-inline-group' },
+              agentBadge,
+              h('div', { class: 'ai-modes' }, ...modeBtns)
+            ),
+            MODE_TIP[pol.mode] || ''
+          ),
+          setMore(T('允许范围与安全上限', 'Allowed scope & safety limits'),
+            h('div', { class: 'set-more-inner' },
+              setRow(T('允许范围', 'Scope'),
+                h('div', { class: 'agent-cats' }, ...catBoxes),
+                pol.mode === 'off' ? T('当前为「只读」档位，切换到确认/自动/放手后生效', 'Inactive while in Read-only mode') : ''),
+              setRow(T('安全上限', 'Safety limits'),
+                h('div', { class: 'agent-limits' },
+                  h('div', { class: 'field' },
+                    h('label', { text: T('每轮提案', 'Per turn') }),
+                    numIn('maxOpsPerTurn', 1, 10, 2)),
+                  h('div', { class: 'field' },
+                    h('label', { text: T('每会话执行', 'Per session') }),
+                    numIn('maxOpsPerSession', 1, 200, 30)),
+                  h('div', { class: 'field' },
+                    h('label', { text: T('单次项目', 'Max items') }),
+                    numIn('maxItems', 10, 20000, 200))
+                ),
+                T('每次执行均记入 ai\\journal 审计日志', 'Every execution is recorded in ai\\journal'))
+            ), {
+              open: permOpen,
+              onToggle: (open) => { state.moreOpen.aiPerm = open; }
+            })
+        );
+
+        const aiAdvCard = h('div', { class: 'set-card' },
+          setMore(T('高级模型参数与维护', 'Advanced model params & maintenance'),
+            h('div', { class: 'set-more-inner' },
+              setRow(T('参数', 'Params'),
+                h('div', { class: 'set-tri' },
+                  h('div', { class: 'field' },
+                    h('label', {
+                      title: reported
+                        ? T('读自端点 /models 的 max context length；历史超 50% 裁剪、85% 摘要', 'Read from endpoint /models; trims at 50% and summarizes at 85%')
+                        : T('按模型名推断或默认 1M；历史超 50% 裁剪、85% 摘要', 'Inferred from model or 1M default'),
+                      text: T('上下文窗口', 'Context')
+                    }),
+                    ctxIn),
+                  h('div', { class: 'field' },
+                    h('label', {
+                      title: d.tempAuto !== false
+                        ? T('自动：查文件 0.1 · 算数字 0 · 写文案 0.85', 'Auto: 0.1 files · 0 math · 0.85 writing')
+                        : T('手填值对所有非推理任务生效', 'Manual temperature for non-reasoning tasks'),
+                      text: T('温度', 'Temp')
+                    }),
+                    h('div', { class: 'row wrap' },
+                      tempIn,
+                      h('label', { class: 'check', title: T('按任务自动选温度', 'Pick temperature by task') }, tempAutoCb, h('span', { text: T('自动', 'Auto') })))),
+                  h('div', { class: 'field' },
+                    h('label', {
+                      title: T('防死循环安全闸，与强度档位取小', 'Safety step cap'),
+                      text: T('查证轮数', 'Steps')
+                    }),
+                    h('input', {
+                      class: 'input', type: 'number', min: '1', max: '30', step: '1',
+                      value: String(d.maxSteps),
+                      onchange: (e) => {
+                        const n = Math.max(1, Math.min(30, Math.round(Number(e.target.value) || 12)));
+                        d.maxSteps = n;
+                        AIStore.save({ maxSteps: n });
+                        paint();
+                      }
+                    }))
+                ),
+                winSrc
+              ),
+              setLine(T('要求 JSON 模式', 'Request JSON mode'),
+                setSwitch(d.jsonMode !== false, (v) => { d.jsonMode = v; }, {
+                  ariaLabel: T('要求 JSON 模式', 'Request JSON mode')
+                })
+              ),
+              setRow(T('本机兜底', 'Local fallback'),
+                h('div', { class: 'ai-ollama-row' },
+                  setSwitch(d.ollamaFallback === true, (v) => { d.ollamaFallback = v; paint(); }, {
+                    label: T('云端不可用时切 Ollama', 'Fallback to Ollama')
+                  }),
+                  ollamaModelIn
+                ),
+                T('需本机已运行 Ollama（127.0.0.1:11434）；留空默认 qwen2.5:7b',
+                  'Requires local Ollama at 127.0.0.1:11434; empty defaults to qwen2.5:7b')),
+              setRow(T('备用模型', 'Fallbacks'), fbBox,
+                T('主端点限流或不可用时按顺序切换（最多 5 条）', 'Tried in order if primary fails (up to 5)')),
+              setLine(T('节点健康与对话数据', 'Health & chat history'),
+                h('div', { class: 'set-inline-group' },
+                  capStatusBadge,
+                  capResetBtn,
+                  h('button', {
+                    type: 'button',
+                    class: 'set-text-btn ai-set-danger',
+                    onclick: clearAiData
+                  }, T('清空对话记录', 'Clear chats'))
+                )
+              )
+            ), {
+              open: !!state.moreOpen.aiAdv,
+              onToggle: (open) => { state.moreOpen.aiAdv = open; },
+              badge: winSrc
+            })
+        );
+
+        const body = h('div', { class: 'stack set-stack' },
+          aiConnCard,
+          test && !test.ok
+            ? h('div', { class: 'upd-box warn' }, h('div', { class: 'small', style: 'color:var(--danger)', text: test.msg }))
+            : null,
+          test && test.ok && (test.warn || test.note || test.hint)
+            ? h('div', { class: 'upd-box ' + (test.warn ? 'warn' : 'ok') },
+              test.warn ? h('div', { class: 'small', style: 'color:var(--warn)', text: test.warn }) : null,
+              test.note ? h('div', { class: 'small muted', text: test.note }) : null,
+              test.hint ? h('div', { class: 'small muted', text: test.hint }) : null)
+            : null,
+          aiPermCard,
+          aiAdvCard
+        );
+
         return section(T('AI 助手', 'AI assistant'), body, {
           open: state.openId === 'assistant',
-          hint: AIStore.isConfigured(d) ? T('已配置', 'Configured') : T('未配置', 'Not configured'),
+          hint: AIStore.isConfigured(d) ? (d.model || T('已配置', 'Configured')) : T('未配置', 'Not configured'),
           id: 'assistant',
           accordion: holder,
           onToggle: (open) => { if (open) state.openId = 'assistant'; }
@@ -2832,14 +2765,9 @@
               )
             ),
             h('div', { class: 'upd-sub-row' },
-              h('label', { class: 'check upd-auto-check' },
-                h('input', {
-                  type: 'checkbox',
-                  checked: !!state.updAutoCheck,
-                  onchange: (e) => onUpdaterAutoCheck(e.target.checked)
-                }),
-                h('span', { text: T('启动时自动检查更新', 'Check for updates on launch') })
-              ),
+              setSwitch(!!state.updAutoCheck, (v) => onUpdaterAutoCheck(v), {
+                label: T('启动时自动检查更新', 'Check for updates on launch')
+              }),
               h('div', { class: 'upd-sub-meta' },
                 cacheBytes > 0
                   ? h('span', { class: 'small muted', text: T('已缓存 ', 'Cache ') + fmtSize(cacheBytes) })
@@ -2860,14 +2788,77 @@
           ),
           chkWrap,
           progWrap,
-          resultCard
+          resultCard,
+          (() => {
+            const app = state.app;
+            const eng = state.engine;
+            const dataDirPath = (app && app.data_dir) || (state.settings && state.settings.data_dir) || '';
+            const exeDirPath = (app && app.exe_dir) || '';
+            const engPill = eng
+              ? (eng.pid > 0
+                ? h('span', { class: 'set-pill is-ok', text: T('引擎运行中', 'Engine running') + ' · PID ' + eng.pid })
+                : h('span', { class: 'set-pill is-warn', text: T('引擎未启动', 'Engine stopped') }))
+              : h('span', { class: 'set-pill', text: T('引擎状态未知', 'Engine unknown') });
+
+            return state.appError
+              ? empty(T('应用信息读取失败', 'Could not read app info'), state.appError)
+              : h('div', { class: 'set-card' },
+                setRow(T('数据目录', 'Data folder'),
+                  h('div', { class: 'row' },
+                    h('input', {
+                      class: 'input grow mono', readonly: true, spellcheck: 'false',
+                      value: dataDirPath || '—', title: dataDirPath || ''
+                    }),
+                    h('button', {
+                      type: 'button',
+                      class: 'btn ghost sm icon', disabled: !dataDirPath,
+                      title: T('在软件内打开目录', 'Browse folder in app'), 'aria-label': T('在软件内打开目录', 'Browse folder in app'),
+                      onclick: () => openInApp(dataDirPath)
+                    }, icon('scan', 14)),
+                    h('button', {
+                      type: 'button',
+                      class: 'btn ghost sm icon', disabled: !dataDirPath,
+                      title: T('在系统文件管理器中打开', 'Open in system file manager'), 'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
+                      onclick: () => reveal(dataDirPath)
+                    }, icon('external', 14)),
+                    h('button', {
+                      type: 'button',
+                      class: 'set-outline-btn',
+                      disabled: state.dataMigrating,
+                      onclick: pickDataDir
+                    }, icon('folder', 13), h('span', { text: state.dataMigrating ? T('迁移中…', 'Migrating…') : T('更改并迁移…', 'Migrate…') }))
+                  ),
+                  T('配置、AI 会话、整理历史、缓存与日志统一存放于此；更改后自动整体迁移并重启',
+                    'Config, AI chats, history, cache and logs live here; changing migrates and restarts automatically')
+                ),
+                setLine(T('运行状态', 'Runtime'),
+                  h('div', { class: 'set-inline-group' },
+                    engPill,
+                    exeDirPath
+                      ? h('button', {
+                        type: 'button',
+                        class: 'set-text-btn',
+                        title: exeDirPath,
+                        onclick: () => reveal(exeDirPath)
+                      }, T('程序目录', 'App folder'))
+                      : null,
+                    h('button', {
+                      type: 'button',
+                      class: 'set-text-btn',
+                      onclick: (ev) => refreshMaintenance(ev && ev.currentTarget)
+                    }, T('刷新', 'Refresh'))
+                  ),
+                  state.engineError || ''
+                )
+              );
+          })()
         );
 
-        return section(T('版本与在线更新', 'Version & updates'), body, {
+        return section(T('版本与数据', 'Version & data'), body, {
           open: state.openId === 'updater',
           hint: hasNew
             ? T('有新版本 v' + chk.latestVersion, 'Update v' + chk.latestVersion)
-            : T('v' + curVer + ' · 检查与升级', 'v' + curVer + ' · Updates'),
+            : T('v' + curVer + ' · 更新与存储', 'v' + curVer + ' · Updates & data'),
           id: 'updater',
           accordion: holder,
           onToggle: (open) => { if (open) state.openId = 'updater'; }
@@ -3065,77 +3056,6 @@
         }
       }
 
-      function secMaintenance(holder) {
-        const app = state.app;
-        const eng = state.engine;
-        const status = eng
-          ? (eng.pid > 0
-            ? h('span', { class: 'badge ok', text: T('运行中', 'Running') })
-            : h('span', { class: 'badge warn', text: T('未启动', 'Not running') }))
-          : h('span', { class: 'badge', text: T('未知', 'Unknown') });
-
-        const dataDirPath = (app && app.data_dir) || (state.settings && state.settings.data_dir) || '';
-        const dataDirRow = h('div', { class: 'row' },
-          h('input', {
-            class: 'input grow mono', readonly: true, spellcheck: 'false',
-            value: dataDirPath || '—', title: dataDirPath || ''
-          }),
-          h('button', {
-            type: 'button',
-            class: 'btn ghost sm icon', disabled: !dataDirPath,
-            title: T('在软件内打开目录', 'Browse folder in app'), 'aria-label': T('在软件内打开目录', 'Browse folder in app'),
-            onclick: () => openInApp(dataDirPath)
-          }, icon('scan', 14)),
-          h('button', {
-            type: 'button',
-            class: 'btn ghost sm icon', disabled: !dataDirPath,
-            title: T('在系统文件管理器中打开', 'Open in system file manager'), 'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
-            onclick: () => reveal(dataDirPath)
-          }, icon('external', 14)),
-          h('button', {
-            class: 'btn sm',
-            disabled: state.dataMigrating,
-            onclick: pickDataDir
-          }, icon('folder', 14),
-            h('span', { text: state.dataMigrating ? T('迁移中…', 'Migrating…') : T('更改并迁移…', 'Change & migrate…') }))
-        );
-
-        const body = h('div', { class: 'stack' },
-          state.appError
-            ? empty(T('应用信息读取失败', 'Could not read app info'), state.appError)
-            : h('div', { class: 'set-card' },
-              h('dl', { class: 'kv' },
-                kvRow(T('版本', 'Version'), h('span', { class: 'mono', text: (app && app.version) || '—' })),
-                kvRow(T('程序目录', 'Program folder'), pathRow(app && app.exe_dir)),
-                kvRow(T('数据目录', 'Data folder'), dataDirRow),
-                kvRow(T('日志目录', 'Log folder'), h('div', { class: 'stack', style: { gap: '4px' } },
-                  pathRow(app && app.log_dir),
-                  h('span', { class: 'small muted', text: T('日志、缓存与索引统一存放在数据目录下，更改数据目录时会自动整体迁移并重建', 'Logs, cache and indexes live inside the data folder and follow it automatically') })
-                )),
-                kvRow(T('引擎状态', 'Engine'), h('div', { class: 'row' }, status,
-                  h('span', { class: 'small muted', text: eng && eng.pid ? 'PID ' + eng.pid : '' }))),
-                kvRow(T('权限', 'Privileges'), state.admin
-                  ? h('span', { class: 'badge ok', text: T('管理员', 'Administrator') })
-                  : h('span', { class: 'badge warn', text: T('普通权限', 'Standard user') }))
-              )
-            ),
-          h('div', { class: 'action-bar' },
-            h('span', { class: 'small muted', text: T('数据目录与日志目录全局统一；更改后自动一次性迁移并重启生效', 'Data and log folders stay unified; changing migrates and restarts automatically') }),
-            h('div', { class: 'spacer' }),
-            h('button', { class: 'btn sm', onclick: (ev) => refreshMaintenance(ev && ev.currentTarget) }, icon('refresh', 14), h('span', { text: T('刷新', 'Refresh') }))
-          ),
-          state.engineError ? h('div', { class: 'small muted', text: state.engineError }) : null
-        );
-
-        return section(T('数据与维护', 'Data & maintenance'), body, {
-          open: state.openId === 'maintenance',
-          hint: T('目录与引擎', 'Folders and engine'),
-          id: 'maintenance',
-          accordion: holder,
-          onToggle: (open) => { if (open) state.openId = 'maintenance'; }
-        });
-      }
-
       async function refreshMaintenance(btn) {
         const run = async () => {
           await Promise.all([loadAbout(), loadAdmin(), loadSettings()]);
@@ -3232,14 +3152,16 @@
           if (!id || id === 'settings') return;
           const st = active.state;
           if (!st || !st.settings || !st.original) return;
-          const dirty = ['recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content']
+          const dirty = ['recursive_depth', 'conflict_policy', 'log_keep_days', 'default_recursive', 'default_content',
+            'index_freshness', 'index_max_mb', 'index_rebuild_idle',
+            'prune_enabled', 'prune_history_keep', 'prune_thumbs_mb', 'prune_backup_keep']
             .some((k) => st.settings[k] !== st.original[k]);
           if (!dirty) return;
           e.preventDefault();
           e.stopPropagation();
           confirm({
             title: T('有未保存的修改', 'Unsaved changes'),
-            body: T('离开设置页会丢失尚未保存的整理默认值，仍要离开吗？', 'Leaving will discard unsaved tidy defaults. Leave anyway?'),
+            body: T('离开设置页会丢失尚未保存的整理与索引设置，仍要离开吗？', 'Leaving will discard unsaved tidy & index settings. Leave anyway?'),
             ok: T('离开', 'Leave'),
             danger: true
           }).then((ok) => { if (ok) window.navigate(id); });
@@ -3248,10 +3170,17 @@
 
       setActions();
 
+      const SECTION_ALIAS = {
+        appearance: 'general',
+        behavior: 'general',
+        performance: 'general',
+        maintenance: 'updater'
+      };
       liveJump = function (payload) {
-        const sec = payload && (payload.section || payload.tab || payload.id);
-        if (!sec) return;
-        state.openId = String(sec);
+        const raw = payload && (payload.section || payload.tab || payload.id);
+        if (!raw) return;
+        const key = String(raw);
+        state.openId = SECTION_ALIAS[key] || key;
         paint();
         const node = root.querySelector('[data-section="' + state.openId + '"]');
         if (node && node.scrollIntoView) node.scrollIntoView({ block: 'start', behavior: 'smooth' });
