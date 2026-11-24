@@ -30,13 +30,9 @@
 
 ## 🎬 56 秒官方实机宣传片
 
-<!-- 如需在 GitHub README 原地原生播放，将生成的 <9.5 MB qdisk-promo-github-10mb.mp4 拖入任意 GitHub Issue 编辑框，把返回的 https://github.com/user-attachments/assets/... 链接单行贴到此处即可 -->
-<div align="center">
-  <a href="https://3347567186.github.io/QDisk/#film">
-    <img src="website/assets/media/promo-poster.jpg" alt="点击观看轻盘 QDisk 56 秒 1080p 官方实机宣传片（暖白/炭黑双主题）" width="100%" />
-  </a>
-  <p><sub>▶ <a href="https://3347567186.github.io/QDisk/#film"><strong>前往官网影幕播放 1080p 有声实机宣传片（0:56 · 支持章节跳播）</strong></a> · 或直接下载 <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 高清原片 (8.5 MB)</a></sub></p>
-</div>
+https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
+
+<p align="center"><sub>▶ 1080p 有声实机演示（暖白 / 炭黑双主题）· 也可前往 <a href="https://3347567186.github.io/QDisk/#film"><strong>官网影幕按章节跳播</strong></a> 或下载 <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 原片 (8.5 MB)</a></sub></p>
 
 ---
 
