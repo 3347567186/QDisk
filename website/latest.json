@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "version": "1.45.0",
+  "version": "1.46.0",
   "channel": "stable",
-  "pubDate": "2026-11-24T11:35:38+08:00",
+  "pubDate": "2026-11-24T14:37:15+08:00",
   "minVersion": "",
-  "notes": "## 1.45.0（minor）—— 全链路「软件内优先打开 + 系统管理器保留」重构、路径定位与搜索「未搜到」根治、AI 用户消息快捷复制与全站红队测试修复\n\n### 一、全链路本地路径「软件内优先打开」与四层「系统文件管理器」显式保留\n- **真实磁盘探测替代盲猜**（`src/src-tauri/src/main.rs`、`src/web/js/api.js`、`src/web/js/ai/entries.js`）：\n  - 新增 `inspect_local_path` 命令，基于 `symlink_metadata` 与目录列举精确区分 `ok / permission_denied / not_found / invalid` 与真实 `dir / file`，彻底消除前端靠「末段是否含 `.`」误将 `157.0.4341.60`、`OpenAI.Codex_...` 等带点文件夹错判为文件并弹出资源管理器的问题；同步修复 `parentOf(\"C:\\\\foo.exe\")` 缺失尾反斜杠变为相对路径 `\"C:\"` 的隐患。\n  - 重构 `AIEntries.open()` 统一路由：文件夹 → 软件内「空间工具 → 文件夹浏览（DirView）」；压缩包 → 软件内「压缩包」页直接打开；可执行文件（`.exe` 等）与普通文件 → 软件内 DirView 打开父目录并自动定位高亮选中（绝不自动运行 `.exe`，也绝不默认跳出系统资源管理器），且失败绝不吞错伪造成功提示。\n- **四层显式保留「系统文件管理器」入口**：\n  1. DirView 顶栏常驻「系统文件管理器」按钮与选中/高亮动作条（`.dv-focus-bar`，含软件内图片/文本预览、压缩包直达、应用/进程联动、默认程序与系统管理器入口）；\n  2. AI 位置胶囊（`.ai-entry-wrap` + `.ai-entry-ext`）、依据行（`.ai-ev-ext`）与建议卡同步保留系统管理器直达按钮；\n  3. AI 正文路径链接（`md.js` `.md-path-wrap`）伴随纯 SVG、`user-select: none` 的系统管理器小按钮（`.md-path-ext`），不影响正文选中复制；\n  4. 其余 11 个功能页（搜索、大文件、空文件夹、应用/自启/进程、缓存、整理、截图、压缩包、迁移、规则、日志、设置）全量对齐「软件内优先 + 系统管理器保留」双入口。\n\n### 二、彻底根治「跳转进软件后显示没有搜索到 / 空结果 / 目录不存在」\n- **空间工具与目录浏览加固**（`src/src-tauri/src/main.rs`、`src/web/js/dirview.js`、`src/web/js/pages/tools.js`、`src/web/js/app.js`）：\n  - 升级 Rust `list_dir` 支持 `locate` 目标自动算页定位与 `filter` 全量过滤，突破单页 200 项限制；`dirview.js` 引入单调 `reqSeq` 抢占旧请求并新增目录内筛选框，`tools.js` 增设 `jumpClaimed` 杜绝异步 `configGet()` 覆写跳转目录。\n  - 修复 `tools.js` 将 `action: 'delete'` 的非空目录（如 10.4 GB 下载目录）误判进「空文件夹清理」导致报「没有空文件夹」的逻辑缺陷。\n  - 区分 `WindowsApps` 等 ACL 权限受限目录与真正缺失路径：DirView 自动回退至最近可读上级目录并展示提示横幅，提供「以管理员身份重启并继续定位」（通过 10 分钟 TTL 的 `pending_jump` 跨 UAC 自动续跳并即刻清零）与「尝试用系统文件管理器打开」；路径栏粘贴文件路径回车自动定位高亮；`App.jump()` 自动收起已打开的 AI 侧栏抽屉。\n- **Markdown 路径解析与搜索引擎加固**（`src/web/js/ai/md.js`、`src/engine/tidy.py`、`src/web/js/pages/search.js`）：\n  - 增强 `md.js` 裸路径正则，完整识别末段含空格路径（`C:\\Program Files`、`Program Files (x86)`、`User Data`、`屏幕截图 2026-06-09 115005.png`）、中文空格目录与 `&` 实体，同时拒绝误吞后续中英文正文。\n  - 升级 `tidy.py` `_ix_query_one` / `es_search` / `_engine_search_query` 支持完整路径与局部路径检索、Everything `-p` 空格路径参数，以及对未建索引盘的本机真实绝对路径即时直出精确命中（`source: \"direct\"`）；`search.js` `liveJump` 支持 `paths` 载荷并改单击结果为软件内定位。\n\n### 三、AI 对话用户消息快捷复制与全站红队对抗修复\n- **用户消息无损快捷复制**（`src/web/js/ai/chatui.js`、`src/web/js/ui.js`、`src/web/styles.css`）：\n  - 为每条用户发送气泡下方新增 `.ai-user-bar` + `.ai-user-copy`（覆盖实时发送、历史回放、整页与抽屉），读取原始 `dataset.text` 无损复制（支持多行/缩进/特殊字符）、内联切换 ✓ 态且永不禁用按钮、防抖计时器随 `destroy()` 全量回收、`user-select:\n…",
+  "notes": "## 1.46.0（minor）—— 根治旧目录自动打开、全能只读文件内容预览、双栏历史更新日志弹窗与一键全盘主要磁盘索引\n\n### 一、彻底修复整理页旧目录胶囊关不掉与空间工具自动打开旧目录\n- 移除整理页来源胶囊（`×`）或「清空来源」时同步清零/更新持久化的 `last_folder` / `lastFolder`，并立即清理已移除来源的残留预览项。\n- 整理页挂载恢复上次目录前先经 Rust `inspect_local_path` 真实核验路径存在且可读，自动清理失效路径并防异步竞态覆写；「空间工具」彻底停止在打开时自动加载旧目录。\n\n### 二、整理文件 & 空间工具全能只读文件内容预览\n- 新增 Rust 原生 `file_preview` 只读预览引擎（零新增依赖），支持图片（含 SVG 安全隔离与同目录相册翻页）、PDF、音视频、Office OOXML（`.docx` / `.xlsx` / `.pptx` 带防 Zip Bomb 限额提取）、全编码文本（UTF-8 / UTF-16 / Windows GBK CP936 开头对齐无乱码）、压缩包直达与二进制魔数 + 十六进制嗅探；脚本与可执行文件严格只读不运行。\n- 全面接入「整理文件」预览表、「空间工具 → 大文件排行」及「文件夹浏览」（双击、行内按钮、右键与聚焦栏均可一键查看内容）；关闭弹窗主动释放 `<video>/<audio>/<iframe>` 资源句柄，杜绝 Windows 文件锁残留。\n\n### 三、版本与在线更新：独立双栏历史更新日志弹窗\n- 「设置 → 版本与在线更新」底栏常驻「查看更新日志」按钮，随时独立弹窗查阅当前及全部历史版本（无需等待检测到新版本）。\n- 弹窗采用原生 `<dialog>` 居中双栏布局：左侧 244px 版本时间轴支持关键词搜索、分类筛选与方向键切换，右侧展示富文本排版正文、一键复制、快捷翻版与新版升级操作条，并支持按需同步远端 GitHub Releases。\n\n### 四、搜索索引：新增「一键建立索引」（默认识别并覆盖本机主要盘）\n- 新增 Win32 动态主要固定盘识别（`C:\\`、`D:\\`、`E:\\` …），自动跳过移动 U 盘、光驱、网络盘、`subst` 虚拟盘与恢复分区，并支持逐盘智能复用已健康建库磁盘。\n- 搜索页主卡片与「管理索引 / 索引列表」弹窗均新增常驻「一键建立索引」主按钮，零索引空列表亦可直接一键识别确认并覆盖全盘。",
   "installer": {
-    "file": "QDisk_1.45.0_x64-setup.exe",
-    "url": "https://github.com/3347567186/QDisk/releases/download/v1.45.0/QDisk_1.45.0_x64-setup.exe",
-    "size": 21712160,
-    "sha256": "6a6160ed59b5ee04282177232306ab8f50737a3b2c38ccf3a16e1491a78dfb17"
+    "file": "QDisk_1.46.0_x64-setup.exe",
+    "url": "https://github.com/3347567186/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-setup.exe",
+    "size": 21978699,
+    "sha256": "a483a61ec512b257a173b50155dfea77715dc666fa545cefbbb63ee08de1c7a1"
   },
   "platforms": {
     "windows-x86_64": {
-      "file": "QDisk_1.45.0_x64-setup.exe",
-      "url": "https://github.com/3347567186/QDisk/releases/download/v1.45.0/QDisk_1.45.0_x64-setup.exe",
-      "size": 21712160,
-      "sha256": "6a6160ed59b5ee04282177232306ab8f50737a3b2c38ccf3a16e1491a78dfb17"
+      "file": "QDisk_1.46.0_x64-setup.exe",
+      "url": "https://github.com/3347567186/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-setup.exe",
+      "size": 21978699,
+      "sha256": "a483a61ec512b257a173b50155dfea77715dc666fa545cefbbb63ee08de1c7a1"
     }
   },
   "portable": {
-    "file": "QDisk_1.45.0_x64-portable.zip",
-    "url": "https://github.com/3347567186/QDisk/releases/download/v1.45.0/QDisk_1.45.0_x64-portable.zip",
-    "size": 26365243,
-    "sha256": "86337402d6b37c263c137278832daeb59b718ba0f0437b61f907f40974703885"
+    "file": "QDisk_1.46.0_x64-portable.zip",
+    "url": "https://github.com/3347567186/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-portable.zip",
+    "size": 26710337,
+    "sha256": "aa975e41f5ff69c3c85e3f1a27244d6aa9072f6dbbef18d6df8d5735f3d78ce1"
   }
 }

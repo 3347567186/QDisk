@@ -23,7 +23,7 @@
       'nav.star': '点 Star',
       'nav.get': '立即下载',
       'hero.title': '零广告、不靠黑盒<br>每一步都能撤回的 <span class="title-accent">Windows 轻盘</span>',
-      'hero.sub': '将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 20.7 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。',
+      'hero.sub': '将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 21.0 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。',
       'hero.dlExe': '下载安装版',
       'hero.dlZip': '便携免安装版',
       'tabs.ai': 'AI 助手',
@@ -98,7 +98,7 @@
       'nav.star': 'Star',
       'nav.get': 'Download',
       'hero.title': 'Zero ads, zero black boxes.<br>The undoable <span class="title-accent">Windows utility</span>.',
-      'hero.sub': 'Dry-Run file organization, a 4-tier multi-core Rust archiver, risk-tiered cleanup, and an auditable local AI assistant in one 20.7 MB native app. Every risky action previews first.',
+      'hero.sub': 'Dry-Run file organization, a 4-tier multi-core Rust archiver, risk-tiered cleanup, and an auditable local AI assistant in one 21.0 MB native app. Every risky action previews first.',
       'hero.dlExe': 'Download Installer',
       'hero.dlZip': 'Portable ZIP',
       'tabs.ai': 'AI Assistant',
@@ -184,7 +184,7 @@
 
   let curLang = 'zh';
   let curBenchMode = 'create';
-  let currentVer = 'v1.45.0';
+  let currentVer = 'v1.46.0';
 
   /* ---- Two-State Color Scheme Toggle (modern-web-guidance: dark-mode-toggle) ---- */
   const metaScheme = document.querySelector('meta[name="color-scheme"]');
@@ -623,7 +623,7 @@
       }
       setHref('dl-sha-link', `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
     })
-    .catch(() => { /* Static v1.45.0 fallback already rendered */ });
+    .catch(() => { /* Static v1.46.0 fallback already rendered */ });
 
   /* ---- Hydrate GitHub Star Count from Same-Origin repo-meta.json (0 CORS / 0 Rate-Limit) ---- */
   fetch('./repo-meta.json', { cache: 'no-cache' })
