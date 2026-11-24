@@ -6237,6 +6237,14 @@ def _engine_scan_plans(params):
     use_content = params.get("use_content")
     if use_content is not None and not isinstance(use_content, bool):
         raise EngineError("参数 use_content 必须是布尔值或 null")
+    if use_content is None:
+        # 前端传 null 表示「自动识别（跟随设置）」，优先读取 settings.json 中的 default_content
+        try:
+            _s = load_settings()
+            if isinstance(_s.get("default_content"), bool):
+                use_content = _s["default_content"]
+        except Exception:
+            pass
     exclude_exts = _engine_str_list(params, "exclude_exts")
     exclude_dirs = _engine_str_list(params, "exclude_dirs")
     min_age = params.get("min_age_minutes")

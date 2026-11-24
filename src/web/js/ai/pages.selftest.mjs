@@ -3006,5 +3006,151 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.isAdmin = origIsAdmin;
 }
 
+// 回归 19：整理文件页「整理选项」默认高亮「标准」预设、use_content 保持自动跟随设置、三档切换与「自定义」徽章、带引号路径粘贴与防异步覆写
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const origEngine = sandbox.API.engine;
+  const origCfgGet = sandbox.API.configGet;
+  const origInspect = sandbox.API.inspectPath;
+
+  let lastScanParams = null;
+  let releaseDelayedSettings = null;
+  let delaySettings = false;
+
+  sandbox.API.configGet = async () => ({ last_folder: '' });
+  sandbox.API.inspectPath = async (p) => ({ status: 'ok', kind: 'dir', path: p, readable: true });
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'settings.get') {
+      const payload = { default_recursive: false, default_content: true, conflict_policy: 'rename' };
+      if (delaySettings) {
+        return await new Promise((resolve) => { releaseDelayedSettings = () => resolve(payload); });
+      }
+      return payload;
+    }
+    if (method === 'scan') {
+      lastScanParams = params;
+      return { plans: [], blocked: [], total: 0, total_size: 0 };
+    }
+    return origEngine(method, params);
+  };
+
+  // 19a. 工厂默认 settings.get 返回后，「标准」预设必须保持高亮（不再全部熄灭），use_content 为 null（跟随设置）
+  const orgHost19 = new FakeElement('div');
+  const umOrg19 = await sandbox.Pages.organize.mount(orgHost19);
+  await new Promise((r) => setTimeout(r, 30));
+  const segBtns = findNodes(orgHost19, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('chip'));
+  const btnStd = segBtns.find((b) => txt(b) === '标准');
+  const btnAll = segBtns.find((b) => txt(b) === '全部文件');
+  const btnCareful = segBtns.find((b) => txt(b) === '谨慎');
+  const customBadge = findNodes(orgHost19, (n) => n.classList && n.classList.contains('badge') && txt(n) === '自定义')[0];
+  if (!btnStd || !btnStd.classList.contains('active') || btnStd.getAttribute('aria-pressed') !== 'true' || !customBadge || !customBadge.hidden) {
+    console.error(`[红队回归 19] 打开整理页默认「标准」预设未高亮或误显自定义: stdActive=${btnStd && btnStd.classList.contains('active')}, customHidden=${customBadge && customBadge.hidden}`);
+    process.exit(1);
+  }
+
+  // 19b. 点击「全部文件」与「谨慎」切换，并验证带双引号路径粘贴 + 扫描参数精确传递
+  clickBtn(btnAll);
+  if (!btnAll.classList.contains('active') || btnStd.classList.contains('active')) {
+    console.error('[红队回归 19] 点击「全部文件」预设未切换高亮');
+    process.exit(1);
+  }
+  const pathInp = findNodes(orgHost19, (n) => n.tagName === 'INPUT' && n.classList && n.classList.contains('grow'))[0];
+  const scanBtn = findNodes(orgHost19, (n) => n.tagName === 'BUTTON' && txt(n).includes('扫描'))[0];
+  pathInp.value = '"D:\\Downloads\\Release.v1.46.1"';
+  clickBtn(scanBtn);
+  await new Promise((r) => setTimeout(r, 270));
+  if (!lastScanParams || lastScanParams.paths[0] !== 'D:\\Downloads\\Release.v1.46.1' || lastScanParams.recursive !== true || lastScanParams.skip_recent !== false || lastScanParams.use_content !== null) {
+    console.error(`[红队回归 19] 带引号路径剥离或全部文件扫描参数异常: ${JSON.stringify(lastScanParams)}`);
+    process.exit(1);
+  }
+
+  // 19c. 手动拨动「含子文件夹」脱离预设 -> 必须显示「自定义」徽章；再拨回原组合应自动恢复高亮
+  const findCheckByLabel = (host, kw) => {
+    const lbl = findNodes(host, (n) => n.tagName === 'LABEL' && txt(n).includes(kw))[0];
+    return lbl ? findNodes(lbl, (n) => n.tagName === 'INPUT' && (n.type === 'checkbox' || n.getAttribute('type') === 'checkbox'))[0] : null;
+  };
+  const chkRecursive = findCheckByLabel(orgHost19, '含子文件夹');
+  const chkSkipRecent = findCheckByLabel(orgHost19, '跳过最近修改');
+  const chkShortcuts = findCheckByLabel(orgHost19, '跳过快捷方式');
+  if (!chkRecursive || !chkSkipRecent || !chkShortcuts) {
+    console.error('[红队回归 19] 未找到整理选项关键复选框');
+    process.exit(1);
+  }
+  chkRecursive.checked = false;
+  chkRecursive.dispatchEvent({ type: 'change', target: chkRecursive });
+  if (btnAll.classList.contains('active') || customBadge.hidden) {
+    console.error(`[红队回归 19] 手动改开关后未显示「自定义」徽章: customHidden=${customBadge.hidden}`);
+    process.exit(1);
+  }
+  // 拨回「含子文件夹」=true，应自动恢复命中「全部文件」并隐藏「自定义」
+  chkRecursive.checked = true;
+  chkRecursive.dispatchEvent({ type: 'change', target: chkRecursive });
+  if (!btnAll.classList.contains('active') || !customBadge.hidden) {
+    console.error('[红队回归 19] 手动拨回全部文件组合后未自动恢复预设高亮');
+    process.exit(1);
+  }
+  // 把「谨慎」切过去（min_age=60, conflict=skip），确认命中；再切回「标准」确认回显正常
+  clickBtn(btnCareful);
+  if (!btnCareful.classList.contains('active') || !customBadge.hidden) {
+    console.error('[红队回归 19] 点击「谨慎」预设未高亮');
+    process.exit(1);
+  }
+  // 处于「谨慎」（min_age=60）时，关闭 skip_recent + 开启 recursive + 关闭 shortcuts + 改回 rename，应忽略禁用态 min_age=60 命中「全部文件」
+  chkSkipRecent.checked = false;
+  chkSkipRecent.dispatchEvent({ type: 'change', target: chkSkipRecent });
+  chkRecursive.checked = true;
+  chkRecursive.dispatchEvent({ type: 'change', target: chkRecursive });
+  chkShortcuts.checked = false;
+  chkShortcuts.dispatchEvent({ type: 'change', target: chkShortcuts });
+  const conflictSel = findNodes(orgHost19, (n) => n.classList && n.classList.contains('custom-select') && txt(n).includes('重命名'))[0];
+  if (!conflictSel) {
+    console.error('[红队回归 19] 未找到重名处理下拉框');
+    process.exit(1);
+  }
+  const renameOpt = findNodes(conflictSel, (n) => n.classList && n.classList.contains('custom-select-item') && txt(n).includes('重命名'))[0];
+  if (!renameOpt) {
+    console.error('[红队回归 19] 未找到重命名选项');
+    process.exit(1);
+  }
+  renameOpt.dispatchEvent({ type: 'click', target: renameOpt, stopPropagation() {} });
+  if (!btnAll.classList.contains('active') || !customBadge.hidden) {
+    console.error(`[红队回归 19] skip_recent=false 时禁用态 min_age=60 阻碍了识别「全部文件」: allActive=${btnAll.classList.contains('active')}, customHidden=${customBadge.hidden}`);
+    process.exit(1);
+  }
+  umOrg19();
+
+  // 19d. 异步 settings.get 延迟返回：用户已先点「谨慎」时，绝不得被迟到的 settings.get 覆写
+  delaySettings = true;
+  const orgHost19b = new FakeElement('div');
+  const mountP19b = sandbox.Pages.organize.mount(orgHost19b);
+  await new Promise((r) => setTimeout(r, 20));
+  const btnCareful2 = findNodes(orgHost19b, (n) => n.tagName === 'BUTTON' && txt(n) === '谨慎')[0];
+  clickBtn(btnCareful2);
+  if (releaseDelayedSettings) releaseDelayedSettings();
+  const umOrg19b = await mountP19b;
+  if (!btnCareful2.classList.contains('active')) {
+    console.error('[红队回归 19] 迟到的 settings.get 覆写了用户已点击的「谨慎」预设');
+    process.exit(1);
+  }
+  umOrg19b();
+
+  sandbox.API.engine = origEngine;
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.inspectPath = origInspect;
+}
+
 console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含后台进程真实关闭核验、开机自启排雷、资源概览实时监控与全站红队回归）`);
 process.exit(0);

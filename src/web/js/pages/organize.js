@@ -168,8 +168,8 @@
     };
 
     const opts = {
-      preset: 'standard', // standard | all | careful
-      recursive: true,
+      preset: 'standard', // standard | all | careful | ''(custom)
+      recursive: false,
       use_content: null,   // null=跟随引擎设置 / true=按内容识别 / false=仅按扩展名
       by_date: false,
       conflict: 'rename',
@@ -180,6 +180,7 @@
       exclude_exts: '',
       exclude_dirs: ''
     };
+    let userEditedOpts = false;
 
     /* ---------------- 通用控件 ---------------- */
     function actBtn(zh, en, kind, iconName, onclick) {
@@ -256,8 +257,8 @@
     pathInput.value = state.folder;
     // 只把输入框当「待加入的来源」，不直接改写 state.folder：
     // 撤销 / 打开文件夹都指向上一次真正扫描过的来源。
-    pathInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { addTypedSource(); doScan(); }
+    pathInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') { await addTypedSource(); doScan(); }
     });
 
     const btnBrowse = actBtn('添加文件夹', 'Add folder', 'ghost', 'folder', doBrowse);
@@ -375,40 +376,45 @@
     });
     dirInput.value = opts.exclude_dirs;
 
-    /* 三档预设：一次点完，不用逐个拨开关 */
+    /* 三档预设：一次点完，不用逐个拨开关（standard 与出厂设置默认项 100% 对齐，打开即亮） */
     const PRESETS = {
       standard: {
         zh: '标准', en: 'Standard',
-        hint: T('含子文件夹；跳过 10 分钟内改动与快捷方式；重名自动改名',
-          'Subfolders; skip files changed in the last 10 min and shortcuts; rename on duplicate'),
-        apply: () => {
-          opts.recursive = true; opts.by_date = false; opts.skip_recent = true;
-          opts.min_age_minutes = 10; opts.skip_shortcuts = true; opts.force = false;
-          opts.conflict = 'rename'; opts.use_content = null;
+        hint: T('整理当前目录；跳过 10 分钟内改动与快捷方式；重名自动改名',
+          'Current folder; skip files changed in the last 10 min and shortcuts; rename on duplicate'),
+        values: {
+          recursive: false, by_date: false, skip_recent: true,
+          min_age_minutes: 10, skip_shortcuts: true, force: false,
+          conflict: 'rename', use_content: null
         }
       },
       all: {
         zh: '全部文件', en: 'Everything',
         hint: T('含子文件夹；不跳过最近改动与快捷方式；重名自动改名',
           'Subfolders; do not skip recent files or shortcuts; rename on duplicate'),
-        apply: () => {
-          opts.recursive = true; opts.by_date = false; opts.skip_recent = false;
-          opts.min_age_minutes = 10; opts.skip_shortcuts = false; opts.force = false;
-          opts.conflict = 'rename'; opts.use_content = null;
+        values: {
+          recursive: true, by_date: false, skip_recent: false,
+          min_age_minutes: 10, skip_shortcuts: false, force: false,
+          conflict: 'rename', use_content: null
         }
       },
       careful: {
         zh: '谨慎', en: 'Careful',
         hint: T('只看当前目录；跳过 60 分钟内改动；重名跳过、不覆盖',
           'Top level only; skip files changed in the last hour; skip duplicates, never overwrite'),
-        apply: () => {
-          opts.recursive = false; opts.by_date = false; opts.skip_recent = true;
-          opts.min_age_minutes = 60; opts.skip_shortcuts = true; opts.force = false;
-          opts.conflict = 'skip'; opts.use_content = null;
+        values: {
+          recursive: false, by_date: false, skip_recent: true,
+          min_age_minutes: 60, skip_shortcuts: true, force: false,
+          conflict: 'skip', use_content: null
         }
       }
     };
-    const presetRow = h('div', { class: 'seg', role: 'group' });
+    const presetRow = h('div', { class: 'seg', role: 'group', 'aria-label': T('整理预设', 'Tidy presets') });
+    const presetCustomBadge = h('span', {
+      class: 'badge neutral',
+      hidden: true,
+      title: T('当前为自定义选项组合，点击左侧预设可一键还原', 'Custom option combination; click any preset to reset')
+    }, T('自定义', 'Custom'));
     const presetBtns = {};
     Object.keys(PRESETS).forEach((k) => {
       const b = h('button', {
@@ -416,8 +422,9 @@
         type: 'button',
         title: PRESETS[k].hint,
         onclick: () => {
+          userEditedOpts = true;
           opts.preset = k;
-          PRESETS[k].apply();
+          Object.assign(opts, PRESETS[k].values);
           syncControls();
           refreshSummary();
         }
@@ -427,26 +434,29 @@
     });
 
     function markManual() {
+      userEditedOpts = true;
       opts.preset = detectPreset();
       syncPresetButtons();
       refreshSummary();
     }
 
-    /* 当前开关组合正好等于某一档时，仍然高亮那一档 */
+    /* 纯只读比对：当前开关组合正好等于某一档时高亮该档；skip_recent 关闭时忽略已禁用的 min_age_minutes */
     function detectPreset() {
-      const keys = ['recursive', 'by_date', 'skip_recent', 'min_age_minutes',
-        'skip_shortcuts', 'force', 'conflict', 'use_content'];
-      let hit = '';
-      Object.keys(PRESETS).forEach((k) => {
-        if (hit) return;
-        const save = {};
-        keys.forEach((x) => { save[x] = opts[x]; });
-        PRESETS[k].apply();
-        const same = keys.every((x) => opts[x] === save[x]);
-        keys.forEach((x) => { opts[x] = save[x]; });
-        if (same) hit = k;
-      });
-      return hit;
+      const keys = Object.keys(PRESETS);
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        const v = PRESETS[k].values;
+        if (!!opts.recursive !== v.recursive) continue;
+        if (!!opts.by_date !== v.by_date) continue;
+        if (!!opts.skip_recent !== v.skip_recent) continue;
+        if (v.skip_recent && clampAge(opts.min_age_minutes) !== v.min_age_minutes) continue;
+        if (!!opts.skip_shortcuts !== v.skip_shortcuts) continue;
+        if (!!opts.force !== v.force) continue;
+        if (opts.conflict !== v.conflict) continue;
+        if (opts.use_content !== v.use_content) continue;
+        return k;
+      }
+      return '';
     }
 
     function syncPresetButtons() {
@@ -454,6 +464,7 @@
         presetBtns[k].classList.toggle('active', opts.preset === k);
         presetBtns[k].setAttribute('aria-pressed', opts.preset === k ? 'true' : 'false');
       });
+      presetCustomBadge.hidden = !!opts.preset;
     }
 
     function syncControls() {
@@ -488,9 +499,10 @@
 
     const optsSection = section(T('整理选项', 'Tidy options'),
       h('div', { class: 'stack' },
-        h('div', { class: 'row wrap' },
+        h('div', { class: 'row wrap', style: { alignItems: 'center' } },
           h('span', { class: 'small muted', style: { minWidth: '52px' } }, T('预设', 'Preset')),
-          presetRow
+          presetRow,
+          presetCustomBadge
         ),
         h('div', { class: 'row wrap' },
           checkRecursive, checkByDate, checkSkipRecent, ageInput,
@@ -505,7 +517,8 @@
     );
     presetsInit();
     function presetsInit() {
-      PRESETS.standard.apply();
+      opts.preset = 'standard';
+      Object.assign(opts, PRESETS.standard.values);
       syncControls();
       refreshSummary();
     }
@@ -812,11 +825,20 @@
       refreshButtons();
     }
 
-    function addTypedSource() {
-      const v = String(pathInput.value || '').trim();
+    async function addTypedSource() {
+      // 兼容 Windows 资源管理器「复制文件地址」自带的首尾双引号
+      const v = String(pathInput.value || '').trim().replace(/^"+|"+$/g, '').trim();
       if (!v) return false;
-      addSources([{ path: v, kind: guessKind(v) }]);
       pathInput.value = '';
+      let kind = guessKind(v);
+      if (API && typeof API.inspectPath === 'function') {
+        try {
+          const info = await API.inspectPath(v);
+          if (info && (info.kind === 'dir' || info.kind === 'file')) kind = info.kind;
+        } catch (_) { /* 降级使用启发式判断 */ }
+      }
+      if (unmounted) return false;
+      addSources([{ path: v, kind }]);
       return true;
     }
 
@@ -846,7 +868,7 @@
     /* ---------------- 扫描 ---------------- */
     async function doScan(silent) {
       if (state.loading) return;
-      if (String(pathInput.value || '').trim()) addTypedSource();
+      if (String(pathInput.value || '').trim()) await addTypedSource();
 
       // 一个来源都没有：直接进入内联错误态，不再调引擎
       if (!state.sources.length) {
@@ -1813,17 +1835,15 @@
 
     try {
       const s = await API.engine('settings.get', {});
-      if (s && !unmounted) {
+      // 仅在用户尚未手动切换预设/开关时同步全局设置，且保持 use_content=null（「自动识别（跟随设置）」由引擎实时读取 default_content）
+      if (s && !unmounted && !userEditedOpts) {
         if (typeof s.default_recursive === 'boolean') {
           opts.recursive = s.default_recursive;
-        }
-        if (typeof s.default_content === 'boolean') {
-          opts.use_content = s.default_content ? true : null;
         }
         if (s.conflict_policy === 'rename' || s.conflict_policy === 'skip' || s.conflict_policy === 'overwrite') {
           opts.conflict = s.conflict_policy;
         }
-        opts.preset = detectPreset(); // 设置覆盖后按实际组合回显预设
+        opts.preset = detectPreset(); // 设置覆盖后按实际组合回显预设（默认出厂设置直接命中「标准」）
         syncControls();
       }
     } catch (e) { /* 引擎未连上就沿用默认选项 */ }

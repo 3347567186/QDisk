@@ -3150,6 +3150,43 @@ class TestScanParams(EngineCase):
         self.assertTrue(os.path.isfile(expect), expect)
         self.assertFalse(os.path.isfile(os.path.join(folder, "a.pdf")))
 
+    def test_scan_use_content_none_follows_default_content_setting(self):
+        """回归：scan 传 use_content=None（自动跟随设置）时，必须真正按 settings.default_content 决定是否按内容识别。"""
+        d = self.new_folder()
+        fp = os.path.join(d, "note.txt")
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write("增值税普通发票 发票号码 价税合计 开票日期 购买方名称 销售方名称 税号\n" * 3)
+        fp2 = os.path.join(d, "dummy.jpg")
+        with open(fp2, "wb") as f:
+            f.write(b"x" * 16)
+        old_ts = os.path.getmtime(fp) - 7200
+        os.utime(fp, (old_ts, old_ts))
+        os.utime(fp2, (old_ts, old_ts))
+
+        def cat_of(res, name):
+            for p in res["plans"]:
+                for g in p["groups"]:
+                    if any(item["name"] == name for item in g["files"]):
+                        return g["cat"]
+            return None
+
+        try:
+            r_on = self.rpc_ok("settings.set", {"key": "default_content", "value": True})
+            self.assertTrue(r_on.get("value"))
+            s1 = self.rpc_ok("scan", {"paths": [d], "recursive": False, "use_content": None, "skip_recent": False})
+            self.assertEqual(cat_of(s1, "note.txt"), "16_发票票据", s1)
+
+            r_off = self.rpc_ok("settings.set", {"key": "default_content", "value": False})
+            self.assertFalse(r_off.get("value"))
+            s2 = self.rpc_ok("scan", {"paths": [d], "recursive": False, "use_content": None, "skip_recent": False})
+            self.assertNotEqual(cat_of(s2, "note.txt"), "16_发票票据", s2)
+
+            # 显式传 use_content=True 仍可覆盖关闭的全局设置
+            s3 = self.rpc_ok("scan", {"paths": [d], "recursive": False, "use_content": True, "skip_recent": False})
+            self.assertEqual(cat_of(s3, "note.txt"), "16_发票票据", s3)
+        finally:
+            self.rpc_ok("settings.set", {"key": "default_content", "value": True})
+
 
 class TestStartup(EngineCase):
     def test_startup_list(self):
