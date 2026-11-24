@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "version": "1.44.1",
+  "version": "1.45.0",
   "channel": "stable",
-  "pubDate": "2026-11-24T01:15:11+08:00",
+  "pubDate": "2026-11-24T11:35:38+08:00",
   "minVersion": "",
-  "notes": "## 1.44.1（patch）—— 极简在线更新卡片重构、独立更新日志弹窗与 GitHub / 官网咖啡赞赏体验\n\n### 一、设置页「版本与在线更新」极简重设计\n- **告别冗杂按钮与原始 Markdown 截断**（`src/web/js/pages/settings.js`、`src/web/styles.css`）：\n  - 移除卡片内联的原始 Markdown `<pre>` 大段文本与裸露 64 位 SHA-256，改为自动提取 1 行清爽更新主题摘要，日期精简为 `YYYY-MM-DD`。\n  - 新版本卡片操作区收束为 **2 个核心按钮**（主按钮「下载更新包 / 立即重启并安装更新」+ 次按钮「查看更新日志」）；底部操作栏精简为 **1 个主按钮**（「立即检查更新」），本地缓存清理收束为轻巧文本链接。\n- **独立宽窗口富文本查看更新日志**：\n  - 点击「查看更新日志」弹出独立宽弹窗，调用内置安全 Markdown 引擎 `AIMd.render` 格式化渲染标题、列表与代码标签，所有外链安全代理至系统浏览器打开，SHA-256 校验值、GitHub 发布页与「跳过此版本」统一收纳进弹窗底部折叠详情区，默认零视觉噪音。\n\n### 二、GitHub 仓库与官方网站赞赏入口\n- 在 [README.md](README.md) 与 [README.en.md](README.en.md) 最底部新增双列微信 / 支付宝咖啡赞赏区。\n- 在官方网站顶栏 GitHub Star 按钮旁新增咖啡杯图标按钮及页脚入口，点击弹出遵循现代 Web 规范（原生 `<dialog closedby=\"any\">`、顶层平滑进出场动画、跨浏览器兼容降级与防背景穿透滚动）的双语赞赏弹窗，并同步最新 `v1.44.1` 静态下载链接。\n\n### 三、红队验证\n- `pages.selftest.mjs` 回归 12 增补断言：校验新版本卡片不再渲染原始 `pre.upd-notes`、校验「查看更新日志」按钮弹出独立渲染窗口 `.upd-log-viewer` 且关闭后彻底回收；随 `1.44.1` 全量测试门禁通过并发布。",
+  "notes": "## 1.45.0（minor）—— 全链路「软件内优先打开 + 系统管理器保留」重构、路径定位与搜索「未搜到」根治、AI 用户消息快捷复制与全站红队测试修复\n\n### 一、全链路本地路径「软件内优先打开」与四层「系统文件管理器」显式保留\n- **真实磁盘探测替代盲猜**（`src/src-tauri/src/main.rs`、`src/web/js/api.js`、`src/web/js/ai/entries.js`）：\n  - 新增 `inspect_local_path` 命令，基于 `symlink_metadata` 与目录列举精确区分 `ok / permission_denied / not_found / invalid` 与真实 `dir / file`，彻底消除前端靠「末段是否含 `.`」误将 `157.0.4341.60`、`OpenAI.Codex_...` 等带点文件夹错判为文件并弹出资源管理器的问题；同步修复 `parentOf(\"C:\\\\foo.exe\")` 缺失尾反斜杠变为相对路径 `\"C:\"` 的隐患。\n  - 重构 `AIEntries.open()` 统一路由：文件夹 → 软件内「空间工具 → 文件夹浏览（DirView）」；压缩包 → 软件内「压缩包」页直接打开；可执行文件（`.exe` 等）与普通文件 → 软件内 DirView 打开父目录并自动定位高亮选中（绝不自动运行 `.exe`，也绝不默认跳出系统资源管理器），且失败绝不吞错伪造成功提示。\n- **四层显式保留「系统文件管理器」入口**：\n  1. DirView 顶栏常驻「系统文件管理器」按钮与选中/高亮动作条（`.dv-focus-bar`，含软件内图片/文本预览、压缩包直达、应用/进程联动、默认程序与系统管理器入口）；\n  2. AI 位置胶囊（`.ai-entry-wrap` + `.ai-entry-ext`）、依据行（`.ai-ev-ext`）与建议卡同步保留系统管理器直达按钮；\n  3. AI 正文路径链接（`md.js` `.md-path-wrap`）伴随纯 SVG、`user-select: none` 的系统管理器小按钮（`.md-path-ext`），不影响正文选中复制；\n  4. 其余 11 个功能页（搜索、大文件、空文件夹、应用/自启/进程、缓存、整理、截图、压缩包、迁移、规则、日志、设置）全量对齐「软件内优先 + 系统管理器保留」双入口。\n\n### 二、彻底根治「跳转进软件后显示没有搜索到 / 空结果 / 目录不存在」\n- **空间工具与目录浏览加固**（`src/src-tauri/src/main.rs`、`src/web/js/dirview.js`、`src/web/js/pages/tools.js`、`src/web/js/app.js`）：\n  - 升级 Rust `list_dir` 支持 `locate` 目标自动算页定位与 `filter` 全量过滤，突破单页 200 项限制；`dirview.js` 引入单调 `reqSeq` 抢占旧请求并新增目录内筛选框，`tools.js` 增设 `jumpClaimed` 杜绝异步 `configGet()` 覆写跳转目录。\n  - 修复 `tools.js` 将 `action: 'delete'` 的非空目录（如 10.4 GB 下载目录）误判进「空文件夹清理」导致报「没有空文件夹」的逻辑缺陷。\n  - 区分 `WindowsApps` 等 ACL 权限受限目录与真正缺失路径：DirView 自动回退至最近可读上级目录并展示提示横幅，提供「以管理员身份重启并继续定位」（通过 10 分钟 TTL 的 `pending_jump` 跨 UAC 自动续跳并即刻清零）与「尝试用系统文件管理器打开」；路径栏粘贴文件路径回车自动定位高亮；`App.jump()` 自动收起已打开的 AI 侧栏抽屉。\n- **Markdown 路径解析与搜索引擎加固**（`src/web/js/ai/md.js`、`src/engine/tidy.py`、`src/web/js/pages/search.js`）：\n  - 增强 `md.js` 裸路径正则，完整识别末段含空格路径（`C:\\Program Files`、`Program Files (x86)`、`User Data`、`屏幕截图 2026-06-09 115005.png`）、中文空格目录与 `&` 实体，同时拒绝误吞后续中英文正文。\n  - 升级 `tidy.py` `_ix_query_one` / `es_search` / `_engine_search_query` 支持完整路径与局部路径检索、Everything `-p` 空格路径参数，以及对未建索引盘的本机真实绝对路径即时直出精确命中（`source: \"direct\"`）；`search.js` `liveJump` 支持 `paths` 载荷并改单击结果为软件内定位。\n\n### 三、AI 对话用户消息快捷复制与全站红队对抗修复\n- **用户消息无损快捷复制**（`src/web/js/ai/chatui.js`、`src/web/js/ui.js`、`src/web/styles.css`）：\n  - 为每条用户发送气泡下方新增 `.ai-user-bar` + `.ai-user-copy`（覆盖实时发送、历史回放、整页与抽屉），读取原始 `dataset.text` 无损复制（支持多行/缩进/特殊字符）、内联切换 ✓ 态且永不禁用按钮、防抖计时器随 `destroy()` 全量回收、`user-select:\n…",
   "installer": {
-    "file": "QDisk_1.44.1_x64-setup.exe",
-    "url": "https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-setup.exe",
-    "size": 21679119,
-    "sha256": "26ca33b70eb3d75530e23a35c23cac665bf08f7e077993fba21d03aa9ca3d465"
+    "file": "QDisk_1.45.0_x64-setup.exe",
+    "url": "https://github.com/3347567186/QDisk/releases/download/v1.45.0/QDisk_1.45.0_x64-setup.exe",
+    "size": 21712160,
+    "sha256": "6a6160ed59b5ee04282177232306ab8f50737a3b2c38ccf3a16e1491a78dfb17"
   },
   "platforms": {
     "windows-x86_64": {
-      "file": "QDisk_1.44.1_x64-setup.exe",
-      "url": "https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-setup.exe",
-      "size": 21679119,
-      "sha256": "26ca33b70eb3d75530e23a35c23cac665bf08f7e077993fba21d03aa9ca3d465"
+      "file": "QDisk_1.45.0_x64-setup.exe",
+      "url": "https://github.com/3347567186/QDisk/releases/download/v1.45.0/QDisk_1.45.0_x64-setup.exe",
+      "size": 21712160,
+      "sha256": "6a6160ed59b5ee04282177232306ab8f50737a3b2c38ccf3a16e1491a78dfb17"
     }
   },
   "portable": {
-    "file": "QDisk_1.44.1_x64-portable.zip",
-    "url": "https://github.com/3347567186/QDisk/releases/download/v1.44.1/QDisk_1.44.1_x64-portable.zip",
-    "size": 26332665,
-    "sha256": "b3466bba76a54e538cdaef67c3bceb58be3248398fa1aac115dd19f5efb5950f"
+    "file": "QDisk_1.45.0_x64-portable.zip",
+    "url": "https://github.com/3347567186/QDisk/releases/download/v1.45.0/QDisk_1.45.0_x64-portable.zip",
+    "size": 26365243,
+    "sha256": "86337402d6b37c263c137278832daeb59b718ba0f0437b61f907f40974703885"
   }
 }

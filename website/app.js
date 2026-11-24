@@ -184,7 +184,7 @@
 
   let curLang = 'zh';
   let curBenchMode = 'create';
-  let currentVer = 'v1.44.1';
+  let currentVer = 'v1.45.0';
 
   /* ---- Two-State Color Scheme Toggle (modern-web-guidance: dark-mode-toggle) ---- */
   const metaScheme = document.querySelector('meta[name="color-scheme"]');
@@ -623,7 +623,7 @@
       }
       setHref('dl-sha-link', `https://github.com/${REPO_SLUG}/releases/download/${ver}/SHA256SUMS.txt`);
     })
-    .catch(() => { /* Static v1.44.1 fallback already rendered */ });
+    .catch(() => { /* Static v1.45.0 fallback already rendered */ });
 
   /* ---- Hydrate GitHub Star Count from Same-Origin repo-meta.json (0 CORS / 0 Rate-Limit) ---- */
   fetch('./repo-meta.json', { cache: 'no-cache' })
