@@ -197,8 +197,20 @@
     const c = metaScheme ? metaScheme.content : 'light dark';
     return c === 'light' || c === 'dark' ? c : osScheme();
   }
+  function syncThemeAria() {
+    if (!themeBtn) return;
+    const isDark = renderedScheme() === 'dark';
+    const tip = curLang === 'en'
+      ? (isDark ? 'Switch to light theme' : 'Switch to dark theme')
+      : (isDark ? '切换到浅色主题' : '切换到深色主题');
+    themeBtn.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+    themeBtn.setAttribute('aria-label', tip);
+    themeBtn.setAttribute('title', tip);
+  }
+
   function applySchemeMeta(val) {
     if (metaScheme) metaScheme.content = val === 'light' || val === 'dark' ? val : 'light dark';
+    syncThemeAria();
   }
 
   if (themeBtn) {
@@ -214,7 +226,10 @@
     });
   }
   window.addEventListener('storage', (e) => {
-    if (e.key === STORAGE_SCHEME) applySchemeMeta(e.newValue);
+    if (e.key === STORAGE_SCHEME) {
+      const v = e.newValue === 'light' || e.newValue === 'dark' ? e.newValue : 'light dark';
+      applySchemeMeta(v);
+    }
   });
 
   /* ---- Bilingual ZH/EN Switcher ---- */
@@ -236,7 +251,9 @@
   function renderBenchMode(mode) {
     curBenchMode = mode === 'extract' ? 'extract' : 'create';
     document.querySelectorAll('[data-bench-mode]').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.benchMode === curBenchMode);
+      const on = btn.dataset.benchMode === curBenchMode;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     const rows = BENCH_DATA[curBenchMode];
     rows.forEach((r, i) => {
@@ -269,6 +286,19 @@
     });
 
     if (langLabel) langLabel.textContent = curLang === 'en' ? '中文' : 'EN';
+    if (langBtn) {
+      const langTip = curLang === 'en' ? '切换为中文' : 'Switch to English';
+      langBtn.setAttribute('aria-label', langTip);
+      langBtn.setAttribute('title', langTip);
+    }
+    syncThemeAria();
+    document.querySelectorAll('.brand').forEach((b) => {
+      b.setAttribute('aria-label', curLang === 'en' ? 'QDisk' : '轻盘 QDisk');
+    });
+    const wechatImg = document.querySelector('.sponsor-wechat img');
+    if (wechatImg) wechatImg.alt = curLang === 'en' ? 'WeChat Pay QR code' : '微信赞赏码';
+    const alipayImg = document.querySelector('.sponsor-alipay img');
+    if (alipayImg) alipayImg.alt = curLang === 'en' ? 'Alipay QR code' : '支付宝赞赏码';
     const aiShot = curLang === 'en' ? 'assets/screenshots/07-en-ai-ui.png' : 'assets/screenshots/01-ai-assistant.png';
     if (aiImg) aiImg.src = aiShot;
     if (storyAiImg) storyAiImg.src = aiShot;
@@ -498,16 +528,64 @@
     updateHeroFallback();
   }
 
-  /* ---- Copy Dev Commands ---- */
+  /* ---- Copy Dev Commands (Async Clipboard + legacy fallback + debounce, never disabled) ---- */
   const copyBtn = document.getElementById('copy-dev-cmd');
   const cmdEl = document.getElementById('dev-cmd-text');
+  const copyStatusEl = document.getElementById('copy-dev-status');
+  let copyTimer = 0;
+
+  function legacyCopy(text) {
+    const prev = document.activeElement;
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.cssText = 'position:fixed;inset-block-start:0;inset-inline-start:0;opacity:0;pointer-events:none';
+    document.body.appendChild(field);
+    try {
+      if (typeof field.focus === 'function') {
+        try { field.focus({ preventScroll: true }); } catch (_) { field.focus(); }
+      }
+      if (typeof field.select === 'function') field.select();
+      if (typeof field.setSelectionRange === 'function') field.setSelectionRange(0, text.length);
+      return typeof document.execCommand === 'function' ? !!document.execCommand('copy') : false;
+    } catch (_) {
+      return false;
+    } finally {
+      field.remove();
+      if (prev && prev !== document.body && typeof prev.focus === 'function') {
+        try { prev.focus({ preventScroll: true }); } catch (_) { try { prev.focus(); } catch (__) {} }
+      }
+    }
+  }
+
   if (copyBtn && cmdEl) {
     copyBtn.addEventListener('click', async () => {
+      const text = (cmdEl.textContent || '').trim();
+      if (!text) return;
+      if (copyTimer) { clearTimeout(copyTimer); copyTimer = 0; }
+      copyBtn.removeAttribute('data-copied');
+      copyBtn.removeAttribute('data-failed');
+      let ok = false;
       try {
-        await navigator.clipboard.writeText(cmdEl.textContent || '');
-        copyBtn.textContent = COPY[curLang]['dev.copied'];
-        setTimeout(() => { copyBtn.textContent = COPY[curLang]['dev.copy']; }, 1800);
-      } catch (e) {}
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(text);
+          ok = true;
+        }
+      } catch (_) {
+        ok = false;
+      }
+      if (!ok) ok = legacyCopy(text);
+      const msg = ok ? COPY[curLang]['dev.copied'] : (curLang === 'en' ? 'Copy failed' : '复制失败');
+      copyBtn.setAttribute(ok ? 'data-copied' : 'data-failed', '');
+      copyBtn.textContent = msg;
+      if (copyStatusEl) copyStatusEl.textContent = msg;
+      copyTimer = setTimeout(() => {
+        copyTimer = 0;
+        copyBtn.removeAttribute('data-copied');
+        copyBtn.removeAttribute('data-failed');
+        copyBtn.textContent = COPY[curLang]['dev.copy'];
+        if (copyStatusEl) copyStatusEl.textContent = '';
+      }, 1800);
     });
   }
 
@@ -591,8 +669,11 @@
     return !!(window.CSS && typeof window.CSS.supports === 'function' && window.CSS.supports('overlay', 'auto') && canTransitionDisplay());
   }
 
+  let sponsorSeq = 0;
+
   async function closeSponsorDialog() {
     if (!sponsorDialog || !sponsorDialog.open) return;
+    const seq = ++sponsorSeq;
     if (!supportsTopLayerExit()) {
       sponsorDialog.setAttribute('data-closing', '');
       const animations = typeof sponsorDialog.getAnimations === 'function'
@@ -604,15 +685,17 @@
           new Promise((r) => setTimeout(r, 600))
         ]);
       }
-      if (!sponsorDialog.hasAttribute('data-closing')) return;
+      if (seq !== sponsorSeq || !sponsorDialog.hasAttribute('data-closing')) return;
       sponsorDialog.removeAttribute('data-closing');
     }
+    if (seq !== sponsorSeq || !sponsorDialog.open) return;
     sponsorDialog.close();
   }
 
   if (sponsorDialog) {
     openCoffeeTriggers.forEach((btn) => {
       btn.addEventListener('click', () => {
+        sponsorSeq++;
         sponsorDialog.removeAttribute('data-closing');
         if (!sponsorDialog.open) sponsorDialog.showModal();
       });

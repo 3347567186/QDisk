@@ -152,7 +152,8 @@
                 }
               }, icon('close', 14))
             ), [
-              { label: T('在资源管理器中打开', 'Open in Explorer'), icon: 'external', action: () => API.openPath(dir).catch(() => {}) },
+              { label: T('在软件内定位', 'Locate in app'), icon: 'scan', action: () => openInApp(dir) },
+              { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', action: () => revealPath(dir) },
               { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copyText(dir) },
               { sep: true },
               {
@@ -473,6 +474,12 @@
         );
       }
 
+      function openInApp(path) {
+        if (!path) return;
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(path);
+        else revealPath(path);
+      }
+
       async function revealPath(path) {
         try { await API.reveal(path); } catch (e) { toast(e && e.message ? e.message : String(e), 'error'); }
       }
@@ -480,6 +487,10 @@
       async function openTarget() {
         const dir = (state.result && state.result.destination) || state.destination.trim();
         if (!dir) return;
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') {
+          await window.AIEntries.open(dir);
+          return;
+        }
         try { await API.openPath(dir); } catch (e) { toast(e && e.message ? e.message : String(e), 'error'); }
       }
 

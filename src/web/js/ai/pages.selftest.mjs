@@ -117,20 +117,27 @@ class FakeElement extends FakeNode {
   }
   querySelectorAll(sel) {
     const res = [];
-    const check = (node) => {
-      if (!node || !node.classList) return;
-      let match = false;
-      if (sel.startsWith('#') && node.id === sel.slice(1)) match = true;
-      else if (sel.startsWith('.') && node.classList.contains(sel.slice(1))) match = true;
-      else if (node.tagName && node.tagName.toLowerCase() === sel.toLowerCase()) match = true;
-      else if (sel.includes('.')) {
-        const [tag, cls] = sel.split('.');
-        if ((!tag || (node.tagName && node.tagName.toLowerCase() === tag.toLowerCase())) && node.classList.contains(cls)) match = true;
+    const parts = String(sel || '').trim().split(/\s+/);
+    const leafSel = parts[parts.length - 1] || '';
+    const ancSel = parts.length > 1 ? parts[parts.length - 2] : '';
+    const matchesOne = (node, s) => {
+      if (!node || !node.classList || !s) return false;
+      if (s.startsWith('#')) return node.id === s.slice(1);
+      if (s.startsWith('.')) return node.classList.contains(s.slice(1));
+      if (s.includes('.')) {
+        const [tag, cls] = s.split('.');
+        return (!tag || (node.tagName && node.tagName.toLowerCase() === tag.toLowerCase())) && node.classList.contains(cls);
       }
-      if (match) res.push(node);
-      for (const child of node.children) check(child);
+      return !!(node.tagName && node.tagName.toLowerCase() === s.toLowerCase());
     };
-    for (const child of this.children) check(child);
+    const check = (node, ancHit) => {
+      if (!node || !node.classList) return;
+      const nowAnc = ancHit || !ancSel || matchesOne(node, ancSel);
+      if (ancHit && matchesOne(node, leafSel)) res.push(node);
+      else if (!ancSel && matchesOne(node, leafSel)) res.push(node);
+      for (const child of node.children) check(child, nowAnc);
+    };
+    for (const child of this.children) check(child, !ancSel);
     return res.length > 0 ? res : [new FakeElement('div'), new FakeElement('div'), new FakeElement('div'), new FakeElement('div'), new FakeElement('div')];
   }
   addEventListener(evt, cb) {
@@ -213,7 +220,15 @@ const sandbox = {
   Date, Math, JSON, Promise, Number, String, Object, Array, Set, Map, isNaN, Intl,
   performance: globalThis.performance,
   Node: FakeNode,
-  App: { nav() {}, jump() {} },
+  App: {
+    nav() {},
+    jump() {},
+    setPowerMode: async () => {},
+    setTheme: async () => {},
+    setLang: async () => {},
+    setMotion: async () => {},
+    setPageSize: async () => {}
+  },
   requestAnimationFrame: (cb) => setTimeout(cb, 16),
   cancelAnimationFrame: (id) => clearTimeout(id),
   MutationObserver: class { observe() {} disconnect() {} takeRecords() { return []; } },
@@ -1865,5 +1880,452 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，二次缓存挂载、CSS 令牌、设置页/Steve/抽屉/日志页/全屏按钮/开发者边界/压缩包自定义目录、性能暂停流、冲突撤回、能力扩展钩子、外壳竞态、在线更新、AI 权限切换/即时停止与 [Q]Disk 侧栏红队回归全链路校验通过）`);
+// 回归 15（红队对抗审查）：全链路「软件内优先打开 + 系统管理器保留」+ 防「没有搜索到」竞态/ACL/超200项定位
+{
+  const origJump = sandbox.App.jump;
+  const origReveal = sandbox.API.reveal;
+  const origOpenPath = sandbox.API.openPath;
+  const origInspectPath = sandbox.API.inspectPath;
+  const origListDir = sandbox.API.listDir;
+  const origCfgGet = sandbox.API.configGet;
+  const origTopFiles = sandbox.API.topFiles;
+  const origScanEmpty = sandbox.API.scanEmptyDirs;
+  const origEngine = sandbox.API.engine;
+  const origArchiveOpen = sandbox.API.archiveOpen;
+  const origArchivePreview = sandbox.API.archivePreview;
+
+  const jumps = [];
+  const reveals = [];
+  const externalOpens = [];
+  sandbox.App.jump = async (page, payload) => {
+    jumps.push({ page, payload });
+  };
+  sandbox.API.reveal = async (p) => { reveals.push(p); };
+  sandbox.API.openPath = async (p) => { externalOpens.push(p); };
+
+  // 模拟截图中的 5 条真实路径（含带点目录 157.0.4341.60、ACL 受限 WindowsApps、缺失路径与压缩包）
+  const MOCK_FS = {
+    'c:\\program files\\google\\chrome\\application\\chrome.exe': {
+      status: 'ok', path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      exists: true, kind: 'file', readable: true,
+      parent: 'C:\\Program Files\\Google\\Chrome\\Application', isExec: true, isArchive: false
+    },
+    'c:\\users\\十二\\appdata\\local\\programs\\antigravity\\antigravity.exe': {
+      status: 'ok', path: 'C:\\Users\\十二\\AppData\\Local\\Programs\\antigravity\\Antigravity.exe',
+      exists: true, kind: 'file', readable: true,
+      parent: 'C:\\Users\\十二\\AppData\\Local\\Programs\\antigravity', isExec: true, isArchive: false
+    },
+    'c:\\program files (x86)\\microsoft\\edgewebview\\application\\157.0.4341.60\\msedgewebview2.exe': {
+      status: 'ok', path: 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.60\\msedgewebview2.exe',
+      exists: true, kind: 'file', readable: true,
+      parent: 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.60', isExec: true, isArchive: false
+    },
+    'c:\\program files (x86)\\microsoft\\edgewebview\\application\\157.0.4341.60': {
+      status: 'ok', path: 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.60',
+      exists: true, kind: 'dir', readable: true,
+      parent: 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application', isExec: false, isArchive: false
+    },
+    'c:\\program files\\windowsapps\\openai.codex_26.1016.6573.0_x64__2p2nqsd0c76g0\\app\\chatgpt.exe': {
+      status: 'permission_denied',
+      path: 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1016.6573.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe',
+      exists: true, kind: 'file', readable: false,
+      parent: 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1016.6573.0_x64__2p2nqsd0c76g0\\app',
+      nearestReadable: 'C:\\Program Files',
+      nearestReadableHighlight: 'C:\\Program Files\\WindowsApps',
+      isExec: true, isArchive: false,
+      error: '权限受限'
+    },
+    'd:\\backups\\archive.tar.gz': {
+      status: 'ok', path: 'D:\\backups\\archive.tar.gz',
+      exists: true, kind: 'file', readable: true,
+      parent: 'D:\\backups', isExec: false, isArchive: true
+    },
+    'd:\\downloads\\gone.exe': {
+      status: 'not_found', path: 'D:\\Downloads\\gone.exe',
+      exists: false, kind: null, readable: false,
+      parent: 'D:\\Downloads', nearestExisting: 'D:\\Downloads',
+      isExec: true, isArchive: false, error: '这个位置已经不在了'
+    }
+  };
+  sandbox.API.inspectPath = async (p) => {
+    const key = String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+    return MOCK_FS[key] || { status: 'not_found', path: p, exists: false, readable: false, nearestExisting: 'C:\\' };
+  };
+
+  // 1) parentOf 盘符根规整（C:\foo.exe -> C:\ 而非 C:）
+  if (sandbox.AIEntries.parentOf('C:\\foo.exe') !== 'C:\\') {
+    console.error(`[红队回归 15] parentOf("C:\\foo.exe") 返回错误值: ${sandbox.AIEntries.parentOf('C:\\foo.exe')}`);
+    process.exit(1);
+  }
+
+  // 2) 点击 .exe：必须留在软件内 DirView 定位高亮，0 次调用 reveal / openPath
+  const rExe = await sandbox.AIEntries.open('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+  if (!rExe.ok || !rExe.inApp || reveals.length !== 0 || externalOpens.length !== 0) {
+    console.error(`[红队回归 15] 点击 .exe 未留在软件内: r=${JSON.stringify(rExe)}, reveals=${reveals.length}, opens=${externalOpens.length}`);
+    process.exit(1);
+  }
+  const lastJ = jumps[jumps.length - 1];
+  if (!lastJ || lastJ.page !== 'tools' || lastJ.payload.action !== 'browse'
+      || lastJ.payload.dir !== 'C:\\Program Files\\Google\\Chrome\\Application'
+      || lastJ.payload.highlight !== 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe') {
+    console.error(`[红队回归 15] .exe 跳转载荷错误: ${JSON.stringify(lastJ)}`);
+    process.exit(1);
+  }
+
+  // 3) 带点文件夹（157.0.4341.60）必须作为 dir 进入 DirView，而不是被误猜为 file
+  await sandbox.AIEntries.open('C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.60');
+  const jDot = jumps[jumps.length - 1];
+  if (!jDot || jDot.page !== 'tools' || jDot.payload.dir !== 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.60') {
+    console.error(`[红队回归 15] 带点目录被误判: ${JSON.stringify(jDot)}`);
+    process.exit(1);
+  }
+
+  // 4) 压缩包直达软件「压缩包」页
+  await sandbox.AIEntries.open('D:\\backups\\archive.tar.gz');
+  const jArc = jumps[jumps.length - 1];
+  if (!jArc || jArc.page !== 'archive' || jArc.payload.paths[0] !== 'D:\\backups\\archive.tar.gz') {
+    console.error(`[红队回归 15] 压缩包未路由至压缩包页: ${JSON.stringify(jArc)}`);
+    process.exit(1);
+  }
+
+  // 5) ACL 权限受限（WindowsApps）必须携带 accessDenied 回退最近可读目录
+  await sandbox.AIEntries.open('C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1016.6573.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe');
+  const jAcl = jumps[jumps.length - 1];
+  if (!jAcl || !jAcl.payload.accessDenied || jAcl.payload.dir !== 'C:\\Program Files' || jAcl.payload.highlight !== 'C:\\Program Files\\WindowsApps') {
+    console.error(`[红队回归 15] WindowsApps 权限受限未正确降级回退: ${JSON.stringify(jAcl)}`);
+    process.exit(1);
+  }
+
+  // 6) 缺失目标自动回退最近存在的上级目录（不撞死空页）
+  await sandbox.AIEntries.open('D:\\Downloads\\gone.exe');
+  const jMiss = jumps[jumps.length - 1];
+  if (!jMiss || jMiss.payload.dir !== 'D:\\Downloads' || jMiss.payload.missingTarget !== 'D:\\Downloads\\gone.exe') {
+    console.error(`[红队回归 15] 缺失目标未回退至最近上级目录: ${JSON.stringify(jMiss)}`);
+    process.exit(1);
+  }
+
+  // 7) 显式系统管理器按钮（chip .ai-entry-ext / external: true）必须准确调用 API.reveal，绝不调 openPath
+  const chipEl = sandbox.AIEntries.chip('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', { compact: true });
+  const extChipBtn = findNodes(chipEl, (n) => n.classList && n.classList.contains('ai-entry-ext'))[0];
+  if (!extChipBtn) {
+    console.error('[红队回归 15] AIEntries.chip 缺少伴随式系统文件管理器按钮 .ai-entry-ext');
+    process.exit(1);
+  }
+  const revBefore = reveals.length;
+  extChipBtn.dispatchEvent(Object.assign(new sandbox.Event('click'), { preventDefault() {}, stopPropagation() {} }));
+  await new Promise((r) => setTimeout(r, 20));
+  if (reveals.length !== revBefore + 1 || externalOpens.length !== 0) {
+    console.error(`[红队回归 15] 点击芯片系统管理器按钮未调 reveal 或误调 openPath: reveals=${reveals.length}, opens=${externalOpens.length}`);
+    process.exit(1);
+  }
+  // openSystemApp 严格拦截 .exe 防止直接启动程序
+  const blockedExec = await sandbox.AIEntries.openSystemApp('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+  if (blockedExec.ok || !blockedExec.blockedExec || externalOpens.length !== 0) {
+    console.error(`[红队回归 15] openSystemApp 未拦截可执行文件: ${JSON.stringify(blockedExec)}`);
+    process.exit(1);
+  }
+
+  // 8) tools.js + dirview.js：删除非空下载目录不得误跳空文件夹页；延迟 configGet 不得覆写 jump；超 200 项 locate 高亮 + 权限横幅
+  const listDirCalls = [];
+  let scanBigCalled = 0;
+  let scanEmptyCalled = 0;
+  sandbox.API.configGet = () => new Promise((resolve) => setTimeout(() => resolve({ last_folder: 'D:\\StaleFolder' }), 30));
+  sandbox.API.topFiles = async (dir) => { scanBigCalled++; return { dir, items: [{ path: dir + '\\big.iso', name: 'big.iso', size: 1024 * 1024 * 500, ext: 'iso' }], scanned: 1 }; };
+  sandbox.API.scanEmptyDirs = async (dir) => { scanEmptyCalled++; return { dir, items: [], depth: 3 }; };
+  sandbox.API.listDir = async (dir, limit, offset, opts) => {
+    listDirCalls.push({ dir, limit, offset, opts });
+    if (opts && opts.locate && /item_218/i.test(opts.locate)) {
+      return {
+        dir, total: 225, unfilteredTotal: 225, offset: 200, shown: 25, dirs: 0, files: 225,
+        hasPrev: true, truncated: false, located: true, locateIndex: 218, locateName: 'item_218.exe',
+        items: [{ name: 'item_218.exe', kind: 'file', size: 4096, ext: 'exe', mtime: 1700000000 }]
+      };
+    }
+    return {
+      dir, total: 2, unfilteredTotal: 2, offset: 0, shown: 2, dirs: 1, files: 1,
+      hasPrev: false, truncated: false, located: false,
+      items: [
+        { name: 'WindowsApps', kind: 'dir', size: 0, ext: '', mtime: 1700000000 },
+        { name: 'chrome.exe', kind: 'file', size: 2048, ext: 'exe', mtime: 1700000000 }
+      ]
+    };
+  };
+
+  const toolsRoot = new FakeElement('div');
+  const unmountTools = await sandbox.Pages.tools.mount(toolsRoot);
+  // 8a. 「可以直接删，共 10.4 GB：下载目录」不能进空文件夹清理
+  await sandbox.Pages.tools.jump({ action: 'delete', paths: ['C:\\Users\\十二\\Downloads'], why: '可以直接删，共 10.4 GB：下载目录' });
+  if (scanBigCalled < 1 || scanEmptyCalled !== 0) {
+    console.error(`[红队回归 15] tools.js 把删除非空目录误路由到空文件夹清理: big=${scanBigCalled}, empty=${scanEmptyCalled}`);
+    process.exit(1);
+  }
+  // 8b. 跳进目录浏览定位超 200 项，并等待延迟的 configGet(30ms) 完成校验不被覆写
+  await sandbox.Pages.tools.jump({
+    action: 'browse',
+    dir: 'C:\\ManyFiles',
+    highlight: 'C:\\ManyFiles\\item_218.exe',
+    paths: ['C:\\ManyFiles\\item_218.exe']
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  const hitRows = findNodes(toolsRoot, (n) => n.classList && n.classList.contains('dv-row') && n.hasAttribute('data-hit'));
+  const focusBar = findNodes(toolsRoot, (n) => n.classList && n.classList.contains('dv-focus-bar') && !n.hidden)[0];
+  const staleCall = listDirCalls.find((c) => c.dir === 'D:\\StaleFolder');
+  if (staleCall || hitRows.length !== 1 || !focusBar || !listDirCalls.some((c) => c.opts && c.opts.locate === 'C:\\ManyFiles\\item_218.exe')) {
+    console.error(`[红队回归 15] DirView 超200项定位或防竞态失败: stale=${!!staleCall}, hits=${hitRows.length}, focusBar=${!!focusBar}`);
+    process.exit(1);
+  }
+  // 8c. ACL 受限跳入 DirView 必须展示权限提示横幅与管理员重启续跳按钮
+  await sandbox.Pages.tools.jump({
+    action: 'browse',
+    dir: 'C:\\Program Files',
+    highlight: 'C:\\Program Files\\WindowsApps',
+    paths: ['C:\\Program Files\\WindowsApps\\OpenAI.Codex\\ChatGPT.exe'],
+    accessDenied: true,
+    requestedPath: 'C:\\Program Files\\WindowsApps\\OpenAI.Codex\\ChatGPT.exe'
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  const aclBanner = findNodes(toolsRoot, (n) => n.classList && n.classList.contains('dv-notice') && n.classList.contains('is-warn') && !n.hidden)[0];
+  if (!aclBanner) {
+    console.error('[红队回归 15] WindowsApps 权限受限横幅未显示');
+    process.exit(1);
+  }
+  if (typeof unmountTools === 'function') unmountTools();
+
+  // 9) search.js：接收 paths 跳转并自动检索，单击结果行留在软件内（不直接跳 Explorer）
+  let lastSearchQ = '';
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'search.status') return { backend: 'index', files: 10, entries: [], roots: [], dirs: 1 };
+    if (method === 'search.query') {
+      lastSearchQ = (params && params.q) || '';
+      return {
+        source: 'direct', elapsed_ms: 2,
+        items: [{ name: 'chrome.exe', path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', size: 2048, mtime: 1700000000, kind: 'file' }]
+      };
+    }
+    return origEngine(method, params);
+  };
+  const searchRoot = new FakeElement('div');
+  const unmountSearch = await sandbox.Pages.search.mount(searchRoot);
+  const jumpCountBeforeSearch = jumps.length;
+  const revBeforeSearch = reveals.length;
+  await sandbox.Pages.search.jump({ paths: ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'] });
+  await new Promise((r) => setTimeout(r, 20));
+  const resultTr = findNodes(searchRoot, (n) => n.tagName === 'TR' && n.dataset && n.dataset.ctx === 'result')[0];
+  if (lastSearchQ !== 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' || !resultTr) {
+    console.error(`[红队回归 15] search.js 未接收 paths 载荷执行搜索: q=${lastSearchQ}, tr=${!!resultTr}`);
+    process.exit(1);
+  }
+  resultTr.dispatchEvent(new sandbox.Event('click'));
+  await new Promise((r) => setTimeout(r, 20));
+  if (jumps.length <= jumpCountBeforeSearch || reveals.length !== revBeforeSearch) {
+    console.error(`[红队回归 15] search.js 单击结果行未走软件内打开或误弹 Explorer: jumps=${jumps.length - jumpCountBeforeSearch}, reveals=${reveals.length - revBeforeSearch}`);
+    process.exit(1);
+  }
+  if (typeof unmountSearch === 'function') unmountSearch();
+
+  // 10) apps.js：无未定义 searchInput；liveJump 支持 procs+paths 且不误调 openPath(exe)
+  const appsSrc = fs.readFileSync(path.join(root, 'src/web/js/pages/apps.js'), 'utf8');
+  if (/\bsearchInput\b/.test(appsSrc)) {
+    console.error('[红队回归 15] apps.js 仍残留未定义变量 searchInput');
+    process.exit(1);
+  }
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'process.list') {
+      return {
+        ok: true, raw_count: 1, total_memory: 104857600,
+        items: [{ name: 'chrome.exe', clean_name: 'chrome', memory: 104857600, process_count: 1, is_system: false, pids: [888], exe_path: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' }]
+      };
+    }
+    return origEngine(method, params);
+  };
+  const appsRoot = new FakeElement('div');
+  const unmountApps = await sandbox.Pages.apps.mount(appsRoot);
+  await sandbox.Pages.apps.jump({ tab: 'procs', paths: ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'] });
+  await new Promise((r) => setTimeout(r, 25));
+  const procLocateBtn = findNodes(appsRoot, (n) => n.tagName === 'BUTTON' && (n.title === '在软件内定位' || n.getAttribute('title') === '在软件内定位'))[0];
+  const opensBeforeProc = externalOpens.length;
+  const jumpsBeforeProc = jumps.length;
+  if (!procLocateBtn) {
+    console.error('[红队回归 15] apps.js 后台进程表缺少「在软件内定位」按钮或 liveJump 未加载进程');
+    process.exit(1);
+  }
+  procLocateBtn.dispatchEvent(new sandbox.Event('click'));
+  await new Promise((r) => setTimeout(r, 20));
+  if (externalOpens.length !== opensBeforeProc || jumps.length <= jumpsBeforeProc) {
+    console.error(`[红队回归 15] apps.js 进程定位误调 openPath(.exe) 或未进软件内: opens=${externalOpens.length - opensBeforeProc}, jumps=${jumps.length - jumpsBeforeProc}`);
+    process.exit(1);
+  }
+  if (typeof unmountApps === 'function') unmountApps();
+
+  // 11) archive.js 预览区拦截 .exe 直接运行
+  const arcSrc = fs.readFileSync(path.join(root, 'src/web/js/pages/archive.js'), 'utf8');
+  if (!arcSrc.includes('execBlocked') || !arcSrc.includes('压缩包内可执行文件禁止直接运行')) {
+    console.error('[红队回归 15] archive.js 预览区缺少可执行文件直启拦截保护');
+    process.exit(1);
+  }
+
+  sandbox.App.jump = origJump;
+  sandbox.API.reveal = origReveal;
+  sandbox.API.openPath = origOpenPath;
+  sandbox.API.inspectPath = origInspectPath;
+  sandbox.API.listDir = origListDir;
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.topFiles = origTopFiles;
+  sandbox.API.scanEmptyDirs = origScanEmpty;
+  sandbox.API.engine = origEngine;
+  sandbox.API.archiveOpen = origArchiveOpen;
+  sandbox.API.archivePreview = origArchivePreview;
+}
+
+// 回归 16（红队对抗审查）：AI 用户发送内容快捷复制（含降级/防爆/防泄漏/无损原文本）+ 全 12 页按钮冒烟
+{
+  const origNavClip = sandbox.navigator.clipboard;
+  const origExecCmd = sandbox.document.execCommand;
+  let copiedViaLegacy = '';
+  // 模拟 WebView2 剪贴板 API 拒权：UI.copy 必须自动降级到 execCommand('copy')
+  const directCopyTas = () => sandbox.document.body.children.filter((n) => n.tagName === 'TEXTAREA');
+  const tasBefore = directCopyTas().length;
+  sandbox.navigator.clipboard = { writeText: () => Promise.reject(new Error('Clipboard denied')) };
+  sandbox.document.execCommand = (cmd) => {
+    if (cmd === 'copy') {
+      const list = directCopyTas();
+      const ta = list[list.length - 1];
+      copiedViaLegacy = ta ? String(ta.value || '') : '';
+      return !!copiedViaLegacy;
+    }
+    return false;
+  };
+
+  // 1) UI.copy 超长文本截断 Toast 且返回 true，不残留临时 textarea
+  const longText = '第一行：C:\\Program Files (x86)\\test.exe\n' + '超长内容'.repeat(300);
+  const copyOk = await sandbox.UI.copy(longText);
+  const leftoverTa = directCopyTas().length - tasBefore;
+  if (!copyOk || copiedViaLegacy !== longText || leftoverTa !== 0) {
+    console.error(`[红队回归 16] UI.copy 降级失败或残留 textarea: ok=${copyOk}, match=${copiedViaLegacy === longText}, leftover=${leftoverTa}`);
+    process.exit(1);
+  }
+
+  // 2) AI 对话用户消息气泡下方必须渲染 .ai-user-copy 快捷复制按钮（实时 + 历史回放），无损复制原文、不禁用按钮、防泄漏
+  const origStore16 = sandbox.API.aiStore;
+  const origHttp16 = sandbox.API.aiHttp;
+  const origHttpStream16 = sandbox.API.aiHttpStream;
+  const origCfg16 = sandbox.API.configGet;
+  const rawPrompt = '帮我排查 <script>alert(1)</script>\n  D:\\Program Files (x86)\\test.exe\n保留缩进与换行';
+  const savedHist = {
+    id: 'hist-copy-test',
+    version: 2,
+    title: '复制测试',
+    messages: [
+      { role: 'user', content: rawPrompt },
+      { role: 'assistant', content: '已收到' }
+    ]
+  };
+  sandbox.API.configGet = async () => ({
+    ai: { provider: 'custom', endpoint: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm-test', enabled: true }
+  });
+  sandbox.API.aiStore = async (op, name) => {
+    if (op === 'list') return ['hist-copy-test.json'];
+    if (op === 'read' && name === 'hist-copy-test.json') return JSON.stringify(savedHist);
+    return null;
+  };
+  sandbox.API.aiHttp = async () => ({
+    status: 200,
+    body: JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'ok' }) } }] })
+  });
+  sandbox.API.aiHttpStream = null;
+  if (sandbox.AIStore && sandbox.AIStore.load) await sandbox.AIStore.load(true);
+
+  const aiHost = new FakeElement('div');
+  const unmountAi16 = await sandbox.Pages.ai.mount(aiHost);
+  await new Promise((r) => setTimeout(r, 30));
+
+  // 实时发送一条用户消息
+  const inp = findNodes(aiHost, (n) => n.tagName === 'TEXTAREA' && n.classList && n.classList.contains('dac-input'))[0];
+  const sBtn = findNodes(aiHost, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('dac-send'))[0];
+  if (!inp || !sBtn) {
+    console.error('[红队回归 16] AI 对话输入框或发送按钮未渲染');
+    process.exit(1);
+  }
+  inp.value = rawPrompt;
+  inp.dispatchEvent(new sandbox.Event('input'));
+  sBtn.dispatchEvent(new sandbox.Event('click'));
+  await new Promise((r) => setTimeout(r, 40));
+
+  const userCopyBtns = findNodes(aiHost, (n) => n.tagName === 'BUTTON' && n.classList && n.classList.contains('ai-user-copy'));
+  if (!userCopyBtns.length) {
+    console.error('[红队回归 16] 用户发送消息下方未渲染快捷复制按钮 .ai-user-copy');
+    process.exit(1);
+  }
+  copiedViaLegacy = '';
+  const uBtn = userCopyBtns[userCopyBtns.length - 1];
+  uBtn.dispatchEvent(Object.assign(new sandbox.Event('click'), { preventDefault() {}, stopPropagation() {} }));
+  await new Promise((r) => setTimeout(r, 25));
+  if (copiedViaLegacy !== rawPrompt || !uBtn.hasAttribute('data-copied') || uBtn.disabled) {
+    console.error(`[红队回归 16] 用户快捷复制内容失真或错误禁用按钮: match=${copiedViaLegacy === rawPrompt}, attr=${uBtn.hasAttribute('data-copied')}, disabled=${uBtn.disabled}`);
+    process.exit(1);
+  }
+  // 连续快速再点一次（验证防抖清理前定时器不报错）
+  uBtn.dispatchEvent(Object.assign(new sandbox.Event('click'), { preventDefault() {}, stopPropagation() {} }));
+  await new Promise((r) => setTimeout(r, 20));
+
+  if (typeof unmountAi16 === 'function') unmountAi16();
+  sandbox.navigator.clipboard = origNavClip;
+  sandbox.document.execCommand = origExecCmd;
+  sandbox.API.aiStore = origStore16;
+  sandbox.API.aiHttp = origHttp16;
+  sandbox.API.aiHttpStream = origHttpStream16;
+  sandbox.API.configGet = origCfg16;
+  if (sandbox.AIStore && sandbox.AIStore.load) await sandbox.AIStore.load(true);
+
+  // 3) 全站 12 页可见交互按钮全面点击冒烟（Tab/筛选/视图切换/刷新/收起/定位等非破坏性按钮，校验 0 异常、0 泄漏）
+  const readNodeText = (n) => {
+    if (!n) return '';
+    if (typeof n === 'string') return n;
+    let s = String(n._textContent || n.nodeValue || '');
+    if (Array.isArray(n.children)) s += n.children.map(readNodeText).join('');
+    return s;
+  };
+  const DANGER_RE = /删除|清空|卸载|结束|强制|重建|迁移|重置|重启|执行|取消|恢复默认|安装更新|delete|remove|kill|uninstall|reset|restart|clean|migrate|format/i;
+  let totalClicked = 0;
+  for (const pid of Object.keys(sandbox.Pages)) {
+    const pMod = sandbox.Pages[pid];
+    if (!pMod || typeof pMod.mount !== 'function') continue;
+    const intervalsBefore = activeIntervals.size;
+    const listenersBefore = Array.from(docListeners.values()).reduce((s, a) => s + a.length, 0);
+    const host = new FakeElement('div');
+    const um = await pMod.mount(host);
+    await new Promise((r) => setTimeout(r, 15));
+    const btns = findNodes(host, (n) => n.tagName === 'BUTTON' && !n.disabled && !n.hidden);
+    for (const b of btns) {
+      const label = (readNodeText(b) + ' ' + String(b.title || b.getAttribute('title') || '') + ' ' + String(b.getAttribute('aria-label') || '')).trim();
+      if (DANGER_RE.test(label) || b.classList.contains('danger')) continue;
+      if (b.classList.contains('dac-send') || b.classList.contains('btn-admin-action')) continue;
+      try {
+        b.dispatchEvent(Object.assign(new sandbox.Event('click'), { preventDefault() {}, stopPropagation() {} }));
+        totalClicked++;
+      } catch (e) {
+        console.error(`[红队回归 16 · 全站按钮冒烟] 页面 ${pid} 按钮「${label}」点击抛异常:`, e);
+        process.exit(1);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    if (typeof um === 'function') um();
+    if (sandbox.UI && sandbox.UI.closeMenu) sandbox.UI.closeMenu();
+    if (sandbox.UI && sandbox.UI.closePreview) sandbox.UI.closePreview();
+    if (sandbox.UI && sandbox.UI.closeModals) sandbox.UI.closeModals();
+    if (sandbox.AIDrawer && sandbox.AIDrawer.isOpen && sandbox.AIDrawer.isOpen()) sandbox.AIDrawer.close();
+    const intervalsAfter = activeIntervals.size;
+    const listenersAfter = Array.from(docListeners.values()).reduce((s, a) => s + a.length, 0);
+    if (intervalsAfter > intervalsBefore || listenersAfter > listenersBefore) {
+      console.error(`[红队回归 16 · 全站按钮冒烟] 页面 ${pid} 点击按钮并卸载后发生泄漏: intervals ${intervalsBefore}->${intervalsAfter}, listeners ${listenersBefore}->${listenersAfter}`);
+      process.exit(1);
+    }
+  }
+  if (totalClicked < 40) {
+    console.error(`[红队回归 16 · 全站按钮冒烟] 覆盖按钮数异常偏少: ${totalClicked}`);
+    process.exit(1);
+  }
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含全链路软件内优先打开、系统管理器四层保留、防未搜到竞态/ACL/超200项定位、AI用户消息快捷复制与全站红队回归）`);
 process.exit(0);

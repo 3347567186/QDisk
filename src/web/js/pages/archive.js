@@ -1394,8 +1394,13 @@
     box.innerHTML = '';
     box.hidden = !r;
     if (!r) return;
-    const open = h('button', { class: 'btn ghost sm' }, icon('folder', 14), T('打开文件夹', 'Open folder'));
-    open.onclick = () => API.openPath(r.outDir).catch((e) => toast(errText(e), 'error'));
+    const open = h('button', { class: 'btn ghost sm' }, icon('scan', 14), T('在软件内打开', 'Open in app'));
+    open.onclick = () => {
+      if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(r.outDir);
+      else API.openPath(r.outDir).catch((e) => toast(errText(e), 'error'));
+    };
+    const openExt = h('button', { class: 'btn ghost sm', title: T('在系统文件管理器中打开', 'Open in Explorer') }, icon('external', 14), T('系统管理器', 'Explorer'));
+    openExt.onclick = () => API.reveal(r.outDir).catch((e) => toast(errText(e), 'error'));
     const isCurrentUndo = !!(r.canUndo && r.undoId && r.undoId === S.activeUndoId);
     const undoBtn = (r.undone || isCurrentUndo)
       ? h('button', {
@@ -1427,7 +1432,7 @@
         h('div', { class: 'arc-last-title' }, title),
         h('div', { class: 'small muted ellipsis', title: r.outDir }, sub)),
       h('span', { class: 'spacer' }),
-      h('div', { class: 'arc-last-acts' }, open, undoBtn, hide)));
+      h('div', { class: 'arc-last-acts' }, open, openExt, undoBtn, hide)));
   }
 
   async function doExtract(indices) {
@@ -1492,18 +1497,26 @@
       if (report.canUndo && report.undoId) {
         modalBtns.push({ id: 'undo', label: T('撤回本次解压', 'Undo extract'), kind: 'ghost' });
       }
-      modalBtns.push({ id: 'open', label: T('打开文件夹', 'Open folder'), kind: 'primary' });
+      modalBtns.push({ id: 'explorer', label: T('系统管理器', 'Explorer'), kind: 'ghost' });
+      modalBtns.push({ id: 'open', label: T('在软件内打开', 'Open in app'), kind: 'primary' });
       const recRef = S.lastExtract;
       modal({
         title: T('解压完成', 'Done'),
         body,
         buttons: modalBtns,
         onClose: (v) => {
-          if (v === 'open') API.openPath(report.outDir).catch(() => {});
+          if (v === 'open') {
+            if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(report.outDir);
+            else API.openPath(report.outDir).catch(() => {});
+          }
+          if (v === 'explorer') API.reveal(report.outDir).catch((e) => toast(errText(e), 'error'));
           if (v === 'undo') runUndo(recRef, 'extract');
         }
       });
-      if (picked.openAfter) API.openPath(report.outDir).catch(() => {});
+      if (picked.openAfter) {
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(report.outDir);
+        else API.openPath(report.outDir).catch(() => {});
+      }
     } catch (e) {
       const wasCancelling = S.cancelling;
       S.activeUndoId = null;
@@ -1854,9 +1867,19 @@
     } else {
       body.appendChild(h('div', { class: 'small muted' }, T('这个格式暂不支持内嵌预览。', 'No inline preview for this format.')));
       if (d.file) {
-        const b = h('button', { class: 'btn sm' }, T('用系统默认程序打开', 'Open with system app'));
-        b.onclick = () => API.openPath(d.file).catch(() => {});
-        body.appendChild(b);
+        const execBlocked = (window.AIEntries && typeof window.AIEntries.isExecPath === 'function')
+          ? window.AIEntries.isExecPath(d.name || d.file)
+          : /\.(?:exe|msi|bat|cmd|ps1|scr|com|vbs|vbe|js|jse|wsf|lnk|reg|hta)$/i.test(String(d.name || d.file || ''));
+        if (execBlocked) {
+          body.appendChild(h('div', { class: 'small muted' }, T('安全保护：压缩包内可执行文件禁止直接运行，请先核验来源。', 'Safety guard: executables inside archives cannot be launched directly.')));
+          const b = h('button', { class: 'btn sm ghost' }, icon('external', 13), T('在系统文件管理器中定位（不运行）', 'Reveal in Explorer (safe)'));
+          b.onclick = () => API.reveal(d.file).catch((e) => toast(errText(e), 'error'));
+          body.appendChild(b);
+        } else {
+          const b = h('button', { class: 'btn sm' }, T('用系统默认程序打开', 'Open with system app'));
+          b.onclick = () => API.openPath(d.file).catch((e) => toast(errText(e), 'error'));
+          body.appendChild(b);
+        }
       }
     }
     els.side.appendChild(body);
@@ -2535,12 +2558,21 @@
     off: offHook,
     /* AI 说「这几个压缩包可以看看」时，跳进来要直接把这个包打开，
        而不是停在一个让你自己再选一次的空页面。 */
-    jump(payload) {
-      const paths = ((payload && payload.paths) || []).filter(Boolean).map(String);
+    async jump(payload) {
+      let paths = ((payload && payload.paths) || []).filter(Boolean).map(String);
+      if (paths.length && window.AIEntries && typeof window.AIEntries.resolvePaths === 'function') {
+        try {
+          const resolved = await window.AIEntries.resolvePaths(paths);
+          if (resolved && resolved.length) paths = resolved;
+        } catch (_) {}
+      }
       const arc = paths.find((p) => isArchivePath(p) || /\.zst$/i.test(p));
       if (!arc) return undefined;
-      const run = openArchive(arc, null);
-      return run && typeof run.catch === 'function' ? run.catch(() => {}) : run;
+      try {
+        return await openArchive(arc, null);
+      } catch (_) {
+        return undefined;
+      }
     }
   };
 })();

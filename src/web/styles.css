@@ -5117,6 +5117,9 @@ html[data-theme="dark"] .ai-tnav-pop {
 
 /* 正文里的路径。用虚线下划线而不是实线：位置是「可以去看一眼」，
    不是「点开换页」，别做成普通超链接的样子。 */
+.md-path-wrap {
+  display: inline;
+}
 .md-path {
   color: inherit;
   text-decoration: none;
@@ -5132,6 +5135,63 @@ html[data-theme="dark"] .ai-tnav-pop {
 .md-path:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; border-bottom-color: transparent; }
 /* 行内代码也常整段是路径：链接包着 code，点击归链接，别让 code 抢焦点 */
 .md-path code { pointer-events: none; }
+/* 伴随式系统文件管理器小按钮：纯 SVG、user-select: none 不污染复制正文 */
+.md-path-ext {
+  display: inline-flex; align-items: center; justify-content: center;
+  vertical-align: -2px;
+  width: 18px; height: 18px; margin-left: 3px; padding: 0;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-3); cursor: pointer;
+  opacity: .58;
+  -webkit-user-select: none; user-select: none;
+  transition: opacity var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.md-path-wrap:hover .md-path-ext,
+.md-path-ext:hover,
+.md-path-ext:focus-visible {
+  opacity: 1; color: var(--accent-text); background: var(--accent-weak); border-color: var(--accent-ring);
+}
+.md-path-ext:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
+.md-path-ext svg { width: 11px; height: 11px; pointer-events: none; }
+
+/* ---- 用户消息快捷复制栏（遵循 copy-button 可访问性与零干扰原则） ---- */
+.ai-msg.user { gap: 4px; }
+.ai-user-bar {
+  display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+  max-width: 80%;
+  -webkit-user-select: none; user-select: none;
+}
+.ai-user-copy {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  min-inline-size: 24px; min-block-size: 24px; padding: 0 8px;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-3);
+  font-family: inherit; font-size: var(--fs-tiny); line-height: 1; cursor: pointer;
+  transition: opacity var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.ai-user-copy:hover,
+.ai-user-copy:focus-visible {
+  color: var(--text-1); background: var(--hover); border-color: var(--line);
+}
+.ai-user-copy:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 1px; }
+.ai-user-copy[data-copied] { color: var(--ok); background: var(--surface-2); border-color: var(--line); }
+.ai-user-copy[data-failed] { color: var(--danger); background: var(--surface-2); border-color: var(--danger); }
+.ai-user-copy-ic { display: inline-flex; align-items: center; }
+.ai-user-copy-ic svg { width: 12px; height: 12px; }
+@media (hover: hover) {
+  .ai-msg.user .ai-user-copy { opacity: .42; }
+  .ai-msg.user:hover .ai-user-copy,
+  .ai-msg.user:focus-within .ai-user-copy,
+  .ai-msg.user .ai-user-copy:focus-visible,
+  .ai-msg.user .ai-user-copy[data-copied],
+  .ai-msg.user .ai-user-copy[data-failed] { opacity: 1; }
+}
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 /* ---- 结果位置带 ---- */
 .ai-entries {
@@ -5144,6 +5204,33 @@ html[data-theme="dark"] .ai-tnav-pop {
 }
 .ai-entries-label svg { width: 13px; height: 13px; opacity: .85; }
 .ai-entries-list { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+
+.ai-entry-wrap {
+  display: inline-flex; align-items: center; max-width: min(368px, 100%);
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
+  overflow: hidden;
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+.ai-entry-wrap:hover {
+  border-color: var(--accent-ring); box-shadow: 0 1px 2px rgba(22, 22, 22, .06);
+}
+.ai-entry-wrap .ai-entry {
+  border: 0; border-radius: 0; background: transparent; box-shadow: none; transform: none;
+}
+.ai-entry-wrap .ai-entry:hover { transform: none; box-shadow: none; }
+.ai-entry-ext {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; flex: 0 0 auto;
+  border: 0; border-left: 1px solid var(--line); background: transparent;
+  color: var(--text-3); cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.ai-entry-ext.compact { width: 22px; height: 22px; }
+.ai-entry-ext:hover,
+.ai-entry-ext:focus-visible { color: var(--accent-text); background: var(--accent-weak); }
+.ai-entry-ext:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
+.ai-entry-ext svg { width: 11px; height: 11px; }
+.ai-card-body .ai-entry-wrap { align-self: flex-start; }
 
 .ai-entry {
   display: inline-flex; align-items: center; gap: 6px;
@@ -5179,7 +5266,8 @@ html[data-theme="dark"] .ai-tnav-pop {
 .ai-entry.more:hover { color: var(--accent-text); }
 /* 卡片正文是列向 flex，子项默认拉满整行：位置胶囊得按内容宽，
    否则一个小目录名会被撑成一条横杠，看着像输入框。 */
-.ai-card-body .ai-entry { align-self: flex-start; }
+.ai-card-body .ai-entry,
+.ai-card-body .ai-entry-wrap { align-self: flex-start; }
 
 /* ---- 依据行：每个依据右边一枚「去看这里」 ---- */
 .ai-ev-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -5227,8 +5315,8 @@ html[data-theme="dark"] .ai-tnav-pop {
 
 /* 尊重系统「减少动态效果」：位移与缩放全停，只留颜色变化 */
 @media (prefers-reduced-motion: reduce) {
-  .md-path, .ai-entry, .ai-ev-open, .ai-acts-row, .ai-replay > summary, .ai-replay > summary::after {
-    transition-property: color, background-color, border-color;
+  .md-path, .md-path-ext, .ai-user-copy, .ai-entry, .ai-entry-wrap, .ai-entry-ext, .ai-ev-open, .ai-acts-row, .ai-replay > summary, .ai-replay > summary::after {
+    transition-property: color, background-color, border-color, opacity;
   }
   .ai-entry:hover, .ai-entry:active, .ai-ev-open:active { transform: none; }
   .ai-entries, .ai-replay, .ai-acts { animation: none; }

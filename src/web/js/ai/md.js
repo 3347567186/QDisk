@@ -45,11 +45,25 @@
      「D:\Temp和C:\Logs」被粘成一条坏路径。 */
   const PATH_STOP_CHARS = '<>\\s&"\'`|?*，。；：！？、（）【】「」『』《》〈〉—…·';
   const RE_ABS_PATH = new RegExp(
-    '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\':])[^' + PATH_STOP_CHARS + ':]*'
+    '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\':])(?:&amp;|[^' + PATH_STOP_CHARS + ':])*'
   );
+  /* 裸路径识别（1.45 增强）：
+     1. 放行 HTML 实体 &amp;（还原真实 & 目录如 D:\R&D\file.txt，仍拦截 &lt;/&gt;/&quot; 防 XSS）；
+     2. 支持带空格的中间目录（含中英文空格目录，但禁止跨中文连词粘连第二条路径）；
+     3. 支持末段含空格的真实文件名（如 屏幕截图 2026-06-09 115005.png、My Report (2).pdf）
+        及常见含空格系统/应用目录末段（如 Program Files、Program Files (x86)、User Data、Common Files），
+        同时拒吞英文介词/连词或中文自然语言。 */
   const RE_INLINE_PATH = new RegExp(
     '(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\s\\\\<>"\'&:])'
-    + '(?:(?![A-Za-z]:[\\\\/])[^' + PATH_STOP_CHARS + ':]|(?:[ ][A-Za-z0-9._()\\-]+)+[\\\\/])*'
+    + '(?:'
+      + '(?![A-Za-z]:[\\\\/])(?:&amp;|[^' + PATH_STOP_CHARS + ':])'
+      + '|(?![ ](?:和|与|或|及|跟|到|至|在|的|里|中|下|是|有|共|约|把|将|给|让|可|已|未|请|看|删|清|打开|清理|删除|检查))(?:[ ][A-Za-z0-9\\u4e00-\\u9fff._()+-]+)+[\\\\/]'
+    + ')*'
+    + '(?:'
+      + '(?![ ](?:and|or|to|for|in|on|at|of|with|from|is|are|was|has|have|can|will|not|by|as|the|this|that)\\b)'
+      + '(?:[ ][A-Za-z0-9._()+-]+){1,4}\\.(?:7z|3gp|3ds|[A-Za-z][A-Za-z0-9]{0,7})(?![A-Za-z0-9_])'
+      + '|[ ](?:Files(?: \\(x86\\))?|Data|Menu|Games|Folder|Documents|Downloads|Pictures|Videos|Music|Desktop|Settings|Cache|Temp|Logs|Backup|App|Apps|ProgramData|LocalLow|WebView|EdgeWebView)(?=$|[\\s,.;:!?，。；：！？、（）【】「」『』《》〈〉—…·<])'
+    + ')?'
   );
   /* 标签 | 路径：只处理标签之外的文本段，且用负向后行断言代替捕获前缀，
      这样「D:\Temp和C:\Logs」拆掉前段「和」后，紧跟的 C:\Logs 也能紧接着匹配。 */
@@ -142,9 +156,18 @@
     return splitPathTail(String(p || '').trim()).path;
   }
 
+  const EXT_BTN_SVG = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+
   function pathAnchor(p, inner) {
-    return '<a class="md-path" href="#" data-path="' + p + '" title="' + p + '">'
-      + (inner || p) + '</a>';
+    const T = root.UI && typeof root.UI.T === 'function' ? root.UI.T : (zh) => zh;
+    const openTip = escape(T('优先在软件内打开：', 'Open in app: ')) + p;
+    const extTip = escape(T('在系统文件管理器中打开', 'Open in system file manager'));
+    return '<span class="md-path-wrap">'
+      + '<a class="md-path" href="#" data-path="' + p + '" title="' + openTip + '">'
+      + (inner || p) + '</a>'
+      + '<button type="button" class="md-path-ext" data-path="' + p + '" title="' + extTip + '" aria-label="' + extTip + '">'
+      + EXT_BTN_SVG + '</button>'
+      + '</span>';
   }
 
   function asPath(text) {

@@ -3468,6 +3468,39 @@ class TestSystemPerformance(EngineCase):
             self.assertTrue(T.unregister_engine_method("ext.echo"))
         self.assertNotIn("ext.echo", T.list_engine_methods())
 
+    def test_search_query_handles_full_paths_spaces_and_unindexed_exact_hit(self):
+        # 1. 创建含空格与带点目录的测试树
+        base = self.new_folder()
+        dot_sub = os.path.join(base, "Program Files (x86)", "157.0.4341.60")
+        os.makedirs(dot_sub, exist_ok=True)
+        exe_path = os.path.join(dot_sub, "msedgewebview2.exe")
+        with open(exe_path, "wb") as f:
+            f.write(b"MZ" + b"\x00" * 64)
+
+        # 未建任何索引时搜索本机真实存在的完整路径（带空格与括号）-> 必须即时精确命中，不得报空
+        r_direct = self.rpc_ok("search.query", {"q": exe_path, "limit": 20})
+        self.assertGreaterEqual(len(r_direct["items"]), 1)
+        self.assertEqual(os.path.normcase(r_direct["items"][0]["path"]), os.path.normcase(exe_path))
+
+        # 搜索完整目录路径（带点目录）也能命中
+        r_dir = self.rpc_ok("search.query", {"q": dot_sub, "limit": 20})
+        self.assertGreaterEqual(len(r_dir["items"]), 1)
+        self.assertEqual(os.path.normcase(r_dir["items"][0]["path"]), os.path.normcase(dot_sub))
+
+        # 2. 建立本地索引后，通过完整路径与局部路径均能从索引命中
+        self.rpc_ok("search.add", {"roots": [base]})
+        self.rpc_ok("search.index", {"full": True})
+        r_full = self.rpc_ok("search.query", {"q": exe_path, "limit": 20})
+        self.assertTrue(any(os.path.normcase(it["path"]) == os.path.normcase(exe_path) for it in r_full["items"]))
+        r_partial = self.rpc_ok("search.query", {"q": r"157.0.4341.60\msedgewebview2.exe", "limit": 20})
+        self.assertTrue(any(os.path.normcase(it["path"]) == os.path.normcase(exe_path) for it in r_partial["items"]))
+
+        # 3. es.exe 参数构造：含路径分隔符加 -p，含空格加双引号
+        import tidy as T
+        args = T._build_es_args("es.exe", r"C:\Program Files\Google\Chrome\Application\chrome.exe", 50)
+        self.assertIn("-p", args)
+        self.assertEqual(args[-1], r'"C:\Program Files\Google\Chrome\Application\chrome.exe"')
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

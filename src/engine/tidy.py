@@ -4882,15 +4882,16 @@ def start_index_watchdog():
 
 
 
-def _ix_query_one(db_path, kw, limit):
+def _ix_query_one(db_path, kw, limit, raw_keyword=""):
     """查单个库，返回 [(完整路径, 名字, 大小, 时间)]。
 
-    和 `_ix_top_one` 一样会滤掉「索引里有、磁盘上已经没了」的条目：索引是
-    快照，用户可能在别的程序里删了文件，甚至就是在搜索框里刚删完又来搜。
-    给一条点进去打不开的结果，比少给一条更糟。
+    支持：
+    1. 裸文件名模糊匹配（f.name LIKE）；
+    2. 完整文件路径或局部路径匹配（如 C:\\Program Files\\...\\chrome.exe 或 Chrome\\chrome.exe），
+       先按「父目录片段 + 末段文件名」走索引高效命中，再辅以完整路径拼接兜底；
+    3. 目录路径匹配（dirs.path LIKE），返回目录下文件。
 
-    代价是每个命中都要 stat 一次。命中数受 limit 限制（默认 200，最多
-    5000），实测 200 条以内可以忽略；真搜到几千条时用户也不会一条条看。
+    和 `_ix_top_one` 一样会滤掉「索引里有、磁盘上已经没了」的条目。
     """
     db = _index_open(db_path)
     if db is None:
@@ -4915,6 +4916,53 @@ def _ix_query_one(db_path, kw, limit):
                 if len(out) >= want:
                     break
             return out
+
+        raw_norm = (raw_keyword or "").strip().strip('"\'`').replace("/", "\\")
+        if len(raw_norm) > 3:
+            raw_norm = raw_norm.rstrip("\\")
+
+        # 含路径分隔符时，优先按「父目录 + 文件名」拆分查，彻底修复搜索完整路径必返 0 条的问题
+        if "\\" in raw_norm:
+            dir_part, leaf_part = raw_norm.rsplit("\\", 1)
+            dir_like = "%" + _like_literal(dir_part) + "%" if dir_part else "%"
+            if leaf_part:
+                leaf_like = "%" + _like_literal(leaf_part) + "%"
+                path_rows = db.execute(
+                    "SELECT d.path, f.name, f.size, f.mtime FROM files f "
+                    "JOIN dirs d ON d.id = f.dir_id "
+                    "WHERE f.name LIKE ? ESCAPE '\\' AND d.path LIKE ? ESCAPE '\\' LIMIT ?",
+                    (leaf_like, dir_like, take)).fetchall()
+                if path_rows:
+                    res = alive(path_rows)
+                    if res:
+                        return res
+            # 兜底：若输入的是目录路径（如 C:\Foo\Bar），列出其下文件
+            dir_kw = "%" + _like_literal(raw_norm) + "%"
+            out = []
+            for dpath, f0, n in db.execute(
+                    "SELECT path, f0, n FROM dirs WHERE path LIKE ? ESCAPE '\\' LIMIT 40",
+                    (dir_kw,)).fetchall():
+                if not n:
+                    continue
+                out.extend((dpath, name, size, mtime) for name, size, mtime in db.execute(
+                    "SELECT name, size, mtime FROM files "
+                    "WHERE rowid BETWEEN ? AND ? LIMIT ?",
+                    (f0, f0 + n - 1, take - len(out))).fetchall())
+                if len(out) >= take:
+                    break
+            if out:
+                res = alive(out)
+                if res:
+                    return res
+            # 最后兜底完整拼接匹配
+            full_rows = db.execute(
+                "SELECT d.path, f.name, f.size, f.mtime FROM files f "
+                "JOIN dirs d ON d.id = f.dir_id "
+                "WHERE (d.path || '\\' || f.name) LIKE ? ESCAPE '\\' LIMIT ?",
+                (dir_kw, take)).fetchall()
+            if full_rows:
+                return alive(full_rows)
+            return []
 
         rows = db.execute(
             "SELECT d.path, f.name, f.size, f.mtime FROM files f "
@@ -4943,12 +4991,12 @@ def _ix_query_one(db_path, kw, limit):
 
 
 def search_index(keyword, limit=800, ids=None):
-    """按文件名查索引：多个库并发查，合并去重后按「前缀命中优先」排序。
+    """按文件名或路径查索引：多个库并发查，合并去重后按「前缀命中优先」排序。
 
     ids 给定时只查这些索引；不给就查全部。返回 (完整路径, 名字, 大小, 时间)，
     路径一定是文件路径，上层直接打开 / 定位 / 复制即可。
     """
-    keyword = (keyword or "").strip()
+    keyword = (keyword or "").strip().strip('"\'`')
     if not keyword:
         return []
     limit = max(1, int(limit))
@@ -4965,25 +5013,28 @@ def search_index(keyword, limit=800, ids=None):
     try:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
-            for part in pool.map(lambda p: _ix_query_one(p, kw, limit), paths):
+            for part in pool.map(lambda p: _ix_query_one(p, kw, limit, keyword), paths):
                 results.extend(part)
     except Exception:
         for p in paths:
-            results.extend(_ix_query_one(p, kw, limit))
+            results.extend(_ix_query_one(p, kw, limit, keyword))
 
     # 同一个文件可能被两个范围都覆盖：按路径去重
     seen = {}
-    low_kw = keyword.lower()
+    low_kw = keyword.replace("/", "\\").lower()
+    leaf_kw = low_kw.rsplit("\\", 1)[-1] if "\\" in low_kw else low_kw
     for path, name, size, mtime in results:
         key = os.path.normcase(path)
         if key not in seen:
             seen[key] = (path, name, size, mtime)
 
     def rank(row):
+        full_low = (row[0] or "").lower()
         name = row[1] or ""
         low = name.lower()
-        return (0 if low.startswith(low_kw) else 1,
-                0 if low_kw in low else 1,
+        return (0 if full_low == low_kw else 1,
+                0 if low.startswith(leaf_kw) else 1,
+                0 if leaf_kw in low else 1,
                 len(name),
                 -(row[3] or 0))
 
@@ -5396,13 +5447,30 @@ def find_es():
     return ""
 
 
+def _build_es_args(exe, keyword, limit=800):
+    """构造 Everything es.exe 参数：含路径分隔符时启用 -p，避免带空格完整路径被拆词漏检。"""
+    q = (keyword or "").strip().strip('"\'`')
+    args = [exe, "-n", str(limit)]
+    if "\\" in q or "/" in q:
+        q = q.replace("/", "\\")
+        args.append("-p")
+        # Everything 在命令行把空格视作 AND，含空格路径必须加双引号作字面路径匹配
+        if " " in q:
+            args.append(f'"{q}"')
+        else:
+            args.append(q)
+    else:
+        args.append(q)
+    return args
+
+
 def es_search(keyword, limit=800):
     """用 es.exe 直接取 Everything 结果。返回列表或 None（不可用）"""
     exe = find_es()
     if not exe:
         return None
     try:
-        r = subprocess.run([exe, "-n", str(limit), keyword],
+        r = subprocess.run(_build_es_args(exe, keyword, limit),
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=20,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -8601,12 +8669,43 @@ def _engine_search_index(params):
             "dirs": int(st.get("dirs") or 0)}
 
 
+def _direct_path_hit(q):
+    """当查询串本身是本机绝对路径时，做实时磁盘核验：
+    即使该盘符未建本地索引、也未装 Everything，文件真实存在就必须能搜到。
+    返回 (item_or_None, hint_or_empty)。
+    """
+    raw = (q or "").strip().strip('"\'`').replace("/", "\\")
+    if not raw or not (os.path.isabs(raw) or raw.startswith("\\\\")):
+        return None, ""
+    if len(raw) > 3:
+        raw = raw.rstrip("\\")
+    try:
+        st = os.stat(raw)
+        is_dir = os.path.isdir(raw)
+        name = os.path.basename(raw) or raw
+        return ({
+            "name": name,
+            "path": raw,
+            "size": 0 if is_dir else int(st.st_size or 0),
+            "mtime": int(st.st_mtime or 0),
+            "kind": "dir" if is_dir else "file",
+            "direct": True,
+        }, "")
+    except PermissionError:
+        return None, "该路径受 Windows 系统权限保护（如 WindowsApps），需以管理员身份运行或直接点击定位到上级目录查看"
+    except OSError:
+        return None, ""
+
+
 def _engine_search_query(params):
-    """search.query：优先 Everything（es.exe），否则并发查本地索引再合并。"""
+    """search.query：优先 Everything（es.exe），否则并发查本地索引再合并；
+    若查询本身是本机真实存在的绝对路径（含未索引盘符），实时直出精确命中。"""
     q = params.get("q")
     if not isinstance(q, str) or not q.strip():
         raise EngineError("参数 q 必须是非空字符串")
-    q = q.strip()
+    q = q.strip().strip('"\'`')
+    if not q:
+        raise EngineError("参数 q 必须是非空字符串")
     limit = _engine_get(params, "limit", 200, int)
     if limit <= 0:
         raise EngineError("参数 limit 必须是正整数")
@@ -8632,9 +8731,22 @@ def _engine_search_query(params):
     items = [{"name": name or os.path.basename(path), "path": path,
               "size": int(size or 0), "mtime": int(mtime or 0)}
              for path, name, size, mtime in rows]
+
+    direct_item, direct_hint = _direct_path_hit(q)
+    if direct_item:
+        target_key = os.path.normcase(direct_item["path"])
+        already = any(os.path.normcase(it["path"]) == target_key for it in items)
+        if not already:
+            items.insert(0, direct_item)
+            if len(items) == 1 and source == "index":
+                source = "direct"
+                direct_hint = "本机路径精确命中（该位置未在本地索引范围内，已实时从磁盘核验）"
+
     result = {"items": items, "total": len(items), "source": source,
               "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
-    if source == "index" and not items and index_count() == 0:
+    if direct_hint:
+        result["hint"] = direct_hint
+    elif source == "index" and not items and index_count() == 0:
         result["hint"] = "本地还没有索引，可以先添加目录并建立一次"
     return result
 

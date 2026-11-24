@@ -608,14 +608,25 @@
     /* ---------------- 顶部动作（撤销 / 导出 / 打开目录） ---------------- */
     const btnUndo = topBtn('撤销上次整理', 'Undo last tidy', 'undo', doUndo);
     const btnExport = topBtn('导出预览 CSV', 'Export preview CSV', 'export', doExport);
-    const btnOpen = topBtn('打开当前文件夹', 'Open current folder', 'folder', () => {
+    const btnOpen = topBtn('软件内浏览目录', 'Browse folder in app', 'scan', () => {
+      if (!state.folder) {
+        toast(T('还没有选择文件夹', 'No folder selected'), 'warn');
+        return;
+      }
+      if (window.AIEntries && typeof window.AIEntries.open === 'function') {
+        window.AIEntries.open(state.folder);
+      } else {
+        window.App && window.App.jump && window.App.jump('tools', { dir: state.folder, paths: [state.folder], action: 'browse' });
+      }
+    });
+    const btnOpenExt = topBtn('在系统文件管理器中打开', 'Open in Explorer', 'external', () => {
       if (!state.folder) {
         toast(T('还没有选择文件夹', 'No folder selected'), 'warn');
         return;
       }
       API.reveal(state.folder).catch((e) => toast(errText(e), 'error'));
     });
-    setActions(btnUndo, btnExport, btnOpen);
+    setActions(btnUndo, btnExport, btnOpen, btnOpenExt);
 
     /* 行内状态：复选框登记表（只登记已渲染的行） */
     const rowChecks = new Map();   // key → checkbox
@@ -1593,7 +1604,11 @@
         if (!it) return [];
         return [
           { header: it.name },
-          { label: T('定位文件', 'Show in folder'), icon: 'external', action: () => revealFile(it) },
+          { label: T('在软件内定位', 'Locate in app'), icon: 'scan', action: () => {
+            if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(it.path);
+            else revealFile(it);
+          } },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', action: () => revealFile(it) },
           { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copyText(it.path) },
           { sep: true },
           { label: T('从预览中移除', 'Remove from preview'), icon: 'close', danger: true,
@@ -1667,12 +1682,28 @@
     /* jump 接收器：AI / 右键菜单通过 App.jump('organize', { paths: [...] }) 进来，
        自动填入来源并触发扫描，用户不用再手动选文件夹。 */
     liveJump = async function (data) {
-      const paths = ((data && data.paths) || []).filter(Boolean).map(String);
+      let paths = ((data && data.paths) || []).filter(Boolean).map(String);
       if (!paths.length) return;
-      /* 清掉之前的来源和预览，以这批路径为准 */
+      if (window.AIEntries && typeof window.AIEntries.resolvePaths === 'function') {
+        try {
+          const resolved = await window.AIEntries.resolvePaths(paths);
+          if (resolved && resolved.length) paths = resolved;
+        } catch (_) {}
+      }
+      /* 清掉之前的来源和预览，以这批路径为准；优先走真实探测区分目录与文件 */
       state.sources = [];
       renderSources();
-      const items = paths.map(function (p) { return { path: p, kind: guessKind(p) }; });
+      const items = [];
+      for (const p of paths) {
+        let kind = guessKind(p);
+        if (window.AIEntries && typeof window.AIEntries.inspect === 'function') {
+          try {
+            const info = await window.AIEntries.inspect(p);
+            if (info && info.kind) kind = info.kind;
+          } catch (_) {}
+        }
+        items.push({ path: p, kind });
+      }
       addSources(items);
       await doScan();
     };

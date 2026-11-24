@@ -199,7 +199,8 @@
               // 右键：查看 / 定位文件 / 复制文件名
               attachMenu(row, [
                 { label: T('查看', 'View'), icon: 'file', action: () => openFile(f) },
-                { label: T('在资源管理器中定位', 'Reveal in Explorer'), icon: 'external', action: () => API.reveal(f.path).catch((e) => toast(errText(e), 'error')) },
+                { label: T('在软件目录中定位', 'Locate in app'), icon: 'scan', action: () => (window.AIEntries && window.AIEntries.open ? window.AIEntries.open(f.path) : reveal(f.path)) },
+                { label: T('在系统文件管理器中定位', 'Reveal in Explorer'), icon: 'external', action: () => API.reveal(f.path).catch((e) => toast(errText(e), 'error')) },
                 { label: T('复制文件名', 'Copy file name'), icon: 'copy', action: () => copyText(f.name) }
               ]);
               return row;

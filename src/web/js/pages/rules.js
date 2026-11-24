@@ -296,7 +296,8 @@
         const it = rows[i];
         if (!it) return;
         attachMenu(tr, [
-          { label: T('定位源文件', 'Reveal source'), icon: 'external', action: () => it.src && API.reveal(it.src).catch(() => {}) },
+          { label: T('在软件内定位源文件', 'Locate source in app'), icon: 'scan', action: () => it.src && (window.AIEntries && window.AIEntries.open ? window.AIEntries.open(it.src) : API.reveal(it.src).catch(() => {})) },
+          { label: T('在系统文件管理器中定位', 'Reveal in system file manager'), icon: 'external', action: () => it.src && API.reveal(it.src).catch((e) => toast(errText(e), 'error')) },
           { label: T('复制源路径', 'Copy source path'), icon: 'copy', action: () => copyText(it.src || '') },
           { label: T('复制目标路径', 'Copy destination'), icon: 'copy', action: () => copyText(it.dst || '') }
         ]);

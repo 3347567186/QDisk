@@ -809,6 +809,283 @@ fn resolve_existing_local_path(raw: &str) -> Option<PathBuf> {
     None
 }
 
+const LOCAL_EXEC_EXTS: &[&str] = &[
+    "exe", "msi", "bat", "cmd", "ps1", "scr", "com", "vbs", "vbe", "js", "jse", "wsf", "lnk",
+    "reg", "hta",
+];
+
+fn path_ext_lower(p: &Path) -> String {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn is_exec_path(p: &Path) -> bool {
+    let ext = path_ext_lower(p);
+    !ext.is_empty() && LOCAL_EXEC_EXTS.contains(&ext.as_str())
+}
+
+fn is_archive_path_local(p: &Path) -> bool {
+    let name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if name.ends_with(".tar.gz")
+        || name.ends_with(".tar.bz2")
+        || name.ends_with(".tar.xz")
+        || name.ends_with(".tar.zst")
+    {
+        return true;
+    }
+    matches!(
+        path_ext_lower(p).as_str(),
+        "zip" | "rar" | "7z" | "tar" | "tgz" | "tbz2" | "txz" | "gz" | "bz2" | "xz" | "zst"
+    )
+}
+
+fn normalized_parent_str(p: &Path) -> String {
+    match p.parent() {
+        Some(par) if !par.as_os_str().is_empty() => {
+            let s = par.to_string_lossy().to_string();
+            let b = s.as_bytes();
+            if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+                format!("{s}\\")
+            } else {
+                s
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn is_perm_denied(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(5)
+}
+
+fn probe_path_meta(p: &Path) -> Result<std::fs::Metadata, std::io::Error> {
+    let sm = std::fs::symlink_metadata(p)?;
+    if sm.file_type().is_symlink() {
+        if let Ok(target) = std::fs::metadata(p) {
+            return Ok(target);
+        }
+    }
+    Ok(sm)
+}
+
+fn find_nearest_readable_ancestor(p: &Path) -> (Option<String>, Option<String>) {
+    let mut child: Option<PathBuf> = None;
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(md) = probe_path_meta(&cur) {
+            if md.is_dir() && std::fs::read_dir(&cur).is_ok() {
+                let dir_s = {
+                    let s = cur.to_string_lossy().to_string();
+                    let b = s.as_bytes();
+                    if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+                        format!("{s}\\")
+                    } else {
+                        s
+                    }
+                };
+                let hi_s = child.map(|c| c.to_string_lossy().to_string());
+                return (Some(dir_s), hi_s);
+            }
+        }
+        match cur.parent().map(|par| par.to_path_buf()) {
+            Some(next) if next != cur && !next.as_os_str().is_empty() => {
+                child = Some(cur);
+                cur = next;
+            }
+            _ => break,
+        }
+    }
+    (None, None)
+}
+
+fn has_permission_denied_ancestor(p: &Path) -> bool {
+    let mut cur = p.to_path_buf();
+    loop {
+        match probe_path_meta(&cur) {
+            Ok(md) => {
+                if md.is_dir() {
+                    if let Err(e) = std::fs::read_dir(&cur) {
+                        if is_perm_denied(&e) {
+                            return true;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            Err(e) if is_perm_denied(&e) => return true,
+            Err(_) => {}
+        }
+        match cur.parent() {
+            Some(par) if par != cur && !par.as_os_str().is_empty() => cur = par.to_path_buf(),
+            _ => break,
+        }
+    }
+    false
+}
+
+/// 真实探测本地路径：彻底消除前端靠「有没有 `.`」猜目录/文件，并精确区分
+/// 「正常存在」「权限受限（如 WindowsApps）」与「真正不存在」，同时回传最近可读上级目录。
+fn inspect_local_path_core(raw: &str) -> Value {
+    let trimmed0 = raw.trim();
+    if trimmed0.is_empty()
+        || trimmed0
+            .chars()
+            .any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20)
+    {
+        return json!({
+            "status": "invalid",
+            "path": trimmed0,
+            "exists": false,
+            "readable": false,
+            "error": "路径为空或包含不能用的字符",
+        });
+    }
+    let normalized_raw = {
+        let mut s = trimmed0.replace('/', "\\");
+        let b = s.as_bytes();
+        if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            s.push('\\');
+        }
+        s
+    };
+    let trimmed = normalized_raw.as_str();
+
+    let make_ok = |pb: &PathBuf, md: &std::fs::Metadata| -> Value {
+        let is_dir = md.is_dir();
+        let path_s = pb.to_string_lossy().to_string();
+        let parent_s = normalized_parent_str(pb);
+        let is_exec = !is_dir && is_exec_path(pb);
+        let is_archive = !is_dir && is_archive_path_local(pb);
+        if is_dir {
+            if let Err(e) = std::fs::read_dir(pb) {
+                if is_perm_denied(&e) {
+                    let (nr, hi) = find_nearest_readable_ancestor(pb);
+                    return json!({
+                        "status": "permission_denied",
+                        "path": path_s,
+                        "exists": true,
+                        "kind": "dir",
+                        "readable": false,
+                        "parent": parent_s,
+                        "nearestReadable": nr,
+                        "nearestReadableHighlight": hi.unwrap_or_else(|| path_s.clone()),
+                        "isExec": false,
+                        "isArchive": false,
+                        "error": format!("权限受限（受 Windows 系统保护，需要管理员权限）：{path_s}"),
+                    });
+                }
+            }
+        } else if !parent_s.is_empty() {
+            if let Err(e) = std::fs::read_dir(&parent_s) {
+                if is_perm_denied(&e) {
+                    let (nr, hi) = find_nearest_readable_ancestor(pb);
+                    return json!({
+                        "status": "permission_denied",
+                        "path": path_s,
+                        "exists": true,
+                        "kind": "file",
+                        "readable": false,
+                        "parent": parent_s,
+                        "nearestReadable": nr,
+                        "nearestReadableHighlight": hi.unwrap_or_else(|| path_s.clone()),
+                        "isExec": is_exec,
+                        "isArchive": is_archive,
+                        "error": format!("所在目录受 Windows 权限保护，需要管理员权限：{path_s}"),
+                    });
+                }
+            }
+        }
+        json!({
+            "status": "ok",
+            "path": path_s,
+            "exists": true,
+            "kind": if is_dir { "dir" } else { "file" },
+            "readable": true,
+            "parent": parent_s,
+            "isExec": is_exec,
+            "isArchive": is_archive,
+        })
+    };
+
+    let exact = PathBuf::from(trimmed);
+    match probe_path_meta(&exact) {
+        Ok(md) => return make_ok(&exact, &md),
+        Err(e) if is_perm_denied(&e) => {
+            let (nr, hi) = find_nearest_readable_ancestor(&exact);
+            return json!({
+                "status": "permission_denied",
+                "path": trimmed,
+                "exists": true,
+                "kind": if is_exec_path(&exact) || is_archive_path_local(&exact) {
+                    Value::String("file".into())
+                } else {
+                    Value::Null
+                },
+                "readable": false,
+                "parent": normalized_parent_str(&exact),
+                "nearestReadable": nr,
+                "nearestReadableHighlight": hi,
+                "isExec": is_exec_path(&exact),
+                "isArchive": is_archive_path_local(&exact),
+                "error": format!("权限受限（受 Windows 系统保护，需要管理员权限）：{trimmed}"),
+            });
+        }
+        Err(_) => {}
+    }
+
+    // 先尝试粘连中文/标点真实路径兜底
+    if let Some(rescued) = resolve_existing_local_path(trimmed) {
+        if let Ok(md) = probe_path_meta(&rescued) {
+            return make_ok(&rescued, &md);
+        }
+    }
+
+    // 若任一祖先目录（例如 C:\Program Files\WindowsApps）拒绝列目录/遍历，明确报权限受限而非「不存在」
+    if has_permission_denied_ancestor(&exact) {
+        let (nr, hi) = find_nearest_readable_ancestor(&exact);
+        return json!({
+            "status": "permission_denied",
+            "path": trimmed,
+            "exists": true,
+            "kind": Value::Null,
+            "readable": false,
+            "parent": normalized_parent_str(&exact),
+            "nearestReadable": nr,
+            "nearestReadableHighlight": hi,
+            "isExec": is_exec_path(&exact),
+            "isArchive": is_archive_path_local(&exact),
+            "error": format!("权限受限（受 Windows 系统保护，需要管理员权限）：{trimmed}"),
+        });
+    }
+
+    let (nearest_existing, nearest_hi) = find_nearest_readable_ancestor(&exact);
+    json!({
+        "status": "not_found",
+        "path": trimmed,
+        "exists": false,
+        "kind": Value::Null,
+        "readable": false,
+        "parent": normalized_parent_str(&exact),
+        "nearestExisting": nearest_existing,
+        "nearestExistingHighlight": nearest_hi,
+        "isExec": is_exec_path(&exact),
+        "isArchive": is_archive_path_local(&exact),
+        "error": format!("这个位置已经不在了：{trimmed}"),
+    })
+}
+
+#[tauri::command]
+fn inspect_local_path(path: String) -> Value {
+    inspect_local_path_core(&path)
+}
+
 #[tauri::command]
 fn resolve_local_path(path: String) -> Option<String> {
     let raw = path.trim();
@@ -819,7 +1096,8 @@ fn resolve_local_path(path: String) -> Option<String> {
 }
 
 /// 在资源管理器里定位一个位置：目录就打开它，文件就选中它。
-/// 同样先检查存在性——「定位了一个不存在的东西」等于没定位。
+/// 同样先检查存在性——「定位了一个不存在的东西」等于没定位；
+/// 若命中 WindowsApps 等权限受限路径，尝试交由资源管理器定位而不是谎报「不存在」。
 #[tauri::command]
 fn reveal(path: String) -> Result<(), String> {
     let raw = path.trim().to_string();
@@ -829,11 +1107,25 @@ fn reveal(path: String) -> Result<(), String> {
     if raw.chars().any(|c| c == '"' || c == '\n' || c == '\r' || (c as u32) < 0x20) {
         return Err("路径里有不能用的字符".into());
     }
-    let p = resolve_existing_local_path(&raw)
-        .ok_or_else(|| format!("这个位置已经不在了：{raw}"))?;
-    let target = p.to_string_lossy().to_string();
+    let resolved = resolve_existing_local_path(&raw);
+    let (target, is_dir) = if let Some(p) = resolved {
+        let dir = probe_path_meta(&p).map(|m| m.is_dir()).unwrap_or_else(|_| p.is_dir());
+        (p.to_string_lossy().to_string(), dir)
+    } else {
+        let info = inspect_local_path_core(&raw);
+        if info["status"].as_str() == Some("permission_denied") {
+            let fallback = info["nearestReadableHighlight"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&raw)
+                .to_string();
+            (fallback, false)
+        } else {
+            return Err(format!("这个位置已经不在了：{raw}"));
+        }
+    };
     let mut cmd = Command::new("explorer.exe");
-    if p.is_dir() {
+    if is_dir {
         cmd.arg(&target);
     } else {
         cmd.arg(format!("/select,{target}"));
@@ -2556,23 +2848,58 @@ fn ai_store(op: String, name: Option<String>, content: Option<String>) -> Result
 /// 才轮到文件：一个装了 300 个子目录的文件夹，文件永远显示不出来，而且界面
 /// 只能看到 `truncated: true` 却没地方翻页 —— 用户会以为「里面就这些」。
 /// 现在先拼成一条「目录在前、文件在后」的序列，再按 offset/cap 切，能一页页翻完。
+/// `offset` 是分页起点（默认 0）；`locate` 可指定要定位的文件/子目录名或完整路径，
+/// 当 `offset` 未显式指定时自动计算目标所在页并返回 `located` / `locateIndex`；
+/// `filter` 可在全量目录项上做不区分大小写子串过滤，突破单页 200 项限制。
 #[tauri::command(async)]
-fn list_dir(dir: String, limit: Option<usize>, offset: Option<usize>) -> Result<Value, String> {
-    let p = PathBuf::from(dir.trim());
-    if p.as_os_str().is_empty() {
+fn list_dir(
+    dir: String,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    locate: Option<String>,
+    filter: Option<String>,
+) -> Result<Value, String> {
+    let raw = dir.trim();
+    if raw.is_empty() {
         return Err("缺少目录".into());
     }
-    if !p.exists() {
-        return Err(format!("目录不存在：{}", p.display()));
-    }
-    if !p.is_dir() {
+    let mut p = PathBuf::from(raw);
+    let md = match probe_path_meta(&p) {
+        Ok(m) => m,
+        Err(e) if is_perm_denied(&e) => {
+            return Err(format!("权限不足（需要管理员权限）：{}", p.display()));
+        }
+        Err(_) => {
+            if let Some(rescued) = resolve_existing_local_path(raw) {
+                p = rescued;
+                probe_path_meta(&p)
+                    .map_err(|e| {
+                        if is_perm_denied(&e) {
+                            format!("权限不足（需要管理员权限）：{}", p.display())
+                        } else {
+                            format!("目录不存在：{}", p.display())
+                        }
+                    })?
+            } else if has_permission_denied_ancestor(&p) {
+                return Err(format!("权限不足（需要管理员权限）：{}", p.display()));
+            } else {
+                return Err(format!("目录不存在：{}", p.display()));
+            }
+        }
+    };
+    if !md.is_dir() {
         return Err(format!("这不是文件夹：{}", p.display()));
     }
     let cap = limit.unwrap_or(100).clamp(1, 200);
-    let skip = offset.unwrap_or(0);
     let mut files: Vec<Value> = Vec::new();
     let mut dirs: Vec<Value> = Vec::new();
-    let rd = std::fs::read_dir(&p).map_err(|e| format!("无法读取目录：{e}"))?;
+    let rd = std::fs::read_dir(&p).map_err(|e| {
+        if is_perm_denied(&e) {
+            format!("权限不足（需要管理员权限）：{}", p.display())
+        } else {
+            format!("无法读取目录：{e}")
+        }
+    })?;
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().to_string();
         let meta = match ent.metadata() {
@@ -2616,21 +2943,65 @@ fn list_dir(dir: String, limit: Option<usize>, offset: Option<usize>) -> Result<
     };
     dirs.sort_by(by_name);
     files.sort_by(by_name);
+    let unfiltered_total = dirs.len() + files.len();
+
+    let flt = filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase());
+    if let Some(ref kw) = flt {
+        dirs.retain(|it| it["name"].as_str().unwrap_or("").to_lowercase().contains(kw));
+        files.retain(|it| it["name"].as_str().unwrap_or("").to_lowercase().contains(kw));
+    }
+
     let dir_count = dirs.len();
     let file_count = files.len();
-    // 目录在前、文件在后拼成一条序列，分页只在序列上切一段。
     let all: Vec<Value> = dirs.into_iter().chain(files.into_iter()).collect();
+
+    // 目标定位：同时支持传完整路径或纯文件名/目录名，自动落到包含该项的那一页；
+    // 若 locate 本身就是当前目录 dir，则不误高亮同名子目录。
+    let dir_norm_low = trim_nonroot_sep(&p.to_string_lossy().replace('/', "\\")).to_lowercase();
+    let locate_leaf = locate.as_deref().and_then(|raw_loc| {
+        let s = trim_nonroot_sep(&raw_loc.trim().replace('/', "\\")).to_string();
+        if s.is_empty() || s.to_lowercase() == dir_norm_low {
+            return None;
+        }
+        let leaf = s
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(&s)
+            .trim();
+        (!leaf.is_empty()).then(|| leaf.to_lowercase())
+    });
+    let locate_idx = locate_leaf.as_ref().and_then(|want| {
+        all.iter()
+            .position(|it| it["name"].as_str().unwrap_or("").to_lowercase() == *want)
+    });
+    let locate_name = locate_idx
+        .and_then(|i| all[i]["name"].as_str())
+        .map(|s| s.to_string());
+
+    let skip = match (offset, locate_idx) {
+        (Some(explicit), _) => explicit,
+        (None, Some(idx)) => (idx / cap) * cap,
+        (None, None) => 0,
+    };
     let items: Vec<Value> = all.iter().skip(skip).take(cap).cloned().collect();
     let shown = items.len();
     Ok(json!({
         "dir": p.to_string_lossy(),
         "total": dir_count + file_count,
+        "unfilteredTotal": unfiltered_total,
         "offset": skip,
         "shown": shown,
         "dirs": dir_count,
         "files": file_count,
-        // 只在「后面还有」时为真：翻到最后一页它会变 false，界面据此收掉「加载更多」。
+        "hasPrev": skip > 0,
         "truncated": skip + shown < dir_count + file_count,
+        "located": locate_idx.is_some(),
+        "locateIndex": locate_idx,
+        "locateName": locate_name,
         "items": items,
     }))
 }
@@ -3624,6 +3995,7 @@ fn main() {
             reveal,
             open_path,
             resolve_local_path,
+            inspect_local_path,
             app_info,
             app_capabilities,
             data_dir_migrate_preview,
@@ -4102,6 +4474,94 @@ mod shell_tests {
         // 5. 真正不存在的子目录必须返回 None，绝不静默回退到父目录
         let missing = format!("{}\\不存在的子目录", downloads.display());
         assert_eq!(resolve_existing_local_path(&missing), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inspect_local_path_distinguishes_dot_dirs_files_missing_and_drive_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "qdisk_inspect_{}_{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dot_dir = root.join("157.0.4341.60");
+        let exe_file = dot_dir.join("msedgewebview2.exe");
+        let zip_file = root.join("backup.tar.gz");
+        std::fs::create_dir_all(&dot_dir).unwrap();
+        std::fs::write(&exe_file, b"MZ").unwrap();
+        std::fs::write(&zip_file, b"gz").unwrap();
+
+        // 1. 带点目录必须被识别为真实 dir，绝不误判为 file
+        let r_dir = inspect_local_path_core(&dot_dir.to_string_lossy());
+        assert_eq!(r_dir["status"], "ok");
+        assert_eq!(r_dir["kind"], "dir");
+        assert_eq!(r_dir["isExec"], false);
+
+        // 2. .exe 文件被识别为 file + isExec=true，parent 准确指向带点目录
+        let r_exe = inspect_local_path_core(&exe_file.to_string_lossy());
+        assert_eq!(r_exe["status"], "ok");
+        assert_eq!(r_exe["kind"], "file");
+        assert_eq!(r_exe["isExec"], true);
+        assert_eq!(r_exe["isArchive"], false);
+        assert_eq!(r_exe["parent"].as_str().unwrap(), dot_dir.to_string_lossy());
+
+        // 3. 复合扩展名压缩包被识别为 file + isArchive=true
+        let r_zip = inspect_local_path_core(&zip_file.to_string_lossy());
+        assert_eq!(r_zip["status"], "ok");
+        assert_eq!(r_zip["kind"], "file");
+        assert_eq!(r_zip["isArchive"], true);
+
+        // 4. 缺失目标返回 not_found 并给出最近存在的上级目录
+        let missing = dot_dir.join("ghost").join("missing.exe");
+        let r_miss = inspect_local_path_core(&missing.to_string_lossy());
+        assert_eq!(r_miss["status"], "not_found");
+        assert_eq!(r_miss["nearestExisting"].as_str().unwrap(), dot_dir.to_string_lossy());
+
+        // 5. 盘符根父目录规范化带尾斜杠（C:\foo.exe -> C:\ 而非 C:）
+        assert_eq!(normalized_parent_str(Path::new(r"C:\foo.exe")), r"C:\");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_dir_locate_and_filter_handles_over_200_items() {
+        let root = std::env::temp_dir().join(format!(
+            "qdisk_listdir_{}_{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..225 {
+            std::fs::write(root.join(format!("item_{:03}.txt", i)), b"x").unwrap();
+        }
+        let target = root.join("item_218.txt");
+        let res = list_dir(
+            root.to_string_lossy().to_string(),
+            Some(200),
+            None,
+            Some(target.to_string_lossy().to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(res["located"], true);
+        assert_eq!(res["locateIndex"], 218);
+        assert_eq!(res["offset"], 200);
+        assert_eq!(res["hasPrev"], true);
+        let items = res["items"].as_array().unwrap();
+        assert!(items.iter().any(|it| it["name"] == "item_218.txt"));
+
+        // 后端过滤突破 200 项限制
+        let flt = list_dir(
+            root.to_string_lossy().to_string(),
+            Some(50),
+            None,
+            None,
+            Some("item_21".to_string()),
+        )
+        .unwrap();
+        assert_eq!(flt["unfilteredTotal"], 225);
+        assert_eq!(flt["total"], 10);
 
         let _ = std::fs::remove_dir_all(&root);
     }

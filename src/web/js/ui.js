@@ -112,6 +112,15 @@
   }
 
   /* ---------- 通用弹窗 ---------- */
+  const openModals = new Set();
+
+  function closeModals() {
+    for (const fn of Array.from(openModals)) {
+      try { fn(null); } catch (_) {}
+    }
+    openModals.clear();
+  }
+
   function modal({ title, body, buttons, wide = false, onClose, onAction }) {
     const mask = h('div', { class: 'modal-mask', onclick: (e) => { if (e.target === mask) close(null); } });
     const bodyEl = h('div', { class: 'modal-body' },
@@ -149,6 +158,7 @@
     function close(v) {
       if (closed) return;
       closed = true;
+      openModals.delete(close);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('keydown', onRepeat, true);
       mask.classList.add('closing');
@@ -156,6 +166,7 @@
       setTimeout(() => mask.remove(), 190);
       onClose && onClose(v);
     }
+    openModals.add(close);
     const first = box.querySelector('.btn'); first && first.focus();
     return { el: box, close };
   }
@@ -616,7 +627,14 @@
         h('button', { class: 'btn sm ghost', onclick: () => { zoom = Math.min(4, zoom + .25); render(); } }, '＋'),
         h('button', { class: 'btn sm ghost', onclick: () => { zoom = Math.max(.25, zoom - .25); render(); } }, '－'),
         h('button', { class: 'btn sm ghost', onclick: () => { zoom = 1; render(); } }, T('原始', 'Reset')),
-        h('button', { class: 'btn sm ghost', onclick: () => { const it = list[idx]; it.path && API.reveal(it.path).catch(() => {}); } }, T('定位', 'Reveal')),
+        h('button', { class: 'btn sm ghost', onclick: () => {
+          const it = list[idx];
+          if (!it || !it.path) return;
+          close();
+          if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(it.path);
+          else API.reveal(it.path).catch(() => {});
+        } }, T('软件内定位', 'Locate in app')),
+        h('button', { class: 'btn sm ghost', title: T('在系统文件管理器中定位', 'Reveal in Explorer'), onclick: () => { const it = list[idx]; it && it.path && API.reveal(it.path).catch((e) => toast(errText(e), 'error')); } }, T('系统管理器', 'Explorer')),
         h('button', { class: 'btn sm ghost', onclick: close }, T('关闭', 'Close'))
       ),
       stage,
@@ -743,25 +761,59 @@
     return e && e.message ? e.message : String(e);
   }
 
-  async function copy(text) {
-    const v = String(text === null || text === undefined ? '' : text);
-    if (!v) return;
+  function legacyCopyText(text) {
+    const prev = document.activeElement;
+    const ta = h('textarea', {
+      readonly: true,
+      style: { position: 'fixed', insetBlockStart: '0', insetInlineStart: '0', opacity: '0', pointerEvents: 'none' }
+    });
+    ta.value = text;
+    document.body.appendChild(ta);
     try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(v);
-      } else {
-        // 无剪贴板 API 时用临时输入框兜底
-        const ta = h('textarea', { style: { position: 'fixed', opacity: '0', top: '0', left: '0' } });
-        ta.value = v;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
+      if (typeof ta.focus === 'function') {
+        try { ta.focus({ preventScroll: true }); } catch (_) { ta.focus(); }
       }
-      toast(T('已复制：', 'Copied: ') + v, 'ok');
-    } catch (e) {
-      toast(errText(e), 'error');
+      if (typeof ta.select === 'function') ta.select();
+      if (typeof ta.setSelectionRange === 'function') ta.setSelectionRange(0, text.length);
+      return typeof document.execCommand === 'function' ? !!document.execCommand('copy') : false;
+    } catch (_) {
+      return false;
+    } finally {
+      ta.remove();
+      if (prev && prev !== document.body && typeof prev.focus === 'function') {
+        try { prev.focus({ preventScroll: true }); } catch (_) { try { prev.focus(); } catch (__) {} }
+      }
     }
+  }
+
+  async function copy(text, opts) {
+    const v = String(text === null || text === undefined ? '' : text);
+    if (!v) return false;
+    const o = opts || {};
+    let ok = false;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(v);
+        ok = true;
+      }
+    } catch (_) {
+      ok = false;
+    }
+    if (!ok) {
+      ok = legacyCopyText(v);
+    }
+    if (ok) {
+      if (!o.silent) {
+        const single = v.replace(/\s+/g, ' ').trim();
+        const preview = single.length > 48 ? single.slice(0, 48) + '…' : single;
+        toast(T('已复制：', 'Copied: ') + preview, 'ok');
+      }
+      return true;
+    }
+    if (!o.silentError) {
+      toast(T('复制失败，请手动按 Ctrl+C', 'Copy failed, please press Ctrl+C'), 'error');
+    }
+    return false;
   }
 
   /* ---------- 自定义圆角胶囊下拉框（替换原生 select，自适应防溢出翻转） ---------- */
@@ -1045,7 +1097,7 @@
     h, T, fmtBytes, fmtSize: fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
     withButtonBusy, progressModal,
     skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, askBtn, setLang, onLangChange,
-    menu, attachMenu, closeMenu, modal, preview, closePreview,
+    menu, attachMenu, closeMenu, modal, closeModals, preview, closePreview,
     pageSize, pageSizePick, PAGE_SIZES,
     errText, copy,
     customSelect, initGlobalTooltip

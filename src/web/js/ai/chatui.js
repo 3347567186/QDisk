@@ -184,9 +184,18 @@
       if (p) {
         chipRow.appendChild(h('button', {
           class: 'ai-ev-open',
-          title: p,
+          type: 'button',
+          title: T('在软件内打开：', 'Open in app: ') + p,
+          'aria-label': T('在软件内打开', 'Open in app'),
           onclick: (e) => { e.stopPropagation(); AIEntries.open(p); }
-        }, UIx.icon('folder')));
+        }, UIx.icon('folder', 12)));
+        chipRow.appendChild(h('button', {
+          class: 'ai-ev-open ai-ev-ext',
+          type: 'button',
+          title: T('在系统文件管理器中打开：', 'Open in Explorer: ') + p,
+          'aria-label': T('在系统文件管理器中打开', 'Open in Explorer'),
+          onclick: (e) => { e.stopPropagation(); AIEntries.reveal(p); }
+        }, UIx.icon('external', 12)));
       }
       box.appendChild(chipRow);
       box.appendChild(detail);
@@ -199,9 +208,16 @@
   }
 
   /* 「去工具页」必须带上这一条的路径：只切页等于让用户看一张空表。
-     载荷交给 App.jump，目标页在挂载时取走（见 app.js 的 App.takeJump）。 */
-  function jumpToPage(page, s) {
-    const paths = ((s && s.paths) || []).filter(Boolean).map(String);
+     先经 AIEntries.resolvePaths 展开 %VAR% 与真实路径解析，避免未展开/粘连路径导致跳页后「目录不存在」。 */
+  async function jumpToPage(page, s) {
+    const rawPaths = ((s && s.paths) || []).filter(Boolean).map(String);
+    let paths = rawPaths;
+    if (rawPaths.length && AIEntries && typeof AIEntries.resolvePaths === 'function') {
+      try {
+        const resolved = await AIEntries.resolvePaths(rawPaths);
+        if (resolved && resolved.length) paths = resolved;
+      } catch (_) {}
+    }
     const payload = { paths: paths, action: (s && s.action) || 'check', why: (s && s.why) || '' };
     if (root.App && typeof root.App.jump === 'function') { root.App.jump(page, payload); return; }
     location.hash = '#' + page;
@@ -1379,6 +1395,49 @@
       ? proposals.subscribe(() => { try { pendingCardsRefresh(); } catch (e) { /* 画挂了不该影响执行 */ } })
       : null;
 
+    const copyTimers = new Map();
+    let lastCopyAnnounce = '';
+
+    async function runCopyBtn(btn, lblEl, statusEl, getText) {
+      const raw = String(getText() || '');
+      if (!raw) return;
+      const prevTimer = copyTimers.get(btn);
+      if (prevTimer) { clearTimeout(prevTimer); copyTimers.delete(btn); }
+      btn.removeAttribute('data-copied');
+      btn.removeAttribute('data-failed');
+      const ok = await UIx.copy(raw, { silent: true, silentError: true });
+      if (destroyed) return;
+      let msg = ok ? T('已复制', 'Copied') : T('复制失败', 'Copy failed');
+      if (msg === lastCopyAnnounce) msg += '\u00A0';
+      lastCopyAnnounce = msg;
+      btn.setAttribute(ok ? 'data-copied' : 'data-failed', '');
+      const icEl = btn.querySelector('.ai-user-copy-ic');
+      if (icEl) icEl.replaceChildren(UIx.icon(ok ? 'check' : 'copy', 12));
+      if (lblEl) lblEl.textContent = ok ? T('已复制', 'Copied') : T('复制失败', 'Failed');
+      if (statusEl) {
+        statusEl.textContent = '';
+        if (typeof requestAnimationFrame === 'function') {
+          requestAnimationFrame(() => { if (!destroyed) statusEl.textContent = msg; });
+        } else {
+          statusEl.textContent = msg;
+        }
+      }
+      if (!ok) {
+        UIx.toast(T('复制失败，请手动按 Ctrl+C', 'Copy failed, press Ctrl+C'), 'error');
+      }
+      const tid = setTimeout(() => {
+        copyTimers.delete(btn);
+        if (destroyed) return;
+        btn.removeAttribute('data-copied');
+        btn.removeAttribute('data-failed');
+        const ic2 = btn.querySelector('.ai-user-copy-ic');
+        if (ic2) ic2.replaceChildren(UIx.icon('copy', 12));
+        if (lblEl) lblEl.textContent = T('复制', 'Copy');
+        if (statusEl) statusEl.textContent = '';
+      }, 1600);
+      copyTimers.set(btn, tid);
+    }
+
     /* 写进某个会话的消息区。所有「这一轮产出」都走这里：
        传 pane 就写那个 pane 自己的容器，不传就是可见会话。
        以前一律写全局 msgs，切走之后写进的是已经脱离文档的节点。 */
@@ -1386,14 +1445,33 @@
       const tgt = pane || activePane;
       if (!tgt) return;
       if (isVisible(tgt)) setEmpty(false);
-      /* 不挂「你」的标签：右侧浅底气泡本身已经说明了是谁在说 */
-      const node = h('div', { class: 'ai-msg user' },
-        h('div', { class: 'ai-msg-body' }, text)
+      const raw = String(text == null ? '' : text);
+      /* 不挂「你」的标签：右侧浅底气泡本身已经说明了是谁在说；
+         气泡下方配极简快捷复制栏（user-select:none 不污染拖选，读原始 dataset.text 无损复制） */
+      const copyLbl = h('span', { class: 'ai-user-copy-lbl' }, T('复制', 'Copy'));
+      const copyBtn = h('button', {
+        type: 'button',
+        class: 'ai-user-copy',
+        title: T('复制我发送的内容', 'Copy your message')
+      },
+        h('span', { class: 'ai-user-copy-ic', 'aria-hidden': 'true' }, UIx.icon('copy', 12)),
+        copyLbl
       );
+      const copyStatus = h('span', { class: 'ai-copy-status sr-only', role: 'status' }, '');
+      const userBar = h('div', { class: 'ai-user-bar' }, copyBtn, copyStatus);
+      const node = h('div', { class: 'ai-msg user' },
+        h('div', { class: 'ai-msg-body' }, raw),
+        userBar
+      );
+      copyBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        runCopyBtn(copyBtn, copyLbl, copyStatus, () => node.dataset.text || raw);
+      });
       tgt.msgs.appendChild(node);
       /* 每句话开一轮：导航条上一条刻度，跳转就落到这句话 */
-      tgt.turns.push({ prompt: text, answer: '', userNode: node, answerNode: null });
-      stamp(node, 'user', text);
+      tgt.turns.push({ prompt: raw, answer: '', userNode: node, answerNode: null });
+      stamp(node, 'user', raw);
       /* 刻度条只有一条：只在看得见那个会话变化时重画 */
       if (rail && isVisible(tgt)) rail.setTurns(tgt.turns);
       scrollEnd(true, tgt);
@@ -2388,9 +2466,7 @@
 
     function writeClipboard(text) {
       if (!text) return;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(() => UIx.copy(text));
-      } else UIx.copy(text);
+      UIx.copy(String(text));
     }
 
     function pasteIntoComposer() {
@@ -2483,10 +2559,10 @@
         return;
       }
 
-      /* 某条消息：选中了文字就只引用选中那段，否则引用整条 */
+      /* 某条消息：选中了文字就只引用选中那段，否则优先取原始无损 dataset.text */
       if (msg) {
         const role = msg.dataset.role || 'bot';
-        const body = textOf(msg);
+        const body = (msg.dataset && msg.dataset.text) ? msg.dataset.text : textOf(msg);
         const payload = sel || body;
         const short = payload.length > 800 ? payload.slice(0, 800) + '…' : payload;
         UI.menu(e, [
@@ -2502,14 +2578,15 @@
         return;
       }
 
-      /* 空白处：只给「粘贴」和「全选对话」。
-         这里不能直接读全局 msgs：右键可能是从某个 pane 的容器冒泡上来的，
-         读全局会把「另一个会话的对话」复制出去。以事件实际落在哪个容器为准。 */
+      /* 空白处：只给「粘贴」和「复制整段对话」。
+         仅收集真正带 data-role 的 .ai-msg 节点，避免把 .ai-proc 过程组或 .ai-notice 误标为「助手：」。 */
       const scope = t.closest('.ai-msgs') || msgs;
+      const msgNodes = Array.prototype.filter.call(scope.children || [], (n) =>
+        n && n.classList && n.classList.contains('ai-msg') && n.dataset && n.dataset.role);
       UI.menu(e, [
         { label: T('粘贴到输入框', 'Paste into composer'), action: pasteIntoComposer },
-        { label: T('复制整段对话', 'Copy transcript'), disabled: !scope.children.length,
-          action: () => writeClipboard(Array.prototype.map.call(scope.children,
+        { label: T('复制整段对话', 'Copy transcript'), disabled: !msgNodes.length,
+          action: () => writeClipboard(msgNodes.map(
             (n) => ((n.dataset.role === 'user' ? '我：' : '助手：') + (n.dataset.text || textOf(n)))).join('\n\n')) }
       ]);
     }
@@ -2880,6 +2957,8 @@
         /* 先立牌子再拆东西：在飞那一轮收尾时会问 isVisible，
            立完牌子它就知道「界面已经没了」，不再去调那些 destroy 过的对象 */
         destroyed = true;
+        copyTimers.forEach((tid) => clearTimeout(tid));
+        copyTimers.clear();
         try { if (unsubscribe) unsubscribe(); } catch (e) { /* 退订失败不影响收尾 */ }
         try { if (follow) follow.destroy(); } catch (e) { /* 跟随器收不掉也别拦着关 */ }
         follow = null;

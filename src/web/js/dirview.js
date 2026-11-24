@@ -12,7 +12,19 @@
   const errText = UI.errText;
 
   const PAGE = 200;                 // 与 Rust list_dir 的 cap 上限一致
-  const EXEC_EXT = ['exe', 'msi', 'msix', 'appx', 'bat', 'cmd', 'com', 'scr', 'ps1', 'vbs', 'js', 'jar', 'lnk'];
+  const EXEC_EXT = ['exe', 'msi', 'msix', 'appx', 'bat', 'cmd', 'com', 'scr', 'ps1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'jar', 'lnk', 'reg', 'hta'];
+  const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'];
+  const TEXT_EXT = ['txt', 'log', 'md', 'json', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'xml', 'csv', 'tsv', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'html', 'htm', 'css', 'scss', 'toml', 'sql', 'sh', 'env', 'gitignore'];
+  const ARCHIVE_RE = /\.(?:tar\.(?:gz|bz2|xz|zst)|zip|rar|7z|tar|tgz|tbz2|txz|gz|bz2|xz|zst)$/i;
+
+  function isImage(name) { return IMG_EXT.indexOf(extOf(name)) >= 0; }
+  function isTextFile(name) { return TEXT_EXT.indexOf(extOf(name)) >= 0; }
+  function isArchive(name) { return ARCHIVE_RE.test(String(name || '')); }
+  function stemOf(name) {
+    const s = String(name || '');
+    const i = s.lastIndexOf('.');
+    return i > 0 ? s.slice(0, i) : s;
+  }
 
   function stripSlash(p) {
     return String(p || '').replace(/[\\/]+$/, '');
@@ -89,15 +101,25 @@
     const o = opts || {};
     let dir = '';
     let items = [];
+    let pageOffset = 0;
     let nextOffset = 0;
     let total = 0;
+    let unfilteredTotal = 0;
     let dirsN = 0;
     let filesN = 0;
+    let hasPrev = false;
     let truncated = false;
+    let locatedIdx = -1;
     let busy = false;
+    let busyAppend = false;
     let err = '';
     let alive = true;
     let hitPath = '';
+    let focusedItem = null;        // { path, name, kind, size, ext }
+    let notice = null;             // { accessDenied, requestedPath, missingTarget }
+    let filterText = '';
+    let filterTimer = 0;
+    let reqSeq = 0;
     const rowOf = new Map();       // path(小写) → 行节点，highlight 用
 
     /* ---------- 骨架 ---------- */
@@ -105,24 +127,248 @@
     const refreshBtn = h('button', { class: 'btn ghost sm dv-icon dv-refresh-btn', type: 'button', title: T('刷新', 'Refresh'), 'aria-label': T('刷新', 'Refresh') }, icon('refresh', 14));
     const pathIn = h('input', { class: 'input dv-path', type: 'text', spellcheck: 'false', placeholder: T('输入或粘贴一个文件夹路径', 'Type or paste a folder path') });
     const pickBtn = h('button', { class: 'btn sm', type: 'button' }, icon('folder', 14), T('选择', 'Browse'));
+    const extDirBtn = h('button', {
+      class: 'btn sm ghost dv-ext-btn',
+      type: 'button',
+      title: T('在系统文件管理器中打开当前目录或定位选中项', 'Open current folder or reveal selected item in Explorer')
+    }, icon('external', 14), h('span', null, T('系统文件管理器', 'Explorer')));
+
+    const filterIn = h('input', {
+      class: 'input dv-filter',
+      type: 'text',
+      spellcheck: 'false',
+      placeholder: T('在当前目录内筛选文件名（支持超 200 项全量过滤）…', 'Filter files in this folder…')
+    });
+    const filterClearBtn = h('button', {
+      class: 'btn ghost sm dv-filter-clear',
+      type: 'button',
+      hidden: true,
+      title: T('清空筛选', 'Clear filter'),
+      'aria-label': T('清空筛选', 'Clear filter')
+    }, icon('close', 12));
+    const filterRow = h('div', { class: 'dv-filter-row' }, icon('search', 13), filterIn, filterClearBtn);
+
     const crumbBox = h('div', { class: 'dv-crumbs' });
+    const noticeBox = h('div', { class: 'dv-notice', hidden: true });
+    const focusBox = h('div', { class: 'dv-focus-bar', hidden: true });
     const metaBox = h('div', { class: 'dv-meta' });
+    const prevBtn = h('button', { class: 'btn ghost sm dv-more', type: 'button', hidden: true }, T('加载前一批', 'Load previous'));
     const listBox = h('div', { class: 'dv-list' });
     const moreBtn = h('button', { class: 'btn ghost sm dv-more', type: 'button', hidden: true }, T('加载更多', 'Load more'));
     const stateBox = h('div', { class: 'dv-state', hidden: true });
 
-    const bar = h('div', { class: 'dv-bar' }, upBtn, refreshBtn, pathIn, pickBtn);
+    const bar = h('div', { class: 'dv-bar' }, upBtn, refreshBtn, pathIn, pickBtn, extDirBtn);
     const el = h('div', { class: 'dv' });
     el.appendChild(bar);
     el.appendChild(crumbBox);
+    el.appendChild(filterRow);
+    el.appendChild(noticeBox);
+    el.appendChild(focusBox);
     el.appendChild(metaBox);
     el.appendChild(stateBox);
+    el.appendChild(prevBtn);
     el.appendChild(listBox);
     el.appendChild(moreBtn);
+
+    /* ---------- 辅助操作 ---------- */
+    async function previewTextModal(path, name) {
+      try {
+        const text = await API.readText(path, 120000);
+        const body = h('div', { class: 'stack' },
+          h('div', { class: 'small muted mono ellipsis', title: path }, path),
+          h('pre', { class: 'dv-text-pre' }, String(text == null ? '' : text))
+        );
+        UI.modal({
+          title: name || T('文件内容预览', 'File preview'),
+          wide: true,
+          body: body,
+          buttons: [
+            { id: 'copy', label: T('复制内容', 'Copy text'), kind: 'ghost' },
+            { id: 'reveal', label: T('系统文件管理器', 'Explorer'), kind: 'ghost' },
+            { id: 'close', label: T('关闭', 'Close'), kind: 'primary' }
+          ],
+          onAction: (id) => {
+            if (id === 'copy') { UI.copy(String(text == null ? '' : text)); return false; }
+            if (id === 'reveal') { revealSafe(path); return false; }
+            return true;
+          }
+        });
+      } catch (e) {
+        toast(errText(e), 'error');
+      }
+    }
+
+    function revealSafe(p) {
+      if (!p) return;
+      if (root.AIEntries && typeof root.AIEntries.reveal === 'function') {
+        root.AIEntries.reveal(p);
+      } else {
+        Promise.resolve(API.reveal(p)).catch((e) => toast(errText(e), 'error'));
+      }
+    }
+
+    function openDefaultAppSafe(p) {
+      if (!p) return;
+      if (root.AIEntries && typeof root.AIEntries.openSystemApp === 'function') {
+        root.AIEntries.openSystemApp(p);
+        return;
+      }
+      if (isExec(p)) {
+        toast(T('这是可执行文件，为防误运行仅支持定位，不直接启动', 'Executable blocked from direct launch'), 'warn');
+        return;
+      }
+      Promise.resolve(API.openPath(p)).catch((e) => toast(errText(e), 'error'));
+    }
+
+    async function restartAsAdminFor(targetPath) {
+      try {
+        await API.configSet({
+          pending_jump: {
+            openPath: targetPath,
+            ts: Date.now()
+          }
+        });
+      } catch (_) {}
+      try {
+        await API.runAsAdmin();
+      } catch (e) {
+        toast(errText(e), 'error');
+      }
+    }
+
+    /* ---------- 权限 / 缺失兜底横幅 ---------- */
+    function paintNotice() {
+      noticeBox.replaceChildren();
+      if (!notice || (!notice.accessDenied && !notice.missingTarget)) {
+        noticeBox.hidden = true;
+        return;
+      }
+      noticeBox.hidden = false;
+      if (notice.accessDenied) {
+        const req = notice.requestedPath || dir;
+        noticeBox.className = 'dv-notice is-warn';
+        noticeBox.appendChild(h('div', { class: 'dv-notice-text' },
+          icon('shield', 14),
+          h('span', null, T(
+            '受 Windows 系统权限保护，无法直接读取「' + req + '」，已自动打开最近可浏览的上级目录。',
+            'Protected by Windows ACL: cannot list "' + req + '". Opened the nearest accessible parent folder.'
+          ))));
+        noticeBox.appendChild(h('div', { class: 'dv-notice-acts' },
+          h('button', {
+            class: 'btn sm primary',
+            type: 'button',
+            onclick: () => restartAsAdminFor(req)
+          }, icon('shield', 13), T('以管理员身份重启并继续定位', 'Restart as admin & locate')),
+          h('button', {
+            class: 'btn sm ghost',
+            type: 'button',
+            onclick: () => revealSafe(req)
+          }, icon('external', 13), T('尝试用系统文件管理器打开', 'Try in Explorer')),
+          h('button', {
+            class: 'btn sm ghost',
+            type: 'button',
+            onclick: () => { notice = null; paintNotice(); }
+          }, T('收起', 'Dismiss'))
+        ));
+        return;
+      }
+      if (notice.missingTarget) {
+        const miss = notice.missingTarget;
+        noticeBox.className = 'dv-notice is-info';
+        noticeBox.appendChild(h('div', { class: 'dv-notice-text' },
+          icon('folder', 14),
+          h('span', null, T(
+            '目标位置已不存在：「' + miss + '」，已为你打开最近存在的上级目录。',
+            'Target missing: "' + miss + '". Opened the nearest existing parent folder.'
+          ))));
+        noticeBox.appendChild(h('div', { class: 'dv-notice-acts' },
+          h('button', {
+            class: 'btn sm ghost',
+            type: 'button',
+            onclick: () => {
+              if (root.AIEntries && root.AIEntries.open) root.AIEntries.open(miss);
+              else load(null);
+            }
+          }, icon('refresh', 13), T('重新探测', 'Retry')),
+          h('button', {
+            class: 'btn sm ghost',
+            type: 'button',
+            onclick: () => { notice = null; paintNotice(); }
+          }, T('收起', 'Dismiss'))
+        ));
+      }
+    }
+
+    /* ---------- 选中 / 高亮条目动作条 ---------- */
+    function paintFocusBar() {
+      focusBox.replaceChildren();
+      if (!focusedItem || !focusedItem.path) {
+        focusBox.hidden = true;
+        return;
+      }
+      focusBox.hidden = false;
+      const it = focusedItem;
+      const isDir = it.kind === 'dir';
+      const execFlag = !isDir && isExec(it.name);
+      const arcFlag = !isDir && isArchive(it.name);
+      const imgFlag = !isDir && isImage(it.name);
+      const txtFlag = !isDir && isTextFile(it.name);
+
+      const acts = [];
+      if (isDir) {
+        acts.push(h('button', {
+          class: 'btn sm primary', type: 'button',
+          onclick: () => setPath(it.path)
+        }, icon('folder', 13), T('进入目录', 'Open folder')));
+      } else if (arcFlag) {
+        acts.push(h('button', {
+          class: 'btn sm primary', type: 'button',
+          onclick: () => root.App && root.App.jump && root.App.jump('archive', { paths: [it.path] })
+        }, icon('archive', 13), T('在压缩包页打开', 'Open in Archives')));
+      } else if (imgFlag && typeof UI.preview === 'function') {
+        acts.push(h('button', {
+          class: 'btn sm primary', type: 'button',
+          onclick: () => UI.preview({ items: [{ path: it.path, name: it.name }], index: 0, title: it.name })
+        }, icon('shots', 13), T('软件内预览', 'Preview')));
+      } else if (txtFlag) {
+        acts.push(h('button', {
+          class: 'btn sm primary', type: 'button',
+          onclick: () => previewTextModal(it.path, it.name)
+        }, icon('file', 13), T('软件内查看', 'View text')));
+      }
+      if (execFlag) {
+        acts.push(h('button', {
+          class: 'btn sm', type: 'button',
+          onclick: () => root.App && root.App.jump && root.App.jump('apps', { tab: 'procs', q: stemOf(it.name), paths: [it.path] })
+        }, icon('apps', 13), T('在应用/进程中查看', 'Inspect in Apps')));
+      } else if (!isDir) {
+        acts.push(h('button', {
+          class: 'btn sm ghost', type: 'button',
+          onclick: () => openDefaultAppSafe(it.path)
+        }, icon('file', 13), T('用默认程序打开', 'Default app')));
+      }
+      acts.push(h('button', {
+        class: 'btn sm ghost', type: 'button',
+        onclick: () => revealSafe(it.path)
+      }, icon('external', 13), T('系统文件管理器', 'Explorer')));
+      acts.push(h('button', {
+        class: 'btn sm ghost', type: 'button',
+        onclick: () => UI.copy(it.path)
+      }, icon('copy', 13), T('复制路径', 'Copy')));
+
+      focusBox.appendChild(h('div', { class: 'dv-focus-info' },
+        icon(arcFlag ? 'archive' : (isDir ? 'folder' : 'file'), 14),
+        h('span', { class: 'dv-focus-name ellipsis', title: it.path }, it.name),
+        execFlag ? h('span', { class: 'badge warn' }, T('可执行文件 · 仅定位不运行', 'Executable · safe lock')) : null,
+        h('span', { class: 'dv-focus-path mono small muted ellipsis', title: it.path }, it.path)
+      ));
+      focusBox.appendChild(h('div', { class: 'dv-focus-acts' }, ...acts));
+    }
 
     /* ---------- 状态展示 ---------- */
     function paintMeta() {
       metaBox.replaceChildren();
+      extDirBtn.disabled = !dir && !(focusedItem && focusedItem.path);
       if (busy && !items.length) {
         metaBox.appendChild(h('span', { class: 'small muted' }, T('正在读取目录…', 'Reading folder…')));
         return;
@@ -134,14 +380,21 @@
       metaBox.appendChild(h('span', { class: 'small muted' },
         T(fmtCount(dirsN) + ' 个文件夹 · ' + fmtCount(filesN) + ' 个文件 · 共 ' + fmtCount(total) + ' 项',
           fmtCount(dirsN) + ' folders · ' + fmtCount(filesN) + ' files · ' + fmtCount(total) + ' entries')));
-      /* 一页只读 200 项。不把这件事说出来，用户翻不到第 201 项时
-         会以为文件不存在 —— 之前 @ 候选就是这么骗了他一次。 */
-      if (truncated) {
+      if (filterText && unfilteredTotal > total) {
         metaBox.appendChild(h('span', { class: 'badge' },
-          T('已显示 ' + fmtCount(items.length) + ' / ' + fmtCount(total) + ' 项',
-            fmtCount(items.length) + ' of ' + fmtCount(total) + ' shown')));
+          T('已筛选（原共 ' + fmtCount(unfilteredTotal) + ' 项）', 'Filtered from ' + fmtCount(unfilteredTotal))));
       }
-      if (busy && items.length) {
+      if (locatedIdx >= 0 && pageOffset > 0) {
+        metaBox.appendChild(h('span', { class: 'badge ok' },
+          T('已自动定位至第 ' + fmtCount(locatedIdx + 1) + ' 项', 'Located at #' + fmtCount(locatedIdx + 1))));
+      }
+      if (truncated || hasPrev) {
+        const rangeEnd = pageOffset + items.length;
+        metaBox.appendChild(h('span', { class: 'badge' },
+          T('当前显示第 ' + fmtCount(pageOffset + 1) + '–' + fmtCount(rangeEnd) + ' / ' + fmtCount(total) + ' 项',
+            'Showing ' + fmtCount(pageOffset + 1) + '–' + fmtCount(rangeEnd) + ' of ' + fmtCount(total))));
+      }
+      if ((busy || busyAppend) && items.length) {
         metaBox.appendChild(h('span', { class: 'small muted' }, T('读取中…', 'Loading…')));
       }
     }
@@ -150,39 +403,58 @@
       stateBox.replaceChildren();
       if (err) {
         stateBox.hidden = false;
+        const isPerm = /权限不足|Access is denied|拒绝访问/i.test(err);
         stateBox.appendChild(h('div', { class: 'dv-err' },
           h('span', null, err),
-          h('button', { class: 'btn ghost sm', type: 'button', onclick: () => load(0) }, T('重试', 'Retry'))));
+          isPerm ? h('button', {
+            class: 'btn sm primary', type: 'button',
+            onclick: () => restartAsAdminFor(dir)
+          }, icon('shield', 13), T('以管理员身份重启', 'Restart as admin')) : null,
+          dir ? h('button', {
+            class: 'btn ghost sm', type: 'button',
+            onclick: () => revealSafe(dir)
+          }, icon('external', 13), T('系统文件管理器', 'Explorer')) : null,
+          h('button', { class: 'btn ghost sm', type: 'button', onclick: () => load(null) }, T('重试', 'Retry'))));
         return;
       }
       if (!dir) {
         stateBox.hidden = false;
         stateBox.appendChild(h('div', { class: 'dv-hint' },
-          /* 提示里只能写真实存在的入口：右键菜单那一项叫「在空间工具里查看」。
-             以前这里写了「在应用内看」，但界面上根本没有这么一个按钮。 */
-          T('选一个文件夹；或者右键任意位置，选「在空间工具里查看」。',
-            'Pick a folder, or right-click any path and choose "Show in space tools".')));
+          T('选一个文件夹，或直接点击 AI 回答 / 搜索结果中的任意链接即可在此定位查看。',
+            'Pick a folder, or click any path in AI / Search results to inspect it here.')));
         return;
       }
       if (!busy && !items.length) {
         stateBox.hidden = false;
-        stateBox.appendChild(h('div', { class: 'dv-hint' }, T('这个文件夹是空的', 'This folder is empty')));
+        stateBox.appendChild(h('div', { class: 'dv-hint' },
+          filterText
+            ? T('当前目录下没有匹配「' + filterText + '」的文件或文件夹', 'No items match "' + filterText + '" in this folder')
+            : T('这个文件夹是空的', 'This folder is empty')));
         return;
       }
       stateBox.hidden = true;
     }
 
     /* ---------- 行 ---------- */
+    function setFocused(item, rowEl) {
+      focusedItem = item;
+      listBox.querySelectorAll('.dv-row[data-sel]').forEach((n) => n.removeAttribute('data-sel'));
+      if (rowEl) rowEl.setAttribute('data-sel', '');
+      paintFocusBar();
+      paintMeta();
+    }
+
     function rowOfItem(it) {
       const name = it.name || '';
       const path = joinDir(dir, name);
       const isDir = it.kind === 'dir';
+      const itemObj = { path, name, kind: isDir ? 'dir' : 'file', size: it.size || 0, ext: it.ext || '' };
       const row = h('div', {
         class: 'dv-row' + (isDir ? ' is-dir' : ' is-file'),
         tabindex: '0',
         dataset: { path: path.toLowerCase(), name: name }
       });
-      row.appendChild(h('span', { class: 'dv-ico' }, icon(isDir ? 'folder' : 'file', 14)));
+      row.appendChild(h('span', { class: 'dv-ico' }, icon(isArchive(name) && !isDir ? 'archive' : (isDir ? 'folder' : 'file'), 14)));
       row.appendChild(h('span', { class: 'dv-name ellipsis', title: path }, name));
       if (!isDir) {
         row.appendChild(h('span', { class: 'dv-ext muted small' }, it.ext ? '.' + it.ext : ''));
@@ -193,42 +465,61 @@
 
       const openIt = () => {
         if (isDir) { setPath(path); return; }
-        /* 可执行文件只定位不运行 —— 在目录浏览里顺手双击一个 setup.exe
-           就真的装起来，这个后果没人愿意承担。 */
-        if (isExec(name)) {
-          API.reveal(path);
-          toast(T('这是可执行文件，已定位但没有运行它', 'This is an executable; located but not run'), 'warn');
+        if (isArchive(name) && root.App && root.App.jump) {
+          root.App.jump('archive', { paths: [path] });
           return;
         }
-        Promise.resolve(API.openPath(path)).catch((e) => toast(errText(e), 'error'));
+        if (isImage(name) && typeof UI.preview === 'function') {
+          UI.preview({ items: [{ path, name }], index: 0, title: name });
+          return;
+        }
+        if (isTextFile(name)) {
+          previewTextModal(path, name);
+          return;
+        }
+        if (isExec(name)) {
+          setFocused(itemObj, row);
+          toast(T('这是可执行文件，已留在软件内定位，如需去资源管理器请点「系统文件管理器」',
+            'Executable located in app; use Explorer button if you need system folder'), 'info', 2800);
+          return;
+        }
+        openDefaultAppSafe(path);
       };
-      /* 目录：单击就进去（资源管理器、浏览器都是这个手感），**不绑 dblclick** ——
-         双击会先触发一次 click（已进入新目录，列表重画），第二下落在新行上会莫名跳走。
-         文件反过来：单击只选中，双击才打开，因为打开是外部动作，不能误触。 */
+
       if (isDir) {
         row.addEventListener('click', openIt);
       } else {
-        row.addEventListener('click', () => {
-          listBox.querySelectorAll('.dv-row[data-sel]').forEach((n) => n.removeAttribute('data-sel'));
-          row.setAttribute('data-sel', '');
-        });
+        row.addEventListener('click', () => setFocused(itemObj, row));
         row.addEventListener('dblclick', openIt);
       }
       row.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); openIt(); }
       });
       if (typeof attachMenu === 'function') {
-        attachMenu(row, () => [
-          isDir
-            ? { label: T('打开这个文件夹', 'Open folder'), icon: 'folder', action: () => setPath(path) }
-            : { label: T('用默认程序打开', 'Open with default app'), icon: 'file', action: openIt },
-          { label: T('在资源管理器里显示', 'Show in Explorer'), icon: 'external', action: () => API.reveal(path) },
-          { label: T('复制完整路径', 'Copy full path'), icon: 'copy', action: () => { try { UI.copy(path); } catch (e) { toast(path); } } },
-          { sep: true },
-          { label: T('问助手：这个能删吗', 'Ask: can I delete this'), icon: 'spark', action: () => { if (root.AIDrawer) root.AIDrawer.open({ title: T('问助手 · 这个文件', 'Ask · this file'), question: T('这个文件能删吗：', 'Can I delete ') + path }); } }
-        ]);
+        attachMenu(row, () => {
+          const itemsMenu = [];
+          if (isDir) {
+            itemsMenu.push({ label: T('在软件内打开文件夹', 'Open folder in app'), icon: 'folder', action: () => setPath(path) });
+          } else {
+            if (isArchive(name)) {
+              itemsMenu.push({ label: T('在软件「压缩包」中打开', 'Open in Archives'), icon: 'archive', action: () => root.App && root.App.jump && root.App.jump('archive', { paths: [path] }) });
+            } else if (isImage(name) && typeof UI.preview === 'function') {
+              itemsMenu.push({ label: T('软件内预览图片', 'Preview image'), icon: 'shots', action: () => UI.preview({ items: [{ path, name }], index: 0, title: name }) });
+            } else if (isTextFile(name)) {
+              itemsMenu.push({ label: T('软件内查看文本', 'View text in app'), icon: 'file', action: () => previewTextModal(path, name) });
+            }
+            if (!isExec(name)) {
+              itemsMenu.push({ label: T('用系统默认程序打开', 'Open with default app'), icon: 'file', action: () => openDefaultAppSafe(path) });
+            }
+          }
+          itemsMenu.push({ label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', action: () => revealSafe(path) });
+          itemsMenu.push({ label: T('复制完整路径', 'Copy full path'), icon: 'copy', action: () => UI.copy(path) });
+          itemsMenu.push({ sep: true });
+          itemsMenu.push({ label: T('问助手：这个能删吗', 'Ask: can I delete this'), icon: 'spark', action: () => { if (root.AIDrawer) root.AIDrawer.open({ title: T('问助手 · 这个文件', 'Ask · this file'), question: T('这个文件能删吗：', 'Can I delete ') + path }); } });
+          return itemsMenu;
+        });
       }
-      rowOf.set(path.toLowerCase(), row);
+      rowOf.set(path.toLowerCase(), { row, item: itemObj });
       return row;
     }
 
@@ -236,44 +527,89 @@
       listBox.replaceChildren();
       rowOf.clear();
       items.forEach((it) => listBox.appendChild(rowOfItem(it)));
+      prevBtn.hidden = !hasPrev;
       moreBtn.hidden = !truncated;
       if (hitPath) highlight(hitPath);
     }
 
     /* ---------- 读取 ---------- */
-    function applyRes(res, append) {
+    function applyRes(res, mode) {
       const got = (res && res.items) || [];
-      items = append ? items.concat(got) : got;
+      const resOffset = Number(res && res.offset) || 0;
+      if (mode === 'append') {
+        items = items.concat(got);
+        nextOffset = resOffset + (Number(res && res.shown) || got.length);
+      } else if (mode === 'prepend') {
+        items = got.concat(items);
+        pageOffset = resOffset;
+      } else {
+        items = got;
+        pageOffset = resOffset;
+        nextOffset = resOffset + (Number(res && res.shown) || got.length);
+      }
       total = Number(res && res.total) || items.length;
+      unfilteredTotal = Number(res && res.unfilteredTotal);
+      if (!isFinite(unfilteredTotal)) unfilteredTotal = total;
       dirsN = Number(res && res.dirs);
       filesN = Number(res && res.files);
       if (!isFinite(dirsN)) dirsN = items.filter((x) => x.kind === 'dir').length;
       if (!isFinite(filesN)) filesN = items.filter((x) => x.kind !== 'dir').length;
-      truncated = !!(res && res.truncated);
-      nextOffset = (Number(res && res.offset) || 0) + (Number(res && res.shown) || got.length);
+      hasPrev = pageOffset > 0;
+      truncated = !!(res && res.truncated) && (pageOffset + items.length < total);
+      locatedIdx = (res && res.located && typeof res.locateIndex === 'number') ? res.locateIndex : -1;
     }
 
-    function load(offset) {
-      if (!alive || busy) return;
-      if (!dir) { paintMeta(); paintState(); return; }
-      busy = true;
-      err = '';
-      if (!offset) { items = []; truncated = false; nextOffset = 0; hitPath = ''; }
+    function load(offset, loadOpts) {
+      if (!alive) return Promise.resolve();
+      const lo = loadOpts || {};
+      const mode = lo.mode || (offset !== null && offset !== undefined && offset > 0 ? 'append' : 'fresh');
+      if (mode !== 'fresh' && (busy || busyAppend)) return Promise.resolve();
+      if (!dir) { paintMeta(); paintState(); return Promise.resolve(); }
+      const mySeq = mode === 'fresh' ? ++reqSeq : reqSeq;
+      if (mode === 'fresh') {
+        busy = true;
+        err = '';
+        items = [];
+        pageOffset = 0;
+        nextOffset = 0;
+        hasPrev = false;
+        truncated = false;
+        locatedIdx = -1;
+        if (!lo.keepHit) { hitPath = ''; focusedItem = null; }
+        paintFocusBar();
+      } else {
+        busyAppend = true;
+      }
       paintMeta();
       paintState();
-      paintList();
-      const at = offset || 0;
-      Promise.resolve()
-        .then(() => API.listDir(dir, PAGE, at))
-        .then((res) => { applyRes(res, at > 0); })
-        .catch((e) => { err = errText(e); })
+      if (mode === 'fresh') paintList();
+
+      const reqOffset = mode === 'fresh' ? (offset === undefined ? null : offset) : offset;
+      const apiOpts = {
+        locate: mode === 'fresh' && lo.locate ? lo.locate : null,
+        filter: filterText || null
+      };
+      return Promise.resolve()
+        .then(() => API.listDir(dir, PAGE, reqOffset, apiOpts))
+        .then((res) => {
+          if (!alive || mySeq !== reqSeq) return;
+          applyRes(res, mode);
+        })
+        .catch((e) => {
+          if (!alive || mySeq !== reqSeq) return;
+          err = errText(e);
+        })
         .then(() => {
+          if (!alive || mySeq !== reqSeq) return;
           busy = false;
-          if (!alive) return;
+          busyAppend = false;
           paintMeta();
           paintState();
           paintList();
           paintCrumbs();
+          paintNotice();
+          paintFocusBar();
+          prevBtn.hidden = !hasPrev;
           moreBtn.hidden = !truncated;
         });
     }
@@ -297,60 +633,122 @@
     /* ---------- 对外 ---------- */
     function setPath(p) {
       const next = stripSlash(String(p || '').trim());
-      if (!next) return;
+      if (!next) return Promise.resolve();
       dir = isDriveRoot(next) ? next.replace(/[\\/]+$/, '') + '\\' : next;
       pathIn.value = dir.replace(/\\+$/, isDriveRoot(dir) ? '\\' : '');
       hitPath = '';
-      load(0);
+      focusedItem = null;
+      notice = null;
+      filterText = '';
+      filterIn.value = '';
+      filterClearBtn.hidden = true;
+      paintNotice();
+      paintFocusBar();
+      return load(0, { mode: 'fresh', keepHit: false });
     }
 
     function highlight(p) {
       const want = String(p || '').toLowerCase();
-      if (!want) return;
-      /* 目录本身就是当前路径时，标记「你就是这里」 */
-      if (stripSlash(want) === stripSlash(dir).toLowerCase()) {
+      if (!want) return false;
+      const cleanWant = stripSlash(want);
+      if (cleanWant === stripSlash(dir).toLowerCase()) {
         el.setAttribute('data-here', '');
-        return;
+        return true;
       }
-      /* rowOf 的键是「小写完整路径」，所以查的时候也要小写 */
-      const row = rowOf.get(stripSlash(want));
-      if (!row) {
-        /* 只给到目录一级、但当前列的是它的父目录时，把同名那一行点亮 */
+      let found = rowOf.get(cleanWant);
+      if (!found) {
         const base = String(p || '').split(/[\\/]/).filter(Boolean).pop();
-        const loose = base ? rowOf.get(String(base).toLowerCase()) : null;
-        if (loose) { mark(loose); return; }
-        return;
+        if (base) {
+          const baseLow = base.toLowerCase();
+          for (const entry of rowOf.values()) {
+            if (entry.item && entry.item.name.toLowerCase() === baseLow) {
+              found = entry;
+              break;
+            }
+          }
+        }
       }
-      mark(row);
+      if (!found) return false;
+      mark(found.row, found.item);
+      return true;
     }
 
-    function mark(row) {
+    function mark(row, item) {
       listBox.querySelectorAll('.dv-row[data-hit]').forEach((n) => n.removeAttribute('data-hit'));
       row.setAttribute('data-hit', '');
-      try { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { row.scrollIntoView(); }
+      if (item) {
+        focusedItem = item;
+        paintFocusBar();
+        paintMeta();
+      }
+      try { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { if (row.scrollIntoView) row.scrollIntoView(); }
     }
 
-    function showPath(p, hit) {
-      setPath(p);
-      if (hit) {
-        hitPath = String(hit);
-        /* 数据回来之后 paintList 会自己调 highlight */
-      }
+    function showPath(p, hit, opts) {
+      const next = stripSlash(String(p || '').trim());
+      if (!next) return Promise.resolve();
+      dir = isDriveRoot(next) ? next.replace(/[\\/]+$/, '') + '\\' : next;
+      pathIn.value = dir.replace(/\\+$/, isDriveRoot(dir) ? '\\' : '');
+      hitPath = hit ? String(hit) : '';
+      focusedItem = null;
+      notice = (opts && (opts.accessDenied || opts.missingTarget)) ? Object.assign({}, opts) : null;
+      filterText = '';
+      filterIn.value = '';
+      filterClearBtn.hidden = true;
+      paintNotice();
+      paintFocusBar();
+      return load(null, { mode: 'fresh', keepHit: true, locate: hitPath || null });
     }
 
     upBtn.addEventListener('click', () => {
       const up = parentOf(dir);
       if (up) setPath(up);
     });
-    refreshBtn.addEventListener('click', () => load(0));
-    moreBtn.addEventListener('click', () => load(nextOffset));
+    refreshBtn.addEventListener('click', () => load(null, { mode: 'fresh', keepHit: true, locate: hitPath || null }));
+    extDirBtn.addEventListener('click', () => {
+      const target = (focusedItem && focusedItem.path) || dir;
+      if (!target) return;
+      revealSafe(target);
+    });
+    prevBtn.addEventListener('click', () => {
+      if (pageOffset <= 0) return;
+      const start = Math.max(0, pageOffset - PAGE);
+      load(start, { mode: 'prepend' });
+    });
+    moreBtn.addEventListener('click', () => load(nextOffset, { mode: 'append' }));
     pickBtn.addEventListener('click', () => {
       Promise.resolve(API.pickFolder(dir)).then((p) => { if (p) setPath(p); }).catch(() => {});
     });
     pathIn.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      setPath(pathIn.value);
+      const v = pathIn.value.trim();
+      if (!v) return;
+      if (root.AIEntries && typeof root.AIEntries.open === 'function') {
+        root.AIEntries.open(v);
+      } else {
+        setPath(v);
+      }
+    });
+    filterIn.addEventListener('input', () => {
+      const v = filterIn.value.trim();
+      filterClearBtn.hidden = !v;
+      if (filterTimer) clearTimeout(filterTimer);
+      filterTimer = setTimeout(() => {
+        filterTimer = 0;
+        filterText = v;
+        if (dir) load(0, { mode: 'fresh', keepHit: false });
+      }, 180);
+    });
+    filterClearBtn.addEventListener('click', () => {
+      if (filterTimer) { clearTimeout(filterTimer); filterTimer = 0; }
+      filterIn.value = '';
+      filterClearBtn.hidden = true;
+      if (filterText) {
+        filterText = '';
+        if (dir) load(0, { mode: 'fresh', keepHit: false });
+      }
+      filterIn.focus();
     });
 
     /* 初始目录可以直接给；调用方也可以先建再看 setPath */
@@ -361,12 +759,15 @@
     return {
       el: el,
       getPath: function () { return dir; },
+      getFocused: function () { return focusedItem ? Object.assign({}, focusedItem) : null; },
       setPath: setPath,
       showPath: showPath,
-      refresh: function () { load(0); },
+      refresh: function () { return load(null, { mode: 'fresh', keepHit: true, locate: hitPath || null }); },
       highlight: highlight,
       destroy: function () {
         alive = false;
+        reqSeq++;
+        if (filterTimer) { clearTimeout(filterTimer); filterTimer = 0; }
         rowOf.clear();
         try { el.remove(); } catch (e) {}
       }

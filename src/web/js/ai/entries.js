@@ -27,6 +27,17 @@
   const EXEC_EXT = ['exe', 'msi', 'bat', 'cmd', 'ps1', 'scr', 'com', 'vbs', 'vbe',
     'js', 'jse', 'wsf', 'lnk', 'reg', 'hta'];
 
+  const ARCHIVE_RE = /\.(?:tar\.(?:gz|bz2|xz|zst)|zip|rar|7z|tar|tgz|tbz2|txz|gz|bz2|xz|zst)$/i;
+
+  function isExecPath(p) {
+    const ext = extOf(p);
+    return !!ext && EXEC_EXT.indexOf(ext) >= 0;
+  }
+
+  function isArchivePath(p) {
+    return ARCHIVE_RE.test(stripSlash(String(p || '').trim()));
+  }
+
   /* 百分比变量只能按已知目录猜：JS 读不到进程环境，Rust 那边也没必要为
      一个路径展开单开命令。这几个是标准位置，猜错也只是打不开而不是打错地方。 */
   let env = { home: '', data: '', exe: '' };
@@ -98,9 +109,16 @@
 
   function parentOf(p) {
     const t = stripSlash(p);
+    if (!t) return '';
+    if (/^[A-Za-z]:[\\/]?$/.test(t)) return '';
+    /* UNC 共享根 \\server\share 没有可浏览父目录 */
+    if (/^\\\\[^\\/]+[\\/][^\\/]+$/.test(t)) return '';
     const i = Math.max(t.lastIndexOf('\\'), t.lastIndexOf('/'));
     if (i <= 0) return '';
-    return t.slice(0, i);
+    const par = t.slice(0, i);
+    /* 盘符根必须带尾反斜杠（C:\ 而非 C:），否则 Windows 当当前工作目录处理 */
+    if (/^[A-Za-z]:$/.test(par)) return par + '\\';
+    return par;
   }
 
   function extOf(p) {
@@ -140,13 +158,24 @@
     UIx.toast(msg.indexOf(path) >= 0 ? msg : msg + '\n' + path, 'warn', 4200);
   }
 
-  /* 1.42.9 起：目录在应用内浏览（Space Tools → DirView），不再默认打开 Explorer。
-     这解决了「AI 给的路径一点就跳出软件」的核心体验问题。
-     文件仍然用系统默认程序打开——应用内没有编辑器。
-     1.43.16：点击跳转前先经 Rust 真机存在性解析（精确命中优先；仅当原路径不存在时
-     才剥离粘连汉字/标点做真实存在性兜底），兼顾旧历史消息与奇异中文目录名。 */
+  async function expandAsync(raw) {
+    const s = String(raw == null ? '' : raw).trim().replace(/^[`'"]+|[`'"]+$/g, '').trim();
+    if (/^%[^%]+%/.test(s) && !env.home) {
+      try { await ready(); } catch (_) {}
+    }
+    return stripSlash(expand(s));
+  }
+
+  /* 1.45 起：全链路真实探测 + 软件内优先路由。
+     1) 所有本地路径优先走 Rust inspect_local_path 获取真实磁盘元数据（彻底废除 JS 靠「有没有 .」猜目录/文件）；
+     2) 文件夹（含带点目录如 157.0.4341.60、OpenAI.Codex_...）→ 软件内 DirView 打开；
+     3) 压缩包（.zip/.rar/.7z/.tar.* 等）→ 软件内压缩包页直接打开；
+     4) 可执行文件（.exe/.msi 等）及普通文件 → 软件内 DirView 打开其父目录并自动翻页定位+高亮选中，
+        绝不自动运行可执行文件，也绝不默认跳出系统文件管理器；
+     5) 权限受限（WindowsApps 等）→ 自动回退到最近可读上级目录并展示权限横幅（支持管理员重启续跳）；
+     6) 真正不存在 → 自动回退到最近存在的上级目录并明确提示，不再撞空页。 */
   async function resolveForJump(raw) {
-    let path = stripSlash(expand(raw));
+    let path = await expandAsync(raw);
     if (!path) return '';
     if (API && typeof API.resolvePath === 'function') {
       try {
@@ -161,26 +190,140 @@
     return path;
   }
 
+  async function inspect(raw) {
+    const expanded = await expandAsync(raw);
+    if (!expanded) return { status: 'invalid', path: '', error: T('路径是空的', 'Path is empty') };
+    if (API && typeof API.inspectPath === 'function') {
+      try {
+        const res = await API.inspectPath(expanded);
+        if (res && typeof res === 'object' && res.status) {
+          return res;
+        }
+      } catch (e) { /* 非 Tauri / 旧桩测试环境降级 */ }
+    }
+    const resolved = await resolveForJump(expanded);
+    const k = kindOf(resolved);
+    return {
+      status: 'ok',
+      path: resolved,
+      exists: true,
+      kind: k,
+      readable: true,
+      parent: parentOf(resolved),
+      isExec: k === 'file' && isExecPath(resolved),
+      isArchive: k === 'file' && isArchivePath(resolved),
+      fallback: true
+    };
+  }
+
+  async function resolvePaths(list) {
+    const src = Array.isArray(list) ? list : [];
+    const out = [];
+    const seen = new Set();
+    for (const raw of src) {
+      if (!raw) continue;
+      const p = await resolveForJump(String(raw));
+      if (!p) continue;
+      const key = p.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+    }
+    return out;
+  }
+
   async function open(p, opts) {
+    const o = opts || {};
+    if (o.external) {
+      return reveal(p);
+    }
+    const info = await inspect(p);
+    if (!info || info.status === 'invalid' || !info.path) {
+      failToast((info && info.error) || T('路径无效', 'Invalid path'), String(p || ''));
+      return { ok: false, error: (info && info.error) || 'invalid' };
+    }
+    const path = stripSlash(info.path);
+    const app = root.App;
+
+    /* 权限受限（如 C:\Program Files\WindowsApps\...）：自动落到最近可读上级目录并高亮受限文件夹 */
+    if (info.status === 'permission_denied') {
+      const fbDir = stripSlash(info.nearestReadable || info.parent || '');
+      if (app && typeof app.jump === 'function' && fbDir) {
+        await app.jump('tools', {
+          dir: fbDir,
+          highlight: stripSlash(info.nearestReadableHighlight || path),
+          paths: [path],
+          action: 'browse',
+          accessDenied: true,
+          requestedPath: path
+        });
+        return { ok: true, inApp: true, accessDenied: true, fallbackDir: fbDir };
+      }
+      failToast(info.error || T('权限不足，需要管理员权限', 'Access denied; administrator required'), path);
+      return { ok: false, accessDenied: true, error: info.error };
+    }
+
+    /* 目标缺失：若存在最近上级目录则自动在软件内打开并横幅提示，不再只给冷冰冰的空态 */
+    if (info.status === 'not_found') {
+      const fbDir = stripSlash(info.nearestExisting || '');
+      if (app && typeof app.jump === 'function' && fbDir) {
+        await app.jump('tools', {
+          dir: fbDir,
+          highlight: stripSlash(info.nearestExistingHighlight || ''),
+          paths: [path],
+          action: 'browse',
+          missingTarget: path
+        });
+        UIx.toast(T('该位置已不存在，已为你定位到最近的上级目录', 'Location missing; opened nearest existing folder'), 'warn', 3600);
+        return { ok: true, inApp: true, missingTarget: true, fallbackDir: fbDir };
+      }
+      failToast(info.error || T('这个位置已经不在了', 'This location no longer exists'), path);
+      return { ok: false, notFound: true, error: info.error };
+    }
+
+    const kind = info.kind || kindOf(path, o.kind);
+    const isArc = info.isArchive === true || (kind === 'file' && isArchivePath(path));
+    const isExec = info.isExec === true || (kind === 'file' && isExecPath(path));
+
+    /* 1. 压缩包：直达软件内「压缩包」页浏览 */
+    if (isArc && !o.noArchive && !o.inDirView && app && typeof app.jump === 'function') {
+      await app.jump('archive', { paths: [path] });
+      return { ok: true, inApp: true, page: 'archive', path };
+    }
+
+    /* 2. 文件夹（含带点目录如 157.0.4341.60）：软件内 DirView 打开 */
+    if (kind === 'dir' && app && typeof app.jump === 'function') {
+      await app.jump('tools', { dir: path, paths: [path], action: 'browse' });
+      return { ok: true, inApp: true, page: 'tools', path };
+    }
+
+    /* 3. 可执行文件与普通文件：软件内 DirView 打开父目录并自动翻页定位 + 高亮选中 */
+    const targetDir = stripSlash(info.parent || parentOf(path));
+    if (app && typeof app.jump === 'function' && targetDir) {
+      await app.jump('tools', {
+        dir: targetDir,
+        highlight: path,
+        paths: [path],
+        action: 'browse',
+        isExec: isExec,
+        kind: 'file'
+      });
+      return { ok: true, inApp: true, page: 'tools', dir: targetDir, highlight: path, isExec };
+    }
+
+    /* 兜底（无 App 壳环境的极端情况）：可执行文件只定位不运行 */
+    if (isExec) return reveal(path);
+    return openSystemApp(path);
+  }
+
+  async function openSystemApp(p) {
     const path = await resolveForJump(p);
     if (!path) return { ok: false };
-    const o = opts || {};
-    if (extOf(path) && EXEC_EXT.indexOf(extOf(path)) >= 0) {
-      /* 只定位不运行：用户想跑程序自己会去双击 */
-      try { await API.reveal(path); } catch (e) { /* 定位失败也还有提示 */ }
-      UIx.toast(T('这是可执行文件，已定位但没有运行它', 'It is an executable: revealed, not run'), 'info', 2600);
-      return { ok: true, revealed: true };
+    if (isExecPath(path)) {
+      UIx.toast(T('这是可执行文件，为防误运行不直接启动，请使用「系统文件管理器」查看',
+        'Executable blocked from direct launch; reveal in Explorer instead'), 'warn', 3200);
+      return { ok: false, blockedExec: true };
     }
-    /* 目录：优先在应用内 DirView 里打开，让用户能上下浏览 */
-    const k = kindOf(path, o.kind);
-    if (k === 'dir' && !o.external) {
-      const app = root.App;
-      if (app && typeof app.jump === 'function') {
-        app.jump('tools', { dir: path, paths: [path], action: 'browse' });
-        return { ok: true, inApp: true };
-      }
-    }
-    /* 文件：走系统默认程序 */
     try {
       await API.openPath(path);
       return { ok: true };
@@ -195,7 +338,7 @@
     if (!path) return { ok: false };
     try {
       await API.reveal(path);
-      return { ok: true };
+      return { ok: true, external: true };
     } catch (e) {
       failToast(e, path);
       return { ok: false, error: toastOf(e) };
@@ -212,26 +355,44 @@
     if (!path) return;
     const o = opts || {};
     const k = kindOf(path, o.kind);
+    const isArc = isArchivePath(path);
     const items = [{ header: leafOf(path) || path }];
-    /* 目录的主操作是应用内浏览；文件的主操作是系统打开 */
+    items.push({
+      label: isArc
+        ? T('在软件「压缩包」中打开', 'Open in Archives')
+        : (k === 'dir' ? T('在软件内浏览', 'Browse in app') : T('在软件内定位查看', 'Locate in app')),
+      icon: isArc ? 'archive' : 'scan',
+      action: () => { open(path); }
+    });
+    if (isArc) {
+      items.push({
+        label: T('在软件目录树中定位', 'Locate in folder view'),
+        icon: 'folder',
+        action: () => { open(path, { noArchive: true }); }
+      });
+    }
     if (k === 'dir') {
-      items.push({ label: T('在应用内浏览', 'Browse in app'), icon: 'scan',
-        action: () => {
-          const app = root.App;
-          if (app && typeof app.jump === 'function') app.jump('tools', { dir: path, paths: [path], action: 'browse' });
-          else location.hash = '#tools';
-        } });
-      items.push({ label: T('在整理页处理', 'Organize this folder'), icon: 'organize',
+      items.push({
+        label: T('在整理页处理', 'Organize this folder'),
+        icon: 'organize',
         action: () => {
           const app = root.App;
           if (app && typeof app.jump === 'function') app.jump('organize', { paths: [path] });
           else location.hash = '#organize';
-        } });
-      items.push({ label: T('在资源管理器中打开', 'Open in Explorer'), icon: 'external', action: () => { open(path, { external: true }); } });
-    } else {
-      items.push({ label: T('打开', 'Open'), icon: 'external', action: () => { open(path); } });
-      items.push({ label: T('在资源管理器中显示', 'Show in Explorer'), icon: 'folder', action: () => { reveal(path); } });
+        }
+      });
+    } else if (!isExecPath(path)) {
+      items.push({
+        label: T('用系统默认程序打开', 'Open with default app'),
+        icon: 'file',
+        action: () => { openSystemApp(path); }
+      });
     }
+    items.push({
+      label: T('在系统文件管理器中打开', 'Open in system file manager'),
+      icon: 'external',
+      action: () => { reveal(path); }
+    });
     items.push({ label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copy(path) });
     if (typeof o.onAsk === 'function') {
       items.push({ sep: true });
@@ -258,27 +419,42 @@
     const o = opts || {};
     const e = entry(p, o.kind, o.src) || { p: p, k: 'file', n: String(p), s: '', src: 'suggest' };
     const suffix = suffixOf(e);
-    const btn = h('button', {
+    const mainBtn = h('button', {
       class: 'ai-entry ' + (e.k === 'dir' ? 'is-dir' : 'is-file') + (o.compact ? ' compact' : ''),
       type: 'button',
-      title: e.p,
+      title: T('在软件内打开：', 'Open in app: ') + e.p,
       dataset: { path: e.p, kind: e.k }
     },
-      UIx.icon(e.k === 'dir' ? 'folder' : 'file', 14),
+      UIx.icon(isArchivePath(e.p) ? 'archive' : (e.k === 'dir' ? 'folder' : 'file'), 14),
       h('span', { class: 'ai-entry-n' }, e.n),
       suffix ? h('span', { class: 'ai-entry-s' }, suffix) : null
     );
-    btn.addEventListener('click', (ev) => {
+    mainBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       open(e.p);
     });
-    btn.addEventListener('contextmenu', (ev) => {
+    const extTip = T('在系统文件管理器中打开', 'Open in system file manager');
+    const extBtn = h('button', {
+      class: 'ai-entry-ext' + (o.compact ? ' compact' : ''),
+      type: 'button',
+      title: extTip,
+      'aria-label': extTip,
+      dataset: { path: e.p }
+    }, UIx.icon('external', 12));
+    extBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      reveal(e.p);
+    });
+    const wrap = h('span', { class: 'ai-entry-wrap' + (o.compact ? ' compact' : ''), dataset: { path: e.p, kind: e.k } },
+      mainBtn, extBtn);
+    wrap.addEventListener('contextmenu', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       menu(ev, e.p, o);
     });
-    return btn;
+    return wrap;
   }
 
   /* 一条「结果位置」带：放在回答下面，用户读完话就能直接点到那个目录 */
@@ -352,6 +528,9 @@
           if (!it) return;
           if (typeof it === 'string') add(it, null, t.tool);
           else if (it.path) add(it.path, it.kind === 'dir' ? 'dir' : null, t.tool);
+          else if (it.exe_path) add(it.exe_path, 'file', t.tool);
+          else if (it.install_path) add(it.install_path, 'dir', t.tool);
+          else if (it.dir && it.name) add(stripSlash(it.dir) + '\\' + it.name, 'file', t.tool);
           else if (it.dir) add(it.dir, 'dir', t.tool);
         });
       }
@@ -394,6 +573,13 @@
     scope.addEventListener('click', (ev) => {
       const t = ev.target;
       if (!t || !t.closest) return;
+      const extBtn = t.closest('.md-path-ext');
+      if (extBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        reveal(extBtn.getAttribute('data-path') || '');
+        return;
+      }
       const pathEl = t.closest('.md-path');
       if (pathEl) {
         ev.preventDefault();
@@ -411,7 +597,6 @@
           API.openPath(href).catch((e) => UIx.toast(toastOf(e), 'warn'));
         } else if (href) {
           UIx.copy(href);
-          UIx.toast(T('已复制链接', 'Link copied'), 'info', 1600);
         }
         return;
       }
@@ -419,7 +604,7 @@
     scope.addEventListener('contextmenu', (ev) => {
       const t = ev.target;
       if (!t || !t.closest) return;
-      const pathEl = t.closest('.md-path');
+      const pathEl = t.closest('.md-path, .md-path-ext');
       if (!pathEl) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -430,13 +615,20 @@
   root.AIEntries = {
     ready,
     expand,
+    expandAsync,
+    resolveForJump,
+    resolvePaths,
+    inspect,
     isPathLike,
     isAbs,
+    isExecPath,
+    isArchivePath,
     entry,
     leafOf,
     parentOf,
     kindOf,
     open,
+    openSystemApp,
     reveal,
     copy,
     menu,

@@ -982,8 +982,11 @@
                 acts.push(bToggle);
               }
               if (it.exe_path && it.exists) {
-                acts.push(iconBtn('打开所在位置', 'Open location', 'folder', () => {
-                  API.reveal(it.exe_path).catch((e) => toast(errText(e), 'error'));
+                acts.push(iconBtn('在软件内定位', 'Locate in app', 'scan', () => {
+                  openPath(it.exe_path);
+                }));
+                acts.push(iconBtn('在系统文件管理器中打开', 'Open in system file manager', 'external', () => {
+                  revealPath(it.exe_path);
                 }));
               }
               acts.push(iconBtn('删除自启动项', 'Delete entry', 'trash', async () => {
@@ -1051,9 +1054,14 @@
             }
           } : null,
           it.exe_path && it.exists ? {
-            label: T('打开文件所在位置', 'Open file location'),
-            icon: 'folder',
-            action: () => API.reveal(it.exe_path).catch((err) => toast(errText(err), 'error'))
+            label: T('在软件内定位文件', 'Locate in app'),
+            icon: 'scan',
+            action: () => openPath(it.exe_path)
+          } : null,
+          it.exe_path && it.exists ? {
+            label: T('在系统文件管理器中打开', 'Open in system file manager'),
+            icon: 'external',
+            action: () => revealPath(it.exe_path)
           } : null,
           it.command ? {
             label: T('复制启动命令', 'Copy command'),
@@ -1216,8 +1224,8 @@
       }
     };
     const procPageTotal = h('span', { class: 'pg-total' }, '1');
-    const btnProcPrev = pagerBtn('prev', () => gotoProcPage(ProcState.page - 1));
-    const btnProcNext = pagerBtn('next', () => gotoProcPage(ProcState.page + 1));
+    const btnProcPrev = pagerBtn('chevron-left', '上一页', 'Previous', () => gotoProcPage(ProcState.page - 1));
+    const btnProcNext = pagerBtn('chevron-right', '下一页', 'Next', () => gotoProcPage(ProcState.page + 1));
     const procPagerBar = h('div', { class: 'row pg-bar', style: { gap: '4px', alignItems: 'center' } },
       btnProcPrev, procPageInput, h('span', { style: { color: 'var(--text-3)', fontSize: '11px' } }, '/'), procPageTotal, btnProcNext
     );
@@ -1304,34 +1312,39 @@
     );
     procsCard.style.display = 'none';
 
+    let procLoadP = null;
     async function loadProcs(force, silent = false) {
-      if (ProcState.loading) return;
+      if (ProcState.loading && procLoadP) return procLoadP;
       ProcState.loading = true;
       if (!silent && (force || !ProcState.items.length)) {
         procTableBox.innerHTML = '';
         const spinner = h('div', { class: 'center text-muted', style: { padding: '32px' } }, icon('refresh', 20), h('span', { style: { marginLeft: '8px' } }, T('正在生成进程快照…', 'Snapshotting processes…')));
         procTableBox.appendChild(spinner);
       }
-      try {
-        const res = await API.engine('process.list', { aggregate: true });
-        if (!isMounted) return;
-        ProcState.items = Array.isArray(res && res.items) ? res.items : [];
-        ProcState.totalMemory = Number(res && res.total_memory) || 0;
-        ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
-        GlobalAppsCache.procs = ProcState.items;
-        GlobalAppsCache.procRawCount = ProcState.rawCount;
-        GlobalAppsCache.procTotalRam = ProcState.totalMemory;
-        if (!silent) ProcState.page = 1;
-        applyProcFilter();
-        renderProcVisual();
-      } catch (err) {
-        if (!silent) {
-          procTableBox.innerHTML = '';
-          procTableBox.appendChild(empty(T('读取进程列表失败', 'Failed to read processes'), (err && err.message) || String(err)));
+      procLoadP = (async () => {
+        try {
+          const res = await API.engine('process.list', { aggregate: true });
+          if (!isMounted) return;
+          ProcState.items = Array.isArray(res && res.items) ? res.items : [];
+          ProcState.totalMemory = Number(res && res.total_memory) || 0;
+          ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
+          GlobalAppsCache.procs = ProcState.items;
+          GlobalAppsCache.procRawCount = ProcState.rawCount;
+          GlobalAppsCache.procTotalRam = ProcState.totalMemory;
+          if (!silent) ProcState.page = 1;
+          applyProcFilter();
+          renderProcVisual();
+        } catch (err) {
+          if (!silent) {
+            procTableBox.innerHTML = '';
+            procTableBox.appendChild(empty(T('读取进程列表失败', 'Failed to read processes'), (err && err.message) || String(err)));
+          }
+        } finally {
+          ProcState.loading = false;
+          procLoadP = null;
         }
-      } finally {
-        ProcState.loading = false;
-      }
+      })();
+      return procLoadP;
     }
 
     function startProcLiveMonitoring() {
@@ -1824,12 +1837,18 @@
               bClose.disabled = true;
               bClose.title = T('系统核心保护组件受系统级保护，禁止关闭', 'Protected system component');
             }
-            const bFolder = iconBtn('打开所在目录', 'Open file location', 'folder', () => {
+            const bFolder = iconBtn('在软件内定位', 'Locate in app', 'scan', () => {
               if (it.exe_path) openPath(it.exe_path);
             });
-            if (!it.exe_path) bFolder.disabled = true;
+            const bExt = iconBtn('在系统文件管理器中打开', 'Open in system file manager', 'external', () => {
+              if (it.exe_path) revealPath(it.exe_path);
+            });
+            if (!it.exe_path) {
+              bFolder.disabled = true;
+              bExt.disabled = true;
+            }
 
-            return h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '4px', flexWrap: 'nowrap' } }, bClose, bFolder);
+            return h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '4px', flexWrap: 'nowrap' } }, bClose, bFolder, bExt);
           }
         }
       ];
@@ -1857,8 +1876,10 @@
           { label: T('强制结束进程', 'Force kill'), icon: 'trash',
             danger: true, disabled: it.is_system, action: () => closeProcOne(it, true) },
           { sep: true },
-          { label: T('打开文件所在位置', 'Open file location'), icon: 'folder',
+          { label: T('在软件内定位文件', 'Locate in app'), icon: 'scan',
             disabled: !it.exe_path, action: () => openPath(it.exe_path) },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external',
+            disabled: !it.exe_path, action: () => revealPath(it.exe_path) },
           { label: T('复制完整路径', 'Copy full path'), icon: 'copy',
             disabled: !it.exe_path, action: () => copyText(it.exe_path) },
           { label: T('复制进程名称', 'Copy name'), icon: 'copy', action: () => copyText(it.name) },
@@ -1866,7 +1887,7 @@
           { label: T('在「已安装程序」中查找', 'Find in installed apps'), icon: 'apps', action: () => {
             switchTab('apps');
             const kw = it.clean_name;
-            searchInput.value = kw;
+            filterInput.value = kw;
             S.filter = kw.trim().toLowerCase();
             applyFilter();
           }},
@@ -2881,8 +2902,10 @@
             { header: it.name || '' },
             { label: T('🚀 深度卸载与残留清理', '🚀 Deep uninstall & clean'), icon: 'trash',
               danger: true, action: () => openUninstallWizard(it, 'prepare') },
-            { label: T('打开安装目录', 'Open install folder'), icon: 'folder',
+            { label: T('在软件内打开安装目录', 'Browse install folder in app'), icon: 'scan',
               disabled: !it.install_path, action: () => openInstallDir(it) },
+            { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external',
+              disabled: !it.install_path, action: () => it.install_path && revealPath(it.install_path) },
             { sep: true },
             { label: T('复制名称', 'Copy name'), icon: 'copy', action: () => copyText(it.name) },
             { label: T('复制包名', 'Copy package name'), icon: 'copy',
@@ -2901,8 +2924,10 @@
             action: () => deleteEntry(it) },
           { sep: true },
           { label: T('注册表条目…', 'Registry entry…'), icon: 'search', action: () => showRegistry(it) },
-          { label: T('安装文件夹', 'Install folder'), icon: 'folder',
+          { label: T('在软件内打开安装目录', 'Browse install folder in app'), icon: 'scan',
             disabled: !it.install_path, action: () => openInstallDir(it) },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external',
+            disabled: !it.install_path, action: () => it.install_path && revealPath(it.install_path) },
           { label: T('程序网站', 'Program website'), icon: 'external',
             disabled: !it.url, action: () => openSite(it) },
           { sep: true },
@@ -3349,7 +3374,21 @@
     }
 
     function openPath(p) {
-      API.openPath(p).catch((e) => toast(errText(e), 'error'));
+      if (!p) return;
+      if (window.AIEntries && typeof window.AIEntries.open === 'function') {
+        window.AIEntries.open(p);
+      } else {
+        API.reveal(p).catch((e) => toast(errText(e), 'error'));
+      }
+    }
+
+    function revealPath(p) {
+      if (!p) return;
+      if (window.AIEntries && typeof window.AIEntries.reveal === 'function') {
+        window.AIEntries.reveal(p);
+      } else {
+        API.reveal(p).catch((e) => toast(errText(e), 'error'));
+      }
     }
 
     function openInstallDir(it) {
@@ -4075,24 +4114,57 @@
     /* 第四块不存在：残留内容合并进 loSection，保持顶层 3 块 */
 
     liveJump = async (payload) => {
-      const tab = (payload && payload.tab) || (payload && payload.status ? 'startup' : 'apps');
+      const p = payload || {};
+      const tab = p.tab || (p.status ? 'startup' : 'apps');
       switchTab(tab);
+      let kw = String(p.filter || p.name || p.q || '').trim();
+      if (!kw && Array.isArray(p.paths) && p.paths.length) {
+        const first = String(p.paths[0] || '').replace(/[\\/]+$/, '');
+        const leaf = first.split(/[\\/]/).pop() || '';
+        kw = leaf.replace(/\.exe$/i, '');
+      }
       if (tab === 'startup') {
-        if (payload && payload.status) {
-          const st = String(payload.status).toLowerCase();
+        if (kw) {
+          startupFilterInput.value = kw;
+          StartupState.filter = kw.toLowerCase();
+        }
+        if (p.status) {
+          const st = String(p.status).toLowerCase();
           setStartupView(st === 'invalid' ? 'broken' : st);
         }
-        if (payload && (payload.filter || payload.name || payload.q)) {
-          const kw = String(payload.filter || payload.name || payload.q || '');
-          startupFilterInput.value = kw;
-          StartupState.filter = kw.trim().toLowerCase();
+        if (!StartupState.items.length) {
+          try { await loadStartup(false); } catch (_) {}
+        }
+        applyStartupFilter();
+        if (kw && !StartupState.filtered.length) {
+          try { await loadStartup(true); } catch (_) {}
           applyStartupFilter();
         }
+      } else if (tab === 'procs') {
+        if (kw) {
+          procFilterInput.value = kw;
+          ProcState.filter = kw.toLowerCase();
+        }
+        /* 等待在途或冷启动进程快照；若旧缓存未命中目标进程则强制刷新一次 */
+        if (procLoadP || !ProcState.items.length) {
+          try { await loadProcs(false); } catch (_) {}
+        }
+        applyProcFilter();
+        if (kw && !ProcState.filtered.length) {
+          try { await loadProcs(true); } catch (_) {}
+          applyProcFilter();
+        }
       } else if (tab === 'apps') {
-        if (payload && (payload.filter || payload.name || payload.q)) {
-          const kw = String(payload.filter || payload.name || payload.q || '');
+        if (kw) {
           filterInput.value = kw;
-          S.filter = kw.trim().toLowerCase();
+          S.filter = kw.toLowerCase();
+        }
+        if (!S.items.length) {
+          try { await loadApps(false); } catch (_) {}
+        }
+        applyFilter();
+        if (kw && !S.filtered.length) {
+          try { await loadApps(true); } catch (_) {}
           applyFilter();
         }
       } else if (tab === 'footprint') {
@@ -4125,6 +4197,7 @@
       GlobalAppsCache.perfSamples = PerfState.samples.slice();
       GlobalAppsCache.perfData = PerfState.perfData;
       if (window.App) window.App._onPageSize = null;
+      if (UI.closeModals) UI.closeModals();
       setActions();
     };
   }

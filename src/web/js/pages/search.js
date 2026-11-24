@@ -192,7 +192,8 @@
           if (!row) return;
           tr.dataset.ctx = 'index';
           attachMenu(tr, [
-            { label: T('打开目录', 'Open folder'), icon: 'external', action: () => reveal(row.root) },
+            { label: T('在软件内浏览目录', 'Browse folder in app'), icon: 'scan', action: () => openInApp(row.root) },
+            { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', action: () => reveal(row.root) },
             { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copyText(row.root) },
             { sep: true },
             { label: T('重建这个索引', 'Rebuild this index'), icon: 'scan', action: () => buildIndex(true, [row.id]) },
@@ -221,24 +222,31 @@
           }, icon('undo', 14), h('span', { text: T('全部重建', 'Rebuild all') })),
           h('div', { class: 'spacer' }),
           h('button', {
-            class: 'btn sm', disabled: !state.indexDir, onclick: () => reveal(state.indexDir)
-          }, icon('external', 14), h('span', { text: T('打开索引目录', 'Show index folder') }))
+            class: 'btn sm', disabled: !state.indexDir, onclick: () => openInApp(state.indexDir)
+          }, icon('scan', 14), h('span', { text: T('在软件内打开索引目录', 'Browse index folder') })),
+          h('button', {
+            class: 'btn sm ghost', disabled: !state.indexDir, onclick: () => reveal(state.indexDir)
+          }, icon('external', 14), h('span', { text: T('系统文件管理器', 'Explorer') }))
         ));
 
         return parts;
       }
 
       async function openIndexManager() {
+        if (manager && manager.modal && typeof manager.modal.close === 'function') {
+          manager.modal.close();
+        }
         const host = h('div', { class: 'stack' });
         const render = () => host.replaceChildren(...managerBody(host));
         render();
-        UI.modal({
+        const modalRef = UI.modal({
           title: T('索引详情', 'Index details'),
           wide: true,
           body: host,
-          buttons: [{ id: 'close', label: T('关闭', 'Close'), kind: 'ghost' }]
+          buttons: [{ id: 'close', label: T('关闭', 'Close'), kind: 'ghost' }],
+          onClose: () => { if (manager && manager.modal === modalRef) manager = null; }
         });
-        manager = { host, render };
+        manager = { host, render, modal: modalRef };
       }
 
       let manager = null;
@@ -439,14 +447,33 @@
           const cols = [
             {
               key: 'name', label: T('名称', 'Name'),
-              render: (r) => h('div', { class: 'name' }, icon('file', 14), h('span', { class: 'txt', text: r.name || '—' }))
+              render: (r) => h('div', { class: 'name' }, icon(r.kind === 'dir' ? 'folder' : 'file', 14), h('span', { class: 'txt', text: r.name || '—' }))
             },
             {
               key: 'path', label: T('路径', 'Path'),
               render: (r) => h('span', { class: 'mono ellipsis', title: r.path || '', text: r.path || '—' })
             },
-            { key: 'size', label: T('大小', 'Size'), width: '90px', align: 'right', render: (r) => UI.fmtBytes(r.size || 0) },
-            { key: 'mtime', label: T('修改时间', 'Modified'), width: '140px', align: 'right', render: (r) => r.mtime ? UI.fmtTime(r.mtime) : '—' }
+            { key: 'size', label: T('大小', 'Size'), width: '90px', align: 'right', render: (r) => r.kind === 'dir' ? T('文件夹', 'Folder') : UI.fmtBytes(r.size || 0) },
+            { key: 'mtime', label: T('修改时间', 'Modified'), width: '140px', align: 'right', render: (r) => r.mtime ? UI.fmtTime(r.mtime) : '—' },
+            {
+              key: 'ops', label: T('操作', 'Actions'), width: '80px', align: 'right',
+              render: (r) => h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '4px' } },
+                h('button', {
+                  type: 'button',
+                  class: 'btn icon sm ghost',
+                  title: T('在软件内定位查看', 'Locate in app'),
+                  'aria-label': T('在软件内定位查看', 'Locate in app'),
+                  onclick: (e) => { e.stopPropagation(); openInApp(r.path); }
+                }, icon('scan', 13)),
+                h('button', {
+                  type: 'button',
+                  class: 'btn icon sm ghost',
+                  title: T('在系统文件管理器中打开', 'Open in system file manager'),
+                  'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
+                  onclick: (e) => { e.stopPropagation(); reveal(r.path); }
+                }, icon('external', 13))
+              )
+            }
           ];
 
           const body = table({ columns: cols, rows: slice, rowKey: (r) => r.path });
@@ -455,22 +482,31 @@
             const row = slice[i];
             if (!row) return;
             tr.dataset.ctx = 'result';
-            tr.addEventListener('click', () => reveal(row.path));
-            tr.addEventListener('dblclick', () => openFile(row.path));
+            tr.addEventListener('click', (e) => {
+              if (e.target && e.target.closest && e.target.closest('button')) return;
+              openInApp(row.path);
+            });
+            const isExec = window.AIEntries && window.AIEntries.isExecPath && window.AIEntries.isExecPath(row.path);
             attachMenu(tr, [
-              { label: T('打开文件', 'Open file'), icon: 'external', action: () => openFile(row.path) },
-              { label: T('打开所在目录', 'Show in folder'), icon: 'folder', action: () => reveal(row.path) },
+              { label: T('在软件内定位查看', 'Locate in app'), icon: 'scan', action: () => openInApp(row.path) },
+              { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', action: () => reveal(row.path) },
+              !isExec && row.kind !== 'dir'
+                ? { label: T('用系统默认程序打开', 'Open with default app'), icon: 'file', action: () => openFile(row.path) }
+                : null,
               { sep: true },
               { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copyText(row.path) },
               { label: T('复制文件名', 'Copy file name'), icon: 'file', action: () => copyText(row.name) }
-            ]);
+            ].filter(Boolean));
           });
 
+          const sourceLabel = state.source === 'es'
+            ? 'Everything'
+            : (state.source === 'direct' ? T('本机路径直达', 'Direct path') : T('本地索引', 'Local index'));
           const pager = h('div', { class: 'action-bar' },
             h('span', {
               class: 'small muted',
               text: T('已加载', 'Loaded') + ' ' + UI.fmtCount(state.items.length) + ' · ' + state.elapsed + ' ms'
-                + (state.source ? ' · ' + (state.source === 'es' ? 'Everything' : T('本地索引', 'Local index')) : '')
+                + (state.source ? ' · ' + sourceLabel : '')
             }),
             h('div', { class: 'spacer' }),
             h('button', {
@@ -605,6 +641,15 @@
         paint();
       }
 
+      async function openInApp(path) {
+        if (!path) return;
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') {
+          await window.AIEntries.open(path);
+        } else {
+          await reveal(path);
+        }
+      }
+
       async function reveal(path) {
         if (!path) return;
         try { await API.reveal(path); } catch (e) { toast(errText(e), 'error'); }
@@ -612,6 +657,10 @@
 
       async function openFile(path) {
         if (!path) return;
+        if (window.AIEntries && typeof window.AIEntries.openSystemApp === 'function') {
+          await window.AIEntries.openSystemApp(path);
+          return;
+        }
         try { await API.openPath(path); } catch (e) { toast(errText(e), 'error'); }
       }
 
@@ -623,7 +672,11 @@
       } catch (e) { state.scope = []; }
 
       liveJump = async function (payload) {
-        const q = String((payload && (payload.q || payload.query || payload.keyword)) || '').trim();
+        const p = payload || {};
+        let q = String(p.q || p.query || p.keyword || '').trim();
+        if (!q && Array.isArray(p.paths) && p.paths.length) {
+          q = String(p.paths[0] || '').trim();
+        }
         if (q) {
           state.query = q;
           paint();
@@ -638,6 +691,10 @@
       await refreshStatus();
 
       return function unmount() {
+        if (manager && manager.modal && typeof manager.modal.close === 'function') {
+          manager.modal.close();
+        }
+        manager = null;
         liveJump = null;
         active = null;
         setActions();

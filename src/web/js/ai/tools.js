@@ -231,12 +231,18 @@
         summary: (args, r) => `读文件 ${args.path} · ${r.kind === 'binary' ? '二进制' : (r.text || '').length + ' 字'}`
       },
 
-      /* 打开：目录→资源管理器，文件→系统默认程序；可执行文件一律不运行 */
+      /* 打开：本地路径优先在软件内打开（DirView / 压缩包页），网址交给系统浏览器；可执行文件一律不运行 */
       open_path: {
         label: '打开',
         run: async (args) => {
           const path = String((args && args.path) || '').trim();
           if (!path) throw new Error('缺少参数 path（要打开的完整路径）');
+          const isUrl = /^(?:https?:|mailto:)/i.test(path);
+          if (!isUrl && root.AIEntries && typeof root.AIEntries.open === 'function') {
+            const res = await withTimeout(root.AIEntries.open(path), TIMEOUT, '打开');
+            if (!res || res.ok === false) throw new Error((res && res.error) || '无法打开该位置');
+            return { path, opened: true, inApp: !!res.inApp };
+          }
           const ext = (path.split('.').pop() || '').toLowerCase();
           if (EXEC_EXT.indexOf(ext) >= 0) {
             throw new Error('不自动运行程序（.' + ext + '）。要看内容用 read_file，要看签名用 file_signals');

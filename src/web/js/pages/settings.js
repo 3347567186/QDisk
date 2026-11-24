@@ -236,14 +236,21 @@
               );
             }
           },
-          { label: T('打开数据目录', 'Open data folder'), icon: 'folder', disabled: !dir, action: () => dir && API.openPath(dir).catch(() => {}) },
-          { label: T('打开日志目录', 'Open log folder'), icon: 'file', action: () => API.appInfo().then((a) => { if (a && a.log_dir) API.openPath(a.log_dir).catch(() => {}); }).catch(() => {}) }
+          { label: T('在软件内打开数据目录', 'Browse data folder in app'), icon: 'scan', disabled: !dir, action: () => dir && openInApp(dir) },
+          { label: T('在系统文件管理器中打开数据目录', 'Open data folder in Explorer'), icon: 'external', disabled: !dir, action: () => dir && reveal(dir) },
+          { label: T('在软件内打开日志目录', 'Browse log folder in app'), icon: 'file', action: () => API.appInfo().then((a) => { if (a && a.log_dir) openInApp(a.log_dir); }).catch(() => {}) }
         ];
       });
 
       const kvRow = (label, value) => [h('dt', { text: label }), h('dd', null, value)];
 
-      /* 只读路径 + 打开按钮 */
+      function openInApp(path) {
+        if (!path) return;
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(path);
+        else reveal(path);
+      }
+
+      /* 只读路径 + 双入口按钮（优先软件内打开，同时保留系统文件管理器） */
       function pathRow(path, onOpen) {
         return h('div', { class: 'row' },
           h('input', {
@@ -254,9 +261,18 @@
             title: path || ''
           }),
           h('button', {
+            type: 'button',
             class: 'btn ghost sm icon',
-            title: T('打开目录', 'Open folder'),
-            'aria-label': T('打开目录', 'Open folder'),
+            title: T('在软件内打开目录', 'Browse folder in app'),
+            'aria-label': T('在软件内打开目录', 'Browse folder in app'),
+            disabled: !path,
+            onclick: () => (typeof onOpen === 'function' ? onOpen(path) : openInApp(path))
+          }, icon('scan', 14)),
+          h('button', {
+            type: 'button',
+            class: 'btn ghost sm icon',
+            title: T('在系统文件管理器中打开', 'Open in system file manager'),
+            'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
             disabled: !path,
             onclick: () => reveal(path)
           }, icon('external', 14))
@@ -585,8 +601,15 @@
                     value: unifiedDataDir || '—', title: unifiedDataDir || ''
                   }),
                   h('button', {
+                    type: 'button',
                     class: 'btn ghost sm icon', disabled: !unifiedDataDir,
-                    title: T('打开目录', 'Open folder'), 'aria-label': T('打开目录', 'Open folder'),
+                    title: T('在软件内打开目录', 'Browse folder in app'), 'aria-label': T('在软件内打开目录', 'Browse folder in app'),
+                    onclick: () => openInApp(unifiedDataDir)
+                  }, icon('scan', 14)),
+                  h('button', {
+                    type: 'button',
+                    class: 'btn ghost sm icon', disabled: !unifiedDataDir,
+                    title: T('在系统文件管理器中打开', 'Open in system file manager'), 'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
                     onclick: () => reveal(unifiedDataDir)
                   }, icon('external', 14)),
                   h('button', {
@@ -1451,7 +1474,7 @@
             : Object.assign({}, base, patch);
           state.agentDraft = next;
           /* 这一栏不进「保存」，改一下立刻生效：它是权限开关，不该有「改了没保存」的中间态 */
-          AIStore.saveUi({ agent: next });
+          Promise.resolve(AIStore.saveUi({ agent: next })).catch((e) => toast(errText(e), 'error'));
           paint();
         }
 
@@ -2692,8 +2715,15 @@
             value: dataDirPath || '—', title: dataDirPath || ''
           }),
           h('button', {
+            type: 'button',
             class: 'btn ghost sm icon', disabled: !dataDirPath,
-            title: T('打开目录', 'Open folder'), 'aria-label': T('打开目录', 'Open folder'),
+            title: T('在软件内打开目录', 'Browse folder in app'), 'aria-label': T('在软件内打开目录', 'Browse folder in app'),
+            onclick: () => openInApp(dataDirPath)
+          }, icon('scan', 14)),
+          h('button', {
+            type: 'button',
+            class: 'btn ghost sm icon', disabled: !dataDirPath,
+            title: T('在系统文件管理器中打开', 'Open in system file manager'), 'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
             onclick: () => reveal(dataDirPath)
           }, icon('external', 14)),
           h('button', {

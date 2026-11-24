@@ -224,6 +224,7 @@
       dvHost
     );
     let dv = null;
+    let jumpClaimed = false;
     function ensureDv() {
       if (dv || !window.DirView) return dv;
       dv = window.DirView.create(dvHost, {});
@@ -235,7 +236,7 @@
     Promise.resolve()
       .then(() => API.configGet())
       .then((cfg) => {
-        if (!dv || dv.getPath()) return;
+        if (!dv || jumpClaimed || dv.getPath()) return;
         const last = String((cfg && (cfg.last_folder || cfg.lastFolder)) || '');
         if (last) dv.setPath(last);
       })
@@ -278,17 +279,26 @@
     setActions();
 
     /* ---------------- 来自助手的跳转 ---------------- */
-    const stripSlash = (p) => String(p || '').replace(/[\\/]+$/, '');
+    const stripSlash = (p) => {
+      const s = String(p || '');
+      return (s.length > 3 && /[\\/]$/.test(s)) ? s.replace(/[\\/]+$/, '') : s;
+    };
     const parentOf = (p) => {
+      if (window.AIEntries && typeof window.AIEntries.parentOf === 'function') {
+        return window.AIEntries.parentOf(p);
+      }
       const s = stripSlash(p);
+      if (!s || /^[A-Za-z]:[\\/]?$/.test(s)) return '';
       const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
-      return i > 0 ? s.slice(0, i) : s;
+      if (i <= 0) return '';
+      const par = s.slice(0, i);
+      return /^[A-Za-z]:$/.test(par) ? par + '\\' : par;
     };
     const isFile = (p) => (window.AIEntries && window.AIEntries.kindOf
       ? window.AIEntries.kindOf(stripSlash(p)) === 'file'
       : /\.[A-Za-z0-9]{1,8}$/.test(stripSlash(p)));
 
-    function paintJump(paths, why, dir) {
+    function paintJump(paths, why, dir, hitTarget) {
       const chipOf = (p) => (window.AIEntries && window.AIEntries.chip
         ? window.AIEntries.chip(p, { compact: true, src: 'jump' })
         : h('span', { class: 'ai-jump-path mono' }, p));
@@ -297,6 +307,7 @@
         list.appendChild(h('span', { class: 'ai-jump-more' },
           T('还有 ' + (paths.length - 6) + ' 个位置', '+' + (paths.length - 6) + ' more')));
       }
+      const primary = hitTarget || paths[0] || dir || '';
       jumpBox.replaceChildren(
         h('div', { class: 'ai-jump-head' },
           icon('spark', 14),
@@ -307,14 +318,24 @@
           dir ? h('span', { class: 'ai-jump-dir mono', title: dir }, dir) : null,
           dir ? h('button', {
             class: 'btn sm ghost',
+            type: 'button',
             onclick: () => {
               switchToolTab('browse');
               const view = ensureDv();
-              if (view) view.showPath(dir, paths[0] || '');
+              if (view) view.showPath(dir, primary);
             }
           }, icon('scan', 13), h('span', {}, T('在目录树中浏览', 'Browse in tree'))) : null,
+          primary ? h('button', {
+            class: 'btn sm ghost',
+            type: 'button',
+            onclick: () => {
+              if (window.AIEntries && window.AIEntries.reveal) window.AIEntries.reveal(primary);
+              else API.reveal(primary).catch((e) => toast(errText(e), 'error'));
+            }
+          }, icon('external', 13), h('span', {}, T('系统文件管理器', 'Explorer'))) : null,
           h('button', {
             class: 'btn sm ghost',
+            type: 'button',
             onclick: () => { jumpBox.hidden = true; }
           }, T('收起', 'Hide')))
       );
@@ -360,30 +381,68 @@
     }
 
     async function applyJump(data) {
-      const paths = ((data && data.paths) || [])
+      const d = data || {};
+      const paths = (d.paths || [])
         .filter(Boolean).map((p) => stripSlash(String(p)));
-      if (!paths.length && !(data && data.dir) && !(data && data.tab)) return;
-      const want = String((data && (data.tab || data.action)) || 'check');
-      if (!paths.length && data && data.tab) {
-        switchToolTab(data.tab);
+      if (!paths.length && !d.dir && !d.tab) return;
+      jumpClaimed = true;
+      const want = String(d.tab || d.action || 'check');
+      if (!paths.length && d.tab && !d.dir) {
+        switchToolTab(d.tab);
         return;
       }
-      const files = paths.filter(isFile);
-      const dirs = paths.filter((p) => !isFile(p));
-      const dir = dirs[0] || parentOf(files[0]) || stripSlash(String((data && data.dir) || ''));
-      if (paths.length) paintJump(paths, String((data && data.why) || ''), dir);
 
-      if (want === 'browse' || (data && data.dir && want !== 'empty' && want !== 'big')) {
+      /* 优先信任来自真实文件系统探测的 d.dir / d.kind，避免把带点目录误判为文件 */
+      let dir = stripSlash(String(d.dir || ''));
+      if (!dir && paths.length) {
+        if (d.kind === 'dir') {
+          dir = paths[0];
+        } else if (d.kind === 'file') {
+          dir = parentOf(paths[0]);
+        } else if (window.AIEntries && typeof window.AIEntries.inspect === 'function') {
+          try {
+            const info = await window.AIEntries.inspect(paths[0]);
+            if (info && info.status === 'ok') {
+              dir = stripSlash(info.kind === 'dir' ? info.path : (info.parent || parentOf(info.path)));
+            } else if (info && info.status === 'permission_denied') {
+              dir = stripSlash(info.nearestReadable || info.parent || '');
+            } else if (info && info.status === 'not_found') {
+              dir = stripSlash(info.nearestExisting || '');
+            }
+          } catch (_) {}
+        }
+      }
+      if (!dir && paths.length) {
+        const files = paths.filter(isFile);
+        const dirs = paths.filter((p) => !isFile(p));
+        dir = dirs[0] || parentOf(files[0]) || '';
+      }
+
+      const hitTarget = stripSlash(String(d.highlight || paths[0] || ''));
+      const whyStr = String(d.why || '');
+      if (paths.length) paintJump(paths, whyStr, dir, hitTarget);
+
+      if (want === 'browse' || (d.dir && want !== 'empty' && want !== 'big')) {
         switchToolTab('browse');
         const view = ensureDv();
         if (view) {
-          const start = stripSlash(String((data && data.dir) || dir || ''));
-          if (start) view.showPath(start, paths[0] || '');
+          const start = stripSlash(String(d.dir || dir || ''));
+          if (start) {
+            await view.showPath(start, hitTarget, {
+              accessDenied: !!d.accessDenied,
+              requestedPath: d.requestedPath || paths[0] || '',
+              missingTarget: d.missingTarget || ''
+            });
+          }
         }
         return;
       }
 
-      if (want === 'empty' || (want === 'delete' && dirs.length && !files.length)) {
+      /* 红队修复 RT-05：只有显式指定 empty 或明确提及空文件夹时才走「空文件夹清理」，
+         严禁把「可以直接删的 10.4 GB 下载目录」误路由成空文件夹扫描导致显示「没有空文件夹」。 */
+      const isEmptyIntent = want === 'empty'
+        || (want === 'delete' && /空文件夹|空目录|empty\s*(?:dir|folder)/i.test(whyStr));
+      if (isEmptyIntent) {
         switchToolTab('empty');
         if (dir) emptyInput.value = dir;
         if (dir) {
@@ -552,7 +611,14 @@
         );
         attachMenu(row, [
           { header: it.name || '' },
-          { label: T('打开所在文件夹', 'Open containing folder'), icon: 'folder',
+          { label: T('在软件目录树中定位', 'Locate in folder view'), icon: 'scan',
+            action: () => {
+              switchToolTab('browse');
+              const view = ensureDv();
+              const d = parentOf(it.path) || dirOf(it.path);
+              if (view && d) view.showPath(d, it.path);
+            } },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external',
             action: () => API.reveal(it.path).catch((e) => toast(errText(e), 'error')) },
           { label: T('复制完整路径', 'Copy full path'), icon: 'copy', action: () => copy(it.path) },
           { label: T('复制文件名', 'Copy file name'), icon: 'copy', action: () => copy(it.name) },
@@ -578,7 +644,14 @@
             } }
         ]);
         row.addEventListener('dblclick', () => {
-          API.reveal(it.path).catch((e) => toast(errText(e), 'error'));
+          if (window.AIEntries && typeof window.AIEntries.open === 'function') {
+            window.AIEntries.open(it.path);
+          } else {
+            switchToolTab('browse');
+            const view = ensureDv();
+            const d = parentOf(it.path) || dirOf(it.path);
+            if (view && d) view.showPath(d, it.path);
+          }
         });
         return row;
       });
@@ -700,7 +773,14 @@
         }
         attachMenu(row, [
           { header: it.path },
-          { label: T('打开所在文件夹', 'Open containing folder'), icon: 'folder',
+          { label: T('在软件目录树中查看', 'View in folder tree'), icon: 'scan',
+            action: () => {
+              switchToolTab('browse');
+              const view = ensureDv();
+              const d = parentOf(it.path) || it.path;
+              if (view && d) view.showPath(d, it.path);
+            } },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external',
             action: () => API.reveal(it.path).catch((e) => toast(errText(e), 'error')) },
           { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copy(it.path) },
           { sep: true },

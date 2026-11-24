@@ -193,7 +193,8 @@
         const gone = !it || it.exists === false;
         return [
           { header: path },
-          { label: T('定位文件', 'Reveal file'), icon: 'folder', disabled: gone, action: () => revealPath(path) },
+          { label: T('在软件内定位', 'Locate in app'), icon: 'scan', disabled: gone, action: () => openInApp(path) },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', disabled: gone, action: () => revealPath(path) },
           { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copyText(path) },
           { sep: true },
           { label: T('删除此目录', 'Clean this folder'), icon: 'trash', danger: true, disabled: gone, action: () => { doCleanItem(path); } }
@@ -323,14 +324,25 @@
           ),
           h('td', { class: 'num' }, exists ? fmtBytes(item.size) : '—'),
           h('td', null, levelBadge(item.level)),
-          h('td', { class: 'num', style: { width: '82px' } },
-            h('button', {
-              class: 'btn icon sm ghost',
-              title: T('定位文件', 'Reveal file'),
-              'aria-label': T('定位文件', 'Reveal file'),
-              disabled: !exists,
-              onclick: (e) => { e.stopPropagation(); revealPath(item.path); }
-            }, icon('external', 13))
+          h('td', { class: 'num', style: { width: '92px' } },
+            h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '4px' } },
+              h('button', {
+                type: 'button',
+                class: 'btn icon sm ghost',
+                title: T('在软件内定位', 'Locate in app'),
+                'aria-label': T('在软件内定位', 'Locate in app'),
+                disabled: !exists,
+                onclick: (e) => { e.stopPropagation(); openInApp(item.path); }
+              }, icon('scan', 13)),
+              h('button', {
+                type: 'button',
+                class: 'btn icon sm ghost',
+                title: T('在系统文件管理器中打开', 'Open in system file manager'),
+                'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
+                disabled: !exists,
+                onclick: (e) => { e.stopPropagation(); revealPath(item.path); }
+              }, icon('external', 13))
+            )
           )
         );
       }
@@ -880,6 +892,12 @@
       }
 
       /* ---------- 小工具 ---------- */
+      function openInApp(p) {
+        if (!p) return;
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(p);
+        else revealPath(p);
+      }
+
       function revealPath(p) {
         API.reveal(p).catch((e) => toast(errText(e), 'error'));
       }

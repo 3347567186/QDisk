@@ -255,8 +255,8 @@
                 <span class="panel-sub mono">64 MB · 32 × 2 MB (75% JSON + 25% PNG)</span>
               </div>
               <div class="seg-switch" role="group" aria-label="Benchmark dataset">
-                <button type="button" class="seg-btn active" data-bench-mode="create" data-i18n="bench.modeCreate">ZIP 压缩</button>
-                <button type="button" class="seg-btn" data-bench-mode="extract" data-i18n="bench.modeExtract">ZIP 解压</button>
+                <button type="button" class="seg-btn active" data-bench-mode="create" aria-pressed="true" data-i18n="bench.modeCreate">ZIP 压缩</button>
+                <button type="button" class="seg-btn" data-bench-mode="extract" aria-pressed="false" data-i18n="bench.modeExtract">ZIP 解压</button>
               </div>
             </div>
 
@@ -394,6 +394,7 @@
 node src/web/js/ai/pages.selftest.mjs &amp;&amp; node src/web/js/ai/agent.selftest.mjs
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
               <button type="button" class="btn ghost sm copy-btn" id="copy-dev-cmd" data-i18n="dev.copy">复制命令</button>
+              <span class="sr-only" id="copy-dev-status" role="status"></span>
             </div>
           </div>
         </details>

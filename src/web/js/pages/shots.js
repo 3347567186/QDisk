@@ -312,7 +312,8 @@
         return [
           { header: p },
           { label: T('预览', 'Preview'), icon: 'image', action: () => openViewer(p) },
-          { label: T('定位文件', 'Reveal file'), icon: 'folder', action: () => revealPath(p) },
+          { label: T('在软件内定位', 'Locate in app'), icon: 'scan', action: () => openInApp(p) },
+          { label: T('在系统文件管理器中打开', 'Open in system file manager'), icon: 'external', action: () => revealPath(p) },
           { label: T('复制路径', 'Copy path'), icon: 'copy', action: () => copyText(p) },
           { sep: true },
           { label: T('删除该图', 'Delete image'), icon: 'trash', danger: true, action: () => { cleanPaths([p]); } }
@@ -540,11 +541,19 @@
           h('span', { class: 'mono' }, fmtBytes(it.size)),
           h('span', { class: 'small muted' }, fmtTime(it.mtime)),
           h('button', {
+            type: 'button',
             class: 'btn icon sm ghost',
-            title: T('定位文件', 'Reveal file'),
-            'aria-label': T('定位文件', 'Reveal file'),
+            title: T('在软件内定位', 'Locate in app'),
+            'aria-label': T('在软件内定位', 'Locate in app'),
+            onclick: (e) => { e.stopPropagation(); openInApp(it.path); }
+          }, icon('scan', 13)),
+          h('button', {
+            type: 'button',
+            class: 'btn icon sm ghost',
+            title: T('在系统文件管理器中打开', 'Open in system file manager'),
+            'aria-label': T('在系统文件管理器中打开', 'Open in system file manager'),
             onclick: (e) => { e.stopPropagation(); revealPath(it.path); }
-          }, icon('folder', 13))
+          }, icon('external', 13))
         );
       }
 
@@ -805,8 +814,12 @@
             delBtn,
             h('button', {
               class: 'btn sm ghost',
+              onclick: () => { const it = list[idx]; if (it) { close(); openInApp(it.path); } }
+            }, T('软件内定位', 'Locate in app')),
+            h('button', {
+              class: 'btn sm ghost',
               onclick: () => { const it = list[idx]; if (it) revealPath(it.path); }
-            }, T('定位', 'Reveal')),
+            }, T('系统管理器', 'Explorer')),
             h('button', { class: 'btn sm ghost', onclick: () => close() }, T('关闭', 'Close'))
           ),
           stage,
@@ -1273,6 +1286,12 @@
       }
 
       /* ---------- 小工具 ---------- */
+      function openInApp(p) {
+        if (!p) return;
+        if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(p);
+        else revealPath(p);
+      }
+
       function revealPath(p) {
         API.reveal(p).catch((e) => toast(errText(e), 'error'));
       }

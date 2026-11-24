@@ -133,7 +133,7 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 | `system.performance` | `{}` | `{timestamp,drives,disk_summary,disk_io,network_io,memory,cpu}` 系统磁盘、内存、I/O 与 CPU 实时负载快照 |
 | `search.status` | `{}` | 查询索引服务整体状态、索引数量、覆盖目录及数据库信息 |
 | `search.index` | `{roots?, ids?, reuse?, full?}` | 触发一次索引建立或增量扫描（基于 indexwalk 或 Python 遍历） |
-| `search.query` | `{q, limit?, offset?}` | 关键词实时搜索匹配的文件与目录 `{items: [...], total}` |
+| `search.query` | `{q, limit?, ids?}` | 关键词与完整路径实时搜索（支持未索引绝对路径磁盘直出精确命中 `{source:'direct'}`） `{items: [...], total, source, hint?}` |
 | `search.top` | `{limit?, min_size?}` | 基于 SQLite 索引查询超大文件排行榜 `{items, total, source, roots}` |
 | `search.folders` | `{depth?, limit?, min_size?, parent?, auto?, ids?}` | 目录空间占用聚合统计分析 `{items, total, bytes, source}` |
 | `search.add` | `{paths: [...]}` | 向搜索索引库中添加监控根目录 |

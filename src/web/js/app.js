@@ -84,6 +84,20 @@
         ? location.hash.replace('#', '')
         : (this.cfg.last_page && NAV.some((n) => n.id === this.cfg.last_page) ? this.cfg.last_page : 'organize');
       await navigate(start, false);
+      /* 跨管理员提权重启自动续跳（10 分钟内有效，消费一次即清零，杜绝循环跳转） */
+      const pj = this.cfg && this.cfg.pending_jump;
+      if (pj && typeof pj === 'object') {
+        this.cfg = { ...(this.cfg || {}), pending_jump: null };
+        API.configSet({ pending_jump: null }).catch(() => {});
+        const age = Date.now() - (Number(pj.ts) || 0);
+        if (age >= 0 && age < 10 * 60 * 1000) {
+          if (pj.openPath && window.AIEntries && typeof window.AIEntries.open === 'function') {
+            window.AIEntries.open(String(pj.openPath)).catch(() => {});
+          } else if (pj.page && NAV.some((n) => n.id === pj.page)) {
+            App.jump(pj.page, pj.payload || {}).catch(() => {});
+          }
+        }
+      }
       pollEngine(true);
       this._pollTimer = setInterval(() => pollEngine(false), 15000);
       /* 启动后延迟 6 秒静默检查一次官方 GitHub Releases 更新（无需用户配置任何网址） */
@@ -609,8 +623,9 @@
     renderChrome(id, App.cfg);
     setActions();
     UI.closeMenu();
-    // 切页时把残留的图片预览遮罩一并收掉，避免挡住新页面
+    // 切页时把残留的图片预览遮罩与打开的弹窗一并收掉，避免挡住新页面或泄漏全局按键监听
     if (UI.closePreview) UI.closePreview();
+    if (UI.closeModals) UI.closeModals();
     const holder = document.createElement('div');
     holder.className = 'page-body';
     /* data-enter 只在这一页刚挂载时存在，挂载完就摘掉：
@@ -674,7 +689,12 @@
   App.jump = async function (id, payload) {
     const page = (window.Pages || {})[id];
     if (!page) { toast(UI.T('页面尚未加载', 'Page not loaded'), 'warn'); return; }
+    const seq = (App._jumpSeq = (App._jumpSeq || 0) + 1);
     const data = payload || {};
+    /* 从 AI 侧栏抽屉点击路径或建议卡跳转至功能页时自动收起抽屉，避免遮挡目标工作台 */
+    if (id !== 'ai' && window.AIDrawer && typeof window.AIDrawer.isOpen === 'function' && window.AIDrawer.isOpen()) {
+      try { window.AIDrawer.close(); } catch (_) {}
+    }
     const pageEl = document.getElementById('page');
     const mounted = App._mountedId === id && pageEl && pageEl.querySelector('.page-body');
     if (mounted) {
@@ -684,6 +704,7 @@
     } else {
       await navigate(id, true, { force: true });
     }
+    if (seq !== App._jumpSeq) return;
     if (typeof page.jump === 'function') {
       try { await page.jump(data); } catch (e) { toast((e && e.message) || String(e), 'error'); }
     }

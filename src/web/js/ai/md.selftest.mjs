@@ -391,29 +391,32 @@ test('file:// 链接二次反转义不能注入属性或原始引号', (fail) =>
 });
 
 test('本地路径粘连汉字/全角标点时精准切分且不丢正文（1.43.16）', (fail) => {
+  const plain = (html) => html.replace(/<[^>]*>/g, '');
   const c1 = AIMd.render('清理D:\\Downloads里的文件和C:\\Windows\\Temp目录');
   has(c1, 'data-path="D:\\Downloads"', fail, 'ASCII目录+里的文件');
-  has(c1, '>D:\\Downloads</a>里的文件和', fail, '中文正文保留在链接外');
+  has(c1, '</span>里的文件和', fail, '中文正文保留在链接外');
   has(c1, 'data-path="C:\\Windows\\Temp"', fail, '双路径紧邻中文连词时第二条也生效');
-  has(c1, '>C:\\Windows\\Temp</a>目录', fail, '目录二字保留在链接外');
+  has(c1, '</span>目录', fail, '目录二字保留在链接外');
+  eq(plain(c1), '清理D:\\Downloads里的文件和C:\\Windows\\Temp目录', fail, '伴随按钮不污染纯文本');
 
   const c2 = AIMd.render('大文件 D:\\a\\setup.exe是否可删，以及 D:\\data\\backup.zip（约 2 GB）');
   has(c2, 'data-path="D:\\a\\setup.exe"', fail, '扩展名后粘连汉字');
-  has(c2, '>D:\\a\\setup.exe</a>是否可删', fail, '扩展名后的提问正文保留');
+  has(c2, '</span>是否可删', fail, '扩展名后的提问正文保留');
   has(c2, 'data-path="D:\\data\\backup.zip"', fail, '全角开括号截断');
-  has(c2, '>D:\\data\\backup.zip</a>（约 2 GB）', fail, '全角括号注释保留');
+  has(c2, '</span>（约 2 GB）', fail, '全角括号注释保留');
 
   const c3 = AIMd.render('查看 D:\\工作资料目录下 的文件，以及 D:\\下载\\2026年报告.pdf里的内容');
   has(c3, 'data-path="D:\\工作资料"', fail, '中文目录后粘连目录下');
-  has(c3, '>D:\\工作资料</a>目录下', fail, '目录下保留在链接外');
+  has(c3, '</span>目录下', fail, '目录下保留在链接外');
   has(c3, 'data-path="D:\\下载\\2026年报告.pdf"', fail, '中文文件名+扩展名后粘连汉字');
-  has(c3, '>D:\\下载\\2026年报告.pdf</a>里的内容', fail, '中文文件名后正文保留');
+  has(c3, '</span>里的内容', fail, '中文文件名后正文保留');
 
   const c4 = AIMd.render('[打开](file:///D:/Downloads目录) 和 [看看](D:\\AppData下) 和 `D:\\Temp里的日志`');
   has(c4, 'data-path="D:\\Downloads"', fail, 'file:// 链接剥离粘连汉字');
   has(c4, 'data-path="D:\\AppData"', fail, 'Markdown 本地链接剥离粘连汉字');
   has(c4, 'data-path="D:\\Temp"', fail, '行内代码路径剥离粘连汉字');
-  has(c4, '</code></a>里的日志', fail, '行内代码剥离出的后缀保留');
+  has(c4, '</code></a>', fail, '行内代码标签完整');
+  has(c4, '</span>里的日志', fail, '行内代码剥离出的后缀保留');
 
   const c5 = AIMd.render('保留真实中文与混排：D:\\下载、D:\\新建文件夹、D:\\Docs\\PDF报告、D:\\Docs\\PDF中文版、D:\\项目\\v1.2财务报表.xlsx、D:\\Games\\和平精英');
   has(c5, 'data-path="D:\\下载"', fail, '纯中文目录保留');
@@ -425,8 +428,27 @@ test('本地路径粘连汉字/全角标点时精准切分且不丢正文（1.43
 
   const c6 = AIMd.render('检查 D:\\里的文件 和 D:\\Downloads\\目录下 的日志');
   has(c6, 'data-path="D:\\"', fail, '盘符根目录后粘连中文');
-  has(c6, '>D:\\</a>里的文件', fail, '盘符根目录后正文保留');
+  has(c6, '</span>里的文件', fail, '盘符根目录后正文保留');
   has(c6, 'data-path="D:\\Downloads"', fail, '尾斜杠后粘连目录下');
+});
+
+test('1.45 末段含空格路径、中文空格目录、& 实体与伴随系统管理器按钮', (fail) => {
+  const s1 = AIMd.render('请检查 C:\\Program Files、C:\\Program Files (x86) 与 C:\\Users\\十二\\AppData\\Local\\Google\\Chrome\\User Data');
+  has(s1, 'data-path="C:\\Program Files"', fail, 'Program Files 不截断');
+  has(s1, 'data-path="C:\\Program Files (x86)"', fail, 'Program Files (x86) 不截断');
+  has(s1, 'data-path="C:\\Users\\十二\\AppData\\Local\\Google\\Chrome\\User Data"', fail, 'User Data 不截断');
+  has(s1, 'class="md-path-ext" data-path="C:\\Program Files"', fail, '伴随系统管理器按钮同步携带路径');
+
+  const s2 = AIMd.render('截图 C:\\Users\\十二\\Pictures\\屏幕截图 2026-06-09 115005.png 与文档 D:\\我的 文档\\项目 2026\\My Report (2).pdf');
+  has(s2, 'data-path="C:\\Users\\十二\\Pictures\\屏幕截图 2026-06-09 115005.png"', fail, '含空格截图文件名完整');
+  has(s2, 'data-path="D:\\我的 文档\\项目 2026\\My Report (2).pdf"', fail, '中文空格目录+空格文件名完整');
+
+  const s3 = AIMd.render('研发目录 D:\\R&D\\spec.txt 与防误吞 D:\\Downloads 下面的 a.txt 以及 check D:\\Temp and report.txt');
+  has(s3, 'data-path="D:\\R&amp;D\\spec.txt"', fail, '含 & 目录实体完整保留');
+  has(s3, 'data-path="D:\\Downloads"', fail, '不误吞中文后续词+文件名');
+  lacks(s3, 'data-path="D:\\Downloads 下面的 a.txt"', fail, '绝不合并跨中文 prose');
+  has(s3, 'data-path="D:\\Temp"', fail, '不误吞英文连词 and report.txt');
+  lacks(s3, 'data-path="D:\\Temp and report.txt"', fail, '绝不合并英文介词/连词');
 });
 
 /* ---------------- 汇总 ---------------- */
