@@ -38,6 +38,9 @@ pub const OFFICIAL_API_LATEST_URL: &str =
     "https://api.github.com/repos/3347567186/QDisk/releases/latest";
 pub const OFFICIAL_API_RELEASES_URL: &str =
     "https://api.github.com/repos/3347567186/QDisk/releases?per_page=8";
+/// 零 API 限流官方发布 Atom 订阅源（覆盖正式版与 Beta 预发布版，规避未登录 `api.github.com` 403 限流）。
+pub const OFFICIAL_RELEASES_ATOM_URL: &str =
+    "https://github.com/3347567186/QDisk/releases.atom";
 pub const OFFICIAL_RELEASES_PAGE: &str =
     "https://github.com/3347567186/QDisk/releases";
 /// 远端历史版本日志（按需同步，带 20 条上限与独立超时）。
@@ -512,6 +515,110 @@ pub fn extract_tag_from_release_location(loc: &str) -> Option<String> {
         return None;
     }
     Some(tag.to_string())
+}
+
+/// 从 GitHub `releases.atom` XML 中安全提取属于本仓库的有效 SemVer 发布标签，并按 SemVer 倒序排列（最高版本优先）。
+/// 仅解析每个 `<entry>` 头部（截断 `<content>` / `<summary>` 正文）中的 `<link ... href="...">`，
+/// 且强制校验精确仓库前缀，杜绝更新说明正文中的第三方链接或畸形标签劫持更新源。
+pub fn extract_release_tags_from_atom(xml: &str) -> Vec<String> {
+    const ABS_PREFIX: &str = "https://github.com/3347567186/QDisk/releases/tag/";
+    const REL_PREFIX: &str = "/3347567186/QDisk/releases/tag/";
+    let mut parsed: Vec<(SemVer, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut rest = xml;
+    while let Some(entry_start) = rest.find("<entry") {
+        let after_tag = &rest[entry_start + "<entry".len()..];
+        let next_ch = after_tag.as_bytes().first().copied().unwrap_or(0);
+        if !matches!(next_ch, b'>' | b' ' | b'\t' | b'\r' | b'\n') {
+            rest = after_tag;
+            continue;
+        }
+        let Some(gt) = after_tag.find('>') else {
+            break;
+        };
+        let body_start = &after_tag[gt + 1..];
+        let entry_body = match body_start.find("</entry>") {
+            Some(end) => {
+                rest = &body_start[end + "</entry>".len()..];
+                &body_start[..end]
+            }
+            None => {
+                rest = "";
+                body_start
+            }
+        };
+
+        // 截断正文内容（<content / <summary），绝不扫描发布说明 HTML 里的任意外链
+        let header_end = [entry_body.find("<content"), entry_body.find("<summary")]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(entry_body.len());
+        let header = &entry_body[..header_end];
+
+        // 在 entry 头部查找所有 <link ...> 标签并解析独立的 href="..." / href='...' 属性
+        let mut hrest = header;
+        while let Some(lpos) = hrest.find("<link") {
+            let after_l = &hrest[lpos + "<link".len()..];
+            let lnext = after_l.as_bytes().first().copied().unwrap_or(0);
+            if !matches!(lnext, b' ' | b'\t' | b'\r' | b'\n') {
+                hrest = after_l;
+                continue;
+            }
+            let Some(lend) = after_l.find('>') else {
+                break;
+            };
+            let attrs = &after_l[..lend];
+            hrest = &after_l[lend + 1..];
+
+            let href = extract_xml_href_attr(attrs);
+            let Some(href_val) = href else {
+                continue;
+            };
+            let trimmed_href = href_val.trim();
+            let prefix_ok = (trimmed_href.len() > ABS_PREFIX.len()
+                && trimmed_href[..ABS_PREFIX.len()].eq_ignore_ascii_case(ABS_PREFIX))
+                || (trimmed_href.len() > REL_PREFIX.len()
+                    && trimmed_href[..REL_PREFIX.len()].eq_ignore_ascii_case(REL_PREFIX));
+            if !prefix_ok {
+                continue;
+            }
+            if let Some(tag) = extract_tag_from_release_location(trimmed_href) {
+                let ver_str = tag.trim_start_matches(['v', 'V']);
+                if let Ok(sv) = SemVer::parse(ver_str) {
+                    let key = tag.to_ascii_lowercase();
+                    if seen.insert(key) {
+                        parsed.push((sv, tag));
+                    }
+                    // 每个 <entry> 仅采信首个合法本仓库发布链接，防止尾部杂链注入
+                    break;
+                }
+            }
+        }
+    }
+
+    parsed.sort_by(|a, b| b.0.cmp(&a.0));
+    parsed.into_iter().map(|(_, t)| t).collect()
+}
+
+fn extract_xml_href_attr(attrs: &str) -> Option<&str> {
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i + 6 <= bytes.len() {
+        let prev_is_ws = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if prev_is_ws && bytes[i..].starts_with(b"href=") {
+            let quote = bytes[i + 5];
+            if quote == b'"' || quote == b'\'' {
+                let start = i + 6;
+                if let Some(rel_end) = attrs[start..].find(quote as char) {
+                    return Some(&attrs[start..start + rel_end]);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -1215,11 +1322,22 @@ fn fetch_and_parse_manifest(feed_url: &str) -> Result<ReleaseManifest> {
         winhttp_fetch_bytes(feed_url, MAX_MANIFEST_BYTES, 9_000, "application/json, application/vnd.github+json")?;
     let raw_v: Value = serde_json::from_slice(&bytes).context("更新清单不是合法的 JSON 格式")?;
 
-    // 支持 GitHub `/releases?per_page=8` 列表（beta 通道取最新一条非 draft 发布）
+    // 支持 GitHub `/releases?per_page=8` 列表（beta 通道取最高 SemVer 的公开非 draft 发布，防老分支热修复时间倒挂）
     let v = if let Some(arr) = raw_v.as_array() {
-        arr.iter()
-            .find(|item| !item.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
-            .cloned()
+        let non_drafts: Vec<&Value> = arr
+            .iter()
+            .filter(|item| !item.get("draft").and_then(|d| d.as_bool()).unwrap_or(false))
+            .collect();
+        non_drafts
+            .iter()
+            .filter_map(|item| {
+                let tag = item.get("tag_name").and_then(|t| t.as_str())?;
+                let sv = SemVer::parse(tag.trim().trim_start_matches(['v', 'V'])).ok()?;
+                Some((sv, *item))
+            })
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, item)| item.clone())
+            .or_else(|| non_drafts.first().map(|item| (*item).clone()))
             .context("当前仓库尚未发布任何公开版本")?
     } else {
         raw_v
@@ -1942,6 +2060,68 @@ pub fn updater_config_set(patch: Value) -> Result<UpdaterConfig, String> {
     save_updater_config(patch)
 }
 
+/// Atom 探测结果：
+/// - `Primary(m)`: 最高 SemVer 标签直接命中有效 `latest.json`（零 API 限流，直接返回）
+/// - `FallbackOnly(m)`: 最高标签缺失或版本不匹配，但次高标签有效（保留作兜底，先给 API 通道一次装配最高标签的机会）
+#[cfg(windows)]
+enum AtomBetaFetch {
+    Primary(ReleaseManifest),
+    FallbackOnly(ReleaseManifest),
+}
+
+#[cfg(windows)]
+fn fetch_beta_manifest_via_atom(
+    atom_url: &str,
+    download_base_prefix: &str,
+) -> Result<AtomBetaFetch> {
+    let (_status, bytes, _final_url) = winhttp_fetch_bytes(
+        atom_url,
+        MAX_MANIFEST_BYTES,
+        9_000,
+        "application/atom+xml, application/xml, text/xml",
+    )?;
+    let xml = String::from_utf8_lossy(&bytes);
+    let tags = extract_release_tags_from_atom(&xml);
+    if tags.is_empty() {
+        bail!("官方发布订阅未包含有效版本标签");
+    }
+
+    let prefix = download_base_prefix.trim_end_matches('/');
+    let mut last_err: Option<anyhow::Error> = None;
+    for (idx, tag) in tags.into_iter().take(3).enumerate() {
+        let direct_url = format!("{prefix}/{tag}/latest.json");
+        match fetch_and_parse_manifest(&direct_url) {
+            Ok(manifest) => {
+                let tag_sv = SemVer::parse(tag.trim_start_matches(['v', 'V'])).ok();
+                let mf_sv = SemVer::parse(&manifest.version).ok();
+                if tag_sv.is_some() && mf_sv.is_some() && tag_sv != mf_sv {
+                    let msg = format!(
+                        "标签 {tag} 下的 latest.json 版本号不匹配（实际为 {}），已跳过",
+                        manifest.version
+                    );
+                    append_log("warn", &msg);
+                    last_err = Some(anyhow::anyhow!(msg));
+                    continue;
+                }
+                return Ok(if idx == 0 {
+                    AtomBetaFetch::Primary(manifest)
+                } else {
+                    AtomBetaFetch::FallbackOnly(manifest)
+                });
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if is_dns_err(&msg) {
+                    return Err(e);
+                }
+                append_log("warn", &format!("Atom 候选标签 {tag} 拉取 latest.json 失败：{msg}"));
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Atom 候选发布均缺少有效 latest.json")))
+}
+
 #[cfg(windows)]
 fn fetch_official_manifest<F>(channel: &str, mut on_stage: F) -> Result<ReleaseManifest>
 where
@@ -1955,18 +2135,49 @@ where
     let mut saw_dns_fail = false;
 
     if channel == "beta" {
-        on_stage("正在查询官方预发布版本列表 (1/2)…", 30);
-        match fetch_and_parse_manifest(OFFICIAL_API_RELEASES_URL) {
-            Ok(m) => return Ok(m),
+        let mut atom_fallback: Option<ReleaseManifest> = None;
+        on_stage("正在查询官方预发布订阅源 (1/3)…", 25);
+        match fetch_beta_manifest_via_atom(
+            OFFICIAL_RELEASES_ATOM_URL,
+            "https://github.com/3347567186/QDisk/releases/download",
+        ) {
+            Ok(AtomBetaFetch::Primary(m)) => return Ok(m),
+            Ok(AtomBetaFetch::FallbackOnly(m)) => {
+                atom_fallback = Some(m);
+            }
             Err(e) => {
                 let msg = format!("{e:#}");
                 saw_dns_fail |= is_dns_err(&msg);
-                append_log("warn", &format!("更新通道 beta-api 失败：{msg}"));
+                append_log("warn", &format!("更新通道 beta-atom 失败：{msg}"));
                 errors.push(msg);
             }
         }
         if !saw_dns_fail {
-            on_stage("正在切换官方发布清单重试 (2/2)…", 70);
+            on_stage("正在切换 GitHub Releases API 重试 (2/3)…", 55);
+            match fetch_and_parse_manifest(OFFICIAL_API_RELEASES_URL) {
+                Ok(m) => {
+                    if let Some(fb) = atom_fallback {
+                        let m_sv = SemVer::parse(&m.version).ok();
+                        let fb_sv = SemVer::parse(&fb.version).ok();
+                        if fb_sv > m_sv {
+                            return Ok(fb);
+                        }
+                    }
+                    return Ok(m);
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    saw_dns_fail |= is_dns_err(&msg);
+                    append_log("warn", &format!("更新通道 beta-api 失败：{msg}"));
+                    errors.push(msg);
+                }
+            }
+        }
+        if let Some(fb) = atom_fallback {
+            return Ok(fb);
+        }
+        if !saw_dns_fail {
+            on_stage("正在切换官方正式版清单兜底 (3/3)…", 80);
             match fetch_and_parse_manifest(OFFICIAL_FEED_URL) {
                 Ok(m) => return Ok(m),
                 Err(e) => {
@@ -3193,5 +3404,154 @@ mod tests {
             pos_145 < pos_1445 && pos_1445 < pos_1441,
             "旧远端版本 1.44.5 应插在 1.45.0 与 1.44.1 之间: pos145={pos_145}, pos1445={pos_1445}, pos1441={pos_1441}"
         );
+    }
+
+    #[test]
+    fn atom_feed_tag_extraction_blocks_spoofing_and_sorts_semver() {
+        assert!(validate_update_url(OFFICIAL_RELEASES_ATOM_URL, false).is_ok());
+
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v99.0.0"/>
+  <entry_meta><link href="https://github.com/3347567186/QDisk/releases/tag/v88.0.0"/></entry_meta>
+  <entry>
+    <link rel="alternate" data-href="https://github.com/3347567186/QDisk/releases/tag/v77.0.0" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.8"/>
+    <title>Hotfix 1.46.8</title>
+    <content type="html"><link href="https://github.com/3347567186/QDisk/releases/tag/v9.9.9"/></content>
+  </entry>
+  <entry>
+    <link href='https://github.com/3347567186/QDisk/releases/tag/v1.47.0-beta.1' rel='alternate'/>
+    <summary><link href="https://github.com/3347567186/QDisk/releases/tag/v9.8.8"/></summary>
+  </entry>
+  <entry>
+    <link rel="alternate" href="https://evil.com/3347567186/QDisk/releases/tag/v50.0.0"/>
+  </entry>
+  <entry>
+    <link rel="alternate" href="https://github.com/attacker/QDisk/releases/tag/v40.0.0"/>
+  </entry>
+  <entry>
+    <link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/build-1.46.9"/>
+  </entry>
+  <entry>
+    <link rel="alternate" href="/3347567186/QDisk/releases/tag/v1.46.7-beta.2"/>
+  </entry>
+  <entry>
+    <link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/../../evil"/>
+  </entry>
+</feed>"#;
+
+        let tags = extract_release_tags_from_atom(xml);
+        assert_eq!(tags, vec!["v1.47.0-beta.1", "v1.46.8", "v1.46.7-beta.2"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn end_to_end_beta_atom_http_handles_missing_and_mismatched_manifests() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let fake_sha = "a".repeat(64);
+
+        let atom_fallback_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.48.0-beta.2"/></entry>
+  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.48.0-beta.1"/></entry>
+  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.47.0-beta.1"/></entry>
+</feed>"#
+            .to_string();
+
+        let atom_primary_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.49.0-beta.1"/></entry>
+  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.2"/></entry>
+</feed>"#
+            .to_string();
+
+        let make_mf = |ver: &str, ch: &str| {
+            format!(
+                r#"{{"version":"{ver}","channel":"{ch}","notes":"test {ver}","installer":{{"file":"QDisk_{ver}_x64-setup.exe","url":"{base}/dl/QDisk_{ver}_x64-setup.exe","size":1234,"sha256":"{fake_sha}"}}}}"#
+            )
+        };
+        let mf_mismatched = make_mf("1.46.0", "beta");
+        let mf_147 = make_mf("1.47.0-beta.1", "beta");
+        let mf_149 = make_mf("1.49.0-beta.1", "beta");
+
+        let srv = std::thread::spawn(move || {
+            for _ in 0..6 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut req_buf = [0u8; 2048];
+                let n = stream.read(&mut req_buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&req_buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let (code, ctype, body) = match path {
+                    "/atom-fallback" => ("200 OK", "application/atom+xml", atom_fallback_xml.as_str()),
+                    "/atom-primary" => ("200 OK", "application/atom+xml", atom_primary_xml.as_str()),
+                    "/dl/v1.48.0-beta.2/latest.json" => ("404 Not Found", "text/plain", "not found"),
+                    "/dl/v1.48.0-beta.1/latest.json" => ("200 OK", "application/json", mf_mismatched.as_str()),
+                    "/dl/v1.47.0-beta.1/latest.json" => ("200 OK", "application/json", mf_147.as_str()),
+                    "/dl/v1.49.0-beta.1/latest.json" => ("200 OK", "application/json", mf_149.as_str()),
+                    _ => ("404 Not Found", "text/plain", "missing"),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {code}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // 场景 1：最高标签 404、次高标签清单版本错配，自动跳过并安全命中第 3 个合法候选作为 FallbackOnly
+        let r1 = fetch_beta_manifest_via_atom(
+            &format!("{base}/atom-fallback"),
+            &format!("{base}/dl"),
+        )
+        .expect("应成功回退到 v1.47.0-beta.1");
+        match r1 {
+            AtomBetaFetch::FallbackOnly(m) => assert_eq!(m.version, "1.47.0-beta.1"),
+            AtomBetaFetch::Primary(m) => panic!("预期 FallbackOnly，实际 Primary({})", m.version),
+        }
+
+        // 场景 2：最高标签直接命中合法清单 -> Primary，且 Beta 通道可升级而 Stable 通道不误收预发布版
+        let r2 = fetch_beta_manifest_via_atom(
+            &format!("{base}/atom-primary"),
+            &format!("{base}/dl"),
+        )
+        .expect("应直接命中 v1.49.0-beta.1");
+        let m2 = match r2 {
+            AtomBetaFetch::Primary(m) => m,
+            AtomBetaFetch::FallbackOnly(m) => panic!("预期 Primary，实际 FallbackOnly({})", m.version),
+        };
+        assert_eq!(m2.version, "1.49.0-beta.1");
+
+        let eval_beta = evaluate_manifest("1.46.2", "installer", "beta", "", &m2, None).unwrap();
+        assert!(eval_beta.has_update);
+        assert!(eval_beta.is_prerelease);
+        assert_eq!(eval_beta.latest_version, "1.49.0-beta.1");
+
+        let eval_stable = evaluate_manifest("1.46.2", "installer", "stable", "", &m2, None).unwrap();
+        assert!(!eval_stable.has_update, "正式版通道绝不可接收预发布版更新");
+
+        let _ = srv.join();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_beta_atom_resolves_real_github_release() {
+        let mut stages = Vec::new();
+        let m = fetch_official_manifest("beta", |s, p| stages.push(format!("{p}% {s}")))
+            .expect("实网 beta 通道应绕过 api.github.com 403 限流成功拉取");
+        assert!(SemVer::parse(&m.version).unwrap() >= SemVer::parse("1.46.7-beta.1").unwrap());
+        let eval = evaluate_manifest("1.46.2", "installer", "beta", "", &m, None).unwrap();
+        assert!(eval.has_update, "v1.46.2 在测试版通道必须检测到新包 {}", m.version);
     }
 }
