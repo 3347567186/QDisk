@@ -28,9 +28,17 @@
 
 ---
 
+## 🎬 56 秒官方实机宣传片
+
+https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
+
+<p align="center"><sub>▶ 1080p 有声实机演示（暖白 / 炭黑双主题）· 也可前往 <a href="https://3347567186.github.io/QDisk/#film"><strong>官网影幕按章节跳播</strong></a> 或下载 <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 原片 (8.5 MB)</a></sub></p>
+
+---
+
 ## 一、它能帮你解决哪 4 件最烦人的事？
 
-> 录制中的 10 秒实机操作 GIF 将陆续补齐到本节；目前可直接前往 **[官方网站交互演示](https://3347567186.github.io/QDisk/)** 或先看下方真实运行截图。
+> 想按功能逐项互动体验？可直接前往 **[官方网站交互演示](https://3347567186.github.io/QDisk/)**（支持每张界面大图无缝放大查看）或先看下方真实运行截图。
 
 ### 1. 下载目录塞满几百个杂乱文件——2 秒归类，点错了 1.39 秒全撤回
 
