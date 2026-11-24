@@ -2269,14 +2269,382 @@
           return '';
         }
 
-        function openReleaseNotesModal({ ver, pubDate, pkgKind, pkgSize, pkgSha, notes, isReady, stagedPath }) {
-          const rendered = (window.AIMd && typeof window.AIMd.render === 'function' && notes)
-            ? window.AIMd.render(String(notes))
-            : null;
-          const notesEl = rendered
-            ? h('div', {
+        function kindBadgeInfo(kind) {
+          if (kind === 'major') return { cls: 'badge accent', text: T('大版本', 'Major') };
+          if (kind === 'minor') return { cls: 'badge accent', text: T('功能更新', 'Feature') };
+          if (kind === 'patch') return { cls: 'badge', text: T('优化修复', 'Fix') };
+          if (kind === 'legacy') return { cls: 'badge', text: T('早期版本', 'Legacy') };
+          return { cls: 'badge', text: T('版本', 'Release') };
+        }
+
+        function formatVersionTag(ver) {
+          const s = String(ver || '').trim();
+          if (!s) return '—';
+          return /^[vVaAbB]/.test(s) ? s : 'v' + s;
+        }
+
+        function closeActiveChangelogDialog() {
+          if (state.changelogClose) {
+            const fn = state.changelogClose;
+            state.changelogClose = null;
+            try { fn(); } catch (_) {}
+          }
+        }
+
+        function openChangelogModal(focusOpts) {
+          const fo = focusOpts || {};
+          closeActiveChangelogDialog();
+
+          const modalRoot = document.getElementById('modal-root') || document.body;
+          const dialog = document.createElement('dialog');
+          dialog.className = 'cl-dialog';
+          dialog.setAttribute('closedby', 'any');
+          dialog.setAttribute('aria-labelledby', 'cl-dialog-title');
+
+          let entries = [];
+          let selectedId = '';
+          let userPicked = false;
+          let filterQuery = '';
+          let filterKind = 'all'; // all | minor | patch | legacy
+          let loading = true;
+          let syncing = false;
+          let remoteSynced = false;
+          let closed = false;
+          let loadSeq = 0;
+
+          const updateCtx = fo.ver ? {
+            ver: String(fo.ver),
+            pubDate: fo.pubDate || '',
+            pkgKind: fo.pkgKind || kind,
+            pkgSize: Number(fo.pkgSize) || 0,
+            pkgSha: fo.pkgSha || '',
+            notes: fo.notes || '',
+            isReady: !!fo.isReady,
+            stagedPath: fo.stagedPath || ''
+          } : ((chk && chk.hasUpdate) ? {
+            ver: String(chk.latestVersion || ''),
+            pubDate: chk.pubDate || '',
+            pkgKind: (staged && staged.packageKind) || chk.packageKind || kind,
+            pkgSize: Number((staged && staged.size) || chk.size || 0),
+            pkgSha: (staged && staged.sha256) || chk.sha256 || '',
+            notes: chk.notes || '',
+            isReady: !!(staged && staged.version === chk.latestVersion),
+            stagedPath: (staged && staged.path) || ''
+          } : null);
+
+          function buildSyntheticUpdateEntry() {
+            if (!updateCtx || !updateCtx.ver) return null;
+            return {
+              id: updateCtx.ver.toLowerCase(),
+              version: updateCtx.ver,
+              kind: 'minor',
+              title: extractReleaseSummary(updateCtx.notes) || T('新版本可用', 'New release available'),
+              summary: extractReleaseSummary(updateCtx.notes),
+              body: updateCtx.notes || T('暂无详细更新说明', 'No release notes provided'),
+              date: fmtReleaseDate(updateCtx.pubDate),
+              isCurrent: updateCtx.ver === curVer,
+              isUpdate: true,
+              isPrerelease: !!(chk && chk.isPrerelease),
+              source: 'remote',
+              url: `${releasesPage}/tag/v${updateCtx.ver}`
+            };
+          }
+
+          function mergeEntries(rawList) {
+            const list = Array.isArray(rawList) ? rawList.map((x) => Object.assign({}, x)) : [];
+            const upd = buildSyntheticUpdateEntry();
+            if (upd) {
+              const hitIdx = list.findIndex((x) => String(x.version || '').toLowerCase() === upd.version.toLowerCase());
+              if (hitIdx >= 0) {
+                list[hitIdx] = Object.assign({}, list[hitIdx], {
+                  isUpdate: true,
+                  date: upd.date || list[hitIdx].date || '',
+                  body: upd.body || list[hitIdx].body || ''
+                });
+              } else {
+                list.unshift(upd);
+              }
+            }
+            if (!list.length) {
+              list.push({
+                id: String(curVer || 'current').toLowerCase(),
+                version: String(curVer || '—'),
+                kind: 'minor',
+                title: T('当前运行版本', 'Current installed version'),
+                summary: T('当前版本更新记录', 'Current version notes'),
+                body: T('暂无可展示的离线更新日志，可点击右上角「同步线上」或前往 GitHub 发布页查看。',
+                  'No offline release notes available. Click Sync or open GitHub Releases.'),
+                date: '',
+                isCurrent: true,
+                isUpdate: false,
+                source: 'local',
+                url: releasesPage
+              });
+            }
+            return list;
+          }
+
+          function filteredEntries() {
+            const q = String(filterQuery || '').trim().toLowerCase();
+            return entries.filter((it) => {
+              if (filterKind !== 'all') {
+                if (filterKind === 'minor' && it.kind !== 'minor' && it.kind !== 'major') return false;
+                if (filterKind === 'patch' && it.kind !== 'patch') return false;
+                if (filterKind === 'legacy' && it.kind !== 'legacy') return false;
+              }
+              if (!q) return true;
+              const hay = [it.version, it.title, it.summary, it.date, it.body].join('\n').toLowerCase();
+              return hay.includes(q);
+            });
+          }
+
+          const titleCountEl = h('span', { class: 'badge' }, '');
+          const syncBtn = h('button', {
+            type: 'button',
+            class: 'btn ghost sm',
+            title: T('从官方 GitHub Releases 同步最新发版日期与远端日志', 'Sync release dates & latest notes from GitHub'),
+            onclick: () => loadChangelog(true)
+          }, icon('refresh', 13), h('span', { text: T('同步线上', 'Sync') }));
+          const curJumpBtn = h('button', {
+            type: 'button',
+            class: 'btn ghost sm',
+            onclick: () => {
+              userPicked = true;
+              filterQuery = '';
+              filterKind = 'all';
+              searchInput.value = '';
+              searchClearBtn.hidden = true;
+              const hit = entries.find((x) => x.isCurrent || x.version === curVer) || entries[0];
+              if (hit) selectedId = hit.id;
+              renderAll(true);
+            }
+          }, h('span', { text: T('当前版本', 'Current') }));
+          const closeIconBtn = h('button', {
+            type: 'button',
+            class: 'btn ghost icon sm',
+            title: T('关闭', 'Close'),
+            'aria-label': T('关闭', 'Close'),
+            onclick: () => closeDialog()
+          }, icon('close', 14));
+
+          const headEl = h('header', { class: 'cl-head' },
+            h('div', { class: 'cl-head-left' },
+              h('h1', { id: 'cl-dialog-title', class: 'cl-title' }, T('更新日志', 'Changelog')),
+              titleCountEl,
+              h('span', { class: 'badge ok mono' }, T('当前 ', 'Now ') + formatVersionTag(curVer))
+            ),
+            h('div', { class: 'cl-head-right' },
+              curJumpBtn,
+              syncBtn,
+              h('button', {
+                type: 'button',
+                class: 'btn ghost sm',
+                onclick: () => openExternalUrl(releasesPage)
+              }, icon('external', 13), h('span', { text: 'GitHub' })),
+              closeIconBtn
+            )
+          );
+
+          const searchInput = h('input', {
+            type: 'search',
+            class: 'input cl-search-input',
+            autofocus: true,
+            spellcheck: 'false',
+            placeholder: T('筛选版本号或关键词…', 'Filter version or keyword…'),
+            'aria-label': T('筛选版本号或关键词', 'Filter version or keyword'),
+            oninput: (e) => {
+              filterQuery = e.target.value || '';
+              searchClearBtn.hidden = !filterQuery;
+              renderAll(false);
+            }
+          });
+          const searchClearBtn = h('button', {
+            type: 'button',
+            class: 'btn ghost icon sm cl-search-clear',
+            hidden: true,
+            title: T('清空筛选', 'Clear'),
+            'aria-label': T('清空筛选', 'Clear'),
+            onclick: () => {
+              filterQuery = '';
+              searchInput.value = '';
+              searchClearBtn.hidden = true;
+              renderAll(false);
+              searchInput.focus();
+            }
+          }, icon('close', 12));
+
+          const filterTabsEl = h('div', { class: 'cl-filter-tabs', role: 'tablist' });
+          const listEl = h('div', { class: 'cl-list', role: 'listbox', 'aria-label': T('历史版本列表', 'Version history') });
+          const sidebarEl = h('aside', { class: 'cl-sidebar' },
+            h('div', { class: 'cl-search-wrap' }, icon('search', 13), searchInput, searchClearBtn),
+            filterTabsEl,
+            listEl
+          );
+
+          const detailEl = h('section', { class: 'cl-detail', 'aria-live': 'polite' });
+          const mainEl = h('div', { class: 'cl-main' }, sidebarEl, detailEl);
+
+          const footInfoEl = h('span', { class: 'small muted' }, '');
+          const prevVerBtn = h('button', {
+            type: 'button',
+            class: 'btn ghost sm',
+            onclick: () => stepSelected(-1)
+          }, icon('chevron-left', 12), h('span', { text: T('更新一版', 'Newer') }));
+          const nextVerBtn = h('button', {
+            type: 'button',
+            class: 'btn ghost sm',
+            onclick: () => stepSelected(1)
+          }, h('span', { text: T('更早一版', 'Older') }), icon('chevron-right', 12));
+          const closeBtn = h('button', {
+            type: 'button',
+            class: 'btn sm primary',
+            onclick: () => closeDialog()
+          }, T('关闭', 'Close'));
+
+          const footEl = h('footer', { class: 'cl-foot' },
+            footInfoEl,
+            h('div', { class: 'spacer' }),
+            prevVerBtn,
+            nextVerBtn,
+            closeBtn
+          );
+
+          dialog.appendChild(h('div', { class: 'cl-shell' }, headEl, mainEl, footEl));
+
+          function stepSelected(delta) {
+            const vis = filteredEntries();
+            if (!vis.length) return;
+            const idx = Math.max(0, vis.findIndex((x) => x.id === selectedId));
+            const nextIdx = Math.max(0, Math.min(vis.length - 1, idx + delta));
+            if (vis[nextIdx] && vis[nextIdx].id !== selectedId) {
+              userPicked = true;
+              selectedId = vis[nextIdx].id;
+              renderAll(true);
+            }
+          }
+
+          const onListKey = (e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); stepSelected(1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); stepSelected(-1); }
+          };
+          listEl.addEventListener('keydown', onListKey);
+
+          function renderFilterTabs() {
+            const defs = [
+              { k: 'all', zh: '全部', en: 'All' },
+              { k: 'minor', zh: '功能', en: 'Feature' },
+              { k: 'patch', zh: '修复', en: 'Fix' },
+              { k: 'legacy', zh: '早期', en: 'Legacy' }
+            ];
+            filterTabsEl.replaceChildren(...defs.map((d) => h('button', {
+              type: 'button',
+              role: 'tab',
+              'aria-selected': filterKind === d.k ? 'true' : 'false',
+              class: 'cl-ftab' + (filterKind === d.k ? ' active' : ''),
+              onclick: () => { filterKind = d.k; renderAll(false); }
+            }, T(d.zh, d.en))));
+          }
+
+          function renderDetail(item, visIndex, visTotal) {
+            detailEl.replaceChildren();
+            if (loading && !entries.length) {
+              detailEl.appendChild(skeleton(6, 'log'));
+              return;
+            }
+            if (!item) {
+              detailEl.appendChild(empty(
+                T('没有匹配的历史版本', 'No matching versions'),
+                T('换个版本号或关键词试试', 'Try another version or keyword'),
+                'search'
+              ));
+              return;
+            }
+            const kb = kindBadgeInfo(item.kind);
+            const verTag = formatVersionTag(item.version);
+            const isUpdItem = !!(updateCtx && item.version.toLowerCase() === updateCtx.ver.toLowerCase());
+            const metaBits = [
+              item.date || '',
+              isUpdItem && updateCtx.pkgSize > 0 ? fmtSize(updateCtx.pkgSize) : '',
+              isUpdItem ? (updateCtx.pkgKind === 'installer' ? T('安装版', 'Installer') : T('便携版', 'Portable')) : ''
+            ].filter(Boolean).join(' · ');
+
+            const headerBadges = [
+              h('span', { class: kb.cls }, kb.text),
+              item.isUpdate ? h('span', { class: 'badge ok' }, T('发现新版本', 'New release')) : null,
+              item.isCurrent ? h('span', { class: 'badge ok' }, T('当前运行', 'Installed')) : null,
+              item.isPrerelease ? h('span', { class: 'badge warn' }, T('预发布', 'Prerelease')) : null
+            ].filter(Boolean);
+
+            const copyTextBody = `# ${verTag}${item.title ? ' — ' + item.title : ''}\n\n${item.body || ''}`.trim();
+
+            const detailHead = h('div', { class: 'cl-detail-head' },
+              h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center' } },
+                h('h2', { class: 'cl-ver-heading mono' }, T(`${verTag} 更新日志`, `${verTag} Release Notes`)),
+                ...headerBadges,
+                h('div', { class: 'spacer' }),
+                h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  onclick: () => UI.copy(copyTextBody, T('已复制本版更新日志', 'Release notes copied'))
+                }, icon('copy', 13), h('span', { text: T('复制', 'Copy') })),
+                item.url ? h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  onclick: () => openExternalUrl(item.url)
+                }, icon('external', 13), h('span', { text: T('发布页', 'Tag') })) : null
+              ),
+              item.title ? h('div', { class: 'cl-ver-sub' }, item.title) : null,
+              metaBits ? h('div', { class: 'small muted' }, metaBits) : null
+            );
+
+            const updBanner = isUpdItem ? h('div', { class: 'cl-upd-bar' },
+              h('div', { class: 'row wrap', style: { gap: '8px', alignItems: 'center' } },
+                updateCtx.isReady
+                  ? h('button', {
+                    type: 'button',
+                    class: 'btn primary sm',
+                    disabled: state.updInstalling || state.updDownloading,
+                    onclick: () => { closeDialog(); installStagedUpdate(updateCtx.ver, updateCtx.pkgKind); }
+                  }, icon('refresh', 13), h('span', { text: T('立即重启并安装更新', 'Restart & install') }))
+                  : h('button', {
+                    type: 'button',
+                    class: 'btn primary sm',
+                    disabled: state.updDownloading || state.updChecking,
+                    onclick: () => { closeDialog(); startUpdateDownload(); }
+                  }, icon('download', 13), h('span', { text: T('下载更新包', 'Download update') })),
+                updateCtx.isReady && updateCtx.stagedPath
+                  ? h('button', {
+                    type: 'button',
+                    class: 'btn ghost sm',
+                    onclick: () => reveal(updateCtx.stagedPath)
+                  }, icon('folder', 13), h('span', { text: T('打开安装包目录', 'Show in folder') }))
+                  : null,
+                !updateCtx.isReady
+                  ? h('button', {
+                    type: 'button',
+                    class: 'btn ghost sm',
+                    disabled: state.updDownloading,
+                    onclick: async () => { closeDialog(); await skipUpdateVersion(updateCtx.ver); }
+                  }, h('span', { text: T('跳过此版本', 'Skip this version') }))
+                  : null
+              ),
+              updateCtx.pkgSha ? h('details', { class: 'upd-details' },
+                h('summary', { class: 'small muted', text: T('SHA-256 校验信息', 'SHA-256 checksum') }),
+                h('div', { class: 'upd-details-body' },
+                  h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
+                    h('span', { class: 'small muted mono upd-sha', text: 'SHA-256: ' + updateCtx.pkgSha }),
+                    h('button', {
+                      type: 'button',
+                      class: 'btn ghost sm',
+                      onclick: () => UI.copy(updateCtx.pkgSha, T('已复制 SHA-256', 'SHA-256 copied'))
+                    }, h('span', { text: T('复制', 'Copy') }))
+                  )
+                )
+              ) : null
+            ) : null;
+
+            const notesEl = h('div', {
               class: 'upd-log-md',
-              html: rendered,
               onclick: (e) => {
                 const a = e && e.target && e.target.closest ? e.target.closest('a[href]') : null;
                 if (!a) return;
@@ -2284,80 +2652,212 @@
                 if (/^https?:\/\//i.test(href)) {
                   e.preventDefault();
                   openExternalUrl(href);
+                } else {
+                  e.preventDefault();
                 }
               }
-            })
-            : h('div', { class: 'small muted', text: notes || T('暂无详细更新说明', 'No release notes provided') });
-
-          const metaBits = [
-            pubDate ? fmtReleaseDate(pubDate) : '',
-            pkgSize > 0 ? fmtSize(pkgSize) : '',
-            pkgKind === 'installer' ? T('安装版', 'Installer') : T('便携版', 'Portable')
-          ].filter(Boolean).join(' · ');
-
-          let notesModalHandle = null;
-          const extraActions = h('div', { class: 'row wrap', style: { gap: '8px', marginTop: '8px' } },
-            h('button', {
-              type: 'button',
-              class: 'btn ghost sm',
-              onclick: () => openExternalUrl(releasesPage)
-            }, icon('external', 13), h('span', { text: T('在 GitHub 查看', 'Open on GitHub') })),
-            isReady && stagedPath
-              ? h('button', {
-                type: 'button',
-                class: 'btn ghost sm',
-                onclick: () => reveal(stagedPath)
-              }, icon('folder', 13), h('span', { text: T('打开安装包目录', 'Show in folder') }))
-              : null,
-            hasNew && !isReady
-              ? h('button', {
-                type: 'button',
-                class: 'btn ghost sm',
-                disabled: state.updDownloading,
-                onclick: async () => {
-                  if (notesModalHandle && typeof notesModalHandle.close === 'function') notesModalHandle.close();
-                  await skipUpdateVersion(ver);
-                }
-              }, h('span', { text: T('跳过此版本', 'Skip this version') }))
-              : null
-          );
-
-          const detailsBlock = h('details', { class: 'upd-details' },
-            h('summary', { class: 'small muted', text: T('校验信息与更多操作', 'Checksum & more options') }),
-            h('div', { class: 'upd-details-body' },
-              pkgSha ? h('div', { class: 'row', style: { gap: '8px', alignItems: 'center' } },
-                h('span', { class: 'small muted mono upd-sha', text: 'SHA-256: ' + pkgSha }),
-                h('button', {
-                  type: 'button',
-                  class: 'btn ghost sm',
-                  onclick: () => UI.copy(pkgSha, T('已复制 SHA-256', 'SHA-256 copied'))
-                }, h('span', { text: T('复制', 'Copy') }))
-              ) : null,
-              extraActions
-            )
-          );
-
-          notesModalHandle = modal({
-            title: T(`v${ver} 更新日志`, `v${ver} Release Notes`),
-            wide: true,
-            body: h('div', { class: 'stack' },
-              metaBits ? h('div', { class: 'small muted', text: metaBits }) : null,
-              h('div', { class: 'upd-log-viewer' }, notesEl),
-              detailsBlock
-            ),
-            buttons: [
-              { id: 'close', label: T('关闭', 'Close') },
-              isReady
-                ? { id: 'install', label: T('立即重启并安装更新', 'Restart & install'), kind: 'primary' }
-                : (hasNew && !state.updDownloading
-                  ? { id: 'download', label: T('下载更新包', 'Download update'), kind: 'primary' }
-                  : null)
-            ].filter(Boolean),
-            onAction: (id) => {
-              if (id === 'download') startUpdateDownload();
-              else if (id === 'install') installStagedUpdate(ver, pkgKind);
+            });
+            if (window.AIMd && typeof window.AIMd.render === 'function' && item.body) {
+              const rendered = window.AIMd.render(String(item.body));
+              if (typeof UI.safeSetHtml === 'function') UI.safeSetHtml(notesEl, rendered);
+              else notesEl.innerHTML = rendered;
+            } else {
+              notesEl.textContent = item.body || T('该版本暂无详细变更记录', 'No detailed release notes for this version');
             }
-          });
+
+            const viewer = h('div', { class: 'upd-log-viewer cl-log-viewer' }, notesEl);
+            detailEl.appendChild(detailHead);
+            if (updBanner) detailEl.appendChild(updBanner);
+            detailEl.appendChild(viewer);
+            if (viewer.scrollTop) viewer.scrollTop = 0;
+
+            footInfoEl.textContent = T(
+              `第 ${visIndex + 1} / ${visTotal} 版` + (remoteSynced ? ' · 已同步线上发布' : ' · 本地完整历史记录'),
+              `#${visIndex + 1} of ${visTotal}` + (remoteSynced ? ' · Synced with GitHub' : ' · Local history')
+            );
+          }
+
+          function renderAll(scrollSelected) {
+            renderFilterTabs();
+            titleCountEl.textContent = T(`共 ${entries.length} 个版本`, `${entries.length} releases`);
+            const vis = filteredEntries();
+            if (vis.length && !vis.some((x) => x.id === selectedId)) {
+              selectedId = vis[0].id;
+            }
+            const hadListFocus = typeof document !== 'undefined'
+              && typeof listEl.contains === 'function'
+              && !!document.activeElement
+              && listEl.contains(document.activeElement);
+            let activeBtnToFocus = null;
+            listEl.replaceChildren();
+            if (loading && !entries.length) {
+              listEl.appendChild(skeleton(6, 'log'));
+            } else if (!vis.length) {
+              listEl.appendChild(h('div', { class: 'small muted', style: { padding: '14px 8px', textAlign: 'center' } },
+                T('无匹配版本', 'No matches')));
+            } else {
+              vis.forEach((it) => {
+                const isSel = it.id === selectedId;
+                const rowBtn = h('button', {
+                  type: 'button',
+                  role: 'option',
+                  'aria-selected': isSel ? 'true' : 'false',
+                  class: 'cl-item' + (isSel ? ' active' : ''),
+                  onclick: () => {
+                    userPicked = true;
+                    selectedId = it.id;
+                    renderAll(false);
+                  }
+                },
+                  h('div', { class: 'cl-item-top' },
+                    h('span', { class: 'cl-item-ver mono' }, formatVersionTag(it.version)),
+                    it.isUpdate ? h('span', { class: 'cl-dot is-new', title: T('新版本', 'New') }) : null,
+                    it.isCurrent ? h('span', { class: 'badge ok cl-mini-badge' }, T('当前', 'Now'))
+                      : (it.isUpdate ? h('span', { class: 'badge accent cl-mini-badge' }, T('新版', 'New')) : null),
+                    h('span', { class: 'spacer' }),
+                    it.date ? h('span', { class: 'cl-item-date mono' }, it.date) : null
+                  ),
+                  h('div', { class: 'cl-item-sub ellipsis', title: it.title || it.summary || '' },
+                    it.title || it.summary || T('查看更新说明', 'View notes'))
+                );
+                listEl.appendChild(rowBtn);
+                if (isSel) {
+                  activeBtnToFocus = rowBtn;
+                  if (scrollSelected && typeof rowBtn.scrollIntoView === 'function') {
+                    rowBtn.scrollIntoView({ block: 'nearest' });
+                  }
+                }
+              });
+            }
+            // 键盘上下切换重建列表后必须将焦点还给新选中项，防止第二次按方向键失焦失效
+            if (hadListFocus && activeBtnToFocus && typeof activeBtnToFocus.focus === 'function') {
+              try { activeBtnToFocus.focus({ preventScroll: true }); } catch (_) { activeBtnToFocus.focus(); }
+            }
+
+            const curIdx = vis.findIndex((x) => x.id === selectedId);
+            const activeItem = curIdx >= 0 ? vis[curIdx] : null;
+            prevVerBtn.disabled = curIdx <= 0;
+            nextVerBtn.disabled = curIdx < 0 || curIdx >= vis.length - 1;
+            renderDetail(activeItem, curIdx >= 0 ? curIdx : 0, vis.length);
+          }
+
+          async function loadChangelog(includeRemote) {
+            const mySeq = ++loadSeq;
+            if (includeRemote) {
+              if (syncing) return;
+              syncing = true;
+              syncBtn.disabled = true;
+            } else {
+              loading = true;
+              renderAll(false);
+            }
+            try {
+              let raw = [];
+              if (API && typeof API.updaterChangelog === 'function') {
+                const res = await API.updaterChangelog(!!includeRemote);
+                if (closed || mySeq !== loadSeq) return;
+                raw = (res && Array.isArray(res.entries)) ? res.entries : [];
+                if (includeRemote) {
+                  remoteSynced = !!(res && res.remoteSynced);
+                  if (remoteSynced) {
+                    toast(T('已同步线上历史版本信息', 'Synced release history from GitHub'), 'ok');
+                  } else if (res && res.remoteError) {
+                    toast(T('线上同步失败，已保留离线完整记录：', 'Online sync failed; showing local history: ') + res.remoteError, 'warn');
+                  }
+                }
+              }
+              entries = mergeEntries(raw);
+              if (!userPicked || !entries.some((x) => x.id === selectedId)) {
+                const wantVer = fo.ver ? String(fo.ver).toLowerCase() : '';
+                const hit = (wantVer && entries.find((x) => x.version.toLowerCase() === wantVer))
+                  || entries.find((x) => x.isUpdate)
+                  || entries.find((x) => x.isCurrent || x.version === curVer)
+                  || entries[0];
+                selectedId = hit ? hit.id : '';
+              }
+            } catch (e) {
+              if (closed || mySeq !== loadSeq) return;
+              entries = mergeEntries([]);
+              selectedId = entries[0] ? entries[0].id : '';
+              if (includeRemote) toast(errText(e), 'warn');
+            } finally {
+              if (!closed && mySeq === loadSeq) {
+                loading = false;
+                syncing = false;
+                syncBtn.disabled = false;
+                renderAll(true);
+              }
+            }
+          }
+
+          let unregModal = null;
+          let pressedOutside = false;
+          const isOutside = (e) => {
+            if (typeof dialog.getBoundingClientRect !== 'function') return false;
+            const r = dialog.getBoundingClientRect();
+            return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+          };
+          const needLightDismissFallback = typeof HTMLDialogElement === 'undefined' || !('closedBy' in HTMLDialogElement.prototype);
+          const onPointerDown = (e) => { pressedOutside = isOutside(e); };
+          const onPointerUp = (e) => { if (pressedOutside && isOutside(e)) closeDialog(); pressedOutside = false; };
+          if (needLightDismissFallback) {
+            dialog.addEventListener('pointerdown', onPointerDown);
+            dialog.addEventListener('pointerup', onPointerUp);
+          }
+
+          function cleanupDialog() {
+            if (closed) return;
+            closed = true;
+            if (state.changelogClose === closeDialog) state.changelogClose = null;
+            if (unregModal) { unregModal(); unregModal = null; }
+            try { dialog.returnValue = ''; } catch (_) {}
+            listEl.removeEventListener('keydown', onListKey);
+            if (needLightDismissFallback) {
+              dialog.removeEventListener('pointerdown', onPointerDown);
+              dialog.removeEventListener('pointerup', onPointerUp);
+            }
+            dialog.removeEventListener('close', cleanupDialog);
+            try { dialog.remove(); } catch (_) {}
+          }
+
+          function closeDialog() {
+            if (closed) return;
+            if (typeof dialog.close === 'function' && dialog.open) {
+              try { dialog.close(); } catch (_) { cleanupDialog(); }
+            } else {
+              cleanupDialog();
+            }
+          }
+
+          dialog.addEventListener('close', cleanupDialog);
+          state.changelogClose = closeDialog;
+          if (typeof UI.registerModalClose === 'function') {
+            unregModal = UI.registerModalClose(closeDialog);
+          }
+
+          modalRoot.appendChild(dialog);
+          if (typeof dialog.showModal === 'function') {
+            try {
+              dialog.showModal();
+            } catch (_) {
+              dialog.setAttribute('open', '');
+              dialog.classList.add('cl-dialog-fallback');
+            }
+          } else {
+            dialog.setAttribute('open', '');
+            dialog.classList.add('cl-dialog-fallback');
+          }
+
+          // 若已传入新版本内容，先同步首帧绘制，再异步补齐全部历史版本列表（无闪烁且兼容同步检测）
+          entries = mergeEntries([]);
+          if (fo.ver) {
+            const hit = entries.find((x) => x.version.toLowerCase() === String(fo.ver).toLowerCase());
+            if (hit) selectedId = hit.id;
+          } else if (entries[0]) {
+            selectedId = entries[0].id;
+          }
+          renderAll(false);
+          loadChangelog(false);
         }
 
         const resultCard = (() => {
@@ -2414,7 +2914,7 @@
               h('button', {
                 type: 'button',
                 class: 'btn ghost sm',
-                onclick: () => openReleaseNotesModal({
+                onclick: () => openChangelogModal({
                   ver: targetVer,
                   pubDate: chk && chk.pubDate,
                   pkgKind,
@@ -2424,7 +2924,7 @@
                   isReady,
                   stagedPath: staged && staged.path
                 })
-              }, icon('external', 13), h('span', { text: T('查看更新日志', 'Release notes') }))
+              }, icon('log', 13), h('span', { text: T('查看更新日志', 'Release notes') }))
             )
           );
         })();
@@ -2491,6 +2991,11 @@
                 : null
             ),
             h('div', { class: 'spacer' }),
+            h('button', {
+              type: 'button',
+              class: 'btn sm',
+              onclick: () => openChangelogModal()
+            }, icon('log', 14), h('span', { text: T('查看更新日志', 'Changelog') })),
             h('button', {
               type: 'button',
               class: 'btn sm primary',
@@ -2938,6 +3443,7 @@
         if (unlistenUpdCheck) { try { unlistenUpdCheck(); } catch (e) { /* ignore */ } unlistenUpdCheck = null; }
         if (unlistenDataMig) { try { unlistenDataMig(); } catch (e) { /* ignore */ } unlistenDataMig = null; }
         if (activeMigModal) { try { activeMigModal.close(); } catch (e) { /* ignore */ } activeMigModal = null; }
+        if (state.changelogClose) { try { state.changelogClose(); } catch (e) { /* ignore */ } state.changelogClose = null; }
         state.updProgDom = null;
         state.updCheckDom = null;
         liveJump = null;

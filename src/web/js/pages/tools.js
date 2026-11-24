@@ -232,15 +232,9 @@
     }
 
     ensureDv();
-
-    Promise.resolve()
-      .then(() => API.configGet())
-      .then((cfg) => {
-        if (!dv || jumpClaimed || dv.getPath()) return;
-        const last = String((cfg && (cfg.last_folder || cfg.lastFolder)) || '');
-        if (last) dv.setPath(last);
-      })
-      .catch(() => {});
+    /* 不再在挂载时自动加载 config.last_folder：
+       旧版会自动把整理页遗留的临时目录打开在「文件夹浏览」里，导致用户关不掉也总看到旧目录；
+       现在仅响应用户主动选目录或显式 jump 定位。 */
 
     /* ---------------- 骨架 I：三分段定高工作台 ---------------- */
     const tabBig = h('button', { class: 'wb-tab active', type: 'button', onclick: () => switchToolTab('big') },
@@ -598,7 +592,18 @@
         if (cat) tags.push(h('span', { class: 'tag' + (cat.tone === 'accent' ? ' store' : '') }, T(cat.label[0], cat.label[1])));
         if (it.company) tags.push(h('span', { class: 'tag' }, it.company));
 
-        const row = h('div', { class: 'tool-row', dataset: { path: it.path || '' } },
+        const viewBtn = h('button', {
+          type: 'button',
+          class: 'btn icon ghost sm tool-view-btn',
+          title: T('查看文件内容', 'View file content'),
+          'aria-label': T('查看文件内容', 'View file content'),
+          onclick: (e) => {
+            e.stopPropagation();
+            if (typeof UI.previewFile === 'function') UI.previewFile(it.path, { name: it.name });
+          }
+        }, icon('file', 13));
+
+        const row = h('div', { class: 'tool-row', dataset: { path: it.path || '' }, title: T('双击查看文件内容', 'Double-click to view file content') },
           h('span', { class: 'muted small', style: { width: '26px' } }, String(i + 1)),
           h('div', { class: 'grow' },
             h('div', { class: 'row' },
@@ -606,11 +611,16 @@
               ...tags),
             h('div', { class: 'mono small muted ellipsis', title: sub }, sub),
             h('div', { class: 'small muted' }, risk.why)),
+          viewBtn,
           h('span', { class: 'badge ' + risk.level, title: risk.why }, risk.text),
           h('span', { class: 'size small' }, fmtBytes(it.size))
         );
         attachMenu(row, [
           { header: it.name || '' },
+          { label: T('查看文件内容', 'View file content'), icon: 'file',
+            action: () => {
+              if (typeof UI.previewFile === 'function') UI.previewFile(it.path, { name: it.name });
+            } },
           { label: T('在软件目录树中定位', 'Locate in folder view'), icon: 'scan',
             action: () => {
               switchToolTab('browse');
@@ -643,8 +653,11 @@
               } catch (e) { toast(errText(e), 'error'); }
             } }
         ]);
-        row.addEventListener('dblclick', () => {
-          if (window.AIEntries && typeof window.AIEntries.open === 'function') {
+        row.addEventListener('dblclick', (e) => {
+          if (e.target && e.target.closest && e.target.closest('button')) return;
+          if (typeof UI.previewFile === 'function') {
+            UI.previewFile(it.path, { name: it.name });
+          } else if (window.AIEntries && typeof window.AIEntries.open === 'function') {
             window.AIEntries.open(it.path);
           } else {
             switchToolTab('browse');

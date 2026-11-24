@@ -13,12 +13,10 @@
 
   const PAGE = 200;                 // 与 Rust list_dir 的 cap 上限一致
   const EXEC_EXT = ['exe', 'msi', 'msix', 'appx', 'bat', 'cmd', 'com', 'scr', 'ps1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'jar', 'lnk', 'reg', 'hta'];
-  const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'];
-  const TEXT_EXT = ['txt', 'log', 'md', 'json', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'xml', 'csv', 'tsv', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'html', 'htm', 'css', 'scss', 'toml', 'sql', 'sh', 'env', 'gitignore'];
+  const IMG_EXT = ['png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'];
   const ARCHIVE_RE = /\.(?:tar\.(?:gz|bz2|xz|zst)|zip|rar|7z|tar|tgz|tbz2|txz|gz|bz2|xz|zst)$/i;
 
   function isImage(name) { return IMG_EXT.indexOf(extOf(name)) >= 0; }
-  function isTextFile(name) { return TEXT_EXT.indexOf(extOf(name)) >= 0; }
   function isArchive(name) { return ARCHIVE_RE.test(String(name || '')); }
   function stemOf(name) {
     const s = String(name || '');
@@ -171,7 +169,34 @@
     el.appendChild(moreBtn);
 
     /* ---------- 辅助操作 ---------- */
-    async function previewTextModal(path, name) {
+    function buildImageGallery(targetPath) {
+      const toSrc = typeof UI.fileSrc === 'function' ? UI.fileSrc : (p) => p;
+      const imgs = items
+        .filter((x) => x && x.kind !== 'dir' && isImage(x.name))
+        .map((x) => {
+          const full = joinDir(dir, x.name);
+          return { path: full, name: x.name, src: toSrc(full) };
+        });
+      const idx = imgs.findIndex((x) => x.path.toLowerCase() === String(targetPath || '').toLowerCase());
+      if (idx >= 0) return { items: imgs, index: idx };
+      return { items: [{ path: targetPath, name: String(targetPath || '').split(/[\\/]/).pop() || '', src: toSrc(targetPath) }], index: 0 };
+    }
+
+    function previewInApp(path, name) {
+      if (!path) return;
+      if (isImage(name) && typeof UI.preview === 'function') {
+        const g = buildImageGallery(path);
+        UI.preview({ items: g.items, index: g.index, title: name });
+        return;
+      }
+      if (typeof UI.previewFile === 'function') {
+        UI.previewFile(path, { name: name || '' });
+        return;
+      }
+      previewTextFallback(path, name);
+    }
+
+    async function previewTextFallback(path, name) {
       try {
         const text = await API.readText(path, 120000);
         const body = h('div', { class: 'stack' },
@@ -312,7 +337,6 @@
       const execFlag = !isDir && isExec(it.name);
       const arcFlag = !isDir && isArchive(it.name);
       const imgFlag = !isDir && isImage(it.name);
-      const txtFlag = !isDir && isTextFile(it.name);
 
       const acts = [];
       if (isDir) {
@@ -328,13 +352,13 @@
       } else if (imgFlag && typeof UI.preview === 'function') {
         acts.push(h('button', {
           class: 'btn sm primary', type: 'button',
-          onclick: () => UI.preview({ items: [{ path: it.path, name: it.name }], index: 0, title: it.name })
+          onclick: () => previewInApp(it.path, it.name)
         }, icon('shots', 13), T('软件内预览', 'Preview')));
-      } else if (txtFlag) {
+      } else {
         acts.push(h('button', {
           class: 'btn sm primary', type: 'button',
-          onclick: () => previewTextModal(it.path, it.name)
-        }, icon('file', 13), T('软件内查看', 'View text')));
+          onclick: () => previewInApp(it.path, it.name)
+        }, icon('file', 13), T('查看内容', 'View content')));
       }
       if (execFlag) {
         acts.push(h('button', {
@@ -359,7 +383,7 @@
       focusBox.appendChild(h('div', { class: 'dv-focus-info' },
         icon(arcFlag ? 'archive' : (isDir ? 'folder' : 'file'), 14),
         h('span', { class: 'dv-focus-name ellipsis', title: it.path }, it.name),
-        execFlag ? h('span', { class: 'badge warn' }, T('可执行文件 · 仅定位不运行', 'Executable · safe lock')) : null,
+        execFlag ? h('span', { class: 'badge warn' }, T('可执行文件 · 只读查看不运行', 'Executable · read-only')) : null,
         h('span', { class: 'dv-focus-path mono small muted ellipsis', title: it.path }, it.path)
       ));
       focusBox.appendChild(h('div', { class: 'dv-focus-acts' }, ...acts));
@@ -465,25 +489,12 @@
 
       const openIt = () => {
         if (isDir) { setPath(path); return; }
+        setFocused(itemObj, row);
         if (isArchive(name) && root.App && root.App.jump) {
           root.App.jump('archive', { paths: [path] });
           return;
         }
-        if (isImage(name) && typeof UI.preview === 'function') {
-          UI.preview({ items: [{ path, name }], index: 0, title: name });
-          return;
-        }
-        if (isTextFile(name)) {
-          previewTextModal(path, name);
-          return;
-        }
-        if (isExec(name)) {
-          setFocused(itemObj, row);
-          toast(T('这是可执行文件，已留在软件内定位，如需去资源管理器请点「系统文件管理器」',
-            'Executable located in app; use Explorer button if you need system folder'), 'info', 2800);
-          return;
-        }
-        openDefaultAppSafe(path);
+        previewInApp(path, name);
       };
 
       if (isDir) {
@@ -503,10 +514,11 @@
           } else {
             if (isArchive(name)) {
               itemsMenu.push({ label: T('在软件「压缩包」中打开', 'Open in Archives'), icon: 'archive', action: () => root.App && root.App.jump && root.App.jump('archive', { paths: [path] }) });
+              itemsMenu.push({ label: T('查看文件信息 / 十六进制', 'Inspect / Hex'), icon: 'file', action: () => UI.previewFile && UI.previewFile(path, { name, mode: 'hex' }) });
             } else if (isImage(name) && typeof UI.preview === 'function') {
-              itemsMenu.push({ label: T('软件内预览图片', 'Preview image'), icon: 'shots', action: () => UI.preview({ items: [{ path, name }], index: 0, title: name }) });
-            } else if (isTextFile(name)) {
-              itemsMenu.push({ label: T('软件内查看文本', 'View text in app'), icon: 'file', action: () => previewTextModal(path, name) });
+              itemsMenu.push({ label: T('软件内预览图片', 'Preview image'), icon: 'shots', action: () => previewInApp(path, name) });
+            } else {
+              itemsMenu.push({ label: T('软件内查看内容', 'View content in app'), icon: 'file', action: () => previewInApp(path, name) });
             }
             if (!isExec(name)) {
               itemsMenu.push({ label: T('用系统默认程序打开', 'Open with default app'), icon: 'file', action: () => openDefaultAppSafe(path) });

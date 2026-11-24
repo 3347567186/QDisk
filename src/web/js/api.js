@@ -53,6 +53,11 @@
   storeApps: () => invoke('store_apps'),
   removeStoreApp: (pkg, confirm) => invoke('remove_store_app', { package: pkg, confirm }),
   readText: (path, maxBytes) => invoke('read_text', { path, maxBytes }),
+  filePreview: (path, maxBytes, mode) => invoke('file_preview', {
+    path,
+    maxBytes: maxBytes || null,
+    mode: mode || null
+  }),
     pickArchive: () => invoke('pick_archive'),
     pickFiles: () => invoke('pick_files'),
     pickArchiveSave: (defaultName) => invoke('pick_archive_save', { defaultName }),
@@ -100,6 +105,7 @@
     updaterCancel: () => invoke('updater_cancel'),
     updaterClearCache: () => invoke('updater_clear_cache'),
     updaterInstall: (silent) => invoke('updater_install', { silent: !!silent }),
+    updaterChangelog: (includeRemote) => invoke('updater_changelog', { includeRemote: !!includeRemote }),
   logRead: (path, maxBytes) => invoke('log_read', { path, maxBytes: maxBytes || null }),
     logClear: () => invoke('log_clear'),
     logLine: (level, msg) => invoke('log_line', { level, msg }),

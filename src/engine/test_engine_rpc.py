@@ -3501,6 +3501,48 @@ class TestSystemPerformance(EngineCase):
         self.assertIn("-p", args)
         self.assertEqual(args[-1], r'"C:\Program Files\Google\Chrome\Application\chrome.exe"')
 
+    def test_search_drives_detection_normalization_and_selective_reuse(self):
+        import tidy as T
+        # 1. 盘符根规范化（防 Windows 把 "c:" 解析为当前工作目录）与去重一致 ID
+        self.assertEqual(T._ix_normalize_root("c:"), "C:\\")
+        self.assertEqual(T._ix_normalize_root("C:/"), "C:\\")
+        self.assertEqual(T._ix_normalize_root("d:\\\\"), "D:\\")
+        self.assertEqual(T._ix_make_id("c:"), T._ix_make_id("C:\\"))
+        self.assertEqual(T._ix_make_id("D:/"), T._ix_make_id("d:\\"))
+        # 小容量恢复分区拦截、系统盘不拦截
+        self.assertTrue(T._is_recovery_partition("System Reserved", 100 * 1024 * 1024, False))
+        self.assertFalse(T._is_recovery_partition("System Reserved", 100 * 1024 * 1024, True))
+        self.assertFalse(T._is_recovery_partition("Data", 100 * 1024 * 1024 * 1024, False))
+
+        # 2. search.drives RPC 返回本机真实固定盘且系统盘排首位
+        dr = self.rpc_ok("search.drives", {})
+        self.assertIsInstance(dr.get("drives"), list)
+        self.assertGreaterEqual(len(dr["drives"]), 1)
+        self.assertTrue(dr["drives"][0]["is_system"])
+        for d in dr["drives"]:
+            self.assertEqual(d["drive_type"], "fixed")
+            self.assertTrue(d["root"].endswith("\\") or d["root"] == "/")
+            self.assertGreater(d["total"], 0)
+
+        # 3. search.index 逐盘增量复用：已健康建库的目录复用，新增目录只建新增部分
+        dir_a = self.new_folder()
+        dir_b = self.new_folder()
+        with open(os.path.join(dir_a, "alpha.txt"), "w", encoding="utf-8") as f:
+            f.write("a")
+        with open(os.path.join(dir_b, "beta.txt"), "w", encoding="utf-8") as f:
+            f.write("b")
+
+        r1 = self.rpc_ok("search.index", {"roots": [dir_a], "full": True})
+        self.assertFalse(r1.get("reused"))
+        r2 = self.rpc_ok("search.index", {"roots": [dir_a, dir_b], "reuse": True, "full": False})
+        self.assertFalse(r2.get("reused"))
+        self.assertTrue(any(os.path.normcase(p) == os.path.normcase(dir_a) for p in r2.get("reused_roots", [])))
+        self.assertTrue(any(os.path.normcase(p) == os.path.normcase(dir_b) for p in r2.get("built_roots", [])))
+
+        # 再次调用两个目录都健康 -> 全部复用
+        r3 = self.rpc_ok("search.index", {"roots": [dir_a, dir_b], "reuse": True, "full": False})
+        self.assertTrue(r3.get("reused"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -40,6 +40,12 @@ pub const OFFICIAL_API_RELEASES_URL: &str =
     "https://api.github.com/repos/3347567186/QDisk/releases?per_page=8";
 pub const OFFICIAL_RELEASES_PAGE: &str =
     "https://github.com/3347567186/QDisk/releases";
+/// 远端历史版本日志（按需同步，带 20 条上限与独立超时）。
+pub const OFFICIAL_API_CHANGELOG_URL: &str =
+    "https://api.github.com/repos/3347567186/QDisk/releases?per_page=20";
+
+/// 编译期内嵌完整变更记录，确保安装版与便携版在完全离线状态下也能秒开全部历史版本日志。
+const EMBEDDED_CHANGELOG_MD: &str = include_str!("../../../docs/01-当前版/变更记录.md");
 
 static PART_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -2264,6 +2270,526 @@ pub async fn updater_install(
     Ok(true)
 }
 
+// ---------------------------------------------------------------- 更新日志与历史版本解析（离线内置 + 可选远端同步 + 隐私红线脱敏）
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogEntry {
+    pub id: String,
+    pub version: String,
+    pub kind: String,
+    pub title: String,
+    pub summary: String,
+    pub body: String,
+    pub date: String,
+    pub is_current: bool,
+    pub is_prerelease: bool,
+    pub source: String,
+    pub url: String,
+}
+
+fn contains_dev_private_marker(s: &str) -> bool {
+    s.contains("白林")
+        || s.contains("3347567186@qq.com")
+        || s.contains("是个帅气的男孩")
+        || s.contains("开发者底层")
+        || s.contains("独立开发者署名")
+}
+
+/// 剥离版本标题中的内部开发者元信息片段（严格守住可见 UI 零暴露开发者信息的红线）。
+fn sanitize_changelog_title(raw: &str) -> String {
+    let cleaned = raw
+        .replace("与开发者底层元信息", "")
+        .replace("、开发者底层元信息", "")
+        .replace("及开发者底层元信息", "")
+        .replace("开发者底层元信息", "")
+        .replace("独立开发者署名", "")
+        .replace("白林", "")
+        .replace("3347567186@qq.com", "")
+        .replace("是个帅气的男孩", "")
+        .trim()
+        .trim_end_matches(['、', '，', ',', '与', '+', ' '])
+        .trim()
+        .to_string();
+    cleaned
+}
+
+/// 剥离正文中的开发者隐私小节与敏感行，确保任何历史版本在可见 UI 渲染时绝对零泄露。
+fn sanitize_changelog_body(raw: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut skip_sub = false;
+    let mut in_fence = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if !in_fence && trimmed.starts_with("###") {
+            if contains_dev_private_marker(trimmed) {
+                skip_sub = true;
+                continue;
+            } else {
+                skip_sub = false;
+            }
+        }
+        if skip_sub {
+            continue;
+        }
+        if contains_dev_private_marker(line) {
+            continue;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
+}
+
+fn extract_inline_date(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    for i in 0..=bytes.len() - 10 {
+        let sub = &bytes[i..i + 10];
+        if sub[0..4].iter().all(|b| b.is_ascii_digit())
+            && sub[4] == b'-'
+            && sub[5..7].iter().all(|b| b.is_ascii_digit())
+            && sub[7] == b'-'
+            && sub[8..10].iter().all(|b| b.is_ascii_digit())
+        {
+            if let Ok(d) = std::str::from_utf8(sub) {
+                return Some(d.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn infer_release_kind(version: &str, meta_hint: &str) -> String {
+    let low = meta_hint.to_ascii_lowercase();
+    if low.contains("major") {
+        return "major".into();
+    }
+    if low.contains("minor") {
+        return "minor".into();
+    }
+    if low.contains("patch") {
+        return "patch".into();
+    }
+    if let Ok(sv) = SemVer::parse(version) {
+        if sv.minor == 0 && sv.patch == 0 {
+            return "major".into();
+        }
+        if sv.patch == 0 {
+            return "minor".into();
+        }
+        return "patch".into();
+    }
+    "legacy".into()
+}
+
+/// 尝试将 Markdown 一级/二级标题解析为版本头 `(version_key, kind, date, title)`。
+/// 仅匹配真实版本标题（`1.45.0`、`v1.42.12`、`1.42.15 – 1.42.26`、以及早期里程碑 `v6`..`v9.8`、`a11`、`b1`..`b5`），
+/// 忽略普通子标题（如 `## 1. 卸载程序`、`## 2026-10-30 ...`、`## 2.1.x` 废弃说明）。
+fn parse_changelog_heading(line: &str) -> Option<(String, String, String, String)> {
+    let trimmed = line.trim();
+    let rest = if let Some(r) = trimmed.strip_prefix("## ") {
+        r.trim()
+    } else if let Some(r) = trimmed.strip_prefix("# ") {
+        // 早期仅 v7 使用了一级标题 `# v7：...`
+        let r = r.trim();
+        if !r.starts_with('v') && !r.starts_with('V') {
+            return None;
+        }
+        r
+    } else {
+        return None;
+    };
+
+    if rest.is_empty() {
+        return None;
+    }
+
+    // 提取开头的版本 token（如 `1.45.0`、`v1.42.10`、`v9.8`、`b5`、`a11`）
+    let mut end = 0usize;
+    for (idx, ch) in rest.char_indices() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    let raw_tok = &rest[..end];
+    let after_tok = rest[end..].trim_start();
+
+    // 检查是否是区间版本（如 `1.42.15 – 1.42.26`）
+    let (ver_raw, tail) = if let Some(after_dash) = after_tok
+        .strip_prefix('–')
+        .or_else(|| after_tok.strip_prefix('-'))
+        .or_else(|| after_tok.strip_prefix('—'))
+    {
+        let ad = after_dash.trim_start();
+        let mut end2 = 0usize;
+        for (idx, ch) in ad.char_indices() {
+            if ch.is_ascii_digit() || ch == '.' {
+                end2 = idx + ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let tok2 = &ad[..end2];
+        if SemVer::parse(raw_tok).is_ok() && SemVer::parse(tok2).is_ok() {
+            (
+                format!("{}–{}", raw_tok.trim_start_matches(['v', 'V']), tok2),
+                ad[end2..].trim_start(),
+            )
+        } else {
+            (raw_tok.to_string(), after_tok)
+        }
+    } else {
+        (raw_tok.to_string(), after_tok)
+    };
+
+    // 1) 标准三段语义版本或区间版本
+    let is_semver = SemVer::parse(&ver_raw).is_ok();
+    let is_semver_range = ver_raw.contains('–');
+    // 2) 早期里程碑版本：v6 / v7 / v9.8 / a11 / b1..b5（跳过 `b5 补充 ...` 这类零碎补注）
+    let is_legacy = !is_semver && !is_semver_range && {
+        let low = ver_raw.to_ascii_lowercase();
+        let bytes = low.as_bytes();
+        let valid_v = bytes.len() >= 2
+            && bytes[0] == b'v'
+            && bytes[1].is_ascii_digit()
+            && bytes[1..].iter().all(|b| b.is_ascii_digit() || *b == b'.');
+        let valid_ab = bytes.len() >= 2
+            && (bytes[0] == b'a' || bytes[0] == b'b')
+            && bytes[1..].iter().all(|b| b.is_ascii_digit())
+            && !tail.starts_with("补充");
+        valid_v || valid_ab
+    };
+
+    if !is_semver && !is_semver_range && !is_legacy {
+        return None;
+    }
+
+    let clean_ver = if is_semver {
+        ver_raw.trim_start_matches(['v', 'V']).to_string()
+    } else {
+        ver_raw
+    };
+
+    // 解析括号里的元信息（如 `（minor）` / `（patch）` / `（2026-11-15）`）
+    let mut meta = String::new();
+    let mut title_part = tail;
+    if let Some(rest_paren) = title_part
+        .strip_prefix('（')
+        .or_else(|| title_part.strip_prefix('('))
+    {
+        if let Some(close_pos) = rest_paren.find(['）', ')']) {
+            meta = rest_paren[..close_pos].trim().to_string();
+            let close_len = rest_paren[close_pos..].chars().next().map_or(1, |c| c.len_utf8());
+            title_part = rest_paren[close_pos + close_len..].trim_start();
+        }
+    }
+
+    let date = extract_inline_date(&meta)
+        .or_else(|| extract_inline_date(title_part))
+        .unwrap_or_default();
+
+    let title_clean = title_part
+        .trim_start_matches(['—', '–', '-', '：', ':', ' '])
+        .trim();
+    let title = sanitize_changelog_title(title_clean);
+    let kind = if is_legacy || is_semver_range {
+        if is_semver_range {
+            "patch".into()
+        } else {
+            "legacy".into()
+        }
+    } else {
+        infer_release_kind(&clean_ver, &meta)
+    };
+
+    Some((clean_ver, kind, date, title))
+}
+
+fn extract_summary_line(title: &str, body: &str) -> String {
+    if !title.is_empty() {
+        return title.chars().take(110).collect();
+    }
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("---") || t.starts_with("```") {
+            continue;
+        }
+        let clean = t
+            .trim_start_matches(['#', '-', '*', '>', ' '])
+            .replace("**", "")
+            .replace('`', "");
+        let clean = clean.trim();
+        if !clean.is_empty() {
+            return clean.chars().take(110).collect();
+        }
+    }
+    String::new()
+}
+
+/// 将 `变更记录.md` 解析为倒序（最新在前）的结构化历史版本列表，合并同号段并完成隐私脱敏。
+pub fn parse_embedded_changelog(raw: &str, current_version: &str) -> Vec<ChangelogEntry> {
+    let mut sections: Vec<(String, String, String, String, Vec<&str>)> = Vec::new();
+    let mut in_fence = false;
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if !in_fence {
+            if let Some((ver, kind, date, title)) = parse_changelog_heading(line) {
+                sections.push((ver, kind, date, title, Vec::new()));
+                continue;
+            }
+        }
+        if let Some(last) = sections.last_mut() {
+            last.4.push(line);
+        }
+    }
+
+    // 按原始时间先后合并重复版本号（如历史文档中出现两次的 1.42.12），再整体反转为「最新在前」。
+    let mut merged: Vec<ChangelogEntry> = Vec::new();
+    let mut index_by_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for (ver, kind, date, title, lines) in sections {
+        let body_raw = lines.join("\n");
+        let body = sanitize_changelog_body(&body_raw);
+        let id = ver.to_ascii_lowercase();
+        let is_cur = ver == current_version;
+        let url = if SemVer::parse(&ver).is_ok() {
+            format!("{OFFICIAL_RELEASES_PAGE}/tag/v{ver}")
+        } else {
+            OFFICIAL_RELEASES_PAGE.to_string()
+        };
+
+        if let Some(&pos) = index_by_id.get(&id) {
+            let existing = &mut merged[pos];
+            if !title.is_empty() && !existing.title.contains(&title) {
+                if existing.title.is_empty() {
+                    existing.title = title.clone();
+                } else {
+                    existing.title = format!("{} · {}", existing.title, title);
+                }
+            }
+            if existing.date.is_empty() && !date.is_empty() {
+                existing.date = date;
+            }
+            if !body.is_empty() {
+                let extra = if !title.is_empty() {
+                    format!("### {title}\n\n{body}")
+                } else {
+                    body
+                };
+                if existing.body.is_empty() {
+                    existing.body = extra;
+                } else {
+                    existing.body.push_str("\n\n---\n\n");
+                    existing.body.push_str(&extra);
+                }
+            }
+            existing.summary = extract_summary_line(&existing.title, &existing.body);
+            continue;
+        }
+
+        let summary = extract_summary_line(&title, &body);
+        index_by_id.insert(id.clone(), merged.len());
+        merged.push(ChangelogEntry {
+            id,
+            version: ver,
+            kind,
+            title,
+            summary,
+            body,
+            date,
+            is_current: is_cur,
+            is_prerelease: false,
+            source: "local".into(),
+            url,
+        });
+    }
+
+    merged.reverse();
+    merged
+}
+
+#[cfg(windows)]
+fn fetch_remote_changelog_entries(current_version: &str) -> Result<Vec<ChangelogEntry>> {
+    let (_status, bytes, _final_url) = winhttp_fetch_bytes(
+        OFFICIAL_API_CHANGELOG_URL,
+        MAX_MANIFEST_BYTES,
+        6_500,
+        "application/vnd.github+json, application/json",
+    )?;
+    let arr: Vec<Value> =
+        serde_json::from_slice(&bytes).context("远端发布列表不是合法的 JSON 数组")?;
+    let mut out = Vec::new();
+    for item in arr {
+        if item.get("draft").and_then(|d| d.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let tag = item
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let ver = tag.trim_start_matches(['v', 'V']).to_string();
+        if ver.is_empty() || SemVer::parse(&ver).is_err() {
+            continue;
+        }
+        let prerelease = item
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let pub_date = item
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let date = extract_inline_date(pub_date).unwrap_or_default();
+        let raw_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let raw_body = item.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        let body = sanitize_changelog_body(raw_body);
+        let title = sanitize_changelog_title(
+            raw_name
+                .trim_start_matches("轻盘")
+                .trim_start_matches([' ', '·', '-'])
+                .trim_start_matches("QDisk")
+                .trim_start_matches([' ', '·', '-', 'v', 'V'])
+                .trim_start_matches(ver.as_str())
+                .trim_start_matches([' ', '—', '–', '-', '：', ':']),
+        );
+        let summary = extract_summary_line(&title, &body);
+        let url = item
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .filter(|u| u.starts_with("https://github.com/3347567186/QDisk/"))
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| format!("{OFFICIAL_RELEASES_PAGE}/tag/v{ver}"));
+        let kind = infer_release_kind(&ver, "");
+        out.push(ChangelogEntry {
+            id: ver.to_ascii_lowercase(),
+            version: ver.clone(),
+            kind,
+            title,
+            summary,
+            body,
+            date,
+            is_current: ver == current_version,
+            is_prerelease: prerelease,
+            source: "remote".into(),
+            url,
+        });
+    }
+    Ok(out)
+}
+
+fn merge_local_and_remote_changelogs(
+    mut local: Vec<ChangelogEntry>,
+    remote: Vec<ChangelogEntry>,
+) -> Vec<ChangelogEntry> {
+    let mut extras: Vec<ChangelogEntry> = Vec::new();
+    for r in remote {
+        if let Some(hit) = local.iter_mut().find(|x| x.id == r.id) {
+            if hit.date.is_empty() && !r.date.is_empty() {
+                hit.date = r.date;
+            }
+            if !r.url.is_empty() {
+                hit.url = r.url;
+            }
+            if hit.body.is_empty() && !r.body.is_empty() {
+                hit.body = r.body;
+            }
+            hit.source = "merged".into();
+        } else {
+            extras.push(r);
+        }
+    }
+    // 远端独有按语义版本降序归位：比本地新版高的置顶，较旧的按真实版本号插入对应位置，避免旧版倒挂在顶部
+    extras.sort_by(|a, b| {
+        let sa = SemVer::parse(&a.version).ok();
+        let sb = SemVer::parse(&b.version).ok();
+        sb.cmp(&sa)
+    });
+    for extra in extras.into_iter().rev() {
+        let extra_sv = SemVer::parse(&extra.version).ok();
+        let insert_at = if let Some(ref esv) = extra_sv {
+            local
+                .iter()
+                .position(|it| {
+                    SemVer::parse(&it.version)
+                        .ok()
+                        .is_some_and(|lsv| *esv >= lsv)
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        local.insert(insert_at, extra);
+    }
+    local
+}
+
+static EMBEDDED_CHANGELOG_CACHE: OnceLock<Vec<ChangelogEntry>> = OnceLock::new();
+
+fn cached_embedded_changelog() -> Vec<ChangelogEntry> {
+    EMBEDDED_CHANGELOG_CACHE
+        .get_or_init(|| parse_embedded_changelog(EMBEDDED_CHANGELOG_MD, env!("CARGO_PKG_VERSION")))
+        .clone()
+}
+
+/// 获取全部更新日志（离线秒开全部内置历史版本；`include_remote=true` 时尝试同步线上最新 Release 并优雅离线兜底）。
+#[tauri::command]
+pub async fn updater_changelog(include_remote: Option<bool>) -> Result<Value, String> {
+    let want_remote = include_remote.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        let cur = env!("CARGO_PKG_VERSION");
+        let local = cached_embedded_changelog();
+        let mut remote_synced = false;
+        let mut remote_error = String::new();
+        let entries = if want_remote {
+            #[cfg(windows)]
+            {
+                match fetch_remote_changelog_entries(cur) {
+                    Ok(remote) => {
+                        remote_synced = true;
+                        merge_local_and_remote_changelogs(local, remote)
+                    }
+                    Err(e) => {
+                        remote_error = format!("{e:#}");
+                        local
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                local
+            }
+        } else {
+            local
+        };
+
+        json!({
+            "currentVersion": cur,
+            "total": entries.len(),
+            "remoteSynced": remote_synced,
+            "remoteError": remote_error,
+            "releasesPage": OFFICIAL_RELEASES_PAGE,
+            "entries": entries
+        })
+    })
+    .await
+    .map_err(|e| format!("读取更新日志任务异常：{e}"))
+}
+
 // ---------------------------------------------------------------- 单元测试（含真实本地 HTTP 端到端对抗测试）
 
 #[cfg(test)]
@@ -2563,5 +3089,109 @@ mod tests {
         assert!(describe_winhttp_error(12007).contains("DNS"));
         assert!(describe_winhttp_error(12002).contains("超时"));
         assert!(describe_winhttp_error(12175).contains("TLS"));
+    }
+
+    #[test]
+    fn embedded_changelog_parses_history_merges_dupes_and_strips_private_dev_info() {
+        let entries = parse_embedded_changelog(EMBEDDED_CHANGELOG_MD, "1.45.0");
+        assert!(
+            entries.len() >= 50,
+            "历史版本条数异常偏少: {}",
+            entries.len()
+        );
+        // 必须倒序（最新在前），1.45.0 应在非常靠前的位置并标为 is_current
+        let cur = entries.iter().find(|e| e.version == "1.45.0").expect("应包含 1.45.0");
+        assert!(cur.is_current);
+        assert_eq!(cur.kind, "minor");
+        // 去重校验：1.42.12 在源文档出现两次，解析后必须合并为唯一一条且保留两部分内容
+        let dup_14212: Vec<&ChangelogEntry> =
+            entries.iter().filter(|e| e.version == "1.42.12").collect();
+        assert_eq!(dup_14212.len(), 1, "重复版本号 1.42.12 必须合并去重");
+        assert!(dup_14212[0].body.contains("浮窗") || dup_14212[0].title.contains("浮窗"));
+        // 唯一 id 校验
+        let mut ids = std::collections::HashSet::new();
+        for e in &entries {
+            assert!(ids.insert(e.id.clone()), "出现重复 changelog id: {}", e.id);
+            // 红队隐私铁律：任何可见更新日志条目绝不允许泄露开发者隐私信息
+            for field in [&e.title, &e.summary, &e.body] {
+                assert!(!field.contains("白林"), "日志 {} 泄露开发者姓名", e.version);
+                assert!(
+                    !field.contains("3347567186@qq.com"),
+                    "日志 {} 泄露开发者邮箱",
+                    e.version
+                );
+                assert!(
+                    !field.contains("是个帅气的男孩"),
+                    "日志 {} 泄露开发者备注",
+                    e.version
+                );
+                assert!(
+                    !field.contains("开发者底层"),
+                    "日志 {} 泄露开发者底层段落",
+                    e.version
+                );
+            }
+        }
+        // 确认代码块里的 `# 整理报告` / `## 2026-09` 未被误解析为版本
+        assert!(!entries.iter().any(|e| e.version.contains("整理报告") || e.version.contains("2026-09")));
+        // 确认合并远端 Release 正确前置更高版本并补齐已有版本日期
+        let remote = vec![
+            ChangelogEntry {
+                id: "9.9.9".into(),
+                version: "9.9.9".into(),
+                kind: "major".into(),
+                title: "远端测试".into(),
+                summary: "远端测试".into(),
+                body: "远端正文".into(),
+                date: "2026-11-25".into(),
+                is_current: false,
+                is_prerelease: false,
+                source: "remote".into(),
+                url: "https://github.com/3347567186/QDisk/releases/tag/v9.9.9".into(),
+            },
+            ChangelogEntry {
+                id: "1.45.0".into(),
+                version: "1.45.0".into(),
+                kind: "minor".into(),
+                title: String::new(),
+                summary: String::new(),
+                body: String::new(),
+                date: "2026-11-24".into(),
+                is_current: true,
+                is_prerelease: false,
+                source: "remote".into(),
+                url: "https://github.com/3347567186/QDisk/releases/tag/v1.45.0".into(),
+            },
+        ];
+        let merged = merge_local_and_remote_changelogs(entries, remote);
+        assert_eq!(merged[0].version, "9.9.9");
+        let m145 = merged.iter().find(|e| e.version == "1.45.0").unwrap();
+        assert_eq!(m145.date, "2026-11-24");
+        assert_eq!(m145.source, "merged");
+
+        // 红队加测：较旧的远端独有版本不得倒挂排在最新版本前面，且远端标题隐私字段必清洗
+        let older_remote = vec![ChangelogEntry {
+            id: "1.44.5".into(),
+            version: "1.44.5".into(),
+            kind: "patch".into(),
+            title: sanitize_changelog_title("远端补丁 · 白林 3347567186@qq.com"),
+            summary: "远端补丁".into(),
+            body: "补丁正文".into(),
+            date: "2026-11-23".into(),
+            is_current: false,
+            is_prerelease: false,
+            source: "remote".into(),
+            url: "https://github.com/3347567186/QDisk/releases/tag/v1.44.5".into(),
+        }];
+        assert!(!older_remote[0].title.contains("白林"));
+        assert!(!older_remote[0].title.contains("3347567186@qq.com"));
+        let merged2 = merge_local_and_remote_changelogs(merged, older_remote);
+        let pos_145 = merged2.iter().position(|e| e.version == "1.45.0").unwrap();
+        let pos_1445 = merged2.iter().position(|e| e.version == "1.44.5").unwrap();
+        let pos_1441 = merged2.iter().position(|e| e.version == "1.44.1").unwrap();
+        assert!(
+            pos_145 < pos_1445 && pos_1445 < pos_1441,
+            "旧远端版本 1.44.5 应插在 1.45.0 与 1.44.1 之间: pos145={pos_145}, pos1445={pos_1445}, pos1441={pos_1441}"
+        );
     }
 }

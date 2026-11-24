@@ -5858,6 +5858,271 @@ html[data-theme="dark"] .ai-tnav-pop {
 }
 .upd-prog-row { align-items: center; gap: 8px; }
 
+/* ---------------- 整理来源标签 & 文件行内预览按钮 ---------------- */
+.src-bar { align-items: center; }
+.src-label { flex: 0 0 auto; user-select: none; }
+.org-file-cell { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.org-file-cell > .txt { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-view-btn, .tool-view-btn {
+  flex: 0 0 auto;
+  opacity: .55;
+  transition: opacity var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+tr:hover .org-view-btn, .org-view-btn:focus-visible,
+.tool-row:hover .tool-view-btn, .tool-view-btn:focus-visible { opacity: 1; }
+
+/* ---------------- 图片预览错误兜底 ---------------- */
+.preview-err {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 28px 32px; max-width: 440px; text-align: center;
+  border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--line);
+  color: var(--text-1); box-shadow: var(--shadow-3);
+}
+.preview-err[hidden] { display: none; }
+.preview-err-title { font-weight: 600; font-size: var(--fs-body); }
+
+/* ---------------- 全能只读文件内容预览器（UI.previewFile） ---------------- */
+.modal.fp-modal { width: min(860px, calc(100vw - 32px)); }
+.fp-wrap { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.fp-meta-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px;
+}
+.fp-path-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 10px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border: 1px solid var(--line);
+  min-width: 0;
+}
+.fp-note {
+  padding: 6px 10px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border-left: 3px solid var(--accent);
+  line-height: 1.5;
+}
+.fp-stage {
+  display: flex; flex-direction: column; min-width: 0;
+  border-radius: var(--radius); border: 1px solid var(--line);
+  background: var(--surface-2); overflow: hidden;
+}
+.fp-pre {
+  margin: 0; padding: 12px 14px; max-height: min(60vh, 480px); overflow: auto;
+  font-family: var(--mono); font-size: var(--fs-small); line-height: 1.58;
+  color: var(--text-1); white-space: pre-wrap; word-break: break-word;
+  -webkit-user-select: text; user-select: text;
+}
+.fp-pre.no-wrap { white-space: pre; word-break: normal; }
+.fp-pre.fp-hex { font-size: var(--fs-tiny); line-height: 1.5; color: var(--text-2); }
+.fp-md {
+  padding: 14px 16px; max-height: min(60vh, 480px); overflow: auto;
+  -webkit-user-select: text; user-select: text;
+}
+.fp-image {
+  display: block; max-width: 100%; max-height: min(60vh, 480px);
+  margin: 0 auto; padding: 12px; object-fit: contain; cursor: zoom-in;
+}
+.fp-pdf {
+  width: 100%; height: min(64vh, 540px); border: 0; background: var(--surface);
+}
+.fp-media {
+  width: 100%; max-height: min(58vh, 460px); background: var(--canvas); display: block;
+}
+.fp-audio { height: 48px; margin: 18px 16px; width: calc(100% - 32px); background: transparent; }
+.fp-fallback {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 32px 20px; text-align: center; color: var(--text-2);
+}
+.fp-fallback.is-err { color: var(--danger); }
+.fp-fallback-title { font-weight: 600; color: var(--text-1); font-size: var(--fs-body); }
+
+/* ---------------- 更新日志独立弹窗（原生 <dialog>，双栏历史浏览） ---------------- */
+dialog.cl-dialog {
+  padding: 0;
+  margin: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text-1);
+  box-shadow: var(--shadow-3);
+  width: min(940px, calc(100vw - 36px));
+  height: min(680px, calc(100vh - 44px));
+  max-width: calc(100vw - 36px);
+  max-height: calc(100vh - 44px);
+  overflow: hidden;
+}
+/* 严禁无条件设置 display，按现代 dialog 规范仅在 [open] 时启用 flex */
+dialog.cl-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+dialog.cl-dialog:modal {
+  overscroll-behavior: contain;
+}
+dialog.cl-dialog::backdrop {
+  background: var(--scrim-strong);
+  backdrop-filter: var(--scrim-blur);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+dialog.cl-dialog.cl-dialog-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 88;
+}
+.cl-shell {
+  display: flex; flex-direction: column;
+  width: 100%; height: 100%; min-height: 0;
+}
+.cl-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+.cl-head-left, .cl-head-right {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;
+}
+.cl-title {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--text-1);
+}
+.cl-main {
+  display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden;
+}
+.cl-sidebar {
+  width: 244px; flex: 0 0 244px;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px;
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  min-height: 0;
+}
+.cl-search-wrap {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px; height: 30px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text-3);
+}
+.cl-search-wrap:focus-within { border-color: var(--line-strong); }
+.cl-search-input {
+  flex: 1 1 auto; min-width: 0; height: 26px; padding: 0;
+  border: 0 !important; background: transparent !important;
+  box-shadow: none !important; font-size: var(--fs-small);
+}
+.cl-search-clear { width: 20px; height: 20px; padding: 0; flex: 0 0 auto; }
+.cl-search-clear[hidden] { display: none; }
+.cl-filter-tabs {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+.cl-ftab {
+  height: 24px; padding: 0 4px;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-2);
+  font-family: inherit; font-size: var(--fs-tiny); cursor: pointer;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.cl-ftab:hover { background: var(--hover); color: var(--text-1); }
+.cl-ftab.active {
+  background: var(--surface); color: var(--text-1); font-weight: 500;
+  border-color: var(--line);
+}
+.cl-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 3px;
+  padding-right: 2px;
+}
+.cl-item {
+  position: relative;
+  display: flex; flex-direction: column; gap: 2px;
+  width: 100%; padding: 7px 9px; text-align: left;
+  border: 1px solid transparent; border-radius: var(--radius);
+  background: transparent; color: var(--text-2);
+  font-family: inherit; cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.cl-item:hover { background: var(--hover); color: var(--text-1); }
+.cl-item.active {
+  background: var(--nav-active, var(--surface));
+  color: var(--text-1);
+  border-color: var(--line);
+}
+.cl-item.active::before {
+  content: ''; position: absolute; left: 0; top: 6px; bottom: 6px;
+  width: 2.5px; border-radius: 2px; background: var(--accent);
+}
+.cl-item-top {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+}
+.cl-item-ver { font-size: var(--fs-small); font-weight: 600; color: var(--text-1); }
+.cl-item-date { font-size: 10px; color: var(--text-3); flex: 0 0 auto; }
+.cl-item-sub { font-size: var(--fs-tiny); color: var(--text-3); max-width: 100%; }
+.cl-mini-badge { padding: 0 5px; line-height: 16px; font-size: 10px; }
+.cl-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto;
+}
+.cl-detail {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 18px; overflow: hidden;
+  background: var(--surface);
+}
+.cl-detail-head {
+  display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line);
+}
+.cl-ver-heading {
+  margin: 0; font-size: 16px; font-weight: 600; color: var(--text-1);
+}
+.cl-ver-sub {
+  font-size: var(--fs-small); color: var(--text-2); line-height: 1.5;
+}
+.cl-upd-bar {
+  display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto;
+  padding: 10px 12px; border-radius: var(--radius);
+  background: var(--accent-weak); border: 1px solid var(--accent-ring);
+}
+.cl-log-viewer {
+  flex: 1 1 auto; min-height: 0; max-height: none;
+  padding: 14px 16px;
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow-y: auto; overscroll-behavior: contain;
+  -webkit-user-select: text; user-select: text;
+}
+.cl-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px; border-top: 1px solid var(--line);
+  background: var(--surface); flex: 0 0 auto;
+}
+@media (max-width: 720px) {
+  .cl-main { flex-direction: column; }
+  .cl-sidebar {
+    width: auto; flex: 0 0 auto; max-height: 200px;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
+}
+
+/* ---------------- 一键建立全盘索引：磁盘识别确认清单 ---------------- */
+.ix-oneclick-body { gap: 10px; }
+.ix-drive-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 260px; overflow-y: auto;
+}
+.ix-drive-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--surface-2);
+  cursor: pointer; min-width: 0;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.ix-drive-row:hover { border-color: var(--line-strong); background: var(--hover); }
+.ix-drive-root { font-weight: 600; color: var(--text-1); flex: 0 0 auto; }
+.ix-drive-meta { flex: 1 1 auto; min-width: 0; }
+
 @media (prefers-reduced-motion: reduce) {
-  .pool-row, .pool-chip, .pool-models, .wb-tab, .ai-suggest-prompts, .ai-sp-chip, .log-file-item, .agent-cat-chip, .xdlg-mode { transition: none; animation: none; }
+  .pool-row, .pool-chip, .pool-models, .wb-tab, .ai-suggest-prompts, .ai-sp-chip, .log-file-item, .agent-cat-chip, .xdlg-mode,
+  .org-view-btn, .tool-view-btn, .cl-ftab, .cl-item, .ix-drive-row { transition: none; animation: none; }
 }

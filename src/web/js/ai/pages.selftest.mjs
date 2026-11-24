@@ -2327,5 +2327,450 @@ function findNodes(rootNode, pred, out = []) {
   }
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含全链路软件内优先打开、系统管理器四层保留、防未搜到竞态/ACL/超200项定位、AI用户消息快捷复制与全站红队回归）`);
+/* ==================== 回归 17（红队对抗审查）：幽灵目录修复 / 全能文件预览 / 历史更新日志弹窗 / 一键全盘索引 ==================== */
+{
+  const txt = (n) => {
+    if (!n) return '';
+    if (typeof n === 'string') return n;
+    let s = String(n._textContent || n.nodeValue || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    const ev = Object.assign(new sandbox.Event('click'), { preventDefault() {}, stopPropagation() {}, target: btn, currentTarget: btn });
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(ev);
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick(ev);
+    }
+  };
+  const modalRoot = sandbox.document._byId['modal-root'];
+  const previewRoot = (sandbox.document._byId['preview-root'] = sandbox.document._byId['preview-root'] || new FakeElement('div'));
+  modalRoot.children = [];
+  previewRoot.children = [];
+
+  const origCfgGet = sandbox.API.configGet;
+  const origCfgSet = sandbox.API.configSet;
+  const origInspect = sandbox.API.inspectPath;
+  const origEngine = sandbox.API.engine;
+  const origFilePreview = sandbox.API.filePreview;
+  const origTopFiles = sandbox.API.topFiles;
+  const origListDir = sandbox.API.listDir;
+  const origOpenPath = sandbox.API.openPath;
+  const origUpdStatus = sandbox.API.updaterStatus;
+  const origUpdChangelog = sandbox.API.updaterChangelog;
+
+  // 1) 幽灵目录根治：点击 × 立即清空 last_folder，且失效目录自动清脏，空间工具绝不自动打开 last_folder
+  let savedCfg = { last_folder: 'E:\\AI\\DeepSeek\\下载\\20261120-临时验证\\整理测试' };
+  const cfgWrites = [];
+  sandbox.API.configGet = async () => Object.assign({}, savedCfg);
+  sandbox.API.configSet = async (patch) => {
+    cfgWrites.push(Object.assign({}, patch));
+    savedCfg = Object.assign({}, savedCfg, patch || {});
+    return savedCfg;
+  };
+  sandbox.API.inspectPath = async (p) => ({ status: 'ok', path: p, exists: true, kind: 'dir', readable: true });
+  sandbox.API.engine = async (method) => {
+    if (method === 'settings.get') return { default_recursive: true, default_content: false, conflict_policy: 'rename' };
+    if (method === 'scan') {
+      return {
+        plans: [{
+          folder: 'E:\\AI\\DeepSeek\\下载\\20261120-临时验证\\整理测试',
+          groups: [{ cat: '文档', files: [{ name: '测试报告.docx', size: 4096, mtime: 1700000000 }] }],
+          skipped: []
+        }],
+        blocked: []
+      };
+    }
+    return origEngine(method, {});
+  };
+
+  // 1a. 整理页挂载看到历史目录芯片 -> 点击 × 移除 -> 立即写盘清空 last_folder -> 重新挂载不再出现
+  const orgHost1 = new FakeElement('div');
+  const umOrg1 = await sandbox.Pages.organize.mount(orgHost1);
+  await new Promise((r) => setTimeout(r, 20));
+  const srcXBtn = findNodes(orgHost1, (n) => n.classList && n.classList.contains('src-x'))[0];
+  if (!srcXBtn) {
+    console.error('[红队回归 17] organize 挂载后未渲染 .src-x 移除按钮');
+    process.exit(1);
+  }
+  clickBtn(srcXBtn);
+  await new Promise((r) => setTimeout(r, 20));
+  if (savedCfg.last_folder !== '' || findNodes(orgHost1, (n) => n.classList && n.classList.contains('src-chip')).length !== 0) {
+    console.error(`[红队回归 17] 点击 × 移除来源后未清空 last_folder: saved=${JSON.stringify(savedCfg)}`);
+    process.exit(1);
+  }
+  umOrg1();
+
+  // 重新挂载整理页：不再恢复被删掉的目录
+  const orgHost2 = new FakeElement('div');
+  const umOrg2 = await sandbox.Pages.organize.mount(orgHost2);
+  await new Promise((r) => setTimeout(r, 20));
+  if (findNodes(orgHost2, (n) => n.classList && n.classList.contains('src-chip')).length !== 0) {
+    console.error('[红队回归 17] 删除来源后重新进入整理页仍复活了旧目录胶囊');
+    process.exit(1);
+  }
+  umOrg2();
+
+  // 1b. 失效/已删除目录自动清脏
+  savedCfg = { last_folder: 'E:\\已删除的临时目录' };
+  sandbox.API.inspectPath = async (p) => ({ status: 'not_found', path: p, exists: false, kind: 'missing' });
+  const orgHost3 = new FakeElement('div');
+  const umOrg3 = await sandbox.Pages.organize.mount(orgHost3);
+  await new Promise((r) => setTimeout(r, 20));
+  if (savedCfg.last_folder !== '' || findNodes(orgHost3, (n) => n.classList && n.classList.contains('src-chip')).length !== 0) {
+    console.error(`[红队回归 17] 失效 last_folder 未自动清理: saved=${JSON.stringify(savedCfg)}`);
+    process.exit(1);
+  }
+  umOrg3();
+
+  // 1c. 空间工具挂载绝不自动打开 config.last_folder
+  savedCfg = { last_folder: 'E:\\AI\\DeepSeek\\下载\\20261120-临时验证\\整理测试' };
+  const autoListDirs = [];
+  sandbox.API.listDir = async (dir) => { autoListDirs.push(dir); return { dir, total: 0, items: [] }; };
+  const toolsHost17 = new FakeElement('div');
+  const umTools17 = await sandbox.Pages.tools.mount(toolsHost17);
+  await new Promise((r) => setTimeout(r, 40));
+  if (autoListDirs.length !== 0) {
+    console.error(`[红队回归 17] 空间工具挂载时仍自动打开了 last_folder: ${JSON.stringify(autoListDirs)}`);
+    process.exit(1);
+  }
+  umTools17();
+
+  // 2) 文件预览修复：UI.preview 自动补 src（含剥离 \\?\ 扩展前缀）+ UI.previewFile 媒体句柄释放 + 内部模式切换防竞态 + XSS 清洗 + 整理/空间工具直看内容
+  const strippedSrc = sandbox.UI.fileSrc('\\\\?\\D:\\Photos\\sample #1.png');
+  if (!strippedSrc || strippedSrc.includes('%3F') || !strippedSrc.includes('sample%20%231.png')) {
+    console.error(`[红队回归 17] UI.fileSrc 未剥离 \\\\?\\ 扩展前缀: ${strippedSrc}`);
+    process.exit(1);
+  }
+  sandbox.UI.preview({ items: [{ path: 'D:\\Photos\\sample #1.png', name: 'sample #1.png' }], index: 0, title: 'sample #1.png' });
+  const prevImg = findNodes(previewRoot, (n) => n.tagName === 'IMG')[0];
+  if (!prevImg || !prevImg.src || !String(prevImg.src).includes('sample%20%231.png')) {
+    console.error(`[红队回归 17] UI.preview 未将 path 转换为合法 src: src=${prevImg && prevImg.src}`);
+    process.exit(1);
+  }
+  sandbox.UI.closePreview();
+
+  const xssHost = new FakeElement('div');
+  sandbox.UI.safeSetHtml(xssHost, '<p>正常内容</p><script>window.__xss=1</script><iframe src="https://evil.test"></iframe><a href="javascript:alert(1)" onclick="evil()">bad</a>');
+  const xssOut = String(xssHost._innerHTML || '').toLowerCase();
+  if (xssOut.includes('<script') || xssOut.includes('<iframe') || xssOut.includes('onclick=') || xssOut.includes('javascript:')) {
+    console.error(`[红队回归 17] UI.safeSetHtml 未拦截脚本/iframe/协议注入: ${xssHost._innerHTML}`);
+    process.exit(1);
+  }
+
+  // 2-rt. previewFile 内部模式切换竞态：先切 hex（慢返回）再切 text（快返回），慢响应不得反覆盖新视图
+  modalRoot.children = [];
+  let resolveSlowHex = null;
+  sandbox.API.filePreview = async (p, _max, mode) => {
+    if (mode === 'hex') {
+      return await new Promise((resolve) => {
+        resolveSlowHex = () => resolve({
+          path: p, name: 'doc.md', ext: 'md', size: 32, mtime: 1700000000,
+          kind: 'hex', encoding: 'hex', text: 'STALE_HEX_DUMP_0000', truncated: false,
+          isExec: false, isArchive: false, canHex: true, canText: true, note: ''
+        });
+      });
+    }
+    return {
+      path: p, name: 'doc.md', ext: 'md', size: 32, mtime: 1700000000,
+      kind: 'text', encoding: 'utf-8', text: 'FRESH_MD_TEXT [官网](https://example.com)', truncated: false,
+      isExec: false, isArchive: false, canHex: true, canText: true, note: ''
+    };
+  };
+  const raceHandle = await sandbox.UI.previewFile('D:\\docs\\doc.md', { name: 'doc.md' });
+  await new Promise((r) => setTimeout(r, 15));
+  const hexBtnR = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('十六进制'))[0];
+  clickBtn(hexBtnR);
+  await new Promise((r) => setTimeout(r, 10));
+  // 模拟同一预览弹窗里立刻切回文本（重新打开或重试）前先让慢 hex 处于在途，随后打开新预览，再释放旧 hex
+  const raceHandle2 = await sandbox.UI.previewFile('D:\\docs\\doc.md', { name: 'doc.md' });
+  await new Promise((r) => setTimeout(r, 15));
+  if (resolveSlowHex) resolveSlowHex();
+  await new Promise((r) => setTimeout(r, 15));
+  if (txt(modalRoot).includes('STALE_HEX_DUMP_0000') || !txt(modalRoot).includes('FRESH_MD_TEXT')) {
+    console.error('[红队回归 17] UI.previewFile 在途慢响应反覆盖了当前预览内容');
+    process.exit(1);
+  }
+  raceHandle2.close();
+  if (raceHandle && raceHandle.close) raceHandle.close();
+  await new Promise((r) => setTimeout(r, 15));
+
+  const previewCalls = [];
+  sandbox.API.filePreview = async (p, _max, mode) => {
+    previewCalls.push({ p, mode });
+    if (/\.bat$/i.test(p)) {
+      return {
+        path: p, name: 'run.bat', ext: 'bat', size: 64, mtime: 1700000000,
+        kind: 'text', encoding: 'gbk', text: '@echo off\necho 中文批处理', truncated: false,
+        isExec: true, isArchive: false, canHex: true, canText: true, note: '安全保护：只读查看'
+      };
+    }
+    if (/\.mp4$/i.test(p)) {
+      return {
+        path: p, name: 'clip.mp4', ext: 'mp4', size: 10240, mtime: 1700000000,
+        kind: 'video', mime: 'video/mp4', encoding: '', text: '', truncated: false,
+        isExec: false, isArchive: false, canHex: true, canText: false, note: ''
+      };
+    }
+    return {
+      path: p, name: '测试报告.docx', ext: 'docx', size: 4096, mtime: 1700000000,
+      kind: 'office', encoding: 'utf-8', text: '季度汇报正文内容', truncated: false,
+      isExec: false, isArchive: false, canHex: true, canText: false, magic: 'Word 文档 (.docx)', note: ''
+    };
+  };
+
+  // 2a. .bat 脚本只读查看文本且严禁提供「默认程序打开」按钮
+  modalRoot.children = [];
+  const batHandle = await sandbox.UI.previewFile('D:\\scripts\\run.bat', { name: 'run.bat' });
+  await new Promise((r) => setTimeout(r, 20));
+  const batText = txt(modalRoot);
+  const batDefaultOpen = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('默认程序打开'));
+  if (!batText.includes('中文批处理') || batDefaultOpen.length > 0) {
+    console.error(`[红队回归 17] .bat 脚本只读预览异常或暴露了默认程序运行按钮: defaultBtns=${batDefaultOpen.length}`);
+    process.exit(1);
+  }
+  batHandle.close();
+  await new Promise((r) => setTimeout(r, 20));
+
+  // 2b. 视频预览关闭时必须 pause + 清空 src 释放文件句柄
+  modalRoot.children = [];
+  let pausedCount = 0;
+  let loadedCount = 0;
+  const mp4Handle = await sandbox.UI.previewFile('D:\\video\\clip.mp4', { name: 'clip.mp4' });
+  await new Promise((r) => setTimeout(r, 20));
+  const vidEl = findNodes(modalRoot, (n) => n.tagName === 'VIDEO')[0];
+  const vidSrcBefore = vidEl && (vidEl.src || vidEl.getAttribute('src'));
+  if (!vidEl || !vidSrcBefore) {
+    console.error('[红队回归 17] 视频预览未渲染 <video src=...>');
+    process.exit(1);
+  }
+  vidEl.pause = () => { pausedCount++; };
+  vidEl.load = () => { loadedCount++; };
+  mp4Handle.close();
+  await new Promise((r) => setTimeout(r, 20));
+  const vidSrcAfter = vidEl.src || vidEl.getAttribute('src') || '';
+  if (pausedCount !== 1 || loadedCount !== 1 || vidSrcAfter !== '') {
+    console.error(`[红队回归 17] 视频预览关闭未释放媒体句柄: paused=${pausedCount}, loaded=${loadedCount}, src=${vidSrcAfter}`);
+    process.exit(1);
+  }
+
+  // 2c. 整理文件页双击/点击预览按钮查看扫描结果文件内容
+  savedCfg = { last_folder: 'E:\\AI\\DeepSeek\\下载\\20261120-临时验证\\整理测试' };
+  sandbox.API.inspectPath = async (p) => ({ status: 'ok', path: p, exists: true, kind: 'dir', readable: true });
+  const orgHost4 = new FakeElement('div');
+  const umOrg4 = await sandbox.Pages.organize.mount(orgHost4);
+  await new Promise((r) => setTimeout(r, 20));
+  const scanBtn4 = findNodes(orgHost4, (n) => n.tagName === 'BUTTON' && txt(n).trim() === '扫描')[0];
+  clickBtn(scanBtn4);
+  await new Promise((r) => setTimeout(r, 280));
+  const grpHead = findNodes(orgHost4, (n) => n.classList && n.classList.contains('group-head'))[0];
+  if (grpHead) clickBtn(grpHead);
+  await new Promise((r) => setTimeout(r, 20));
+  const orgViewBtn = findNodes(orgHost4, (n) => n.classList && n.classList.contains('org-view-btn'))[0];
+  if (!orgViewBtn) {
+    console.error('[红队回归 17] 整理文件扫描预览行缺少查看内容按钮 .org-view-btn');
+    process.exit(1);
+  }
+  const prevBeforeOrg = previewCalls.length;
+  clickBtn(orgViewBtn);
+  await new Promise((r) => setTimeout(r, 25));
+  if (previewCalls.length <= prevBeforeOrg || !txt(modalRoot).includes('季度汇报正文内容')) {
+    console.error('[红队回归 17] 整理文件行点击预览未展示 docx 正文内容');
+    process.exit(1);
+  }
+  sandbox.UI.closeModals();
+  umOrg4();
+
+  // 2d. 空间工具大文件排行行内预览按钮查看内容
+  sandbox.API.topFiles = async (dir) => ({ dir, items: [{ path: dir + '\\测试报告.docx', name: '测试报告.docx', size: 4096, ext: 'docx' }], scanned: 1 });
+  const toolsHostBig = new FakeElement('div');
+  const umToolsBig = await sandbox.Pages.tools.mount(toolsHostBig);
+  await sandbox.Pages.tools.jump({ tab: 'big', dir: 'D:\\Work', paths: ['D:\\Work'] });
+  await new Promise((r) => setTimeout(r, 25));
+  const toolViewBtn = findNodes(toolsHostBig, (n) => n.classList && n.classList.contains('tool-view-btn'))[0];
+  if (!toolViewBtn) {
+    console.error('[红队回归 17] 空间工具大文件行缺少查看内容按钮 .tool-view-btn');
+    process.exit(1);
+  }
+  const prevBeforeTool = previewCalls.length;
+  clickBtn(toolViewBtn);
+  await new Promise((r) => setTimeout(r, 25));
+  if (previewCalls.length <= prevBeforeTool) {
+    console.error('[红队回归 17] 空间工具大文件点击预览未触发 API.filePreview');
+    process.exit(1);
+  }
+  sandbox.UI.closeModals();
+  umToolsBig();
+
+  // 3) 图 2 更新日志独立弹窗：无需发现新版本也能随时打开、可切换历史版本、可搜索筛选、零开发者隐私泄露
+  modalRoot.children = [];
+  if (sandbox.App) sandbox.App._pendingUpdate = null;
+  sandbox.API.updaterStatus = async () => ({
+    currentVersion: '1.46.0',
+    installKind: 'installer',
+    busy: false,
+    releasesPage: 'https://github.com/3347567186/QDisk/releases',
+    config: { channel: 'stable', autoCheck: true, ignoredVersion: '', lastCheckAt: '04:25:23' },
+    updatesDir: 'D:\\data\\updates',
+    cacheBytes: 0,
+    staged: null
+  });
+  sandbox.API.updaterChangelog = async () => ({
+    currentVersion: '1.46.0',
+    total: 3,
+    remoteSynced: false,
+    remoteError: '',
+    releasesPage: 'https://github.com/3347567186/QDisk/releases',
+    entries: [
+      { id: '1.46.0', version: '1.46.0', kind: 'minor', title: '全能文件预览与一键全盘索引', summary: '全能文件预览', body: '### 新功能\n- 完整更新日志弹窗', date: '2026-11-24', isCurrent: true, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.46.0' },
+      { id: '1.45.0', version: '1.45.0', kind: 'minor', title: '软件内优先打开重构', summary: '软件内优先打开', body: '### 历史版本内容\n- 真实磁盘探测', date: '2026-11-24', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.45.0' },
+      { id: '1.44.1', version: '1.44.1', kind: 'patch', title: '极简更新卡片', summary: '极简更新卡片', body: '### 修复\n- 极简更新体验', date: '2026-11-23', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.44.1' }
+    ]
+  });
+  const setHost17 = new FakeElement('div');
+  const umSet17 = await sandbox.Pages.settings.mount(setHost17);
+  sandbox.Pages.settings.jump({ section: 'updater' });
+  await new Promise((r) => setTimeout(r, 25));
+  const openClBtn = findNodes(setHost17, (n) => n.tagName === 'BUTTON' && txt(n).includes('查看更新日志'))[0];
+  if (!openClBtn) {
+    console.error('[红队回归 17] 设置页「版本与在线更新」在未发现新版本时缺少「查看更新日志」按钮');
+    process.exit(1);
+  }
+  clickBtn(openClBtn);
+  await new Promise((r) => setTimeout(r, 25));
+  const clDialog = findNodes(modalRoot, (n) => n.tagName === 'DIALOG' && n.classList && n.classList.contains('cl-dialog'))[0];
+  const clItems = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-item'));
+  if (!clDialog || clDialog.getAttribute('closedby') !== 'any' || clItems.length !== 3) {
+    console.error(`[红队回归 17] 更新日志弹窗未以原生 <dialog closedby="any"> 渲染全部历史版本: dialog=${!!clDialog}, items=${clItems.length}`);
+    process.exit(1);
+  }
+  // 切换到历史版本 v1.45.0
+  clickBtn(clItems[1]);
+  await new Promise((r) => setTimeout(r, 15));
+  const clModalText = txt(modalRoot);
+  const clMdNode = findNodes(modalRoot, (n) => n.classList && n.classList.contains('upd-log-md'))[0];
+  const clMdHtml = (clMdNode && (clMdNode._innerHTML || txt(clMdNode))) || '';
+  if (!clModalText.includes('v1.45.0 更新日志') || !clMdHtml.includes('真实磁盘探测')) {
+    console.error(`[红队回归 17] 点击历史版本 v1.45.0 未切换展示对应正文: hasHead=${clModalText.includes('v1.45.0 更新日志')}, md=${clMdHtml.slice(0, 120)}`);
+    process.exit(1);
+  }
+  // 筛选修复版本（patch）
+  const fixTab = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-ftab') && txt(n).includes('修复'))[0];
+  clickBtn(fixTab);
+  await new Promise((r) => setTimeout(r, 15));
+  const clFiltered = findNodes(modalRoot, (n) => n.classList && n.classList.contains('cl-item'));
+  if (clFiltered.length !== 1 || !txt(clFiltered[0]).includes('v1.44.1')) {
+    console.error(`[红队回归 17] 更新日志按「修复」筛选结果异常: count=${clFiltered.length}`);
+    process.exit(1);
+  }
+  if (/白林|3347567186@qq\.com|是个帅气的男孩/.test(txt(modalRoot))) {
+    console.error('[红队回归 17] 更新日志弹窗暴露了开发者隐私信息');
+    process.exit(1);
+  }
+  umSet17();
+  if (findNodes(modalRoot, (n) => n.tagName === 'DIALOG' && n.classList && n.classList.contains('cl-dialog')).length !== 0) {
+    console.error('[红队回归 17] 设置页 unmount 后未彻底回收更新日志 <dialog>');
+    process.exit(1);
+  }
+
+  // 4) 图 3 一键建立索引：自动识别电脑主要盘（C:\、D:\、E:\）并全覆盖建库（含空列表启用、排除项展示、确认建库）
+  modalRoot.children = [];
+  let oneClickIndexPayload = null;
+  let mockIndexedEntries = [];
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'search.status') {
+      return {
+        backend: '本地索引', files: mockIndexedEntries.length ? 52000 : 0, dirs: mockIndexedEntries.length ? 3000 : 0,
+        size_bytes: mockIndexedEntries.length ? 8388608 : 0, built_at: mockIndexedEntries.length ? 1700000000 : 0,
+        entries: mockIndexedEntries, roots: mockIndexedEntries.map((x) => x.root), index_dir: 'D:\\data\\index'
+      };
+    }
+    if (method === 'search.drives') {
+      return {
+        drives: [
+          { root: 'C:\\', letter: 'C', label: '系统', fs: 'NTFS', total: 512e9, used: 200e9, free: 312e9, is_system: true, drive_type: 'fixed', in_catalog: false, built: false, files: 0 },
+          { root: 'D:\\', letter: 'D', label: '数据', fs: 'NTFS', total: 1000e9, used: 400e9, free: 600e9, is_system: false, drive_type: 'fixed', in_catalog: false, built: false, files: 0 },
+          { root: 'E:\\', letter: 'E', label: '资料', fs: 'NTFS', total: 1000e9, used: 100e9, free: 900e9, is_system: false, drive_type: 'fixed', in_catalog: false, built: false, files: 0 }
+        ],
+        excluded: [{ root: 'F:\\', letter: 'F', drive_type: 'removable', reason: '移动存储 / U 盘' }],
+        missing_roots: ['C:\\', 'D:\\', 'E:\\'],
+        all_covered: false,
+        total_drives: 3
+      };
+    }
+    if (method === 'search.index') {
+      oneClickIndexPayload = params;
+      mockIndexedEntries = (params.roots || []).map((r, idx) => ({
+        id: 'id_' + idx, root: r, files: 18000, dirs: 1000, size_bytes: 2097152,
+        built_at: 1700000000, exists: true, exists_root: true, why: ''
+      }));
+      return { indexed: 54000, built: 54000, entries: mockIndexedEntries.length, reused: false, failed: [], elapsed_ms: 820 };
+    }
+    return origEngine(method, params);
+  };
+
+  const searchHost17 = new FakeElement('div');
+  // 预设局部搜索范围：一键全盘覆盖后必须自动清空局部 scope 回到全盘可搜
+  sandbox.localStorage.setItem('ta.index.scope', JSON.stringify(['id_0']));
+  const umSearch17 = await sandbox.Pages.search.mount(searchHost17);
+  await new Promise((r) => setTimeout(r, 25));
+  const oneClickBtn = findNodes(searchHost17, (n) => n.tagName === 'BUTTON' && txt(n).includes('一键建立索引'))[0];
+  if (!oneClickBtn || oneClickBtn.disabled) {
+    console.error(`[红队回归 17] 搜索页空列表时未启用「一键建立索引」按钮: found=${!!oneClickBtn}, disabled=${oneClickBtn && oneClickBtn.disabled}`);
+    process.exit(1);
+  }
+  // 红队并发连点校验：连续点击两次「一键建立索引」，严禁堆叠两个确认弹窗
+  clickBtn(oneClickBtn);
+  clickBtn(oneClickBtn);
+  await new Promise((r) => setTimeout(r, 30));
+  const openMasks = findNodes(modalRoot, (n) => n.classList && n.classList.contains('modal-mask'));
+  if (openMasks.length !== 1) {
+    console.error(`[红队回归 17] 连点「一键建立索引」堆叠了 ${openMasks.length} 个弹窗`);
+    process.exit(1);
+  }
+  const driveRows = findNodes(modalRoot, (n) => n.classList && n.classList.contains('ix-drive-row'));
+  const modalTxt17 = txt(modalRoot);
+  if (driveRows.length !== 3 || !modalTxt17.includes('C:\\') || !modalTxt17.includes('D:\\') || !modalTxt17.includes('E:\\') || !modalTxt17.includes('移动存储 / U 盘')) {
+    console.error(`[红队回归 17] 一键建索引弹窗未正确识别 C/D/E 盘与排除项: rows=${driveRows.length}`);
+    process.exit(1);
+  }
+  const startIdxBtn = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('开始建立索引')).pop();
+  clickBtn(startIdxBtn);
+  await new Promise((r) => setTimeout(r, 280));
+  if (!oneClickIndexPayload || JSON.stringify(oneClickIndexPayload.roots) !== JSON.stringify(['C:\\', 'D:\\', 'E:\\']) || oneClickIndexPayload.reuse !== true || oneClickIndexPayload.full !== false) {
+    console.error(`[红队回归 17] 一键建立索引提交参数异常: ${JSON.stringify(oneClickIndexPayload)}`);
+    process.exit(1);
+  }
+  if (sandbox.localStorage.getItem('ta.index.scope')) {
+    console.error(`[红队回归 17] 一键全盘覆盖后未重置旧局部 scope: ${sandbox.localStorage.getItem('ta.index.scope')}`);
+    process.exit(1);
+  }
+  // 打开「管理索引」弹窗（图 3 界面）校验列表含 C/D/E 且弹窗内也具备「一键建立索引」按钮
+  const manageBtn17 = findNodes(searchHost17, (n) => n.tagName === 'BUTTON' && txt(n).includes('管理索引'))[0];
+  clickBtn(manageBtn17);
+  await new Promise((r) => setTimeout(r, 25));
+  const mgrTxt = txt(modalRoot);
+  const mgrOneClick = findNodes(modalRoot, (n) => n.tagName === 'BUTTON' && txt(n).includes('一键建立索引'))[0];
+  if (!mgrOneClick || !mgrTxt.includes('索引列表 · 3') || !mgrTxt.includes('C:\\') || !mgrTxt.includes('D:\\') || !mgrTxt.includes('E:\\')) {
+    console.error(`[红队回归 17] 管理索引弹窗缺少「一键建立索引」或未刷新 C/D/E 列表: hasBtn=${!!mgrOneClick}`);
+    process.exit(1);
+  }
+  umSearch17();
+  sandbox.UI.closeModals();
+
+  sandbox.API.configGet = origCfgGet;
+  sandbox.API.configSet = origCfgSet;
+  sandbox.API.inspectPath = origInspect;
+  sandbox.API.engine = origEngine;
+  sandbox.API.filePreview = origFilePreview;
+  sandbox.API.topFiles = origTopFiles;
+  sandbox.API.listDir = origListDir;
+  sandbox.API.openPath = origOpenPath;
+  sandbox.API.updaterStatus = origUpdStatus;
+  sandbox.API.updaterChangelog = origUpdChangelog;
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含幽灵目录根治、全能文件预览、原生弹窗历史更新日志、一键全盘主要磁盘索引与全站红队回归）`);
 process.exit(0);

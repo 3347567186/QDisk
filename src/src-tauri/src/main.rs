@@ -1260,7 +1260,8 @@ fn app_capabilities() -> Value {
             "engineMethods": true,
             "archiveCodecs": true,
             "lifecycleHooks": true,
-            "updater": true
+            "updater": true,
+            "filePreview": true
         }
     })
 }
@@ -2182,6 +2183,1178 @@ fn read_tail_utf8(path: &Path, max_bytes: u64) -> Result<String, String> {
 #[tauri::command(async)]
 fn read_text(path: String, max_bytes: Option<u64>) -> Result<String, String> {
     read_tail_utf8(Path::new(&path), max_bytes.unwrap_or(512 * 1024))
+}
+
+// ---------------------------------------------------------------- 全能只读文件内容预览（整理文件 / 空间工具 / 目录浏览共用）
+
+const FILE_PREVIEW_TEXT_DEFAULT: u64 = 256 * 1024;
+const FILE_PREVIEW_TEXT_MAX: u64 = 512 * 1024;
+const FILE_PREVIEW_HEX_DEFAULT: usize = 32 * 1024;
+const FILE_PREVIEW_HEX_MAX: usize = 64 * 1024;
+const FILE_PREVIEW_SNIFF_BYTES: usize = 64 * 1024;
+const OOXML_XML_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const OOXML_TOTAL_XML_BUDGET: u64 = 6 * 1024 * 1024;
+const OOXML_MAX_ARCHIVE_ENTRIES: usize = 4096;
+const OOXML_MAX_CHARS: usize = 120_000;
+
+fn is_windows_device_path(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let low = trimmed.to_ascii_lowercase();
+    if low.starts_with(r"\\.\") || low.starts_with(r"\\?\pipe\") {
+        return true;
+    }
+    // 拦截 NTFS 备用数据流（ADS，如 C:\foo.txt:stream），跳过盘符冒号与 \\?\C: 前缀
+    let after_prefix = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    let after_drive = if after_prefix.len() >= 2
+        && after_prefix.as_bytes()[0].is_ascii_alphabetic()
+        && after_prefix.as_bytes()[1] == b':'
+    {
+        &after_prefix[2..]
+    } else {
+        after_prefix
+    };
+    if after_drive.contains(':') {
+        return true;
+    }
+    let leaf = trimmed
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.']);
+    let stem = leaf.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
+fn is_image_preview_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "jfif" | "gif" | "webp" | "bmp" | "ico" | "avif" | "svg"
+    )
+}
+
+fn is_video_preview_ext(ext: &str) -> bool {
+    matches!(ext, "mp4" | "webm" | "mov" | "m4v" | "mkv" | "avi" | "wmv" | "ogv")
+}
+
+fn is_audio_preview_ext(ext: &str) -> bool {
+    matches!(ext, "mp3" | "wav" | "flac" | "m4a" | "aac" | "ogg" | "opus" | "wma")
+}
+
+fn is_text_preview_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "txt" | "log" | "md" | "markdown" | "json" | "jsonl" | "ndjson" | "jsonc"
+            | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "properties" | "env"
+            | "xml" | "xsd" | "xsl" | "plist" | "xaml" | "csproj" | "sln" | "vcxproj"
+            | "csv" | "tsv" | "sql" | "graphql" | "gql"
+            | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "vue" | "svelte"
+            | "html" | "htm" | "css" | "scss" | "sass" | "less"
+            | "py" | "pyw" | "pyi" | "rs" | "go" | "java" | "kt" | "kts" | "scala"
+            | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "swift" | "m" | "mm"
+            | "php" | "rb" | "pl" | "pm" | "lua" | "r" | "dart" | "zig" | "nim" | "ex" | "exs"
+            | "sh" | "bash" | "zsh" | "fish" | "bat" | "cmd" | "ps1" | "psm1" | "psd1" | "vbs" | "reg"
+            | "srt" | "ass" | "ssa" | "vtt" | "lrc" | "nfo" | "diff" | "patch"
+            | "tex" | "bib" | "rst" | "adoc" | "org" | "ics" | "vcf" | "rtf"
+            | "gitignore" | "gitattributes" | "gitmodules" | "editorconfig" | "npmrc" | "yarnrc"
+            | "dockerfile" | "makefile" | "cmake" | "gradle" | "lock" | "spec" | "inf" | "url"
+    )
+}
+
+fn is_known_text_filename(name: &str) -> bool {
+    let low = name.to_ascii_lowercase();
+    matches!(
+        low.as_str(),
+        "readme" | "license" | "licence" | "notice" | "authors" | "changelog" | "history"
+            | "makefile" | "dockerfile" | "jenkinsfile" | "vagrantfile" | "procfile"
+            | "hosts" | "cmakelists.txt" | ".gitignore" | ".env" | ".editorconfig"
+    )
+}
+
+fn preview_mime_of(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "ogv" => "video/ogg",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" | "opus" => "audio/ogg",
+        "wma" => "audio/x-ms-wma",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
+}
+
+fn trim_utf8_incomplete_tail(bytes: &[u8]) -> &[u8] {
+    let n = bytes.len();
+    for back in 1..=3usize {
+        if n < back {
+            break;
+        }
+        let idx = n - back;
+        let b = bytes[idx];
+        if b < 0x80 {
+            return bytes;
+        }
+        if b >= 0xC0 {
+            let need = if b >= 0xF0 {
+                4
+            } else if b >= 0xE0 {
+                3
+            } else {
+                2
+            };
+            return if back < need { &bytes[..idx] } else { bytes };
+        }
+    }
+    bytes
+}
+
+fn looks_like_utf16le_no_bom(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(4096)];
+    if sample.len() < 8 {
+        return false;
+    }
+    let pairs = sample.len() / 2;
+    let mut odd_zero = 0usize;
+    let mut even_zero = 0usize;
+    let mut even_printable = 0usize;
+    for pair in sample.chunks_exact(2) {
+        if pair[1] == 0 {
+            odd_zero += 1;
+        }
+        if pair[0] == 0 {
+            even_zero += 1;
+        }
+        if matches!(pair[0], b'\t' | b'\n' | b'\r' | 0x20..=0x7E) {
+            even_printable += 1;
+        }
+    }
+    odd_zero * 100 >= pairs * 35 && even_zero * 100 < pairs * 5 && even_printable * 100 >= pairs * 35
+}
+
+fn is_probably_text_bytes(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || looks_like_utf16le_no_bom(bytes) {
+        return true;
+    }
+    let sample = &bytes[..bytes.len().min(8192)];
+    if sample.contains(&0) {
+        return false;
+    }
+    let ctrl = sample
+        .iter()
+        .filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C))
+        .count();
+    ctrl * 20 <= sample.len()
+}
+
+fn decode_preview_text(bytes: &[u8], truncated: bool) -> (&'static str, String) {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        let body = &bytes[3..];
+        let trimmed = if truncated { trim_utf8_incomplete_tail(body) } else { body };
+        if let Ok(s) = std::str::from_utf8(trimmed) {
+            return ("utf-8-bom", s.to_string());
+        }
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
+        let body = &bytes[2..];
+        let even_len = body.len() & !1;
+        let units: Vec<u16> = body[..even_len]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return ("utf-16le", String::from_utf16_lossy(&units));
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) && bytes.len() >= 2 {
+        let body = &bytes[2..];
+        let even_len = body.len() & !1;
+        let units: Vec<u16> = body[..even_len]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return ("utf-16be", String::from_utf16_lossy(&units));
+    }
+    if looks_like_utf16le_no_bom(bytes) {
+        let even_len = bytes.len() & !1;
+        let units: Vec<u16> = bytes[..even_len]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return ("utf-16le", String::from_utf16_lossy(&units));
+    }
+    let utf8_slice = if truncated { trim_utf8_incomplete_tail(bytes) } else { bytes };
+    if let Ok(s) = std::str::from_utf8(utf8_slice) {
+        return ("utf-8", s.to_string());
+    }
+    #[cfg(windows)]
+    {
+        // GBK 截断对齐：若末尾悬空奇数个高位字节（0x81..=0xFE），退 1 字节避免最后一个汉字乱码
+        let mut gbk_slice = bytes;
+        if truncated && !bytes.is_empty() {
+            let mut hi = 0usize;
+            for &b in bytes.iter().rev() {
+                if b >= 0x81 && b <= 0xFE {
+                    hi += 1;
+                } else {
+                    break;
+                }
+            }
+            if hi % 2 == 1 {
+                gbk_slice = &bytes[..bytes.len() - 1];
+            }
+        }
+        if let Some(s) = gbk_decode(gbk_slice) {
+            return ("gbk", s);
+        }
+    }
+    ("utf-8-lossy", String::from_utf8_lossy(utf8_slice).into_owned())
+}
+
+fn detect_magic_label(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 2 && bytes.starts_with(b"MZ") {
+        return "Windows 可执行文件 / 动态库 (PE)";
+    }
+    if bytes.len() >= 4 && bytes.starts_with(&[0x7F, b'E', b'L', b'F']) {
+        return "Linux ELF 二进制程序";
+    }
+    if bytes.len() >= 16 && bytes.starts_with(b"SQLite format 3\0") {
+        return "SQLite 3 数据库";
+    }
+    if bytes.len() >= 8 && bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]) {
+        return "Microsoft OLE2 复合文档 (.doc / .xls / .ppt / .msi)";
+    }
+    if bytes.len() >= 5 && bytes.starts_with(b"%PDF-") {
+        return "PDF 文档";
+    }
+    if bytes.len() >= 4 && bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
+        return "ZIP 容器（压缩包 / Office / JAR / APK）";
+    }
+    if bytes.len() >= 6 && bytes.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+        return "7-Zip 压缩包";
+    }
+    if bytes.len() >= 7 && bytes.starts_with(b"Rar!\x1A\x07") {
+        return "RAR 压缩包";
+    }
+    if bytes.len() >= 8 && bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return "PNG 图片";
+    }
+    if bytes.len() >= 3 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "JPEG 图片";
+    }
+    if bytes.len() >= 4 && bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]) {
+        return "Java 字节码 / Mach-O 通用二进制";
+    }
+    if bytes.len() >= 4 && bytes.starts_with(b"wOF2") {
+        return "WOFF2 字体文件";
+    }
+    if bytes.len() >= 4 && (bytes.starts_with(&[0x00, 0x01, 0x00, 0x00]) || bytes.starts_with(b"OTTO")) {
+        return "TrueType / OpenType 字体文件";
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return "ISO BMFF 媒体容器 (MP4 / MOV / M4A / HEIC)";
+    }
+    if bytes.len() >= 4 && bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return "Matroska / WebM 媒体容器";
+    }
+    "二进制数据文件"
+}
+
+fn format_hex_dump(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 4);
+    for (row, chunk) in bytes.chunks(16).enumerate() {
+        let _ = write!(out, "{:08X}  ", row * 16);
+        for i in 0..16 {
+            if i == 8 {
+                out.push(' ');
+            }
+            if let Some(b) = chunk.get(i) {
+                let _ = write!(out, "{b:02X} ");
+            } else {
+                out.push_str("   ");
+            }
+        }
+        out.push_str(" |");
+        for &b in chunk {
+            out.push(if (0x20..=0x7E).contains(&b) { b as char } else { '.' });
+        }
+        out.push_str("|\n");
+    }
+    out
+}
+
+fn unescape_xml_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp + 1..];
+        if let Some(semi) = rest.find(';') {
+            let ent = &rest[..semi];
+            let decoded: Option<char> = match ent {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ if ent.starts_with("#x") || ent.starts_with("#X") => {
+                    u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                }
+                _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32),
+                _ => None,
+            };
+            if let Some(ch) = decoded {
+                out.push(ch);
+                rest = &rest[semi + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+    }
+    out.push_str(rest);
+    out
+}
+
+fn read_zip_member_capped<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    cap: u64,
+    budget: &mut u64,
+) -> Option<String> {
+    let allow = cap.min(*budget);
+    if allow == 0 {
+        return None;
+    }
+    let f = archive.by_name(name).ok()?;
+    let mut buf = Vec::new();
+    let _ = f.take(allow).read_to_end(&mut buf).ok()?;
+    *budget = budget.saturating_sub(buf.len() as u64);
+    let trimmed = if buf.len() as u64 >= allow {
+        trim_utf8_incomplete_tail(&buf)
+    } else {
+        &buf[..]
+    };
+    Some(String::from_utf8_lossy(trimmed).into_owned())
+}
+
+/// O(N) 字符上限追加：通过外部计数 `used` 避免每字符重扫全串导致 O(N²) 卡顿。
+fn push_capped(out: &mut String, used: &mut usize, piece: &str, max_chars: usize) -> bool {
+    if *used >= max_chars {
+        return true;
+    }
+    for ch in piece.chars() {
+        out.push(ch);
+        *used += 1;
+        if *used >= max_chars {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_docx_xml_text(xml: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut used = 0usize;
+    let mut truncated = false;
+    let mut rest = xml;
+    let mut in_text = false;
+    let mut cur_text = String::new();
+
+    while let Some(lt) = rest.find('<') {
+        let text_chunk = &rest[..lt];
+        if in_text && !text_chunk.is_empty() {
+            cur_text.push_str(text_chunk);
+        }
+        rest = &rest[lt + 1..];
+        let Some(gt) = rest.find('>') else {
+            break;
+        };
+        let tag = rest[..gt].trim();
+        rest = &rest[gt + 1..];
+
+        let tag_name = tag
+            .trim_end_matches('/')
+            .trim()
+            .split(|c: char| c.is_ascii_whitespace())
+            .next()
+            .unwrap_or("");
+        if tag_name == "w:t" && !tag.ends_with('/') {
+            in_text = true;
+            cur_text.clear();
+        } else if tag_name == "/w:t" {
+            if in_text {
+                let dec = unescape_xml_entities(&cur_text);
+                truncated |= push_capped(&mut out, &mut used, &dec, OOXML_MAX_CHARS);
+                cur_text.clear();
+                in_text = false;
+            }
+        } else if tag_name == "w:tab" {
+            truncated |= push_capped(&mut out, &mut used, "\t", OOXML_MAX_CHARS);
+        } else if tag_name == "w:br" || tag_name == "w:cr" || tag_name == "/w:p" {
+            if !out.ends_with('\n') || tag_name == "w:br" {
+                truncated |= push_capped(&mut out, &mut used, "\n", OOXML_MAX_CHARS);
+            }
+        } else if tag_name == "/w:tc" {
+            truncated |= push_capped(&mut out, &mut used, "\t", OOXML_MAX_CHARS);
+        }
+        if truncated {
+            break;
+        }
+    }
+    (out.trim().to_string(), truncated)
+}
+
+fn extract_xml_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let needle = format!("{attr}=\"");
+    let pos = tag.find(needle.as_str())?;
+    let after = &tag[pos + needle.len()..];
+    let end = after.find('"')?;
+    Some(&after[..end])
+}
+
+fn parse_xlsx_shared_strings(xml: &str) -> Vec<String> {
+    let mut list = Vec::new();
+    let mut rest = xml;
+    while let Some(si_pos) = rest.find("<si") {
+        rest = &rest[si_pos + 3..];
+        let Some(si_gt) = rest.find('>') else { break };
+        rest = &rest[si_gt + 1..];
+        let Some(end_si) = rest.find("</si>") else { break };
+        let chunk = &rest[..end_si];
+        rest = &rest[end_si + 5..];
+
+        let mut cell = String::new();
+        let mut sub = chunk;
+        while let Some(t_pos) = sub.find("<t") {
+            let after_t = &sub[t_pos + 2..];
+            let next_c = after_t.as_bytes().first().copied().unwrap_or(0);
+            if next_c != b'>' && !next_c.is_ascii_whitespace() {
+                sub = after_t;
+                continue;
+            }
+            let Some(gt) = after_t.find('>') else { break };
+            let header = &after_t[..gt];
+            sub = &after_t[gt + 1..];
+            if header.ends_with('/') {
+                continue;
+            }
+            let Some(end_t) = sub.find("</t>") else { break };
+            cell.push_str(&unescape_xml_entities(&sub[..end_t]));
+            sub = &sub[end_t + 4..];
+        }
+        list.push(cell);
+        if list.len() >= 100_000 {
+            break;
+        }
+    }
+    list
+}
+
+fn parse_xlsx_sheet_names(xml: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = xml;
+    while let Some(lt) = rest.find('<') {
+        rest = &rest[lt + 1..];
+        let Some(gt) = rest.find('>') else { break };
+        let tag = rest[..gt].trim();
+        rest = &rest[gt + 1..];
+        let tname = tag.split(|c: char| c.is_ascii_whitespace() || c == '/').next().unwrap_or("");
+        if tname == "sheet" || tname.ends_with(":sheet") {
+            if let Some(n) = extract_xml_attr(tag, "name") {
+                names.push(unescape_xml_entities(n));
+            }
+        }
+    }
+    names
+}
+
+fn extract_xlsx_sheet_text(xml: &str, shared: &[String], max_rows: usize, max_cols: usize) -> (String, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut truncated = false;
+    let mut rest = xml;
+    while let Some(row_pos) = rest.find("<row") {
+        if lines.len() >= max_rows {
+            truncated = true;
+            break;
+        }
+        rest = &rest[row_pos + 4..];
+        let Some(row_gt) = rest.find('>') else { break };
+        let row_hdr = &rest[..row_gt];
+        rest = &rest[row_gt + 1..];
+        if row_hdr.ends_with('/') {
+            continue;
+        }
+        let Some(end_row) = rest.find("</row>") else { break };
+        let row_body = &rest[..end_row];
+        rest = &rest[end_row + 6..];
+
+        let mut cells: Vec<String> = Vec::new();
+        let mut sub = row_body;
+        while let Some(c_pos) = sub.find("<c") {
+            let after_c = &sub[c_pos + 2..];
+            let nc = after_c.as_bytes().first().copied().unwrap_or(0);
+            if nc != b'>' && !nc.is_ascii_whitespace() {
+                sub = after_c;
+                continue;
+            }
+            let Some(gt) = after_c.find('>') else { break };
+            let hdr = &after_c[..gt];
+            sub = &after_c[gt + 1..];
+            if hdr.ends_with('/') {
+                continue;
+            }
+            let Some(end_c) = sub.find("</c>") else { break };
+            let c_body = &sub[..end_c];
+            sub = &sub[end_c + 4..];
+            if cells.len() >= max_cols {
+                truncated = true;
+                break;
+            }
+            let c_type = extract_xml_attr(hdr, "t").unwrap_or("");
+            let val = if c_type == "inlineStr" {
+                let mut s = String::new();
+                let mut ts = c_body;
+                while let Some(tp) = ts.find("<t") {
+                    let at = &ts[tp + 2..];
+                    let Some(tgt) = at.find('>') else { break };
+                    ts = &at[tgt + 1..];
+                    let Some(te) = ts.find("</t>") else { break };
+                    s.push_str(&unescape_xml_entities(&ts[..te]));
+                    ts = &ts[te + 4..];
+                }
+                s
+            } else if let Some(vp) = c_body.find("<v") {
+                let av = &c_body[vp + 2..];
+                if let Some(vgt) = av.find('>') {
+                    let vbody = &av[vgt + 1..];
+                    if let Some(ve) = vbody.find("</v>") {
+                        let raw_v = unescape_xml_entities(vbody[..ve].trim());
+                        if c_type == "s" {
+                            raw_v
+                                .parse::<usize>()
+                                .ok()
+                                .and_then(|idx| shared.get(idx).cloned())
+                                .unwrap_or(raw_v)
+                        } else if c_type == "b" {
+                            if raw_v == "1" { "TRUE".into() } else { "FALSE".into() }
+                        } else {
+                            raw_v
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            cells.push(val.replace(['\r', '\n', '\t'], " "));
+        }
+        if cells.iter().any(|c| !c.trim().is_empty()) {
+            lines.push(cells.join("\t"));
+        }
+    }
+    (lines.join("\n"), truncated)
+}
+
+fn extract_pptx_slide_text(xml: &str) -> String {
+    let mut out = String::new();
+    let mut rest = xml;
+    let mut in_t = false;
+    let mut buf = String::new();
+    while let Some(lt) = rest.find('<') {
+        if in_t {
+            buf.push_str(&rest[..lt]);
+        }
+        rest = &rest[lt + 1..];
+        let Some(gt) = rest.find('>') else { break };
+        let tag = rest[..gt].trim();
+        rest = &rest[gt + 1..];
+        let name = tag
+            .trim_end_matches('/')
+            .trim()
+            .split(|c: char| c.is_ascii_whitespace())
+            .next()
+            .unwrap_or("");
+        if name == "a:t" && !tag.ends_with('/') {
+            in_t = true;
+            buf.clear();
+        } else if name == "/a:t" {
+            if in_t {
+                out.push_str(&unescape_xml_entities(&buf));
+                buf.clear();
+                in_t = false;
+            }
+        } else if name == "/a:p" || name == "a:br" {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+fn extract_ooxml_preview(path: &Path, ext: &str) -> Result<(String, bool, &'static str), String> {
+    let f = std::fs::File::open(path).map_err(|e| format!("打开文档失败：{e}"))?;
+    let mut archive = zip::ZipArchive::new(f).map_err(|_| {
+        "该 Office 文档可能已加密、损坏或属于旧版二进制格式，暂不支持软件内正文提取".to_string()
+    })?;
+
+    // 仅扫描内存中的中央目录（限 4096 条，零逐项磁盘 seek）并统一做大小写不敏感匹配
+    let member_names: Vec<String> = archive
+        .file_names()
+        .take(OOXML_MAX_ARCHIVE_ENTRIES)
+        .filter_map(|r| r.ok().map(|c| c.into_owned()))
+        .collect();
+    let find_ci = |want_lower: &str| -> Option<String> {
+        member_names
+            .iter()
+            .find(|n| n.trim_start_matches('/').eq_ignore_ascii_case(want_lower))
+            .cloned()
+    };
+    let mut xml_budget = OOXML_TOTAL_XML_BUDGET;
+
+    match ext {
+        "docx" => {
+            let doc_member = find_ci("word/document.xml")
+                .ok_or_else(|| "DOCX 文档中未找到正文内容（word/document.xml）".to_string())?;
+            let xml = read_zip_member_capped(&mut archive, &doc_member, OOXML_XML_MAX_BYTES, &mut xml_budget)
+                .ok_or_else(|| "DOCX 文档中未找到正文内容（word/document.xml）".to_string())?;
+            let (text, trunc) = extract_docx_xml_text(&xml);
+            Ok((text, trunc, "Word 文档 (.docx)"))
+        }
+        "xlsx" => {
+            let shared = find_ci("xl/sharedstrings.xml")
+                .and_then(|n| read_zip_member_capped(&mut archive, &n, OOXML_XML_MAX_BYTES, &mut xml_budget))
+                .map(|x| parse_xlsx_shared_strings(&x))
+                .unwrap_or_default();
+            let names = find_ci("xl/workbook.xml")
+                .and_then(|n| read_zip_member_capped(&mut archive, &n, 512 * 1024, &mut xml_budget))
+                .map(|x| parse_xlsx_sheet_names(&x))
+                .unwrap_or_default();
+            let mut sheet_files: Vec<(u32, String)> = Vec::new();
+            for n in &member_names {
+                let low = n.trim_start_matches('/').to_ascii_lowercase();
+                if let Some(rest) = low.strip_prefix("xl/worksheets/sheet").and_then(|s| s.strip_suffix(".xml")) {
+                    if let Ok(idx) = rest.parse::<u32>() {
+                        sheet_files.push((idx, n.clone()));
+                    }
+                }
+            }
+            sheet_files.sort_by_key(|x| x.0);
+            let mut out = String::new();
+            let mut used = 0usize;
+            let mut truncated = sheet_files.len() > 6;
+            for (pos, (_idx, file_name)) in sheet_files.into_iter().take(6).enumerate() {
+                if xml_budget == 0 {
+                    truncated = true;
+                    break;
+                }
+                let Some(xml) = read_zip_member_capped(&mut archive, &file_name, OOXML_XML_MAX_BYTES, &mut xml_budget) else {
+                    continue;
+                };
+                let (sheet_txt, t) = extract_xlsx_sheet_text(&xml, &shared, 200, 30);
+                truncated |= t;
+                let title = names
+                    .get(pos)
+                    .cloned()
+                    .unwrap_or_else(|| format!("工作表 {}", pos + 1));
+                if !out.is_empty() {
+                    truncated |= push_capped(&mut out, &mut used, "\n\n", OOXML_MAX_CHARS);
+                }
+                let hdr = format!("=== {title} ===\n");
+                truncated |= push_capped(&mut out, &mut used, &hdr, OOXML_MAX_CHARS);
+                if sheet_txt.is_empty() {
+                    truncated |= push_capped(&mut out, &mut used, "（空工作表）", OOXML_MAX_CHARS);
+                } else {
+                    truncated |= push_capped(&mut out, &mut used, &sheet_txt, OOXML_MAX_CHARS);
+                }
+                if used >= OOXML_MAX_CHARS {
+                    truncated = true;
+                    break;
+                }
+            }
+            Ok((out, truncated, "Excel 工作簿 (.xlsx)"))
+        }
+        "pptx" => {
+            let mut slides: Vec<(u32, String)> = Vec::new();
+            for n in &member_names {
+                let low = n.trim_start_matches('/').to_ascii_lowercase();
+                if let Some(rest) = low.strip_prefix("ppt/slides/slide").and_then(|s| s.strip_suffix(".xml")) {
+                    if let Ok(idx) = rest.parse::<u32>() {
+                        slides.push((idx, n.clone()));
+                    }
+                }
+            }
+            slides.sort_by_key(|x| x.0);
+            let mut out = String::new();
+            let mut used = 0usize;
+            let mut truncated = slides.len() > 60;
+            for (idx, file_name) in slides.into_iter().take(60) {
+                if xml_budget == 0 {
+                    truncated = true;
+                    break;
+                }
+                let Some(xml) = read_zip_member_capped(&mut archive, &file_name, 512 * 1024, &mut xml_budget) else {
+                    continue;
+                };
+                let slide_txt = extract_pptx_slide_text(&xml);
+                if !out.is_empty() {
+                    truncated |= push_capped(&mut out, &mut used, "\n\n", OOXML_MAX_CHARS);
+                }
+                let hdr = format!("--- 第 {idx} 页 ---\n");
+                truncated |= push_capped(&mut out, &mut used, &hdr, OOXML_MAX_CHARS);
+                if slide_txt.is_empty() {
+                    truncated |= push_capped(&mut out, &mut used, "（无文本内容）", OOXML_MAX_CHARS);
+                } else {
+                    truncated |= push_capped(&mut out, &mut used, &slide_txt, OOXML_MAX_CHARS);
+                }
+                if used >= OOXML_MAX_CHARS {
+                    truncated = true;
+                    break;
+                }
+            }
+            Ok((out, truncated, "PowerPoint 演示文稿 (.pptx)"))
+        }
+        _ => Err("暂不支持该 Office 格式".into()),
+    }
+}
+
+fn read_head_bytes(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let f = std::fs::File::open(path).map_err(|e| {
+        if is_perm_denied(&e) {
+            "受 Windows 系统权限保护，无法读取文件内容（可尝试以管理员身份重启）".to_string()
+        } else if e.raw_os_error() == Some(32) || e.raw_os_error() == Some(33) {
+            "文件正被其他程序独占占用，暂时无法读取".to_string()
+        } else {
+            format!("无法读取文件：{e}")
+        }
+    })?;
+    let mut buf = Vec::with_capacity(limit.min(64 * 1024));
+    f.take(limit as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("读取文件内容失败：{e}"))?;
+    Ok(buf)
+}
+
+/// 统一全能只读文件预览核心（供整理文件、空间工具大文件与目录浏览共用）。
+/// 支持图片 / PDF / 音视频 / Word(.docx) / Excel(.xlsx) / PPT(.pptx) / 多编码文本(UTF-8/UTF-16LE/BE/GBK) /
+/// 压缩包 / 未知扩展名内容嗅探 / 二进制十六进制视图与魔数识别，且严守可执行文件只读不运行红线。
+fn file_preview_core(raw: &str, max_bytes: Option<u64>, mode: Option<&str>) -> Result<Value, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("缺少文件路径".into());
+    }
+    if is_windows_device_path(trimmed) {
+        return Err("安全限制：禁止预览系统设备路径".into());
+    }
+    let resolved = resolve_existing_local_path(trimmed)
+        .ok_or_else(|| format!("文件不存在或已被移动：{trimmed}"))?;
+    let meta = match std::fs::metadata(&resolved) {
+        Ok(m) => m,
+        Err(e) if is_perm_denied(&e) => {
+            return Err("受 Windows 系统权限保护，无法读取该文件（可尝试以管理员身份重启）".into());
+        }
+        Err(e) => return Err(format!("无法访问文件：{e}")),
+    };
+    if meta.is_dir() {
+        return Err("这是文件夹，请通过目录浏览查看".into());
+    }
+    if !meta.is_file() {
+        return Err("该目标不是普通文件，无法预览内容".into());
+    }
+
+    let clean_resolved = strip_extended_prefix(&resolved);
+    let path_str = clean_resolved.to_string_lossy().to_string();
+    if is_windows_device_path(&path_str) {
+        return Err("安全限制：禁止预览系统设备路径".into());
+    }
+    let name = clean_resolved
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path_str.clone());
+    let ext = path_ext_lower(&resolved);
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let is_exec = is_exec_path(&resolved);
+    let is_archive = is_archive_path_local(&resolved);
+    let want_mode = mode.unwrap_or("auto").trim().to_ascii_lowercase();
+    let text_cap = max_bytes
+        .unwrap_or(FILE_PREVIEW_TEXT_DEFAULT)
+        .clamp(4096, FILE_PREVIEW_TEXT_MAX) as usize;
+    let hex_cap = max_bytes
+        .map(|v| (v as usize).clamp(1024, FILE_PREVIEW_HEX_MAX))
+        .unwrap_or(FILE_PREVIEW_HEX_DEFAULT);
+
+    if size == 0 {
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": 0,
+            "mtime": mtime,
+            "kind": "empty",
+            "mime": "text/plain",
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": is_exec,
+            "isArchive": is_archive,
+            "canHex": false,
+            "canText": false,
+            "magic": "",
+            "note": "空文件（0 字节），暂无内容"
+        }));
+    }
+
+    if want_mode == "hex" {
+        let buf = read_head_bytes(&resolved, hex_cap)?;
+        let magic = detect_magic_label(&buf);
+        let truncated = size > buf.len() as u64;
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "hex",
+            "mime": "application/octet-stream",
+            "encoding": "hex",
+            "text": format_hex_dump(&buf),
+            "truncated": truncated,
+            "isExec": is_exec,
+            "isArchive": is_archive,
+            "canHex": true,
+            "canText": is_probably_text_bytes(&buf),
+            "magic": magic,
+            "note": format!("{magic} · 十六进制只读预览（前 {} 字节）", buf.len())
+        }));
+    }
+
+    if is_archive && want_mode != "text" {
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "archive",
+            "mime": "application/x-archive",
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": false,
+            "isArchive": true,
+            "canHex": true,
+            "canText": false,
+            "magic": "压缩包",
+            "note": "压缩包文件，可直接跳转至「压缩包」页浏览、预览或解压内部文件"
+        }));
+    }
+
+    if is_image_preview_ext(&ext) && want_mode != "text" {
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "image",
+            "mime": preview_mime_of(&ext),
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": false,
+            "isArchive": false,
+            "canHex": true,
+            "canText": ext == "svg",
+            "magic": "",
+            "note": ""
+        }));
+    }
+
+    if ext == "pdf" && want_mode != "text" {
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "pdf",
+            "mime": "application/pdf",
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": false,
+            "isArchive": false,
+            "canHex": true,
+            "canText": false,
+            "magic": "PDF 文档",
+            "note": ""
+        }));
+    }
+
+    if is_video_preview_ext(&ext) && want_mode != "text" {
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "video",
+            "mime": preview_mime_of(&ext),
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": false,
+            "isArchive": false,
+            "canHex": true,
+            "canText": false,
+            "magic": "",
+            "note": ""
+        }));
+    }
+
+    if is_audio_preview_ext(&ext) && want_mode != "text" {
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "audio",
+            "mime": preview_mime_of(&ext),
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": false,
+            "isArchive": false,
+            "canHex": true,
+            "canText": false,
+            "magic": "",
+            "note": ""
+        }));
+    }
+
+    if matches!(ext.as_str(), "docx" | "xlsx" | "pptx") && want_mode != "text" {
+        match extract_ooxml_preview(&resolved, &ext) {
+            Ok((text, truncated, label)) => {
+                return Ok(json!({
+                    "path": path_str,
+                    "name": name,
+                    "ext": ext,
+                    "size": size,
+                    "mtime": mtime,
+                    "kind": "office",
+                    "mime": preview_mime_of(&ext),
+                    "encoding": "utf-8",
+                    "text": text,
+                    "truncated": truncated,
+                    "isExec": false,
+                    "isArchive": false,
+                    "canHex": true,
+                    "canText": false,
+                    "magic": label,
+                    "note": if truncated { format!("{label} · 内容较长，已截取前段正文供快速预览") } else { format!("{label} · 已提取纯文本正文") }
+                }));
+            }
+            Err(why) => {
+                return Ok(json!({
+                    "path": path_str,
+                    "name": name,
+                    "ext": ext,
+                    "size": size,
+                    "mtime": mtime,
+                    "kind": "unsupported",
+                    "mime": preview_mime_of(&ext),
+                    "encoding": "",
+                    "text": "",
+                    "truncated": false,
+                    "isExec": false,
+                    "isArchive": false,
+                    "canHex": true,
+                    "canText": false,
+                    "magic": "Office 文档",
+                    "note": why
+                }));
+            }
+        }
+    }
+
+    // 老版 .doc / .xls / .ppt：先嗅探（很多导出 .xls 实为 HTML/TSV 文本，可以直接看！）
+    if matches!(ext.as_str(), "doc" | "xls" | "ppt") && want_mode != "text" {
+        let sniff = read_head_bytes(&resolved, FILE_PREVIEW_SNIFF_BYTES)?;
+        if is_probably_text_bytes(&sniff) {
+            let buf = if size > sniff.len() as u64 {
+                read_head_bytes(&resolved, text_cap)?
+            } else {
+                sniff
+            };
+            let truncated = size > buf.len() as u64;
+            let (enc, text) = decode_preview_text(&buf, truncated);
+            return Ok(json!({
+                "path": path_str,
+                "name": name,
+                "ext": ext,
+                "size": size,
+                "mtime": mtime,
+                "kind": "text",
+                "mime": "text/plain",
+                "encoding": enc,
+                "text": text,
+                "truncated": truncated,
+                "isExec": false,
+                "isArchive": false,
+                "canHex": true,
+                "canText": true,
+                "magic": "文本型导出文档",
+                "note": "检测到该文件实际为可读文本内容，已自动解码预览"
+            }));
+        }
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "unsupported",
+            "mime": "application/octet-stream",
+            "encoding": "",
+            "text": "",
+            "truncated": false,
+            "isExec": false,
+            "isArchive": false,
+            "canHex": true,
+            "canText": false,
+            "magic": detect_magic_label(&sniff),
+            "note": "旧版二进制 Office 格式（.doc / .xls / .ppt）暂不支持内嵌正文提取，可点击「用默认程序打开」或切换「十六进制」查看"
+        }));
+    }
+
+    if is_text_preview_ext(&ext) || is_known_text_filename(&name) || want_mode == "text" {
+        let buf = read_head_bytes(&resolved, text_cap)?;
+        let truncated = size > buf.len() as u64;
+        let (enc, text) = decode_preview_text(&buf, truncated);
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "text",
+            "mime": "text/plain",
+            "encoding": enc,
+            "text": text,
+            "truncated": truncated,
+            "isExec": is_exec,
+            "isArchive": false,
+            "canHex": true,
+            "canText": true,
+            "magic": "",
+            "note": if is_exec {
+                "安全保护：脚本/可执行文件仅支持软件内只读查看源码，禁止直接运行"
+            } else if truncated {
+                "文件较大，已从开头截取前段内容预览"
+            } else {
+                ""
+            }
+        }));
+    }
+
+    // 未知/无扩展名文件：先 64 KiB 嗅探，能当文本读就按文本解，否则展示十六进制 + 文件魔数识别
+    let sniff = read_head_bytes(&resolved, FILE_PREVIEW_SNIFF_BYTES)?;
+    if is_probably_text_bytes(&sniff) {
+        let buf = if size > sniff.len() as u64 {
+            read_head_bytes(&resolved, text_cap)?
+        } else {
+            sniff
+        };
+        let truncated = size > buf.len() as u64;
+        let (enc, text) = decode_preview_text(&buf, truncated);
+        return Ok(json!({
+            "path": path_str,
+            "name": name,
+            "ext": ext,
+            "size": size,
+            "mtime": mtime,
+            "kind": "text",
+            "mime": "text/plain",
+            "encoding": enc,
+            "text": text,
+            "truncated": truncated,
+            "isExec": is_exec,
+            "isArchive": false,
+            "canHex": true,
+            "canText": true,
+            "magic": "",
+            "note": if truncated { "自动识别为文本文件 · 内容较长已截断" } else { "自动识别为可读文本文件" }
+        }));
+    }
+
+    let hex_slice = &sniff[..sniff.len().min(hex_cap)];
+    let magic = detect_magic_label(&sniff);
+    let truncated = size > hex_slice.len() as u64;
+    Ok(json!({
+        "path": path_str,
+        "name": name,
+        "ext": ext,
+        "size": size,
+        "mtime": mtime,
+        "kind": "hex",
+        "mime": "application/octet-stream",
+        "encoding": "hex",
+        "text": format_hex_dump(hex_slice),
+        "truncated": truncated,
+        "isExec": is_exec,
+        "isArchive": false,
+        "canHex": true,
+        "canText": false,
+        "magic": magic,
+        "note": if is_exec {
+            format!("{magic} · 可执行文件禁止直接运行，以下为只读十六进制预览")
+        } else {
+            format!("{magic} · 暂不支持富文本渲染，以下为只读十六进制预览（前 {} 字节）", hex_slice.len())
+        }
+    }))
+}
+
+#[tauri::command(async)]
+fn file_preview(path: String, max_bytes: Option<u64>, mode: Option<String>) -> Result<Value, String> {
+    file_preview_core(&path, max_bytes, mode.as_deref())
 }
 
 /// 只读日志目录内的文件，避免前端拿到任意路径后读取系统文件。
@@ -4016,6 +5189,7 @@ fn main() {
             log_read,
             log_clear,
             read_text,
+            file_preview,
             top_files,
             scan_empty_dirs,
             remove_empty_dirs,
@@ -4055,7 +5229,8 @@ fn main() {
             updater::updater_download,
             updater::updater_cancel,
             updater::updater_clear_cache,
-            updater::updater_install
+            updater::updater_install,
+            updater::updater_changelog
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -4695,6 +5870,183 @@ mod shell_tests {
         assert_eq!(written.len(), 2);
         let picked2 = read_locator_from_candidates(&read_cands).unwrap();
         assert!(path_eq_ci(&picked2, &valid_target));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn file_preview_handles_encodings_ooxml_scripts_binaries_and_guards() {
+        let stamp = unix_now_ms();
+        let root = std::env::temp_dir().join(format!("qdisk_preview_test_{stamp}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 1. UTF-8 中文文本与截断边界对齐
+        let utf8_p = root.join("notes.txt");
+        std::fs::write(&utf8_p, "你好世界".repeat(1500)).unwrap();
+        let r_utf8 = file_preview_core(&utf8_p.to_string_lossy(), Some(4097), None).unwrap();
+        assert_eq!(r_utf8["kind"], "text");
+        assert_eq!(r_utf8["encoding"], "utf-8");
+        assert_eq!(r_utf8["truncated"], true);
+        assert!(!r_utf8["text"].as_str().unwrap().contains('\u{FFFD}'));
+
+        // 2. UTF-16LE BOM 文本（如 Windows .reg / 记事本）
+        let u16_p = root.join("export.reg");
+        let mut u16_bytes = vec![0xFFu8, 0xFEu8];
+        for cu in "Windows Registry Editor\r\n测试键=1".encode_utf16() {
+            u16_bytes.extend_from_slice(&cu.to_le_bytes());
+        }
+        std::fs::write(&u16_p, &u16_bytes).unwrap();
+        let r_u16 = file_preview_core(&u16_p.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_u16["kind"], "text");
+        assert_eq!(r_u16["encoding"], "utf-16le");
+        assert_eq!(r_u16["isExec"], true);
+        assert!(r_u16["text"].as_str().unwrap().contains("测试键=1"));
+
+        // 3. GBK (CP936) 中文文件正确解码（无乱码）
+        #[cfg(windows)]
+        {
+            let gbk_p = root.join("gbk_doc.csv");
+            // "中文测试" in GBK: D6 D0 CE C4 B2 E2 CA D4
+            let gbk_bytes: &[u8] = &[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4, b',', b'1', b'2', b'3'];
+            std::fs::write(&gbk_p, gbk_bytes).unwrap();
+            let r_gbk = file_preview_core(&gbk_p.to_string_lossy(), None, None).unwrap();
+            assert_eq!(r_gbk["kind"], "text");
+            assert_eq!(r_gbk["encoding"], "gbk");
+            assert_eq!(r_gbk["text"], "中文测试,123");
+        }
+
+        // 4. 真实 .docx / .xlsx / .pptx 正文提取
+        let docx_p = root.join("demo.docx");
+        {
+            let f = std::fs::File::create(&docx_p).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(br#"<w:document><w:body><w:p><w:r><w:t>QDisk &amp; Word</w:t></w:r></w:p><w:p><w:r><w:t>&#20013;&#25991;&#27573;&#33853;</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
+            zw.finish().unwrap();
+        }
+        let r_docx = file_preview_core(&docx_p.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_docx["kind"], "office");
+        let dt = r_docx["text"].as_str().unwrap();
+        assert!(dt.contains("QDisk & Word") && dt.contains("中文段落"), "docx={dt}");
+
+        let xlsx_p = root.join("demo.xlsx");
+        {
+            let f = std::fs::File::create(&xlsx_p).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("xl/workbook.xml", opts).unwrap();
+            zw.write_all(r#"<workbook><sheets><sheet name="财务表" sheetId="1"/></sheets></workbook>"#.as_bytes()).unwrap();
+            zw.start_file("xl/sharedStrings.xml", opts).unwrap();
+            zw.write_all(r#"<sst><si><t>项目</t></si><si><t>金额</t></si></sst>"#.as_bytes()).unwrap();
+            zw.start_file("xl/worksheets/sheet1.xml", opts).unwrap();
+            zw.write_all(r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>预算</t></is></c><c r="B2"><v>998</v></c></row></sheetData></worksheet>"#.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        let r_xlsx = file_preview_core(&xlsx_p.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_xlsx["kind"], "office");
+        let xt = r_xlsx["text"].as_str().unwrap();
+        assert!(xt.contains("财务表") && xt.contains("项目\t金额") && xt.contains("预算\t998"), "xlsx={xt}");
+
+        let pptx_p = root.join("demo.pptx");
+        {
+            let f = std::fs::File::create(&pptx_p).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("ppt/slides/slide1.xml", opts).unwrap();
+            zw.write_all(r#"<p:sld><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>第一页标题</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        let r_pptx = file_preview_core(&pptx_p.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_pptx["kind"], "office");
+        let pt = r_pptx["text"].as_str().unwrap();
+        assert!(pt.contains("第 1 页") && pt.contains("第一页标题"), "pptx={pt}");
+
+        // 5. 文本伪装的 .xls 自动嗅探可读；真 OLE2 .doc 友好提示 unsupported
+        let html_xls = root.join("export_table.xls");
+        std::fs::write(&html_xls, "<table><tr><td>OK</td></tr></table>").unwrap();
+        let r_hxls = file_preview_core(&html_xls.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_hxls["kind"], "text");
+
+        let bin_doc = root.join("legacy.doc");
+        std::fs::write(&bin_doc, &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0, 0, 0]).unwrap();
+        let r_bdoc = file_preview_core(&bin_doc.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_bdoc["kind"], "unsupported");
+        assert_eq!(r_bdoc["canHex"], true);
+
+        // 6. 无扩展名文本自动嗅探为 text；二进制 PE 识别为 hex + isExec=true
+        let plain_noext = root.join("CUSTOM_README");
+        std::fs::write(&plain_noext, "plain text without ext\nline 2").unwrap();
+        let r_noext = file_preview_core(&plain_noext.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_noext["kind"], "text");
+
+        let exe_p = root.join("tool.exe");
+        std::fs::write(&exe_p, &[b'M', b'Z', 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]).unwrap();
+        let r_exe = file_preview_core(&exe_p.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_exe["kind"], "hex");
+        assert_eq!(r_exe["isExec"], true);
+        assert!(r_exe["magic"].as_str().unwrap().contains("PE"));
+
+        // 7. 空文件、目录与设备路径拦截
+        let empty_p = root.join("zero.txt");
+        std::fs::write(&empty_p, b"").unwrap();
+        let r_empty = file_preview_core(&empty_p.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_empty["kind"], "empty");
+
+        assert!(file_preview_core(&root.to_string_lossy(), None, None).is_err());
+        assert!(file_preview_core(r"\\.\PhysicalDrive0", None, None).is_err());
+        assert!(file_preview_core("C:\\temp\\CON.txt", None, None).is_err());
+        assert!(file_preview_core(&format!("{}:secret_ads", empty_p.to_string_lossy()), None, None).is_err());
+
+        // 8. 红队加测：13 万字大 DOCX 必须 O(N) 毫秒级截断（防 push_capped O(N²) 假死），
+        //    大写 Sheet1.xml + <x:sheet> 命名空间 XLSX 正常提取，且 \\?\ 扩展前缀自动剥离
+        let big_docx = root.join("large_perf.docx");
+        {
+            let f = std::fs::File::create(&big_docx).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("WORD/Document.xml", opts).unwrap();
+            let chunk = "<w:p><w:r><w:t>0123456789中文性能压测段落</w:t></w:r></w:p>".repeat(8000);
+            zw.write_all(format!("<w:document><w:body>{chunk}</w:body></w:document>").as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        let t_big = std::time::Instant::now();
+        let ext_path = format!(r"\\?\{}", big_docx.to_string_lossy());
+        let r_big = file_preview_core(&ext_path, None, None).unwrap();
+        let elapsed_ms = t_big.elapsed().as_millis();
+        assert_eq!(r_big["kind"], "office");
+        assert_eq!(r_big["truncated"], true);
+        assert!(
+            r_big["text"].as_str().unwrap().chars().count() <= OOXML_MAX_CHARS,
+            "超过 OOXML 字符上限"
+        );
+        assert!(
+            elapsed_ms < 2000,
+            "大 DOCX 提取耗时异常（可能退化为 O(N²)）: {elapsed_ms}ms"
+        );
+        assert!(
+            !r_big["path"].as_str().unwrap().starts_with(r"\\?\"),
+            "返回路径必须剥离 \\\\?\\ 扩展前缀"
+        );
+
+        let cap_xlsx = root.join("wps_case.xlsx");
+        {
+            let f = std::fs::File::create(&cap_xlsx).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("xl/Workbook.xml", opts).unwrap();
+            zw.write_all(r#"<x:workbook><x:sheets><x:sheet name="总览表" sheetId="1"/></x:sheets></x:workbook>"#.as_bytes()).unwrap();
+            zw.start_file("xl/SharedStrings.xml", opts).unwrap();
+            zw.write_all(r#"<sst><si><t>指标</t></si></sst>"#.as_bytes()).unwrap();
+            zw.start_file("xl/worksheets/Sheet1.xml", opts).unwrap();
+            zw.write_all(r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        let r_capx = file_preview_core(&cap_xlsx.to_string_lossy(), None, None).unwrap();
+        assert_eq!(r_capx["kind"], "office");
+        let cxt = r_capx["text"].as_str().unwrap();
+        assert!(cxt.contains("总览表") && cxt.contains("指标"), "wps_xlsx={cxt}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

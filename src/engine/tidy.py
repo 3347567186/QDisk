@@ -3582,10 +3582,28 @@ def _ix_catalog_path():
     return os.path.join(index_dir(), "catalog.json")
 
 
+def _ix_normalize_root(root):
+    """规范化索引根目录：补齐盘符根尾反斜杠（避免 Windows 把 C: 当成当前工作目录），去掉非根目录多余斜杠。"""
+    raw = str(root or "").strip().replace("/", "\\")
+    if not raw:
+        return ""
+    if len(raw) == 2 and raw[0].isalpha() and raw[1] == ":":
+        return raw[0].upper() + ":\\"
+    if len(raw) >= 3 and raw[0].isalpha() and raw[1] == ":" and not raw[2:].strip("\\"):
+        return raw[0].upper() + ":\\"
+    p = os.path.abspath(raw)
+    if len(p) == 3 and p[0].isalpha() and p[1:] == ":\\":
+        return p[0].upper() + ":\\"
+    if len(p) > 3:
+        p = p.rstrip("\\/")
+    return p
+
+
 def _ix_make_id(root):
     """根目录 → 稳定 id。同一个路径永远得到同一个 id，重建不会换文件名。"""
     import hashlib
-    key = os.path.normcase(os.path.abspath(root)).encode("utf-8", "replace")
+    norm_r = _ix_normalize_root(root) or os.path.abspath(str(root or ""))
+    key = os.path.normcase(norm_r).encode("utf-8", "replace")
     return hashlib.sha1(key).hexdigest()[:12]
 
 
@@ -3664,7 +3682,7 @@ def index_add(roots):
         have = {i["id"] for i in items}
         changed = False
         for root in roots or []:
-            root = os.path.abspath(str(root or ""))
+            root = _ix_normalize_root(root)
             if not root or not os.path.isdir(root):
                 continue
             ident = _ix_make_id(root)
@@ -5398,9 +5416,167 @@ def default_index_roots():
 
 
 
+def _is_subst_drive(letter):
+    """检测盘符是否为 subst 虚拟映射盘（QueryDosDeviceW 返回以 \\??\\ 开头），避免同一磁盘重复建库。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(512)
+        n = ctypes.windll.kernel32.QueryDosDeviceW(letter + ":", buf, 512)
+        if n > 0 and buf.value.startswith("\\??\\"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _volume_info(drive_root):
+    """读取卷标与文件系统名；失败返回空串，绝不阻塞。"""
+    if os.name != "nt":
+        return "", ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        vol = ctypes.create_unicode_buffer(261)
+        fs = ctypes.create_unicode_buffer(65)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            drive_root, vol, 261, None, None, None, fs, 65
+        )
+        if ok:
+            return vol.value.strip(), fs.value.strip()
+    except Exception:
+        pass
+    return "", ""
+
+
+def _is_recovery_partition(label, total_bytes, is_system):
+    if is_system:
+        return False
+    if total_bytes >= 512 * 1024 * 1024:
+        return False
+    low = (label or "").lower()
+    return any(tok in low for tok in ("efi", "recovery", "system reserved", "恢复", "系统保留"))
+
+
+def detect_main_drives():
+    """动态识别本机所有主要本地固定磁盘（如 C:\\、D:\\、E:\\ 等），自动跳过光驱/移动盘/网络盘/虚拟映射盘与小恢复分区。"""
+    import shutil
+
+    drives = []
+    excluded = []
+    sys_letter = (os.environ.get("SystemDrive", "C:")[:1] or "C").upper()
+
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        # 线程级屏蔽未就绪驱动器的系统错误弹窗（优先 SetThreadErrorMode，避免进程级竞态）
+        old_mode = None
+        use_thread_mode = False
+        try:
+            from ctypes import wintypes
+            prev = wintypes.DWORD(0)
+            if hasattr(k32, "SetThreadErrorMode") and k32.SetThreadErrorMode(0x0001 | 0x8000, ctypes.byref(prev)):
+                old_mode = prev.value
+                use_thread_mode = True
+            else:
+                old_mode = k32.SetErrorMode(0x0001 | 0x8000)
+        except Exception:
+            old_mode = None
+        try:
+            mask = int(k32.GetLogicalDrives() or 0)
+            for idx in range(26):
+                if not (mask & (1 << idx)):
+                    continue
+                letter = chr(65 + idx)
+                root = letter + ":\\"
+                dtype = int(k32.GetDriveTypeW(root))
+                if dtype == 2:
+                    excluded.append({"root": root, "letter": letter, "drive_type": "removable", "reason": "移动存储 / U 盘"})
+                    continue
+                if dtype == 4:
+                    excluded.append({"root": root, "letter": letter, "drive_type": "remote", "reason": "网络映射盘"})
+                    continue
+                if dtype == 5:
+                    excluded.append({"root": root, "letter": letter, "drive_type": "cdrom", "reason": "光驱 / 虚拟光驱"})
+                    continue
+                if dtype == 6:
+                    excluded.append({"root": root, "letter": letter, "drive_type": "ramdisk", "reason": "内存盘"})
+                    continue
+                if dtype != 3:
+                    continue
+                if _is_subst_drive(letter):
+                    excluded.append({"root": root, "letter": letter, "drive_type": "subst", "reason": "虚拟映射盘 (subst)"})
+                    continue
+                try:
+                    if not os.path.isdir(root):
+                        excluded.append({"root": root, "letter": letter, "drive_type": "fixed", "reason": "分区未就绪或不可访问"})
+                        continue
+                    du = shutil.disk_usage(root)
+                except OSError:
+                    excluded.append({"root": root, "letter": letter, "drive_type": "fixed", "reason": "分区未解锁或无访问权限"})
+                    continue
+                if du.total <= 0:
+                    continue
+                is_sys = (letter == sys_letter)
+                label, fs_name = _volume_info(root)
+                if _is_recovery_partition(label, du.total, is_sys):
+                    excluded.append({"root": root, "letter": letter, "drive_type": "recovery", "reason": "系统保留 / 恢复分区"})
+                    continue
+                drives.append({
+                    "root": root,
+                    "letter": letter,
+                    "label": label,
+                    "fs": fs_name,
+                    "total": int(du.total),
+                    "used": int(du.used),
+                    "free": int(du.free),
+                    "percent": round(du.used / du.total * 100, 1) if du.total else 0.0,
+                    "is_system": is_sys,
+                    "drive_type": "fixed",
+                })
+        finally:
+            if old_mode is not None:
+                try:
+                    if use_thread_mode:
+                        k32.SetThreadErrorMode(old_mode, None)
+                    else:
+                        k32.SetErrorMode(old_mode)
+                except Exception:
+                    pass
+
+        # 极端虚拟化环境兜底：若 GetDriveTypeW 未识别到任何固定盘，退回系统盘
+        if not drives:
+            fb = sys_letter + ":\\"
+            if os.path.isdir(fb):
+                try:
+                    du = shutil.disk_usage(fb)
+                    drives.append({
+                        "root": fb, "letter": sys_letter, "label": "", "fs": "",
+                        "total": int(du.total), "used": int(du.used), "free": int(du.free),
+                        "percent": round(du.used / du.total * 100, 1) if du.total else 0.0,
+                        "is_system": True, "drive_type": "fixed",
+                    })
+                except OSError:
+                    pass
+    else:
+        root = "/"
+        if os.path.isdir(root):
+            du = shutil.disk_usage(root)
+            drives.append({
+                "root": root, "letter": "/", "label": "", "fs": "",
+                "total": int(du.total), "used": int(du.used), "free": int(du.free),
+                "percent": round(du.used / du.total * 100, 1) if du.total else 0.0,
+                "is_system": True, "drive_type": "fixed",
+            })
+
+    drives.sort(key=lambda d: (0 if d.get("is_system") else 1, d.get("letter", "")))
+    return {"drives": drives, "excluded": excluded}
+
+
 def full_disk_roots():
-    """整盘索引：D / E。文件多、索引大，作为可选项。"""
-    return [d for d in ("D:\\", "E:\\") if os.path.isdir(d)]
+    """动态返回本机全部主要本地固定磁盘（如 C:\\、D:\\、E:\\ …）。"""
+    return [d["root"] for d in detect_main_drives().get("drives", [])]
 
 
 def find_everything():
@@ -8574,7 +8750,8 @@ def _engine_search_add(params):
         roots = [roots]
     if not isinstance(roots, list) or not roots:
         raise EngineError("参数 roots 必须是非空数组")
-    clean = [str(r) for r in roots if isinstance(r, str) and r.strip()]
+    clean = [_ix_normalize_root(r) for r in roots if isinstance(r, str) and r.strip()]
+    clean = [r for r in clean if r]
     if not clean:
         raise EngineError("参数 roots 里没有有效路径")
     items = index_add(clean)
@@ -8607,29 +8784,74 @@ def _uniq_failed(items):
     return out
 
 
+def _engine_search_drives(params):
+    """search.drives：识别本机所有主要固定磁盘，并对照现有索引返回覆盖状态。"""
+    info = detect_main_drives()
+    st = index_stats()
+    by_id = {e.get("id"): e for e in (st.get("entries") or [])}
+    out_drives = []
+    missing_roots = []
+    for d in info.get("drives") or []:
+        root = _ix_normalize_root(d.get("root") or "")
+        ident = _ix_make_id(root)
+        hit = by_id.get(ident)
+        in_catalog = hit is not None
+        built = bool(hit and hit.get("exists") and hit.get("exists_root") and not hit.get("why") and int(hit.get("files") or 0) > 0)
+        if not built:
+            missing_roots.append(root)
+        row = dict(d)
+        row.update({
+            "root": root,
+            "id": ident,
+            "in_catalog": in_catalog,
+            "built": built,
+            "files": int(hit.get("files") or 0) if hit else 0,
+            "dirs": int(hit.get("dirs") or 0) if hit else 0,
+            "size_bytes": int(hit.get("size_bytes") or 0) if hit else 0,
+            "built_at": int(hit.get("built_at") or 0) if hit else 0,
+        })
+        out_drives.append(row)
+    return {
+        "drives": out_drives,
+        "excluded": info.get("excluded") or [],
+        "missing_roots": missing_roots,
+        "all_covered": bool(out_drives) and len(missing_roots) == 0,
+        "total_drives": len(out_drives),
+    }
+
+
 def _engine_search_index(params):
     """search.index：建立/重建索引。
 
-    ids 指定就只重建这几条；roots 指定就先把目录登记进清单再重建；都不给就全部重建。
+    ids 指定就只重建这几条；roots 指定就先把目录登记进清单再重建；
+    all_main_drives=True 时自动识别本机所有主要固定盘并一键全覆盖；都不给就全部重建。
     """
+    all_main_drives = _engine_get(params, "all_main_drives", False, bool)
     roots = params.get("roots")
     if isinstance(roots, str):
         roots = [roots]
-    roots = [str(r) for r in roots] if isinstance(roots, list) else []
+    roots = [_ix_normalize_root(r) for r in roots if str(r or "").strip()] if isinstance(roots, list) else []
+    detected_drives = []
+    if all_main_drives and not roots:
+        info = detect_main_drives()
+        detected_drives = [d["root"] for d in (info.get("drives") or [])]
+        roots = list(detected_drives)
     ids = [str(i) for i in params.get("ids")] if isinstance(params.get("ids"), list) else []
     reuse = _engine_get(params, "reuse", True, bool)
     full = _engine_get(params, "full", False, bool)
     t0 = time.perf_counter()
 
     items = _ix_load()
+    before_ids = {i["id"] for i in items}
     if roots:
         items = index_add(roots)
-        want = set(_ix_make_id(os.path.abspath(r)) for r in roots)
+        want = set(_ix_make_id(r) for r in roots)
     elif ids:
         want = set(ids)
     else:
         want = set(i["id"] for i in items)
 
+    added_roots = [i["root"] for i in items if i["id"] in want and i["id"] not in before_ids]
     failed = [{"path": r, "why": "目录不存在"} for r in roots if not os.path.isdir(r)]
     targets = []
     for it in items:
@@ -8649,24 +8871,44 @@ def _engine_search_index(params):
                 "elapsed_ms": int((time.perf_counter() - t0) * 1000),
                 "failed": _uniq_failed(failed), "error": "选中的目录都不存在，没有重建索引"}
 
-    # 库都在、都有条数、抽查通过、又不是强制全量，才跳过重建
-    if reuse and not full and all(
-            os.path.isfile(_ix_db_abspath(i)) and int(i.get("files") or 0) > 0
-            and _ix_verify_one(i).get("ok")
-            for i in targets):
+    # 逐条目判断哪些可以复用、哪些缺失或陈旧需要真正建库：
+    # 这样补齐缺失主要盘（如已有 D:\，一键补齐 C:\ 与 E:\）时不会把健康的 D:\ 白白全量重扫一遍！
+    need_build = []
+    reused_roots = []
+    if reuse and not full:
+        for i in targets:
+            healthy = (
+                os.path.isfile(_ix_db_abspath(i))
+                and int(i.get("files") or 0) > 0
+                and _ix_verify_one(i).get("ok")
+            )
+            if healthy:
+                reused_roots.append(i["root"])
+            else:
+                need_build.append(i)
+    else:
+        need_build = list(targets)
+
+    if not need_build:
         return {"indexed": int(index_count()), "reused": True,
                 "entries": len(targets), "elapsed_ms": 0, "failed": _uniq_failed(failed),
-                "walker": "", "index_dir": index_dir()}
+                "walker": "", "index_dir": index_dir(),
+                "added_roots": added_roots, "reused_roots": reused_roots,
+                "built_roots": [], "drives": detected_drives or [t["root"] for t in targets]}
 
-    n, errs = build_index(ids=[i["id"] for i in targets], progress=_engine_progress)
+    n, errs = build_index(ids=[i["id"] for i in need_build], progress=_engine_progress)
     failed.extend({"path": str(p), "why": why} for p, why in errs)
+    err_roots = {os.path.normcase(str(p)) for p, _ in errs}
     st = index_stats()
     run = dict(_index_last_run)
     return {"indexed": int(st.get("files") or 0), "built": int(n),
             "entries": len(targets), "reused": False, "failed": _uniq_failed(failed),
             "elapsed_ms": int((time.perf_counter() - t0) * 1000),
             "walker": run.get("walker", ""), "index_dir": index_dir(),
-            "dirs": int(st.get("dirs") or 0)}
+            "dirs": int(st.get("dirs") or 0),
+            "added_roots": added_roots, "reused_roots": reused_roots,
+            "built_roots": [i["root"] for i in need_build if os.path.normcase(i["root"]) not in err_roots],
+            "drives": detected_drives or [t["root"] for t in targets]}
 
 
 def _direct_path_hit(q):
@@ -9420,6 +9662,7 @@ _ENGINE_METHODS = {
     "process.list": _engine_process_list,
     "system.performance": _engine_system_performance,
     "search.status": _engine_search_status,
+    "search.drives": _engine_search_drives,
     "search.index": _engine_search_index,
     "search.query": _engine_search_query,
     "search.top": _engine_search_top,

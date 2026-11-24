@@ -656,6 +656,20 @@
     }
 
     /* ---------------- 来源（目录 / 文件可混选） ---------------- */
+    let jumpClaimed = false;
+    let userEditedSources = false;
+    let unmounted = false;
+
+    const normSrcPath = (p) => String(p || '').trim().replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+
+    function parentDirOf(p) {
+      const s = String(p || '');
+      const i = Math.max(s.lastIndexOf('\\'), s.lastIndexOf('/'));
+      if (i <= 0) return s;
+      const head = s.slice(0, i);
+      return /^[A-Za-z]:$/.test(head) ? head + '\\' : head;
+    }
+
     function guessKind(p) {
       const name = String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
       return /\.[^.]{1,10}$/.test(name) ? 'file' : 'dir';
@@ -663,34 +677,102 @@
 
     const sourcePaths = () => state.sources.map((s) => s.path);
 
-    function addSources(items) {
-      const seen = new Set(state.sources.map((s) => s.path.toLowerCase()));
+    function syncPersistedFolder() {
+      const next = state.folder || '';
+      if (window.App && window.App.cfg && typeof window.App.cfg === 'object') {
+        window.App.cfg.last_folder = next;
+        window.App.cfg.lastFolder = '';
+      }
+      if (API && typeof API.configSet === 'function') {
+        API.configSet({ last_folder: next, lastFolder: '' }).catch(() => {});
+      }
+    }
+
+    function addSources(items, optsAdd) {
+      const fromRestore = !!(optsAdd && optsAdd.fromRestore);
+      if (!fromRestore) userEditedSources = true;
+      const seen = new Set(state.sources.map((s) => normSrcPath(s.path)));
       let added = 0;
       (items || []).forEach((it) => {
         const p = String(it && it.path ? it.path : it || '').trim();
-        if (!p || seen.has(p.toLowerCase())) return;
+        const k = normSrcPath(p);
+        if (!p || seen.has(k)) return;
         state.sources.push({ path: p, kind: (it && it.kind) || guessKind(p) });
-        seen.add(p.toLowerCase());
+        seen.add(k);
         added += 1;
       });
       if (added) renderSources();
       return added;
     }
 
-    function removeSource(p) {
-      state.sources = state.sources.filter((s) => s.path !== p);
+    function clearAllSources() {
+      userEditedSources = true;
+      state.sources = [];
       renderSources();
+      resetPreview();
+      state.loaded = false;
+      state.error = null;
+      lastRunBar.hidden = true;
+      lastRunBar.replaceChildren();
+      renderResults();
+      renderStats();
+      refreshSelectionUI();
       refreshSummary();
+      syncPersistedFolder();
+    }
+
+    function removeSource(p) {
+      userEditedSources = true;
+      const targetKey = normSrcPath(p);
+      state.sources = state.sources.filter((s) => normSrcPath(s.path) !== targetKey);
+      renderSources();
+      if (!state.sources.length) {
+        resetPreview();
+        state.loaded = false;
+        state.error = null;
+        lastRunBar.hidden = true;
+        lastRunBar.replaceChildren();
+        renderResults();
+        renderStats();
+        refreshSelectionUI();
+      } else if (state.items.length) {
+        // 移除已删除来源下残留的预览项，避免误把已移出列表的目录继续整理
+        const prefix = targetKey + '\\';
+        const kept = state.items.filter((it) => {
+          const fk = normSrcPath(it.folder);
+          const pk = normSrcPath(it.path);
+          return fk !== targetKey && !fk.startsWith(prefix) && pk !== targetKey;
+        });
+        if (kept.length !== state.items.length) {
+          state.items = kept;
+          state.index = new Map(kept.map((it) => [it.key, it]));
+          state.groups = new Map();
+          kept.forEach((it) => {
+            const gid = groupKey(it.folder, it.cat);
+            let grp = state.groups.get(gid);
+            if (!grp) {
+              grp = { gid, folder: it.folder, cat: it.cat, files: [], size: 0 };
+              state.groups.set(gid, grp);
+            }
+            grp.files.push(it);
+            grp.size += it.size;
+          });
+          state.selected = new Set(Array.from(state.selected).filter((k) => state.index.has(k)));
+          recomputeTotals();
+          renderResults();
+          renderStats();
+          refreshSelectionUI();
+        }
+      }
+      refreshSummary();
+      syncPersistedFolder();
     }
 
     function primaryFolder() {
       const dir = state.sources.find((s) => s.kind === 'dir');
       if (dir) return dir.path;
       const f = state.sources.find((s) => s.kind === 'file');
-      if (f) {
-        const i = Math.max(f.path.lastIndexOf('\\'), f.path.lastIndexOf('/'));
-        return i > 0 ? f.path.slice(0, i) : f.path;
-      }
+      if (f) return parentDirOf(f.path);
       return '';
     }
 
@@ -703,18 +785,29 @@
         return;
       }
       state.folder = primaryFolder();
+      srcBar.appendChild(h('span', { class: 'src-label small muted' }, T('待整理来源：', 'Sources:')));
       state.sources.forEach((s) => {
         const kind = s.kind === 'file' ? 'file' : 'folder';
-        const chip = h('span', { class: 'src-chip', title: s.path },
+        const chip = h('span', {
+          class: 'src-chip',
+          title: s.path + '\n' + T('点击右侧 × 移除该来源并取消记住', 'Click × to remove and forget')
+        },
           icon(kind, 13),
           h('span', { class: 'ellipsis' }, s.path),
           h('button', {
             class: 'src-x', type: 'button',
-            title: T('移除', 'Remove'), 'aria-label': T('移除', 'Remove'),
+            title: T('移除并取消记住', 'Remove and forget'), 'aria-label': T('移除并取消记住', 'Remove and forget'),
             onclick: () => removeSource(s.path)
           }, icon('close', 12)));
         srcBar.appendChild(chip);
       });
+      if (state.sources.length > 1) {
+        srcBar.appendChild(h('button', {
+          class: 'btn ghost sm',
+          type: 'button',
+          onclick: clearAllSources
+        }, T('清空来源', 'Clear all')));
+      }
       srcBar.hidden = false;
       refreshButtons();
     }
@@ -814,8 +907,12 @@
       buildFromScan(res);
       state.loaded = !state.error;
 
-      // 记住上次使用的文件夹，下次进入页面直接带上
-      API.configSet({ last_folder: state.folder }).catch(() => {});
+      // 仅当来源有效且扫描无错误时记住上次目录，同步清除旧驼峰字段
+      if (state.loaded && state.folder) {
+        syncPersistedFolder();
+      } else if (state.error && state.error.kind === 'missing') {
+        API.configSet({ last_folder: '', lastFolder: '' }).catch(() => {});
+      }
 
       renderResults();
       renderStats();
@@ -1217,6 +1314,27 @@
       return el;
     }
 
+    const ORG_IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif']);
+
+    function previewOrgFile(it, g) {
+      if (!it || !it.path) return;
+      const ext = extOfName(it.name || '').replace(/^\./, '').toLowerCase();
+      if (ORG_IMG_EXT.has(ext) && typeof UI.preview === 'function') {
+        const toSrc = typeof UI.fileSrc === 'function' ? UI.fileSrc : (p) => p;
+        const pool = (g && Array.isArray(g.files) ? g.files : [it])
+          .filter((f) => ORG_IMG_EXT.has(extOfName(f.name || '').replace(/^\./, '').toLowerCase()))
+          .map((f) => ({ path: f.path, name: f.name, src: toSrc(f.path) }));
+        const idx = Math.max(0, pool.findIndex((x) => x.path === it.path));
+        UI.preview({ items: pool.length ? pool : [{ path: it.path, name: it.name, src: toSrc(it.path) }], index: idx, title: it.name });
+        return;
+      }
+      if (typeof UI.previewFile === 'function') {
+        UI.previewFile(it.path, { name: it.name });
+        return;
+      }
+      revealFile(it);
+    }
+
     /* 单个文件行 */
     function renderFileRow(g, it) {
       const cb = h('input', {
@@ -1229,15 +1347,31 @@
         }
       });
       rowChecks.set(it.key, cb);
+      const viewBtn = h('button', {
+        type: 'button',
+        class: 'btn icon ghost sm org-view-btn',
+        title: T('查看文件内容', 'View file content'),
+        'aria-label': T('查看文件内容', 'View file content'),
+        onclick: (e) => {
+          e.stopPropagation();
+          previewOrgFile(it, g);
+        }
+      }, icon('search', 13));
       // row-in：新行插入时做一次淡入（前 10 行错峰，见 styles.css），只在建行时触发
-      return h('tr', { class: 'row-in', dataset: { file: it.key }, title: T('双击定位文件', 'Double-click to show in folder') },
+      const tr = h('tr', { class: 'row-in', dataset: { file: it.key, group: g.gid }, title: T('双击查看文件内容', 'Double-click to view file content') },
         h('td', { style: { width: '34px' } }, cb),
-        h('td', null, h('div', { class: 'name' },
+        h('td', null, h('div', { class: 'name org-file-cell' },
           icon('file', 14),
-          h('span', { class: 'txt', style: { minWidth: '0' }, title: it.name }, it.name))),
+          h('span', { class: 'txt', style: { minWidth: '0' }, title: it.name }, it.name),
+          viewBtn)),
         h('td', { class: 'num' }, fmtBytes(it.size)),
         h('td', { class: 'num small muted' }, it.mtime ? fmtTime(it.mtime) : '—')
       );
+      tr.addEventListener('dblclick', (e) => {
+        if (e.target && e.target.closest && e.target.closest('input, button')) return;
+        previewOrgFile(it, g);
+      });
+      return tr;
     }
 
     /* ---------------- 勾选 ---------------- */
@@ -1382,8 +1516,8 @@
         if (s.kind !== 'file') { next.push(s); return; }
         const base = String(s.path).split(/[\\/]/).pop();
         if (failedNames.has(base)) { next.push(s); return; }
-        const cut = Math.max(s.path.lastIndexOf('\\'), s.path.lastIndexOf('/'));
-        next.push(cut > 0 ? { path: s.path.slice(0, cut), kind: 'dir' } : s);
+        const par = parentDirOf(s.path);
+        next.push(par && par !== s.path ? { path: par, kind: 'dir' } : s);
       });
       const seen = new Set();
       const merged = [];
@@ -1602,8 +1736,10 @@
       if (tr) {
         const it = state.index.get(tr.dataset.file);
         if (!it) return [];
+        const grp = tr.dataset.group ? state.groups.get(tr.dataset.group) : null;
         return [
           { header: it.name },
+          { label: T('查看文件内容', 'View file content'), icon: 'file', action: () => previewOrgFile(it, grp) },
           { label: T('在软件内定位', 'Locate in app'), icon: 'scan', action: () => {
             if (window.AIEntries && typeof window.AIEntries.open === 'function') window.AIEntries.open(it.path);
             else revealFile(it);
@@ -1653,14 +1789,31 @@
 
     try {
       const cfg = await API.configGet();
-      if (cfg && typeof cfg.last_folder === 'string' && cfg.last_folder) {
-        addSources([{ path: cfg.last_folder, kind: 'dir' }]);
+      const savedDir = String((cfg && (cfg.last_folder || cfg.lastFolder)) || '').trim();
+      if (!unmounted && !jumpClaimed && !userEditedSources && !state.sources.length && savedDir) {
+        // 先真实探测目录是否仍然存在：已删除或失效的旧临时目录自动清脏，绝不一直挂着幽灵胶囊
+        let valid = true;
+        if (API && typeof API.inspectPath === 'function') {
+          try {
+            const info = await API.inspectPath(savedDir);
+            if (info && (info.status === 'not_found' || info.status === 'invalid' || (info.status === 'ok' && info.kind !== 'dir'))) {
+              valid = false;
+            }
+          } catch (_) { /* 降级保留 */ }
+        }
+        if (!unmounted && !jumpClaimed && !userEditedSources && !state.sources.length) {
+          if (valid) {
+            addSources([{ path: savedDir, kind: 'dir' }], { fromRestore: true });
+          } else {
+            API.configSet({ last_folder: '', lastFolder: '' }).catch(() => {});
+          }
+        }
       }
     } catch (e) { /* 首次运行没有配置，忽略 */ }
 
     try {
       const s = await API.engine('settings.get', {});
-      if (s) {
+      if (s && !unmounted) {
         if (typeof s.default_recursive === 'boolean') {
           opts.recursive = s.default_recursive;
         }
@@ -1675,15 +1828,18 @@
       }
     } catch (e) { /* 引擎未连上就沿用默认选项 */ }
 
-    refreshSummary();
-    renderStats();
-    refreshButtons();
+    if (!unmounted) {
+      refreshSummary();
+      renderStats();
+      refreshButtons();
+    }
 
     /* jump 接收器：AI / 右键菜单通过 App.jump('organize', { paths: [...] }) 进来，
        自动填入来源并触发扫描，用户不用再手动选文件夹。 */
     liveJump = async function (data) {
       let paths = ((data && data.paths) || []).filter(Boolean).map(String);
       if (!paths.length) return;
+      jumpClaimed = true;
       if (window.AIEntries && typeof window.AIEntries.resolvePaths === 'function') {
         try {
           const resolved = await window.AIEntries.resolvePaths(paths);
@@ -1709,6 +1865,7 @@
     };
 
     return function unmount() {
+      unmounted = true;
       liveJump = null;
       setActions();
     };

@@ -114,6 +114,12 @@
   /* ---------- 通用弹窗 ---------- */
   const openModals = new Set();
 
+  function registerModalClose(fn) {
+    if (typeof fn !== 'function') return () => {};
+    openModals.add(fn);
+    return () => openModals.delete(fn);
+  }
+
   function closeModals() {
     for (const fn of Array.from(openModals)) {
       try { fn(null); } catch (_) {}
@@ -575,6 +581,106 @@
   document.addEventListener('scroll', closeMenu, true);
   window.addEventListener('blur', closeMenu);
 
+  /* ---------- 本地路径转可加载资源 URL + 安全 HTML 写入 ---------- */
+  function stripExtendedPrefix(p) {
+    const s = String(p || '');
+    if (/^\\\\\?\\UNC\\/i.test(s)) return '\\\\' + s.slice(8);
+    if (/^\\\\\?\\[A-Za-z]:/.test(s)) return s.slice(4);
+    return s;
+  }
+
+  function fileSrc(p) {
+    const raw = stripExtendedPrefix(String(p || '').trim());
+    if (!raw) return '';
+    if (/^(?:https?:|data:|blob:|asset:)/i.test(raw)) return raw;
+    try {
+      const core = window.__TAURI__ && window.__TAURI__.core;
+      if (core && typeof core.convertFileSrc === 'function') return core.convertFileSrc(raw);
+    } catch (_) { /* 降级 file:/// */ }
+    const norm = raw.replace(/\\/g, '/');
+    const encoded = norm.split('/').map((seg, idx) => (idx === 0 && /^[A-Za-z]:$/.test(seg) ? seg : encodeURIComponent(seg))).join('/');
+    return 'file:///' + encoded.replace(/^\/+/, '');
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const SAFE_HTML_ELEMENTS = [
+    'p', 'br', 'hr', 'div', 'span', 'strong', 'b', 'em', 'i', 'del', 's', 'code', 'pre',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'button', 'svg', 'path'
+  ];
+  const SAFE_SANITIZER_ELEMENTS = [
+    'p', 'br', 'hr', 'div', 'span', 'strong', 'b', 'em', 'i', 'del', 's', 'code', 'pre',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'button',
+    { name: 'svg', namespace: SVG_NS },
+    { name: 'path', namespace: SVG_NS }
+  ];
+  const SAFE_HTML_ATTRS = [
+    'class', 'href', 'title', 'target', 'rel', 'type', 'aria-label', 'aria-hidden',
+    'data-path', 'data-kind', 'colspan', 'rowspan', 'align', 'start',
+    'viewBox', 'width', 'height', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'd'
+  ];
+
+  function safeSetHtml(el, html) {
+    if (!el) return;
+    const raw = String(html == null ? '' : html);
+    // 优先使用原生 Sanitizer API（modern-web-guidance: sanitize-untrusted-html，SVG 显式声明 SVG 命名空间防止 Chrome 146+ 误剥离图标）
+    if (typeof Element !== 'undefined' && Element.prototype && 'setHTML' in Element.prototype && typeof el.setHTML === 'function') {
+      try {
+        el.setHTML(raw, { sanitizer: { elements: SAFE_SANITIZER_ELEMENTS, attributes: SAFE_HTML_ATTRS } });
+        return;
+      } catch (_) { /* 部分浏览器配置差异时走下方严格 DOM 清洗 */ }
+    }
+    // 兼容降级：利用 DOMParser 或离屏容器剥离所有危险标签、on* 事件与非安全协议
+    if (typeof DOMParser === 'function') {
+      try {
+        const doc = new DOMParser().parseFromString(raw, 'text/html');
+        const allow = new Set(SAFE_HTML_ELEMENTS);
+        const allowAttr = new Set(SAFE_HTML_ATTRS.map((a) => a.toLowerCase()));
+        const cleanNode = (node) => {
+          if (!node) return;
+          if (node.nodeType === 1) {
+            const tag = String(node.tagName || '').toLowerCase();
+            if (!allow.has(tag)) {
+              node.remove();
+              return;
+            }
+            const attrs = Array.from(node.attributes || []);
+            for (const a of attrs) {
+              const name = String(a.name || '').toLowerCase();
+              const val = String(a.value || '');
+              if (name.startsWith('on') || !allowAttr.has(name)) {
+                node.removeAttribute(a.name);
+                continue;
+              }
+              if (name === 'href') {
+                const trimV = val.trim();
+                if (!/^(?:https?:\/\/|mailto:|#)/i.test(trimV)) {
+                  node.removeAttribute(a.name);
+                }
+              }
+            }
+          }
+          const kids = Array.from(node.childNodes || []);
+          for (const k of kids) cleanNode(k);
+        };
+        const kids = Array.from((doc.body && doc.body.childNodes) || []);
+        for (const k of kids) cleanNode(k);
+        if (typeof el.replaceChildren === 'function') {
+          el.replaceChildren(...Array.from((doc.body && doc.body.childNodes) || []));
+        } else {
+          el.innerHTML = doc.body ? doc.body.innerHTML : '';
+        }
+        return;
+      } catch (_) { /* 极简桩环境降级 */ }
+    }
+    el.innerHTML = raw
+      .replace(/<(?:script|iframe|object|embed|style)[\s\S]*?<\/(?:script|iframe|object|embed|style)>/gi, '')
+      .replace(/<(?:iframe|object|embed)\b[^>]*\/?>/gi, '')
+      .replace(/\shref\s*=\s*(['"])\s*(?:javascript|vbscript|data):[^'"]*\1/gi, ' href="#"')
+      .replace(/\son[a-z]+\s*=/gi, ' data-blocked=');
+  }
+
   /* ---------- 图片预览 ---------- */
   let activePreviewClose = null;
 
@@ -591,17 +697,42 @@
     root.innerHTML = '';
 
     const img = h('img', { alt: '' });
+    const errBox = h('div', { class: 'preview-err', hidden: true });
     const nameEl = h('div', { class: 'name' });
     const posEl = h('span', { class: 'mono' });
-    const stage = h('div', { class: 'preview-stage' }, img);
+    const stage = h('div', { class: 'preview-stage' }, img, errBox);
     const dots = h('div', { class: 'dots' });
 
     function render() {
       const it = list[idx];
-      img.src = it.src || it.url || '';
+      const resolvedSrc = it.src || it.url || (it.path ? fileSrc(it.path) : '');
+      errBox.hidden = true;
+      errBox.replaceChildren();
+      img.hidden = false;
+      img.style.opacity = '1';
+      img.src = resolvedSrc;
       img.style.transform = `scale(${zoom})`;
-      img.onerror = () => { img.style.opacity = '.25'; };
-      img.onload = () => { img.style.opacity = '1'; };
+      img.onerror = () => {
+        img.hidden = true;
+        errBox.hidden = false;
+        errBox.replaceChildren(
+          icon('image', 28),
+          h('div', { class: 'preview-err-title' }, T('该图片暂无法在内置视图中渲染', 'Cannot render this image inline')),
+          h('div', { class: 'small muted' }, T('可能是不受支持的图片编码或文件已损坏，可尝试用系统默认程序打开', 'Unsupported encoding or damaged file; try opening with default app')),
+          it.path ? h('div', { class: 'row', style: { gap: '8px', marginTop: '6px' } },
+            !(window.AIEntries && typeof window.AIEntries.isExecPath === 'function' && window.AIEntries.isExecPath(it.path))
+              ? h('button', {
+                class: 'btn sm primary', type: 'button',
+                onclick: () => API.openPath(it.path).catch((e) => toast(errText(e), 'error'))
+              }, T('用默认程序打开', 'Open with default app')) : null,
+            h('button', {
+              class: 'btn sm ghost', type: 'button',
+              onclick: () => API.reveal(it.path).catch((e) => toast(errText(e), 'error'))
+            }, T('系统管理器', 'Explorer'))
+          ) : null
+        );
+      };
+      img.onload = () => { img.hidden = false; errBox.hidden = true; img.style.opacity = '1'; };
       nameEl.textContent = it.name || it.path || '';
       posEl.textContent = (idx + 1) + ' / ' + list.length;
       dots.innerHTML = '';
@@ -665,6 +796,342 @@
     document.addEventListener('keydown', onKey);
     root.appendChild(mask);
     render();
+  }
+
+  /* ---------- 统一全能只读文件内容预览器（整理文件 / 空间工具 / 目录浏览共用） ---------- */
+  let previewFileSeq = 0;
+  let activeFilePreview = null;
+
+  function releaseMediaHandles(container) {
+    if (!container || typeof container.querySelectorAll !== 'function') return;
+    ['video', 'audio'].forEach((tag) => {
+      container.querySelectorAll(tag).forEach((m) => {
+        try { if (typeof m.pause === 'function') m.pause(); } catch (_) {}
+        try {
+          if (typeof m.removeAttribute === 'function') m.removeAttribute('src');
+          m.src = '';
+          if (typeof m.load === 'function') m.load();
+        } catch (_) {}
+      });
+    });
+    container.querySelectorAll('iframe').forEach((f) => {
+      try { f.src = 'about:blank'; } catch (_) {}
+    });
+  }
+
+  async function previewFile(path, opts) {
+    const o = opts || {};
+    const rawPath = String(path || '').trim();
+    if (!rawPath) return;
+    const seq = ++previewFileSeq;
+    const initialMode = o.mode || 'auto';
+
+    if (activeFilePreview && typeof activeFilePreview.close === 'function') {
+      try { activeFilePreview.close(); } catch (_) {}
+      activeFilePreview = null;
+    }
+
+    const host = h('div', { class: 'fp-wrap' }, skeleton(5, 'scan'));
+    const displayName = o.name || rawPath.split(/[\\/]/).filter(Boolean).pop() || rawPath;
+    let currentData = null;
+    let mdRendered = false;
+    let softWrap = true;
+    let modalClosed = false;
+    let innerLoadSeq = 0;
+
+    const modalHandle = modal({
+      title: displayName,
+      wide: true,
+      body: host,
+      buttons: [
+        { id: 'reveal', label: T('系统文件管理器', 'Explorer'), kind: 'ghost' },
+        { id: 'close', label: T('关闭', 'Close'), kind: 'primary' }
+      ],
+      onAction: (id) => {
+        if (id === 'reveal') {
+          const target = (currentData && currentData.path) || rawPath;
+          API.reveal(target).catch((e) => toast(errText(e), 'error'));
+          return false;
+        }
+        return true;
+      },
+      onClose: () => {
+        modalClosed = true;
+        innerLoadSeq += 1;
+        releaseMediaHandles(host);
+        if (activeFilePreview === modalHandle) activeFilePreview = null;
+      }
+    });
+    if (modalHandle && modalHandle.el) modalHandle.el.classList.add('fp-modal');
+    activeFilePreview = modalHandle;
+
+    async function load(mode) {
+      const mySeq = seq;
+      const myInnerSeq = ++innerLoadSeq;
+      if (mode === 'hex') mdRendered = false;
+      releaseMediaHandles(host);
+      host.replaceChildren(skeleton(5, 'scan'));
+      let data = null;
+      try {
+        if (API && typeof API.filePreview === 'function') {
+          data = await API.filePreview(rawPath, o.maxBytes || null, mode || 'auto');
+        } else if (API && typeof API.readText === 'function') {
+          const txt = await API.readText(rawPath, o.maxBytes || 262144);
+          data = {
+            path: rawPath, name: displayName, ext: '', size: String(txt || '').length, mtime: 0,
+            kind: 'text', encoding: 'utf-8', text: String(txt == null ? '' : txt),
+            truncated: false, isExec: false, isArchive: false, canHex: false, canText: true, note: ''
+          };
+        } else {
+          throw new Error(T('当前环境不支持文件内容预览', 'File preview unavailable'));
+        }
+      } catch (e) {
+        if (modalClosed || mySeq !== previewFileSeq || myInnerSeq !== innerLoadSeq) return;
+        host.replaceChildren(
+          h('div', { class: 'fp-path-bar' },
+            h('span', { class: 'mono small muted ellipsis', title: rawPath }, rawPath),
+            h('button', { class: 'btn ghost sm', type: 'button', onclick: () => copy(rawPath) }, icon('copy', 12), T('复制路径', 'Copy'))
+          ),
+          h('div', { class: 'fp-fallback is-err' },
+            icon('alert', 22),
+            h('div', { class: 'fp-fallback-title' }, T('暂时无法读取该文件内容', 'Cannot preview file content')),
+            h('div', { class: 'small muted' }, errText(e)),
+            h('div', { class: 'row wrap', style: { gap: '8px', marginTop: '6px' } },
+              h('button', { class: 'btn sm', type: 'button', onclick: () => load(mode) }, icon('refresh', 13), T('重试', 'Retry')),
+              h('button', { class: 'btn sm ghost', type: 'button', onclick: () => API.reveal(rawPath).catch((er) => toast(errText(er), 'error')) }, icon('external', 13), T('系统文件管理器', 'Explorer'))
+            )
+          )
+        );
+        return;
+      }
+
+      if (modalClosed || mySeq !== previewFileSeq || myInnerSeq !== innerLoadSeq) return;
+      currentData = data || {};
+      paint(currentData);
+    }
+
+    function openSystemSafe(target, isExec) {
+      if (isExec) {
+        toast(T('安全保护：可执行/脚本文件禁止直接运行', 'Blocked executable launch for safety'), 'warn');
+        return;
+      }
+      API.openPath(target).catch((e) => toast(errText(e), 'error'));
+    }
+
+    function kindLabelOf(d) {
+      const k = d.kind || '';
+      if (k === 'image') return T('图片', 'Image') + (d.ext ? ' · ' + d.ext.toUpperCase() : '');
+      if (k === 'pdf') return 'PDF';
+      if (k === 'video') return T('视频', 'Video') + (d.ext ? ' · ' + d.ext.toUpperCase() : '');
+      if (k === 'audio') return T('音频', 'Audio') + (d.ext ? ' · ' + d.ext.toUpperCase() : '');
+      if (k === 'office') return d.magic || T('Office 文档', 'Office doc');
+      if (k === 'archive') return T('压缩包', 'Archive');
+      if (k === 'hex') return T('十六进制', 'Hex') + (d.magic ? ' · ' + d.magic : '');
+      if (k === 'empty') return T('空文件', 'Empty');
+      if (k === 'unsupported') return d.magic || T('二进制文件', 'Binary');
+      return T('文本', 'Text') + (d.encoding ? ' · ' + String(d.encoding).toUpperCase() : '');
+    }
+
+    function paint(d) {
+      releaseMediaHandles(host);
+      host.replaceChildren();
+      const targetPath = d.path || rawPath;
+      const isMd = d.kind === 'text' && (d.ext === 'md' || d.ext === 'markdown');
+
+      const metaBadges = [
+        h('span', { class: 'badge accent' }, kindLabelOf(d)),
+        h('span', { class: 'small muted mono' }, fmtBytes(d.size || 0)),
+        d.mtime ? h('span', { class: 'small muted' }, fmtTime(d.mtime)) : null,
+        d.isExec ? h('span', { class: 'badge warn' }, T('可执行 / 脚本 · 只读不运行', 'Executable · read-only')) : null,
+        d.truncated ? h('span', { class: 'badge' }, T('已截取前段', 'Truncated')) : null
+      ].filter(Boolean);
+
+      const tools = [];
+      if (isMd && window.AIMd && typeof window.AIMd.render === 'function') {
+        tools.push(h('button', {
+          class: 'btn ghost sm', type: 'button',
+          onclick: () => { mdRendered = !mdRendered; paint(d); }
+        }, mdRendered ? T('查看源码', 'Source') : T('排版预览', 'Rendered')));
+      }
+      if ((d.kind === 'text' || d.kind === 'office') && !mdRendered) {
+        tools.push(h('button', {
+          class: 'btn ghost sm', type: 'button',
+          onclick: () => { softWrap = !softWrap; paint(d); }
+        }, softWrap ? T('关闭换行', 'No wrap') : T('自动换行', 'Wrap')));
+      }
+      if ((d.kind === 'text' || d.kind === 'office' || d.kind === 'hex') && d.text) {
+        tools.push(h('button', {
+          class: 'btn ghost sm', type: 'button',
+          onclick: () => copy(String(d.text || ''), T('已复制预览内容', 'Preview text copied'))
+        }, icon('copy', 12), T('复制内容', 'Copy text')));
+      }
+      if (d.kind === 'image' && d.canText) {
+        tools.push(h('button', { class: 'btn ghost sm', type: 'button', onclick: () => load('text') }, T('查看 SVG 源码', 'View source')));
+      }
+      if (d.kind === 'hex' && d.canText) {
+        tools.push(h('button', { class: 'btn ghost sm', type: 'button', onclick: () => load('text') }, T('按文本查看', 'View as text')));
+      } else if (d.kind !== 'hex' && d.canHex) {
+        tools.push(h('button', { class: 'btn ghost sm', type: 'button', onclick: () => load('hex') }, T('十六进制', 'Hex')));
+      }
+      if (d.kind === 'text' && d.ext === 'svg') {
+        tools.push(h('button', { class: 'btn ghost sm', type: 'button', onclick: () => load('auto') }, T('看图片', 'View image')));
+      }
+      if (!d.isExec && d.kind !== 'archive') {
+        tools.push(h('button', {
+          class: 'btn ghost sm', type: 'button',
+          onclick: () => openSystemSafe(targetPath, d.isExec)
+        }, icon('external', 12), T('默认程序打开', 'Default app')));
+      }
+
+      host.appendChild(h('div', { class: 'fp-meta-bar' },
+        h('div', { class: 'row wrap', style: { gap: '6px', alignItems: 'center' } }, ...metaBadges),
+        h('div', { class: 'row wrap', style: { gap: '4px', alignItems: 'center' } }, ...tools)
+      ));
+
+      host.appendChild(h('div', { class: 'fp-path-bar' },
+        h('span', { class: 'mono small muted ellipsis', title: targetPath }, targetPath),
+        h('button', {
+          class: 'btn ghost sm', type: 'button',
+          onclick: () => copy(targetPath)
+        }, icon('copy', 12), T('复制路径', 'Copy path'))
+      ));
+
+      if (d.note) {
+        host.appendChild(h('div', { class: 'fp-note small muted' }, d.note));
+      }
+
+      const stage = h('div', { class: 'fp-stage' });
+      if (d.kind === 'image') {
+        const srcUrl = fileSrc(targetPath);
+        const im = h('img', {
+          class: 'fp-image',
+          src: srcUrl,
+          alt: d.name || '',
+          title: T('点击进入全屏缩放预览', 'Click for fullscreen zoom'),
+          onclick: () => {
+            const groupItems = Array.isArray(o.gallery) && o.gallery.length
+              ? o.gallery
+              : [{ path: targetPath, name: d.name || displayName, src: srcUrl }];
+            const idx = Math.max(0, groupItems.findIndex((x) => x.path === targetPath));
+            preview({ items: groupItems, index: idx, title: d.name || displayName });
+          }
+        });
+        im.onerror = () => {
+          stage.replaceChildren(h('div', { class: 'fp-fallback' },
+            icon('image', 24),
+            h('div', { class: 'fp-fallback-title' }, T('内置视图无法解码该图片格式', 'Cannot decode this image inline')),
+            h('div', { class: 'small muted' }, T('请点击上方「默认程序打开」查看原图', 'Use "Default app" above to view'))
+          ));
+        };
+        stage.appendChild(im);
+      } else if (d.kind === 'pdf') {
+        stage.appendChild(h('iframe', {
+          class: 'fp-pdf',
+          src: fileSrc(targetPath),
+          title: d.name || 'PDF'
+        }));
+      } else if (d.kind === 'video') {
+        const vid = h('video', { class: 'fp-media', controls: true, preload: 'metadata', src: fileSrc(targetPath) });
+        vid.onerror = () => {
+          stage.replaceChildren(h('div', { class: 'fp-fallback' },
+            icon('file', 24),
+            h('div', { class: 'fp-fallback-title' }, T('内置播放器不支持该视频编码', 'Unsupported video codec inline')),
+            h('div', { class: 'small muted' }, T('例如 MKV/HEVC/AVI 需使用系统播放器打开', 'Containers like MKV/HEVC/AVI require your system player')),
+            h('button', {
+              class: 'btn sm primary', type: 'button',
+              onclick: () => openSystemSafe(targetPath, d.isExec)
+            }, T('用系统默认程序播放', 'Open with default player'))
+          ));
+        };
+        stage.appendChild(vid);
+      } else if (d.kind === 'audio') {
+        const aud = h('audio', { class: 'fp-media fp-audio', controls: true, preload: 'metadata', src: fileSrc(targetPath) });
+        aud.onerror = () => {
+          stage.replaceChildren(h('div', { class: 'fp-fallback' },
+            icon('file', 24),
+            h('div', { class: 'fp-fallback-title' }, T('内置播放器不支持该音频编码', 'Unsupported audio codec inline')),
+            h('button', {
+              class: 'btn sm primary', type: 'button',
+              onclick: () => openSystemSafe(targetPath, d.isExec)
+            }, T('用系统默认程序播放', 'Open with default player'))
+          ));
+        };
+        stage.appendChild(aud);
+      } else if (d.kind === 'archive') {
+        stage.appendChild(h('div', { class: 'fp-fallback' },
+          icon('archive', 28),
+          h('div', { class: 'fp-fallback-title' }, T('压缩包文件', 'Archive file')),
+          h('div', { class: 'small muted' }, d.note || T('可在压缩包页直接浏览、预览或解压内部文件', 'Browse, preview or extract contents in Archives')),
+          h('div', { class: 'row wrap', style: { gap: '8px', marginTop: '8px' } },
+            h('button', {
+              class: 'btn sm primary', type: 'button',
+              onclick: () => {
+                modalHandle.close();
+                if (window.App && typeof window.App.jump === 'function') {
+                  window.App.jump('archive', { paths: [targetPath] });
+                }
+              }
+            }, icon('archive', 13), T('在压缩包页打开', 'Open in Archives')),
+            h('button', { class: 'btn sm ghost', type: 'button', onclick: () => load('hex') }, T('查看十六进制文件头', 'View hex header'))
+          )
+        ));
+      } else if (d.kind === 'text' || d.kind === 'office') {
+        if (isMd && mdRendered && window.AIMd && typeof window.AIMd.render === 'function') {
+          const mdEl = h('div', {
+            class: 'fp-md upd-log-md',
+            onclick: (e) => {
+              const extBtn = e && e.target && e.target.closest ? e.target.closest('button.md-path-ext[data-path]') : null;
+              if (extBtn) {
+                e.preventDefault();
+                const lp = extBtn.getAttribute('data-path') || '';
+                if (lp) API.reveal(lp).catch((er) => toast(errText(er), 'error'));
+                return;
+              }
+              const a = e && e.target && e.target.closest ? e.target.closest('a[href], a.md-path[data-path]') : null;
+              if (!a) return;
+              e.preventDefault();
+              const lp = a.getAttribute('data-path') || '';
+              if (lp && window.AIEntries && typeof window.AIEntries.open === 'function') {
+                modalHandle.close();
+                window.AIEntries.open(lp);
+                return;
+              }
+              const href = a.getAttribute('href') || '';
+              if (/^https?:\/\//i.test(href)) {
+                API.openPath(href).catch((er) => toast(errText(er), 'error'));
+              }
+            }
+          });
+          safeSetHtml(mdEl, window.AIMd.render(String(d.text || '')));
+          stage.appendChild(mdEl);
+        } else {
+          stage.appendChild(h('pre', {
+            class: 'fp-pre' + (softWrap ? '' : ' no-wrap')
+          }, String(d.text == null ? '' : d.text)));
+        }
+      } else if (d.kind === 'hex') {
+        stage.appendChild(h('pre', { class: 'fp-pre fp-hex no-wrap' }, String(d.text || '')));
+      } else {
+        stage.appendChild(h('div', { class: 'fp-fallback' },
+          icon('file', 26),
+          h('div', { class: 'fp-fallback-title' }, d.kind === 'empty'
+            ? T('空文件（0 字节）', 'Empty file (0 bytes)')
+            : T('暂不支持软件内直接渲染此格式', 'Inline rendering not supported for this format')),
+          h('div', { class: 'small muted' }, d.note || ''),
+          h('div', { class: 'row wrap', style: { gap: '8px', marginTop: '8px' } },
+            !d.isExec ? h('button', {
+              class: 'btn sm primary', type: 'button',
+              onclick: () => openSystemSafe(targetPath, d.isExec)
+            }, T('用系统默认程序打开', 'Open with default app')) : null,
+            d.canHex ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => load('hex') }, T('查看十六进制', 'View hex')) : null
+          )
+        ));
+      }
+      host.appendChild(stage);
+    }
+
+    load(initialMode);
+    return modalHandle;
   }
 
   const ICONS = {
@@ -1097,7 +1564,8 @@
     h, T, fmtBytes, fmtSize: fmtBytes, fmtCount, fmtTime, fmtDateTime, toast, confirm: confirmBox, busy,
     withButtonBusy, progressModal,
     skeleton, loader, softIn, empty, card, section, table, icon, state, setActions, askBtn, setLang, onLangChange,
-    menu, attachMenu, closeMenu, modal, closeModals, preview, closePreview,
+    menu, attachMenu, closeMenu, modal, closeModals, registerModalClose, preview, closePreview, previewFile,
+    fileSrc, safeSetHtml,
     pageSize, pageSizePick, PAGE_SIZES,
     errText, copy,
     customSelect, initGlobalTooltip

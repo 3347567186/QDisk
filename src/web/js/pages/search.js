@@ -51,7 +51,10 @@
         hint: '',
         searched: false,
         searching: false,
-        statusLoading: true
+        statusLoading: true,
+        indexing: false,
+        drives: [],
+        excludedDrives: []
       };
 
       function paint() {
@@ -119,10 +122,16 @@
             h('span', { class: 'small muted', text: hint }),
             h('div', { class: 'spacer' }),
             h('button', {
-              class: 'btn sm', disabled: !state.entries.length, onclick: () => buildIndex(false)
+              class: 'btn sm primary',
+              disabled: state.indexing,
+              title: T('自动识别本机所有主要磁盘（如 C:\\、D:\\、E:\\）并一键全覆盖建立索引', 'Auto-detect all main local drives and build full-coverage index'),
+              onclick: () => oneClickIndexAllDrives()
+            }, icon('drive', 14), h('span', { text: T('一键建立索引', 'One-click index') })),
+            h('button', {
+              class: 'btn sm', disabled: !state.entries.length || state.indexing, onclick: () => buildIndex(false)
             }, icon('scan', 14), h('span', { text: T('建立索引', 'Index') })),
             h('button', {
-              class: 'btn sm', disabled: !state.entries.length, onclick: () => buildIndex(true)
+              class: 'btn sm', disabled: !state.entries.length || state.indexing, onclick: () => buildIndex(true)
             }, icon('undo', 14), h('span', { text: T('重建索引', 'Rebuild') }))
           )
         );
@@ -180,6 +189,7 @@
             key: 'ops', label: T('操作', 'Actions'), width: '76px',
             render: (r) => h('button', {
               class: 'btn icon sm danger',
+              disabled: state.indexing,
               title: T('删除这个索引', 'Delete this index'),
               onclick: (e) => { e.stopPropagation(); deleteIndex(r, host); }
             }, icon('trash', 14))
@@ -207,18 +217,24 @@
               h('div', { class: 'table-wrap' }, tbl),
               h('div', { class: 'note', text: T('勾选决定搜索范围；一个都不勾表示搜全部。删除只删索引文件，不动源目录里的文件。',
                 'Checkboxes set the search scope; none checked means all. Deleting removes the index file only, never your files.') }))
-            : h('div', { class: 'small muted', text: T('还没有索引，先添加一个目录', 'No indexes yet — add a folder first') }),
+            : h('div', { class: 'small muted', text: T('还没有索引，点击下方「一键建立索引」可自动识别并全覆盖电脑主要盘，或手动添加目录', 'No indexes yet — click One-click index to cover all main drives, or add a folder') }),
           { open: true }));
 
         parts.push(h('div', { class: 'toolbar' },
           h('button', {
-            class: 'btn sm', onclick: () => addRoot(host)
+            class: 'btn sm primary',
+            disabled: state.indexing,
+            title: T('自动识别电脑主要盘并一键全覆盖建立索引', 'Auto-detect main local drives and index all'),
+            onclick: () => oneClickIndexAllDrives()
+          }, icon('drive', 14), h('span', { text: T('一键建立索引', 'One-click index') })),
+          h('button', {
+            class: 'btn sm', disabled: state.indexing, onclick: () => addRoot(host)
           }, icon('plus', 14), h('span', { text: T('添加目录', 'Add folder') })),
           h('button', {
-            class: 'btn sm', disabled: !state.scope.length, onclick: () => buildIndex(false, scopeIds())
+            class: 'btn sm', disabled: !state.scope.length || state.indexing, onclick: () => buildIndex(false, scopeIds())
           }, icon('scan', 14), h('span', { text: T('建立选中', 'Index checked') + (state.scope.length ? ' · ' + state.scope.length : '') })),
           h('button', {
-            class: 'btn sm', disabled: !rows.length, onclick: () => buildIndex(true)
+            class: 'btn sm', disabled: !rows.length || state.indexing, onclick: () => buildIndex(true)
           }, icon('undo', 14), h('span', { text: T('全部重建', 'Rebuild all') })),
           h('div', { class: 'spacer' }),
           h('button', {
@@ -263,6 +279,7 @@
       }
 
       async function addRoot(host) {
+        if (state.indexing) return;
         try {
           const dir = await API.pickFolder();
           if (!dir) return;
@@ -283,6 +300,7 @@
       }
 
       async function deleteIndex(row, host) {
+        if (state.indexing) return;
         const ok = await UI.confirm({
           title: T('删除索引', 'Delete index'),
           body: T('只删除这个索引文件，源目录里的文件不受影响。', 'Only the index file is removed; your files stay untouched.')
@@ -436,7 +454,12 @@
           inner = UI.skeleton(8, 'search');
           hintText = T('正在搜索…', 'Searching…');
         } else if (!state.searched) {
-          inner = UI.empty(T('还没有搜索', 'No search yet'), T('添加目录并建立索引后搜索更快', 'Add folders and build the index for faster results'));
+          inner = UI.empty(
+            T('还没有搜索', 'No search yet'),
+            state.entries.length
+              ? T('输入文件名或关键字按回车即可快速定位', 'Type a filename or keyword and press Enter')
+              : T('点击上方「一键建立索引」自动覆盖本机主要盘，搜索更快', 'Click "One-click index" above to cover all main local drives for instant search')
+          );
         } else if (!state.items.length) {
           inner = UI.empty(T('没有匹配的文件', 'No matching files'), state.hint || '');
           hintText = T('没有匹配', 'No matches');
@@ -592,9 +615,16 @@
           state.schema = Number(st && st.schema) || 0;
           state.walker = (st && st.walker) || '';
           state.elapsed = Number(st && st.elapsed_ms) || 0;
-          // 清单变了就把选中的 id 收拢一次，避免留着一堆已经不存在的 id
+          // 清单变了就把选中的 id 收拢一次并回写持久化，避免删空后重启/重建时旧 localStorage 复活成局部范围
           const alive = new Set(state.entries.map((r) => r.id));
-          state.scope = state.scope.filter((id) => alive.has(id));
+          const prunedScope = state.scope.filter((id) => alive.has(id));
+          if (prunedScope.length !== state.scope.length) {
+            state.scope = prunedScope;
+            try {
+              if (state.scope.length) localStorage.setItem('ta.index.scope', JSON.stringify(state.scope));
+              else localStorage.removeItem('ta.index.scope');
+            } catch (_) {}
+          }
           state.statusLoading = false;
           if (!quiet) toast(T('状态已刷新', 'Status refreshed'), 'ok', 1600);
         } catch (e) {
@@ -604,10 +634,220 @@
         if (!quiet) paint();
       }
 
+      async function detectMainDrives() {
+        try {
+          const res = await API.engine('search.drives', {});
+          const drives = Array.isArray(res && res.drives) ? res.drives : [];
+          const excluded = Array.isArray(res && res.excluded) ? res.excluded : [];
+          state.drives = drives;
+          state.excludedDrives = excluded;
+          return { drives, excluded, allCovered: !!(res && res.all_covered), missing: (res && res.missing_roots) || [] };
+        } catch (_) {
+          // 降级：若旧引擎暂无 search.drives，尝试用 Rust agent_roots 兜底识别主要盘
+          try {
+            const ar = await API.agentRoots();
+            const roots = (ar && Array.isArray(ar.roots) ? ar.roots : []).map((r) => ({
+              root: String(r), letter: String(r).slice(0, 1).toUpperCase(),
+              label: '', fs: '', total: 0, used: 0, free: 0,
+              is_system: /^C:/i.test(String(r)), in_catalog: state.entries.some((e) => (e.root || '').toLowerCase() === String(r).toLowerCase()),
+              built: state.entries.some((e) => (e.root || '').toLowerCase() === String(r).toLowerCase() && e.exists && !e.why && e.files > 0),
+              files: 0
+            }));
+            state.drives = roots;
+            state.excludedDrives = [];
+            return { drives: roots, excluded: [], allCovered: roots.length > 0 && roots.every((d) => d.built), missing: roots.filter((d) => !d.built).map((d) => d.root) };
+          } catch (e2) {
+            throw e2;
+          }
+        }
+      }
+
+      let oneClickProbing = false;
+
+      async function oneClickIndexAllDrives() {
+        if (state.indexing || oneClickProbing) return;
+        oneClickProbing = true;
+        let probe = null;
+        let go = false;
+        let drives = [];
+        let picked = new Set();
+        let forceRebuild = false;
+        try {
+          try {
+            probe = await detectMainDrives();
+          } catch (e) {
+            toast(errText(e), 'error');
+            return;
+          }
+          drives = (probe && probe.drives) || [];
+          const excluded = (probe && probe.excluded) || [];
+          if (!drives.length) {
+            toast(T('未识别到可用的本地固定磁盘', 'No local fixed drives detected'), 'warn');
+            return;
+          }
+
+          picked = new Set(drives.map((d) => d.root));
+          const allCovered = drives.every((d) => d.built);
+          forceRebuild = allCovered;
+
+          const body = h('div', { class: 'stack ix-oneclick-body' });
+          const summaryLine = h('div', { class: 'small muted' }, allCovered
+            ? T(`已识别本机全部 ${drives.length} 个主要磁盘，均已建立索引。你可以选择强制全部重建以同步最新变动。`,
+              `All ${drives.length} main local drives are already indexed. You can force a full rebuild if needed.`)
+            : T(`已自动识别本机 ${drives.length} 个主要固定磁盘（默认全选覆盖）；已健康建库的盘将自动复用，仅补建缺失盘。`,
+              `Detected ${drives.length} main local drives (all selected by default); healthy indexes are reused automatically.`));
+          body.appendChild(summaryLine);
+
+          const driveListEl = h('div', { class: 'ix-drive-list' });
+          drives.forEach((d) => {
+            const cb = h('input', {
+              type: 'checkbox',
+              checked: true,
+              onchange: (e) => {
+                if (e.target.checked) picked.add(d.root);
+                else picked.delete(d.root);
+                syncOkBtn();
+              }
+            });
+            const statusEl = d.built
+              ? h('span', { class: 'badge ok' }, T('已建立', 'Built') + (d.files ? ' · ' + UI.fmtCount(d.files) : ''))
+              : (d.in_catalog
+                ? h('span', { class: 'badge warn' }, T('待建立', 'Pending'))
+                : h('span', { class: 'badge accent' }, T('待添加', 'New')));
+            const metaParts = [
+              d.label || (d.is_system ? T('系统盘', 'System') : T('本地磁盘', 'Local Disk')),
+              d.fs || '',
+              d.total > 0 ? UI.fmtBytes(d.used || 0) + ' / ' + UI.fmtBytes(d.total) : ''
+            ].filter(Boolean).join(' · ');
+
+            const row = h('label', { class: 'ix-drive-row' },
+              cb,
+              icon('drive', 15),
+              h('span', { class: 'ix-drive-root mono' }, d.root),
+              d.is_system ? h('span', { class: 'badge' }, T('系统', 'Sys')) : null,
+              h('span', { class: 'ix-drive-meta small muted ellipsis', title: metaParts }, metaParts),
+              h('span', { class: 'spacer' }),
+              statusEl
+            );
+            driveListEl.appendChild(row);
+          });
+          body.appendChild(driveListEl);
+
+          const rebuildCheck = h('label', { class: 'check small' },
+            h('input', {
+              type: 'checkbox',
+              checked: forceRebuild,
+              onchange: (e) => { forceRebuild = !!e.target.checked; }
+            }),
+            h('span', null, T('强制重新扫描并覆盖已建立的索引（关闭则仅补建缺失/未建立的盘）',
+              'Force rescan existing healthy indexes (unchecked = build missing only)'))
+          );
+          body.appendChild(rebuildCheck);
+
+          if (state.scope.length) {
+            body.appendChild(h('div', { class: 'note small muted' },
+              T('当前勾选了局部搜索范围，完成一键全盘覆盖后将自动重置为「搜索全部索引」，确保新建立的主盘立即可搜。',
+                'A partial search scope is currently active; it will be reset to All Indexes after one-click indexing so new drives are searchable immediately.')));
+          }
+
+          if (excluded.length) {
+            const exText = excluded.map((x) => `${x.root}（${x.reason || T('非固定盘', 'Non-fixed')}）`).join('、');
+            body.appendChild(h('div', { class: 'note small muted' },
+              T('已自动排除非主要盘：', 'Automatically excluded: ') + exText));
+          }
+
+          let confirmModal = null;
+          let okBtnEl = null;
+          function syncOkBtn() {
+            if (!okBtnEl) return;
+            okBtnEl.disabled = picked.size === 0;
+            okBtnEl.textContent = picked.size
+              ? T(`开始建立索引（${picked.size} 个盘）`, `Index ${picked.size} drive(s)`)
+              : T('请至少勾选一个磁盘', 'Select at least one drive');
+          }
+
+          go = await new Promise((resolve) => {
+            let settled = false;
+            confirmModal = UI.modal({
+              title: T('一键建立索引 · 本机主要磁盘识别', 'One-click index · Main drives'),
+              wide: true,
+              body,
+              buttons: [
+                { id: 'cancel', label: T('取消', 'Cancel'), kind: 'ghost' },
+                { id: 'ok', label: T(`开始建立索引（${picked.size} 个盘）`, `Index ${picked.size} drive(s)`), kind: 'primary' }
+              ],
+              onAction: (id) => {
+                if (id === 'ok' && picked.size === 0) {
+                  toast(T('请至少选择一个磁盘', 'Select at least one drive'), 'warn');
+                  return false;
+                }
+                return true;
+              },
+              onClose: (v) => { if (!settled) { settled = true; resolve(v === 'ok'); } }
+            });
+            if (confirmModal && confirmModal.el) {
+              const btns = confirmModal.el.querySelectorAll('.modal-foot .btn');
+              okBtnEl = btns[btns.length - 1] || null;
+              syncOkBtn();
+            }
+          });
+        } finally {
+          oneClickProbing = false;
+        }
+        if (!go || !picked.size) return;
+
+        const targetRoots = drives.filter((d) => picked.has(d.root)).map((d) => d.root);
+        state.indexing = true;
+        if (active && active.root === root) {
+          paint();
+          manager && manager.render();
+        }
+        try {
+          await UI.busy(async (ctrl) => {
+            if (ctrl && typeof ctrl.setSub === 'function') {
+              ctrl.setSub(T('正在全盘覆盖索引：', 'Indexing drives: ') + targetRoots.join(' · '));
+            }
+            const r = await API.engine('search.index', {
+              roots: targetRoots,
+              full: !!forceRebuild,
+              reuse: !forceRebuild
+            });
+            const n = (r && r.indexed) || 0;
+            const failed = (r && r.failed) || [];
+            const hadNarrowScope = state.scope.length > 0;
+            if (hadNarrowScope && !(r && r.error)) {
+              state.scope = [];
+              try { localStorage.removeItem('ta.index.scope'); } catch (_) {}
+            }
+            if (r && r.error) toast(r.error, 'error');
+            else if (r && r.reused) toast(T(`主要盘（${targetRoots.join('、')}）索引均已是最新，无需重建`, `All selected drives (${targetRoots.join(', ')}) are already up to date`), 'info');
+            else toast(
+              T(`一键索引完成（${targetRoots.join('、')}），共 `, `Indexed (${targetRoots.join(', ')}): `)
+              + UI.fmtCount(n) + T(' 个文件', ' files')
+              + (failed.length ? ' · ' + failed.length + T(' 个失败', ' failed') : '')
+              + (hadNarrowScope ? T(' · 已切换为搜索全部', ' · Scope reset to all') : '')
+              + ' · ' + fmtSpan(r && r.elapsed_ms),
+              failed.length ? 'warn' : 'ok',
+              4500
+            );
+          }, T('正在一键建立全盘索引…', 'Building full-drive index…'), 'search');
+        } catch (e) {
+          toast(errText(e), 'error');
+        } finally {
+          state.indexing = false;
+        }
+        if (active && active.root === root) {
+          await refreshStatus({ quiet: true });
+          manager && manager.render();
+          paint();
+        }
+      }
+
       async function buildIndex(rebuild, ids) {
+        if (state.indexing) return;
         const target = (ids && ids.length) ? ids : null;
         if (!state.entries.length) {
-          toast(T('请先添加搜索目录', 'Add a folder first'), 'warn');
+          toast(T('请先添加搜索目录或使用「一键建立索引」', 'Add a folder or use One-click index first'), 'warn');
           return;
         }
         if (rebuild) {
@@ -622,6 +862,7 @@
         }
         const payload = { full: !!rebuild, reuse: !rebuild };
         if (target) payload.ids = target;
+        state.indexing = true;
         try {
           await UI.busy(async () => {
             const r = await API.engine('search.index', payload);
@@ -632,13 +873,17 @@
             else toast(T('索引完成，共', 'Indexed') + ' ' + UI.fmtCount(n) + ' ' + T('个文件', 'files')
               + (failed.length ? ' · ' + failed.length + ' ' + T('个目录失败', 'failed') : '')
               + ' · ' + fmtSpan(r && r.elapsed_ms), 'ok');
-          }, T('正在建立索引…', 'Building index…'));
+          }, T('正在建立索引…', 'Building index…'), 'search');
         } catch (e) {
           toast(errText(e), 'error');
+        } finally {
+          state.indexing = false;
         }
-        await refreshStatus({ quiet: true });
-        manager && manager.render();
-        paint();
+        if (active && active.root === root) {
+          await refreshStatus({ quiet: true });
+          manager && manager.render();
+          paint();
+        }
       }
 
       async function openInApp(path) {

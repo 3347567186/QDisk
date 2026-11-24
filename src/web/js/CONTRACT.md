@@ -132,7 +132,8 @@ UI.preview({ items: [{ path, name, url? }], index, title: '截图' });
 | `process.close` | `{pid?, name?, force?}` | `{ok,was_running,closed,name,detail}` 协同释放占用文件的进程（严格正则校验与系统核心白名单保护） |
 | `system.performance` | `{}` | `{timestamp,drives,disk_summary,disk_io,network_io,memory,cpu}` 系统磁盘、内存、I/O 与 CPU 实时负载快照 |
 | `search.status` | `{}` | 查询索引服务整体状态、索引数量、覆盖目录及数据库信息 |
-| `search.index` | `{roots?, ids?, reuse?, full?}` | 触发一次索引建立或增量扫描（基于 indexwalk 或 Python 遍历） |
+| `search.drives` | `{}` | 动态识别本机全部主要本地固定磁盘（跳过 U 盘/光驱/网络盘/subst 映射盘/恢复分区）并返回索引覆盖态 |
+| `search.index` | `{roots?, ids?, reuse?, full?, all_main_drives?}` | 触发一次索引建立或增量扫描（支持逐盘复用健康库与 `all_main_drives` 全主要盘一键覆盖） |
 | `search.query` | `{q, limit?, ids?}` | 关键词与完整路径实时搜索（支持未索引绝对路径磁盘直出精确命中 `{source:'direct'}`） `{items: [...], total, source, hint?}` |
 | `search.top` | `{limit?, min_size?}` | 基于 SQLite 索引查询超大文件排行榜 `{items, total, source, roots}` |
 | `search.folders` | `{depth?, limit?, min_size?, parent?, auto?, ids?}` | 目录空间占用聚合统计分析 `{items, total, bytes, source}` |

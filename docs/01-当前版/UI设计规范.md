@@ -562,4 +562,15 @@ AI 页是唯一一处不跟全站蓝色强调走的地方：它按 Claude 的外
 - `index.html` 中 `#btn-fullscreen` 独立放置在 `.topbar` 右端、`#top-actions` 之外，确保页面调用 `UI.setActions()` 时绝不误删全局窗口控件；
 - 除 `ai` 整页对话外，其余 11 页统一使用 `UI.askBtn({ title, question, ctx })` 生成右侧顶栏助手按钮（统一 20px `SteveAvatar` 图标与 `.ask-ai-btn` 类名），禁止各页复制手写按钮样式。
 
+---
+
+## 14. 更新日志双栏弹窗与全能只读预览弹窗（1.46.0 起）
+
+### 14.1 原生 `<dialog>` 更新日志历史阅读器（`.cl-dialog`）
+- **现代原生模态层**：基于 `<dialog closedby="any" aria-labelledby="cl-dialog-title">` + `showModal()`，仅在 `dialog.cl-dialog[open]` 时设 `display: flex`，配合 `dialog.cl-dialog:modal` 与 `dialog.cl-dialog::backdrop` 的 `overscroll-behavior: contain`（及 `::backdrop` 的 `overflow: hidden`）防止底层页面穿透滚动；对不支持 `closedBy` 的旧内核采用 `pointerdown` + `pointerup` 框外双点降级（避免拖选文字滑出误关）。
+- **双栏 Master-Detail**：左栏 244px（搜索框 + 全部/功能/修复/早期四档筛选 + 版本时间轴，选中态沿用 `--nav-active` + 2.5px `--accent` 左侧竖条）；右栏展示版本号、类型徽章、快捷复制/外链、可选升级动作条与 `.upd-log-viewer` 富文本 Markdown 阅读区（经 `UI.safeSetHtml` 白名单清洗防 XSS）；`<= 720px` 自动切换上下堆叠。
+
+### 14.2 全能只读文件预览器（`UI.previewFile` + `.fp-modal`）
+- 统一服务于「整理文件」预览表、「空间工具」大文件排行与「文件夹浏览」；顶部展示格式/编码徽章、体积、时间、模式切换与路径条，正文区按图片/PDF/视频/音频/Office 正文/多编码文本/十六进制适配；关闭时主动暂停并清空 `<video>/<audio>/<iframe>` 资源句柄，避免 Windows 文件锁残留；可执行与脚本文件严格只读不提供直接运行按钮。
+
 
