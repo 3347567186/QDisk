@@ -283,6 +283,18 @@ const pProc = await props.propose({ action: 'process.close', args: { pid: 4321, 
 const cProc = pProc.ok ? await props.commit(pProc.proposal.id, { approvedBy: 'user' }) : { ok: false };
 ok('process.close 提议与确认执行通过', pProc.ok && cProc.ok && calls.some((c) => c[0] === 'process.close' && c[1].pid === 4321));
 
+/* 17b process.close 后端返回 still_running 时，AI 动作必须报错而非假报成功 */
+const origEngForProc = API.engine;
+API.engine = async (method, params) => {
+  if (method === 'process.close') return { ok: true, closed: false, still_running: true, remaining_count: 5, message: '后台驻留未退出' };
+  return origEngForProc(method, params);
+};
+props.startTurn();
+const pProcFail = await props.propose({ action: 'process.close', args: { name: 'ChatGPT.exe', force: false }, reason: '测试假成功拦截' });
+const cProcFail = pProcFail.ok ? await props.commit(pProcFail.proposal.id, { approvedBy: 'user' }) : { ok: true };
+API.engine = origEngForProc;
+ok('process.close 残留仍在运行时 AI 动作拒报成功', pProcFail.ok && !cProcFail.ok && String(cProcFail.error || '').includes('未能彻底关闭'));
+
 props.startTurn();
 const pClean = await props.propose({ action: 'clean.auto', args: { cache: true, screenshots: true, days: 30 }, reason: '安全清理' });
 const cClean = pClean.ok ? await props.commit(pClean.proposal.id, { approvedBy: 'user' }) : { ok: false };

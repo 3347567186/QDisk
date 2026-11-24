@@ -168,7 +168,7 @@ $py='E:\AI\DeepSeekHarness多插件版\home\dsh-runtimes\dsh-primary-runtime\dep
 
 > 所有改动须遵守 `docs\01-当前版\开发强约束与扩展规范手册.md`。AI 助手当前共开放 **26 个只读/导航工具**（`AIPrompt.TOOLS`）与 **25 个审批动作**（`AIRegistry`）。
 
-- **ai**：整页对话（Linear 风格：13 px 正文、查证过程默认收起、只用一种强调色），`navigate` 支持全 12 页直达与别名跳转（`clean` / `screenshots` / `logs` / `processes` / `startup` / `footprint`）；V2 免费模型同源池扩展 + 单 slug 指数冷却 + HTTP 200 空回复换源；V3 本地 Ollama 确定性尾备。
+- **ai**：整页对话（Linear 风格：13 px 正文、查证过程默认收起、只用一种强调色），`navigate` 支持全 12 页直达与别名跳转（`clean` / `screenshots` / `logs` / `processes` / `startup` / `overview` / `resources` / `footprint`）；V2 免费模型同源池扩展 + 单 slug 指数冷却 + HTTP 200 空回复换源；V3 本地 Ollama 确定性尾备。
 - **organize**：选择文件夹/文件、三档预设（标准 / 全部文件 / 谨慎）、扫描预览、开始整理、撤销上次、导出 CSV、顶栏 `UI.askBtn`。
 - **shots**：扫描截图目录、按大小/时间排序、类型筛选、勾选预览、清理到回收站、顶栏 `UI.askBtn`、支持 `jump({ days, kind, action })`。
 - **cache**：`.card-title` 紧凑概览卡 + 分级（safe/caution/advanced）分组清理、顶栏 `UI.askBtn`、支持 `jump({ action: 'safe' | 'recommended' | 'scan' })`。
@@ -176,7 +176,7 @@ $py='E:\AI\DeepSeekHarness多插件版\home\dsh-runtimes\dsh-primary-runtime\dep
 - **archive**：打开 / 解压 / 创建 / 预览压缩包、Esc 预览销毁清理、顶栏 `UI.askBtn`、支持 `jump({ paths })`。
 - **search**：索引状态、多目录管理、关键词搜索、分页底栏、顶栏 `UI.askBtn`、支持 `jump({ q })`。
 - **rules**：骨架 II 双栏工作台（`.split-wb`：左栏 YAML 编辑器、右栏校验 + 预演 + 运行报告）、顶栏 `UI.askBtn`、支持 `jump({ yaml, folder })` 与 `rules.draft` 提案写入。
-- **apps**：已安装程序 / 启动项管理 / 后台进程（`process.list`/`process.close`）/ 空间透视与系统画像（`system.performance` + 4 KPI 卡），切页销毁 0 定时器与监听器泄漏，顶栏 `UI.askBtn`、支持 `jump({ tab, status, filter })`。
+- **apps**：已安装程序 / 开机自启（对接 `Run32` 与 `StartupFolder`、过滤 `desktop.ini`）/ 后台进程（`process.list`/`process.close` 整树终止 + 复生复核 + 轻盘自身进程树保护）/ 资源概览（`system.performance` PDH 物理磁盘 I/O + 物理网卡去重 + 4 KPI 卡），切页销毁 0 定时器与监听器泄漏，顶栏 `UI.askBtn`、支持 `jump({ tab, status, filter })`。
 - **migrate**：合顶命令与目标目录条 + 平衡双栏（来源 vs 选项）、`planSlot`/`resultSlot` 局刷不丢输入焦点、顶栏 `UI.askBtn`、支持 `jump({ sources, destination })`。
 - **log**：骨架 II 主从双栏（`.split-wb.master-detail` 文件清单 + `.log-viewer-pre` 尾部查看器 + 引擎诊断与操作历史双列）、顶栏 `UI.askBtn`、支持 `jump({ file })`。
 - **settings**：骨架 III 7 个手风琴分组（含 AI 助手模型/端点/密钥/权限配置，移除顶部 `.set-nav-bar` 与设置页 AI 入口）、支持 `jump({ section })`。

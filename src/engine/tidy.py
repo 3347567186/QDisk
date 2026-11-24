@@ -7755,19 +7755,143 @@ def _engine_apps_cleanup(params):
 
 # ---------- 自启动管理与进程释放助手 ----------
 
+_STARTUP_IGNORED_FILES = {"desktop.ini", "thumbs.db", "ehthumbs.db", ".ds_store"}
+_STARTUP_ALLOWED_REG_KEYS = {
+    r"software\microsoft\windows\currentversion\run",
+    r"software\microsoft\windows\currentversion\runonce",
+}
+
+
+def _startup_real_folders():
+    """返回 Windows 真实的当前用户与系统启动目录（规范化绝对路径，(folder, scope, loc_desc)）。"""
+    out = []
+    pairs = [
+        (os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"), "user", "用户启动目录"),
+        (os.path.expandvars(r"%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup"), "system", "系统启动目录"),
+    ]
+    for folder, scope, loc_desc in pairs:
+        if folder and "%" not in folder:
+            out.append((os.path.normpath(os.path.abspath(folder)), scope, loc_desc))
+    return out
+
+
+def _startup_validate_folder_path(file_path):
+    """校验启动目录操作路径：仅允许真实启动目录或单元测试临时启动目录，且严禁碰 desktop.ini 等系统元数据。"""
+    import tempfile
+    if not file_path or not isinstance(file_path, str):
+        raise EngineError("缺少启动项快捷方式文件路径")
+    norm = os.path.normpath(os.path.abspath(file_path))
+    base = os.path.basename(norm).lower()
+    if base in _STARTUP_IGNORED_FILES or base.rstrip(".") in _STARTUP_IGNORED_FILES:
+        raise EngineError("系统目录配置文件（%s）不是启动项，禁止修改或删除" % os.path.basename(norm))
+    parent_l = os.path.normcase(os.path.dirname(norm))
+    for real_dir, scope, _ in _startup_real_folders():
+        if parent_l == os.path.normcase(real_dir):
+            return norm, scope, True
+    # 兼容单元测试在临时目录创建的 tidy_test_startup_* 隔离目录（测试子进程可能重定向 TEMP）
+    tmp_root = os.path.normcase(os.path.normpath(os.path.abspath(tempfile.gettempdir())))
+    parent_dir = os.path.dirname(norm)
+    grandparent = os.path.normcase(os.path.dirname(parent_dir))
+    parent_name = os.path.basename(parent_dir).lower()
+    if parent_name.startswith("tidy_test_startup_") and (
+        grandparent == tmp_root
+        or grandparent.startswith(tmp_root + os.sep)
+        or "\\temp\\" in (grandparent + "\\")
+        or "\\tmp\\" in (grandparent + "\\")
+    ):
+        return norm, "user", False
+    raise EngineError("路径不在系统开机启动目录内，已拒绝操作：%s" % file_path)
+
+
+def _startup_approved_reg_spec(hive_name, is_folder=False, scope="user"):
+    """返回 Windows 任务管理器真实读写的 StartupApproved 注册表视图 (hive_name, subkey)。"""
+    if is_folder:
+        h = "HKCU" if scope == "user" else "HKLM64"
+        return (h, r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder")
+    if hive_name == "HKLM32":
+        # 64位 Windows 下，WOW6432Node\Run 的开关状态统一由 64位视图 StartupApproved\Run32 管控
+        return ("HKLM64", r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32")
+    if hive_name == "HKLM64":
+        return ("HKLM64", r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run")
+    return ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run")
+
+
+def _startup_is_approved_disabled(raw):
+    """StartupApproved 二进制值首字节为奇数（0x03/0x01/0x07 等）表示已禁用。"""
+    return bool(raw and isinstance(raw, (bytes, bytearray)) and len(raw) > 0 and (raw[0] & 1) == 1)
+
+
+def _startup_make_approved_bytes(enabled):
+    """生成与 Windows 任务管理器一致的 12 字节 StartupApproved 值。"""
+    import struct
+    if enabled:
+        return b"\x02" + b"\x00" * 11
+    # 禁用值：0x03 0x00 0x00 0x00 + 8字节 Windows FILETIME
+    ft = int((time.time() + 11644473600) * 10_000_000)
+    return b"\x03\x00\x00\x00" + struct.pack("<Q", max(0, ft))
+
+
+def _startup_read_approved_map(hive_name, subkey):
+    """大小写不敏感读取指定 StartupApproved 键下的全部值。"""
+    import winreg
+    out = {}
+    try:
+        with _open_reg(hive_name, subkey, write=False) as ak:
+            cnt = winreg.QueryInfoKey(ak)[1]
+            for i in range(cnt):
+                an, ad, _ = winreg.EnumValue(ak, i)
+                out[str(an).lower()] = ad
+    except OSError:
+        pass
+    return out
+
+
+def _startup_write_approved(hive_name, subkey, val_name, enabled):
+    """写入 StartupApproved 状态，返回是否成功；权限拒绝抛出 admin_required。"""
+    import winreg
+    hive, flag = _reg_hive(hive_name)
+    try:
+        with winreg.CreateKeyEx(hive, subkey, 0, winreg.KEY_SET_VALUE | flag) as k:
+            winreg.SetValueEx(k, val_name, 0, winreg.REG_BINARY, _startup_make_approved_bytes(enabled))
+    except OSError as ex:
+        if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
+            raise EngineError("修改系统级 (HKLM) 自启动项状态需要管理员权限", code="admin_required")
+        raise EngineError("修改自启动状态失败（可能需要管理员权限）：%s" % ex)
+
+
+def _startup_delete_approved(hive_name, subkey, val_name):
+    """静默清理对应的 StartupApproved 残留项（不因缺失而报错）。"""
+    import winreg
+    hive, flag = _reg_hive(hive_name)
+    try:
+        with winreg.OpenKey(hive, subkey, 0, winreg.KEY_SET_VALUE | flag) as ak:
+            winreg.DeleteValue(ak, val_name)
+    except OSError:
+        pass
+
+
 def _parse_cmd_exe(cmd):
-    """从自启动命令行中解析出主执行文件绝对路径。"""
+    """从自启动命令行中解析出主执行文件绝对路径（支持引号、环境变量、含空格路径与系统 PATH 命令）。"""
+    import shutil
     if not cmd or not isinstance(cmd, str):
         return ""
     s = cmd.strip()
+    if not s:
+        return ""
     if s.startswith('"'):
         end = s.find('"', 1)
-        if end != -1:
-            p = s[1:end].strip()
-            return os.path.expandvars(p)
-        return os.path.expandvars(s.strip('"'))
-    if os.path.isfile(s):
-        return os.path.expandvars(s)
+        cand = s[1:end].strip() if end != -1 else s.strip('"').strip()
+        exp = os.path.expandvars(cand)
+        if os.path.isfile(exp):
+            return exp
+        if not os.path.dirname(exp):
+            found = shutil.which(exp)
+            if found:
+                return found
+        return exp
+    exp_full = os.path.expandvars(s)
+    if os.path.isfile(exp_full):
+        return exp_full
     tokens = s.split()
     cand = ""
     for t in tokens:
@@ -7775,24 +7899,127 @@ def _parse_cmd_exe(cmd):
         exp = os.path.expandvars(cand)
         if os.path.isfile(exp):
             return exp
-    return os.path.expandvars(tokens[0]) if tokens else s
+    first = os.path.expandvars(tokens[0]) if tokens else exp_full
+    if first and not os.path.dirname(first):
+        found = shutil.which(first)
+        if found:
+            return found
+    return first
+
+
+def _parse_lnk_binary(lnk_path):
+    """纯 Python 解析 Windows Shell Link (.lnk / .lnk.disabled) 目标路径（支持 Unicode 与含空格/括号路径）。"""
+    import struct
+    try:
+        with open(lnk_path, "rb") as f:
+            data = f.read(1024 * 256)
+    except OSError:
+        return ""
+    if len(data) < 0x4C:
+        return ""
+    hdr_size = struct.unpack_from("<I", data, 0)[0]
+    clsid = data[4:20]
+    if hdr_size != 0x4C or clsid != b"\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46":
+        return ""
+    flags = struct.unpack_from("<I", data, 0x14)[0]
+    pos = 0x4C
+    # 1. 跳过 LinkTargetIDList
+    if flags & 0x01:
+        if pos + 2 > len(data):
+            return ""
+        id_size = struct.unpack_from("<H", data, pos)[0]
+        pos += 2 + id_size
+    # 2. 解析 LinkInfo
+    if flags & 0x02 and pos + 28 <= len(data):
+        li_start = pos
+        li_size, li_hdr_size, li_flags = struct.unpack_from("<III", data, li_start)
+        if li_size >= 28 and li_start + li_size <= len(data):
+            if li_flags & 0x01:
+                # 优先读取 Unicode 路径字段（LinkInfoHeaderSize >= 0x24）
+                if li_hdr_size >= 0x24 and li_start + 0x24 <= len(data):
+                    u_base_off, u_suf_off = struct.unpack_from("<II", data, li_start + 0x1C)
+                    if u_base_off and li_start + u_base_off < li_start + li_size:
+                        def _read_utf16z(buf, start, end):
+                            i = start
+                            while i + 1 < end:
+                                if buf[i] == 0 and buf[i + 1] == 0:
+                                    break
+                                i += 2
+                            return buf[start:i].decode("utf-16le", "ignore")
+                        base_u = _read_utf16z(data, li_start + u_base_off, li_start + li_size)
+                        suf_u = _read_utf16z(data, li_start + u_suf_off, li_start + li_size) if u_suf_off else ""
+                        joined = (base_u + suf_u).strip()
+                        if joined:
+                            return os.path.expandvars(joined)
+                base_off = struct.unpack_from("<I", data, li_start + 0x10)[0]
+                suf_off = struct.unpack_from("<I", data, li_start + 0x18)[0]
+                if base_off and li_start + base_off < li_start + li_size:
+                    end_b = data.find(b"\x00", li_start + base_off, li_start + li_size)
+                    raw_b = data[li_start + base_off:(end_b if end_b != -1 else li_start + li_size)]
+                    raw_s = b""
+                    if suf_off and li_start + suf_off < li_start + li_size:
+                        end_s = data.find(b"\x00", li_start + suf_off, li_start + li_size)
+                        raw_s = data[li_start + suf_off:(end_s if end_s != -1 else li_start + li_size)]
+                    try:
+                        joined = (raw_b + raw_s).decode("mbcs", "ignore").strip()
+                    except LookupError:
+                        joined = (raw_b + raw_s).decode("gbk", "ignore").strip()
+                    if joined:
+                        return os.path.expandvars(joined)
+            pos = li_start + li_size
+    # 3. 回退解析 StringData（RelativePath / WorkingDir）
+    is_unicode = bool(flags & 0x80)
+    def _read_counted(buf, offset):
+        if offset + 2 > len(buf):
+            return "", len(buf)
+        cnt = struct.unpack_from("<H", buf, offset)[0]
+        offset += 2
+        byte_len = cnt * (2 if is_unicode else 1)
+        if offset + byte_len > len(buf):
+            return "", len(buf)
+        chunk = buf[offset:offset + byte_len]
+        offset += byte_len
+        if is_unicode:
+            return chunk.decode("utf-16le", "ignore"), offset
+        try:
+            return chunk.decode("mbcs", "ignore"), offset
+        except LookupError:
+            return chunk.decode("gbk", "ignore"), offset
+
+    if flags & 0x04:  # HasName
+        _, pos = _read_counted(data, pos)
+    if flags & 0x08:  # HasRelativePath
+        rel, pos = _read_counted(data, pos)
+        if rel:
+            cand = os.path.normpath(os.path.join(os.path.dirname(lnk_path), os.path.expandvars(rel)))
+            if cand:
+                return cand
+    return ""
 
 
 def _resolve_lnk_target(lnk_path):
-    """解析 .lnk 快捷方式目标文件路径。"""
-    try:
-        import win32com.client
-        sh = win32com.client.Dispatch("WScript.Shell")
-        sc = sh.CreateShortcut(lnk_path)
-        if sc.TargetPath:
-            return sc.TargetPath
-    except Exception:
-        pass
+    """解析 .lnk / .lnk.disabled 快捷方式目标文件路径。"""
+    parsed = _parse_lnk_binary(lnk_path)
+    if parsed:
+        return parsed
+    if lnk_path.lower().endswith(".lnk"):
+        try:
+            import win32com.client
+            sh = win32com.client.Dispatch("WScript.Shell")
+            sc = sh.CreateShortcut(lnk_path)
+            if sc.TargetPath:
+                return os.path.expandvars(str(sc.TargetPath))
+        except Exception:
+            pass
     try:
         with open(lnk_path, "rb") as f:
-            content = f.read()
+            content = f.read(1024 * 256)
         import re
-        m = re.findall(rb"[a-zA-Z]:\\[a-zA-Z0-9_ \\.-]+\.[eE][xX][eE]", content)
+        # 先查 UTF-16LE 路径，再查 ASCII 路径（允许括号与空格，如 Program Files (x86)）
+        m_u = re.findall(r"[a-zA-Z]:\\[^\x00<>\"|?*]+\.(?:exe|cmd|bat|vbs|ps1|msc)".encode("utf-16le"), content)
+        if m_u:
+            return m_u[-1].decode("utf-16le", "ignore")
+        m = re.findall(rb"[a-zA-Z]:\\[a-zA-Z0-9_ \.\-\(\)]+\.(?:[eE][xX][eE]|[cC][mM][dD]|[bB][aA][tT])", content)
         if m:
             return m[-1].decode("ascii", "ignore")
     except Exception:
@@ -7801,11 +8028,11 @@ def _resolve_lnk_target(lnk_path):
 
 
 def _engine_startup_list(params):
-    """startup.list：扫描全系统自启动项（注册表 + 启动文件夹），标识启用状态与失效项。"""
+    """startup.list：扫描全系统自启动项（注册表 + 启动文件夹），精确对齐 Windows StartupApproved 状态。"""
     import winreg
     items = []
-    
-    # 1. 注册表自启动
+
+    # 1. 注册表自启动（HKCU / HKLM64 / HKLM32，精确对接 Run / Run32 StartupApproved）
     reg_targets = [
         ("HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run", "当前用户注册表"),
         ("HKLM64", r"Software\Microsoft\Windows\CurrentVersion\Run", "系统注册表 (64位)"),
@@ -7814,16 +8041,13 @@ def _engine_startup_list(params):
     for hive_name, sub, loc_desc in reg_targets:
         try:
             with _open_reg(hive_name, sub, write=False) as k:
-                # 读取 StartupApproved
-                approved_map = {}
-                try:
-                    with _open_reg(hive_name, r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", write=False) as ak:
-                        cnt = winreg.QueryInfoKey(ak)[1]
-                        for i in range(cnt):
-                            an, ad, _ = winreg.EnumValue(ak, i)
-                            approved_map[an] = ad
-                except OSError:
-                    pass
+                appr_hive, appr_sub = _startup_approved_reg_spec(hive_name, is_folder=False)
+                approved_map = _startup_read_approved_map(appr_hive, appr_sub)
+                if hive_name == "HKLM32":
+                    # 兼容读取旧版曾写入 WOW6432Node\StartupApproved\Run 的状态，Run32 优先
+                    legacy_map = _startup_read_approved_map("HKLM32", r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run")
+                    for lk, lv in legacy_map.items():
+                        approved_map.setdefault(lk, lv)
 
                 val_cnt = winreg.QueryInfoKey(k)[1]
                 for i in range(val_cnt):
@@ -7831,9 +8055,9 @@ def _engine_startup_list(params):
                     v_str = str(v)
                     exe_path = _parse_cmd_exe(v_str)
                     exists = bool(exe_path and os.path.exists(exe_path))
-                    appr = approved_map.get(n)
-                    is_disabled = bool(appr and len(appr) > 0 and (appr[0] % 2 == 1))
-                    
+                    appr = approved_map.get(str(n).lower())
+                    is_disabled = _startup_is_approved_disabled(appr)
+
                     status = "broken" if not exists else ("disabled" if is_disabled else "enabled")
                     scope = "user" if hive_name == "HKCU" else "system"
                     icon_src = exe_path if exists else ""
@@ -7858,38 +8082,41 @@ def _engine_startup_list(params):
         except OSError:
             pass
 
-    # 2. 启动文件夹自启动
-    folder_targets = [
-        (os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"), "用户启动目录"),
-        (os.path.expandvars(r"%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup"), "系统启动目录")
-    ]
-    for folder, loc_desc in folder_targets:
+    # 2. 启动文件夹自启动（过滤 desktop.ini / thumbs.db，双向同步 .disabled 后缀与 StartupApproved\StartupFolder）
+    for folder, scope, loc_desc in _startup_real_folders():
         if not os.path.isdir(folder):
             continue
+        appr_hive, appr_sub = _startup_approved_reg_spec("", is_folder=True, scope=scope)
+        folder_appr_map = _startup_read_approved_map(appr_hive, appr_sub)
         try:
             for fname in os.listdir(folder):
+                fl = fname.lower()
+                if fl in _STARTUP_IGNORED_FILES:
+                    continue
                 full = os.path.join(folder, fname)
                 if not os.path.isfile(full):
                     continue
-                name, ext = os.path.splitext(fname)
-                is_disabled = False
-                if fname.lower().endswith(".disabled"):
-                    is_disabled = True
-                    name, _ = os.path.splitext(name)
-                
+                is_disabled_suffix = fl.endswith(".disabled")
+                orig_fname = fname[:-9] if is_disabled_suffix else fname
+                orig_fl = orig_fname.lower()
+                if orig_fl in _STARTUP_IGNORED_FILES:
+                    continue
+                name, orig_ext = os.path.splitext(orig_fname)
+                appr_raw = folder_appr_map.get(orig_fl) or folder_appr_map.get(fl)
+                is_disabled = is_disabled_suffix or _startup_is_approved_disabled(appr_raw)
+
                 exe_target = full
-                if ext.lower() == ".lnk" or fname.lower().endswith(".lnk.disabled"):
+                if orig_ext.lower() == ".lnk":
                     resolved = _resolve_lnk_target(full)
                     if resolved:
                         exe_target = resolved
 
                 exists = bool(exe_target and os.path.exists(exe_target))
                 status = "broken" if not exists else ("disabled" if is_disabled else "enabled")
-                scope = "user" if "appdata" in folder.lower() else "system"
                 icon_src = exe_target if exists else ""
                 icon = app_icon_cached(icon_src) if icon_src else ""
                 items.append({
-                    "id": "folder_%s" % fname,
+                    "id": "folder_%s_%s" % (scope, fname),
                     "name": name,
                     "command": full,
                     "exe_path": exe_target,
@@ -7908,9 +8135,9 @@ def _engine_startup_list(params):
         except OSError:
             pass
 
-    # 统计汇总
+    # 统计汇总：口径严格一致（enabled + disabled + broken == total）
     enabled_cnt = sum(1 for it in items if it["enabled"] and it["exists"])
-    disabled_cnt = sum(1 for it in items if not it["enabled"])
+    disabled_cnt = sum(1 for it in items if (not it["enabled"]) and it["exists"])
     broken_cnt = sum(1 for it in items if not it["exists"])
     return {
         "total": len(items),
@@ -7922,7 +8149,7 @@ def _engine_startup_list(params):
 
 
 def _engine_startup_toggle(params):
-    """startup.toggle：安全切换自启动项的启用/禁用状态。"""
+    """startup.toggle：安全切换自启动项的启用/禁用状态（对齐 Windows Run32 & StartupFolder）。"""
     name = _engine_get(params, "name", "", str)
     if not name.strip():
         raise EngineError("参数 name 不能为空")
@@ -7933,24 +8160,36 @@ def _engine_startup_toggle(params):
     if source_type == "registry":
         hive_name = _engine_get(params, "hive", "HKCU", str)
         if hive_name not in ("HKCU", "HKLM64", "HKLM32"):
-            hive_name = "HKCU"
+            raise EngineError("非法的注册表根键：%s" % hive_name)
+        # 校验目标启动项在对应 Run 键中确实存在（大小写不敏感），防止写入孤立的幽灵 StartupApproved 键
         import winreg
-        hive, flag = _reg_hive(hive_name)
-        approved_sub = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+        run_sub = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        real_val_name = name
+        found_in_run = False
         try:
-            with winreg.CreateKeyEx(hive, approved_sub, 0, winreg.KEY_SET_VALUE | flag) as k:
-                if enabled:
-                    winreg.SetValueEx(k, name, 0, winreg.REG_BINARY, b"\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
-                else:
-                    winreg.SetValueEx(k, name, 0, winreg.REG_BINARY, b"\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
-        except OSError as ex:
-            if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
-                raise EngineError("修改系统级 (HKLM) 注册表自启动项状态需要管理员权限", code="admin_required")
-            raise EngineError("修改自启动状态失败（可能需要管理员权限）：%s" % ex)
+            with _open_reg(hive_name, run_sub, write=False) as rk:
+                vcnt = winreg.QueryInfoKey(rk)[1]
+                nl = name.lower()
+                for vi in range(vcnt):
+                    vn, _, _ = winreg.EnumValue(rk, vi)
+                    if str(vn).lower() == nl:
+                        real_val_name = str(vn)
+                        found_in_run = True
+                        break
+        except OSError:
+            pass
+        if not found_in_run:
+            raise EngineError("未在 %s 启动项中找到【%s】，可能已被删除" % (hive_name, name))
+        appr_hive, appr_sub = _startup_approved_reg_spec(hive_name, is_folder=False)
+        _startup_write_approved(appr_hive, appr_sub, real_val_name, enabled)
+        if hive_name == "HKLM32":
+            # 清理旧版误写入 WOW6432Node\StartupApproved\Run 的残值，避免双处状态分裂
+            _startup_delete_approved("HKLM32", r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", real_val_name)
     elif source_type == "folder":
-        file_path = _engine_get(params, "file_path", "", str)
-        if not file_path or not os.path.exists(file_path):
-            raise EngineError("快捷方式文件不存在：%s" % file_path)
+        raw_path = _engine_get(params, "file_path", "", str)
+        file_path, scope, is_real_folder = _startup_validate_folder_path(raw_path)
+        if not os.path.exists(file_path):
+            raise EngineError("快捷方式文件不存在：%s" % raw_path)
         try:
             import stat
             new_file_path = file_path
@@ -7986,6 +8225,20 @@ def _engine_startup_toggle(params):
             if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
                 raise EngineError("修改系统启动目录快捷方式需要管理员权限", code="admin_required")
             raise EngineError("重命名启动项失败：%s" % ex)
+        # 若属于真实 Windows 启动目录，同步更新 StartupApproved\StartupFolder 保持与任务管理器一致
+        if is_real_folder:
+            orig_fname = os.path.basename(new_file_path[:-9] if new_file_path.lower().endswith(".disabled") else new_file_path)
+            appr_hive, appr_sub = _startup_approved_reg_spec("", is_folder=True, scope=scope)
+            try:
+                _startup_write_approved(appr_hive, appr_sub, orig_fname, enabled)
+            except EngineError:
+                # 文件本身已成功切换，但注册表同步权限不足时：回滚文件并透传提权需求，绝不留半成品状态
+                if new_file_path != file_path and os.path.exists(new_file_path):
+                    try:
+                        os.replace(new_file_path, file_path)
+                    except OSError:
+                        pass
+                raise
     else:
         raise EngineError("未知的启动项类型：%s" % source_type)
 
@@ -7996,7 +8249,7 @@ def _engine_startup_toggle(params):
 
 
 def _engine_startup_delete(params):
-    """startup.delete：安全清理自启动项（注册表键或启动快捷方式）。"""
+    """startup.delete：安全清理自启动项（白名单校验 + 同步清理 StartupApproved）。"""
     name = _engine_get(params, "name", "", str)
     if not name.strip():
         raise EngineError("参数 name 不能为空")
@@ -8004,7 +8257,11 @@ def _engine_startup_delete(params):
 
     if source_type == "registry":
         hive_name = _engine_get(params, "hive", "HKCU", str)
-        key_sub = _engine_get(params, "key", r"Software\Microsoft\Windows\CurrentVersion\Run", str)
+        if hive_name not in ("HKCU", "HKLM64", "HKLM32"):
+            raise EngineError("非法的注册表根键：%s" % hive_name)
+        key_sub = _engine_get(params, "key", r"Software\Microsoft\Windows\CurrentVersion\Run", str).strip()
+        if key_sub.lower() not in _STARTUP_ALLOWED_REG_KEYS:
+            raise EngineError("仅允许删除系统标准自启动注册表项（Run / RunOnce），已拒绝：%s" % key_sub)
         import winreg
         hive, flag = _reg_hive(hive_name)
         try:
@@ -8014,15 +8271,13 @@ def _engine_startup_delete(params):
             if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
                 raise EngineError("删除系统级 (HKLM) 注册表自启动项需要管理员权限", code="admin_required")
             raise EngineError("删除自启动注册表项失败：%s" % ex)
-        try:
-            with winreg.OpenKey(hive, r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", 0, winreg.KEY_SET_VALUE | flag) as ak:
-                winreg.DeleteValue(ak, name)
-        except OSError:
-            pass
+        appr_hive, appr_sub = _startup_approved_reg_spec(hive_name, is_folder=False)
+        _startup_delete_approved(appr_hive, appr_sub, name)
+        if hive_name == "HKLM32":
+            _startup_delete_approved("HKLM32", r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run", name)
     elif source_type == "folder":
-        file_path = _engine_get(params, "file_path", "", str)
-        if not file_path:
-            raise EngineError("缺少启动项快捷方式文件路径")
+        raw_path = _engine_get(params, "file_path", "", str)
+        file_path, scope, is_real_folder = _startup_validate_folder_path(raw_path)
         target_path = file_path
         if not os.path.exists(target_path):
             if not target_path.lower().endswith(".disabled") and os.path.exists(target_path + ".disabled"):
@@ -8030,7 +8285,7 @@ def _engine_startup_delete(params):
             elif target_path.lower().endswith(".disabled") and os.path.exists(target_path[:-9]):
                 target_path = target_path[:-9]
         if not os.path.exists(target_path):
-            raise EngineError("快捷方式文件不存在：%s" % file_path)
+            raise EngineError("快捷方式文件不存在：%s" % raw_path)
         try:
             import stat
             try:
@@ -8042,10 +8297,28 @@ def _engine_startup_delete(params):
             if getattr(ex, "winerror", 0) == 5 or getattr(ex, "errno", 0) == 13:
                 raise EngineError("删除系统启动目录快捷方式需要管理员权限", code="admin_required")
             raise EngineError("删除启动项快捷方式失败：%s" % ex)
+        if is_real_folder:
+            base_cur = os.path.basename(target_path)
+            orig_fname = base_cur[:-9] if base_cur.lower().endswith(".disabled") else base_cur
+            appr_hive, appr_sub = _startup_approved_reg_spec("", is_folder=True, scope=scope)
+            _startup_delete_approved(appr_hive, appr_sub, orig_fname)
+            if base_cur != orig_fname:
+                _startup_delete_approved(appr_hive, appr_sub, base_cur)
     else:
         raise EngineError("未知的启动项类型：%s" % source_type)
 
     return {"ok": True, "name": name, "deleted": True}
+
+
+_SYS_PROTECTED_PROCS = {
+    "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
+    "startmenuexperiencehost", "shellexperiencehost", "searchhost",
+    "tidyassistant", "tidy-assistant", "整理助手", "整理助手引擎", "indexwalk",
+    "conhost", "runtimebroker", "taskmgr", "system", "idle", "winlogon",
+    "wininit", "sihost", "fontdrvhost", "audiodg", "registry", "memory compression"
+}
+_SELF_HOST_EXES = {"tidy-assistant.exe", "tidyassistant.exe", "整理助手.exe", "整理助手引擎.exe"}
+_SENSITIVE_APPS_PROCS = {"xwechat", "wechat", "weixin", "qq"}
 
 
 if os.name == "nt":
@@ -8053,9 +8326,13 @@ if os.name == "nt":
     from ctypes import wintypes
 
     TH32CS_SNAPPROCESS = 0x00000002
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_TERMINATE = 0x0001
     PROCESS_VM_READ = 0x0010
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    SYNCHRONIZE = 0x00100000
+    WM_CLOSE = 0x0010
+    WAIT_OBJECT_0 = 0x00000000
 
     class _PE32W(ctypes.Structure):
         _fields_ = [
@@ -8086,7 +8363,7 @@ if os.name == "nt":
         ]
 
     try:
-        _k32_proc = ctypes.windll.kernel32
+        _k32_proc = ctypes.WinDLL("kernel32", use_last_error=True)
         _k32_proc.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
         _k32_proc.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
         _k32_proc.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -8097,6 +8374,18 @@ if os.name == "nt":
         _k32_proc.Process32NextW.restype = wintypes.BOOL
         _k32_proc.OpenProcess.restype = wintypes.HANDLE
         _k32_proc.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        _k32_proc.TerminateProcess.restype = wintypes.BOOL
+        _k32_proc.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        _k32_proc.WaitForSingleObject.restype = wintypes.DWORD
+        _k32_proc.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        _k32_proc.GetProcessTimes.restype = wintypes.BOOL
+        _k32_proc.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
         _k32_proc.QueryFullProcessImageNameW.restype = wintypes.BOOL
         _k32_proc.QueryFullProcessImageNameW.argtypes = [
             wintypes.HANDLE,
@@ -8108,7 +8397,22 @@ if os.name == "nt":
         _k32_proc = None
 
     try:
-        _psapi_proc = ctypes.windll.psapi
+        _u32_proc = ctypes.WinDLL("user32", use_last_error=True)
+        _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        _u32_proc.EnumWindows.restype = wintypes.BOOL
+        _u32_proc.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
+        _u32_proc.GetWindowThreadProcessId.restype = wintypes.DWORD
+        _u32_proc.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        _u32_proc.IsWindowVisible.restype = wintypes.BOOL
+        _u32_proc.IsWindowVisible.argtypes = [wintypes.HWND]
+        _u32_proc.PostMessageW.restype = wintypes.BOOL
+        _u32_proc.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    except Exception:
+        _u32_proc = None
+        _WNDENUMPROC = None
+
+    try:
+        _psapi_proc = ctypes.WinDLL("psapi", use_last_error=True)
         _psapi_proc.GetProcessMemoryInfo.restype = wintypes.BOOL
         _psapi_proc.GetProcessMemoryInfo.argtypes = [
             wintypes.HANDLE,
@@ -8121,51 +8425,300 @@ else:
     _PE32W = None
     _PROCESS_MEMORY_COUNTERS = None
     _k32_proc = None
+    _u32_proc = None
+    _WNDENUMPROC = None
     _psapi_proc = None
+
+
+def _snapshot_processes_raw():
+    """单次 Win32 Toolhelp32Snapshot 获取全部运行进程 (pid, ppid, name, threads)。"""
+    if os.name != "nt" or not _k32_proc or not _PE32W:
+        return []
+    h_snap = _k32_proc.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    invalid = (1 << (8 * ctypes.sizeof(wintypes.HANDLE))) - 1
+    if not h_snap or h_snap == -1 or h_snap == invalid:
+        return []
+    pe = _PE32W()
+    pe.dwSize = ctypes.sizeof(_PE32W)
+    out = []
+    try:
+        if _k32_proc.Process32FirstW(h_snap, ctypes.byref(pe)):
+            while True:
+                out.append((
+                    int(pe.th32ProcessID),
+                    int(pe.th32ParentProcessID),
+                    str(pe.szExeFile),
+                    int(pe.cntThreads),
+                ))
+                if not _k32_proc.Process32NextW(h_snap, ctypes.byref(pe)):
+                    break
+    finally:
+        _k32_proc.CloseHandle(h_snap)
+    return out
+
+
+def _get_self_protected_pids(raw_procs):
+    """动态识别轻盘自身进程树 PID 集合（引擎自身 + 主壳 tidy-assistant.exe + 其子 WebView2/indexwalk），绝不自杀。"""
+    my_pid = os.getpid()
+    by_pid = {p[0]: p for p in raw_procs}
+    children = {}
+    for pid, ppid, _, _ in raw_procs:
+        if pid != ppid:
+            children.setdefault(ppid, []).append(pid)
+
+    # 向上追溯轻盘宿主（tidy-assistant.exe / 整理助手引擎.exe），仅沿着轻盘自有进程名往上爬
+    root_pid = my_pid
+    seen = {my_pid}
+    cur = my_pid
+    while cur in by_pid:
+        ppid = by_pid[cur][1]
+        if not ppid or ppid in seen or ppid not in by_pid:
+            break
+        pname = by_pid[ppid][2].lower()
+        if pname in _SELF_HOST_EXES:
+            root_pid = ppid
+            seen.add(ppid)
+            cur = ppid
+        else:
+            break
+
+    # 从 root_pid 向下收集全部子孙（含轻盘自用 msedgewebview2.exe 与 indexwalk.exe）
+    protected = set()
+    stack = [root_pid]
+    while stack:
+        x = stack.pop()
+        if x in protected:
+            continue
+        protected.add(x)
+        for ch in children.get(x, ()):
+            if ch not in protected:
+                stack.append(ch)
+    protected.add(my_pid)
+
+    # 若存在同进程名且仅拉起当前单一子进程的引导器/venv 壳父进程（如 Windows Python 启动器或改名后的 PyInstaller bootloader），
+    # 仅保护该直接引导父进程本身，绝不横向波及无关兄弟进程
+    if root_pid in by_pid:
+        my_name = by_pid[root_pid][2].lower()
+        boot_ppid = by_pid[root_pid][1]
+        if (boot_ppid and boot_ppid in by_pid
+                and by_pid[boot_ppid][2].lower() == my_name
+                and len(children.get(boot_ppid, ())) == 1):
+            protected.add(boot_ppid)
+
+    return protected
+
+
+def _get_process_creation_time(pid):
+    """获取进程创建时间戳（100ns ticks），用于防范 PID 复用误判。"""
+    if os.name != "nt" or not _k32_proc or not pid:
+        return 0
+    h = _k32_proc.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not h:
+        return 0
+    try:
+        ct = wintypes.FILETIME()
+        et = wintypes.FILETIME()
+        kt = wintypes.FILETIME()
+        ut = wintypes.FILETIME()
+        if _k32_proc.GetProcessTimes(h, ctypes.byref(ct), ctypes.byref(et), ctypes.byref(kt), ctypes.byref(ut)):
+            return (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+    finally:
+        _k32_proc.CloseHandle(h)
+    return 0
+
+
+def _collect_descendant_pids(root_pids, raw_procs, exclude_pids):
+    """按根优先顺序返回目标 PID 及其全部非系统/非自保护后代子进程列表（先杀父再杀子，断绝 Electron 复生链）。"""
+    by_pid = {p[0]: p for p in raw_procs}
+    children = {}
+    for pid, ppid, _, _ in raw_procs:
+        if pid != ppid:
+            children.setdefault(ppid, []).append(pid)
+
+    target_set = set(int(p) for p in root_pids if int(p) > 4 and int(p) not in exclude_pids)
+    # BFS 展开后代，保护系统核心与轻盘自身进程；同时校验子进程创建时间 >= 父进程创建时间，防 PID 复用误杀无关进程
+    ctime_cache = {}
+    def _ctime(p):
+        if p not in ctime_cache:
+            ctime_cache[p] = _get_process_creation_time(p)
+        return ctime_cache[p]
+
+    queue = list(target_set)
+    visited = set(target_set)
+    while queue:
+        cur = queue.pop(0)
+        cur_ct = _ctime(cur)
+        for ch in children.get(cur, ()):
+            if ch <= 4 or ch in exclude_pids or ch in visited:
+                continue
+            info = by_pid.get(ch)
+            if info:
+                cn = info[2].lower()
+                if cn.endswith(".exe"):
+                    cn = cn[:-4]
+                if cn in _SYS_PROTECTED_PROCS:
+                    continue
+            if cur_ct:
+                ch_ct = _ctime(ch)
+                if ch_ct and ch_ct < cur_ct:
+                    continue  # 该进程比当前父 PID 更早诞生，说明父 PID 已被内核复用，绝非真子进程
+            visited.add(ch)
+            queue.append(ch)
+
+    # 拓扑排序：父进程不在集合内的根优先，防止主进程在子进程被杀瞬间立即拉起新子进程
+    ordered = []
+    roots = [p for p in visited if by_pid.get(p, (0, 0))[1] not in visited]
+    rem = set(visited)
+    bfs = list(roots) if roots else list(visited)
+    while bfs:
+        x = bfs.pop(0)
+        if x not in rem:
+            continue
+        rem.remove(x)
+        ordered.append(x)
+        for ch in children.get(x, ()):
+            if ch in rem:
+                bfs.append(ch)
+    for x in rem:
+        ordered.append(x)
+    return ordered
+
+
+def _send_wm_close_to_pids(target_pids):
+    """向目标 PID 集合拥有的顶层窗口发送 WM_CLOSE，返回 (sent_count, visible_count)。"""
+    if os.name != "nt" or not _u32_proc or not _WNDENUMPROC or not target_pids:
+        return 0, 0
+    pid_set = set(int(p) for p in target_pids)
+    sent = [0]
+    visible = [0]
+
+    def _cb(hwnd, _lp):
+        wpid = wintypes.DWORD(0)
+        _u32_proc.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value in pid_set:
+            if _u32_proc.IsWindowVisible(hwnd):
+                visible[0] += 1
+            if _u32_proc.PostMessageW(hwnd, WM_CLOSE, 0, 0):
+                sent[0] += 1
+        return True
+
+    try:
+        _u32_proc.EnumWindows(_WNDENUMPROC(_cb), 0)
+    except Exception:
+        pass
+    return sent[0], visible[0]
+
+
+def _probe_terminate_access(pids):
+    """探测目标 PID 是否可打开终止句柄，返回 (accessible_pids, denied_pids)。"""
+    accessible, denied = [], []
+    if os.name != "nt" or not _k32_proc:
+        return list(pids), []
+    for pid in pids:
+        h = _k32_proc.OpenProcess(PROCESS_TERMINATE, False, int(pid))
+        if h:
+            _k32_proc.CloseHandle(h)
+            accessible.append(int(pid))
+        else:
+            err = ctypes.get_last_error()
+            if err == 5:  # ERROR_ACCESS_DENIED
+                denied.append(int(pid))
+    return accessible, denied
+
+
+def _terminate_pids_win32(ordered_pids):
+    """原生 Win32 TerminateProcess 逐个终止进程并精确归类权限拒绝，返回 (terminated_handles, denied_pids)。"""
+    denied = set()
+    handles = []
+    if os.name != "nt" or not _k32_proc:
+        return 0, denied
+    terminated_ok = 0
+    for pid in ordered_pids:
+        h = _k32_proc.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, int(pid))
+        if not h:
+            err = ctypes.get_last_error()
+            if err == 5:
+                denied.add(int(pid))
+            continue
+        ok = bool(_k32_proc.TerminateProcess(h, 1))
+        if ok:
+            terminated_ok += 1
+            handles.append(h)
+        else:
+            err = ctypes.get_last_error()
+            if err == 5:
+                denied.add(int(pid))
+            _k32_proc.CloseHandle(h)
+    # 批量短暂等待内核回收进程句柄（最多合计约 400ms）
+    deadline = time.perf_counter() + 0.4
+    for h in handles:
+        rem_ms = max(0, int((deadline - time.perf_counter()) * 1000))
+        if rem_ms > 0:
+            _k32_proc.WaitForSingleObject(h, min(rem_ms, 80))
+        _k32_proc.CloseHandle(h)
+    return terminated_ok, denied
+
+
+def _taskkill_pids_fallback(pids):
+    """二进制安全解码的 taskkill /F /T /PID 兜底（绝不弹黑框、绝不因 GBK 解码异常吞错）。"""
+    import subprocess
+    if not pids:
+        return
+    no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = ["taskkill", "/F", "/T"]
+    for pid in pids[:32]:
+        cmd.extend(["/PID", str(int(pid))])
+    try:
+        subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=6,
+            creationflags=no_win,
+        )
+    except Exception:
+        pass
 
 
 def _engine_process_is_running(proc_name):
     """判断指定名称的进程当前是否正在运行（纯 ctypes 工具快照，微秒级极速，不占主线程）。"""
     if os.name != "nt" or not _k32_proc or not _PE32W:
         return False
-
     target = proc_name.lower()
     if not target.endswith(".exe"):
         target += ".exe"
-
     try:
-        h_snap = _k32_proc.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if not h_snap or h_snap == -1 or h_snap == (1 << (8 * ctypes.sizeof(wintypes.HANDLE))) - 1:
-            return False
-        pe = _PE32W()
-        pe.dwSize = ctypes.sizeof(_PE32W)
-        found = False
-        try:
-            if _k32_proc.Process32FirstW(h_snap, ctypes.byref(pe)):
-                while True:
-                    if pe.szExeFile.lower() == target:
-                        found = True
-                        break
-                    if not _k32_proc.Process32NextW(h_snap, ctypes.byref(pe)):
-                        break
-        finally:
-            _k32_proc.CloseHandle(h_snap)
-        return found
+        for _, _, exe_name, _ in _snapshot_processes_raw():
+            if exe_name.lower() == target:
+                return True
+        return False
     except Exception:
         return False
 
 
+def _validate_process_name(name):
+    """校验进程名：允许合法空格与 Unicode 应用名（如 Clawd on Desk.exe），严禁通配符/注入符/路径穿越。"""
+    import re
+    if not name:
+        return
+    if len(name) > 260 or name in (".", "..") or name.startswith("-") or name.startswith("/"):
+        raise EngineError("非法进程名：%s" % name)
+    # 严格拦截控制字符、路径分隔符、通配符与 Shell 元字符
+    if re.search(r"[\x00-\x1f\x7f<>:\"/\\|?*;`&'$!]", name):
+        raise EngineError("非法进程名，包含禁止字符")
+
+
 def _engine_process_close(params):
-    """process.close：安全协同释放占用文件的进程（优雅通知 + 系统核心白名单保护）。"""
+    """process.close：安全协同关闭进程/进程树（优雅关闭 + 强杀整树 + 复生复核 + 零假成功）。"""
     pid = _engine_get(params, "pid", 0, int)
     name = _engine_get(params, "name", "", str).strip()
 
     if not pid and not name:
         raise EngineError("参数 pid 或 name 至少需要提供一个")
 
-    import re
-    if name and not re.match(r"^[a-zA-Z0-9_\-\.]+$", name):
-        raise EngineError("非法进程名，只允许包含字母、数字、下划线、连字符和点")
+    if name:
+        _validate_process_name(name)
 
     force = _engine_get(params, "force", False, bool)
     confirm_sensitive = _engine_get(params, "confirm_sensitive", False, bool)
@@ -8174,104 +8727,317 @@ def _engine_process_close(params):
     if clean.endswith(".exe"):
         clean = clean[:-4]
 
-    # 绝对系统关键进程白名单（红线）
-    _SYS_PROTECTED = {
-        "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
-        "startmenuexperiencehost", "tidyassistant", "整理助手", "python", "conhost",
-        "runtimebroker", "taskmgr", "system", "idle", "winlogon", "sihost", "fontdrvhost"
-    }
-
     if pid and pid <= 4:
         raise EngineError("【PID %d】是系统保留特权进程，禁止关闭" % pid)
 
-    if clean and clean in _SYS_PROTECTED:
+    if clean and clean in _SYS_PROTECTED_PROCS:
         raise EngineError("【%s】是 Windows 核心受保护组件，禁止关闭以防桌面崩溃" % name)
 
-    # 敏感数据应用（如微信）
-    _SENSITIVE_APPS = {"xwechat", "wechat", "qq"}
-    if clean in _SENSITIVE_APPS and not confirm_sensitive:
+    if clean and clean in _SENSITIVE_APPS_PROCS and not confirm_sensitive:
         return {
             "ok": False,
             "need_confirm": True,
             "warning": "【%s】包含本地数据库文件，强行关闭可能导致未保存聊天记录损坏，建议在软件内退出" % name
         }
 
-    import subprocess, time
-    no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    raw_now = _snapshot_processes_raw()
+    self_pids = _get_self_protected_pids(raw_now)
+    by_pid_now = {p[0]: p for p in raw_now}
 
+    # --- 路径 A：按单 PID 关闭（完整补齐保护校验、创建时间校验与真实存活回查） ---
     if pid:
-        # 按 PID 关闭单进程（严禁弹出黑色控制台窗口）
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid)],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                timeout=5, creationflags=no_win
-            )
-        except Exception:
-            pass
+        info = by_pid_now.get(pid)
+        if not info:
+            return {
+                "ok": True,
+                "pid": pid,
+                "name": name or str(pid),
+                "was_running": False,
+                "initial_count": 0,
+                "terminated_count": 0,
+                "remaining_count": 0,
+                "remaining_pids": [],
+                "skipped_self_count": 0,
+                "closed": False,
+                "still_running": False,
+                "admin_required": False,
+                "respawned": False,
+                "reason": "not_running",
+                "message": "该进程已不在运行"
+            }
+        real_exe = info[2]
+        real_clean = real_exe.lower()[:-4] if real_exe.lower().endswith(".exe") else real_exe.lower()
+        if pid in self_pids:
+            raise EngineError("【%s (PID %d)】是轻盘自身运行进程，禁止关闭" % (real_exe, pid))
+        if real_clean in _SYS_PROTECTED_PROCS:
+            raise EngineError("【%s】是 Windows 核心受保护组件，禁止关闭以防桌面崩溃" % real_exe)
+        if real_clean in _SENSITIVE_APPS_PROCS and not confirm_sensitive:
+            return {
+                "ok": False,
+                "need_confirm": True,
+                "warning": "【%s】包含本地数据库文件，强行关闭可能导致未保存聊天记录损坏，建议在软件内退出" % real_exe
+            }
 
-        if force:
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                    timeout=5, creationflags=no_win
+        orig_ctime = _get_process_creation_time(pid)
+
+        def _pid_still_alive():
+            snap = {p[0]: p for p in _snapshot_processes_raw()}
+            if pid not in snap:
+                return False
+            if orig_ctime:
+                cur_ct = _get_process_creation_time(pid)
+                if cur_ct and cur_ct != orig_ctime:
+                    return False  # PID 已被内核复用于新进程
+            return True
+
+        denied_pids = set()
+        if not force:
+            sent_w, vis_w = _send_wm_close_to_pids([pid])
+            wait_steps = 25 if vis_w > 0 else (6 if sent_w > 0 else 2)
+            for _ in range(wait_steps):
+                time.sleep(0.1)
+                if not _pid_still_alive():
+                    break
+            still = _pid_still_alive()
+            if still:
+                _, probe_denied = _probe_terminate_access([pid])
+                denied_pids.update(probe_denied)
+            closed = not still
+            reason = "closed" if closed else ("access_denied" if denied_pids else ("graceful_no_window" if vis_w == 0 else "graceful_no_response"))
+            return {
+                "ok": True,
+                "pid": pid,
+                "name": name or real_exe,
+                "was_running": True,
+                "initial_count": 1,
+                "terminated_count": 1 if closed else 0,
+                "remaining_count": 0 if closed else 1,
+                "remaining_pids": [] if closed else [pid],
+                "skipped_self_count": 0,
+                "closed": closed,
+                "still_running": still,
+                "admin_required": bool(still and denied_pids),
+                "respawned": False,
+                "reason": reason,
+                "message": "已关闭进程" if closed else (
+                    "权限不足，需要管理员权限才能终止该进程" if denied_pids
+                    else "进程未响应优雅退出（后台驻留或无可见窗口）"
                 )
-            except Exception:
-                pass
-        return {"ok": True, "pid": pid, "name": name or str(pid), "closed": True}
+            }
 
-    # 按名称关闭
-    was_running = _engine_process_is_running(clean + ".exe")
-    if not was_running:
-        return {"ok": True, "name": clean, "was_running": False, "closed": False, "still_running": False}
-
-    # 1. 尝试优雅通知退出（taskkill 不加 /F 发送 WM_CLOSE，静默无黑框）
-    try:
-        subprocess.run(
-            ["taskkill", "/IM", "%s.exe" % clean],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=5, creationflags=no_win
-        )
-    except Exception:
-        pass
-
-    # 非阻塞轮询等待优雅退出并释放文件锁（最多 2.5s，每次 100ms，退出即刻返回）
-    still_running = True
-    for _ in range(25):
-        time.sleep(0.1)
-        if not _engine_process_is_running(clean + ".exe"):
-            still_running = False
-            break
-
-    # 2. 若配置了 force 且仍在运行，再尝试强制终止（同样静默无黑框）
-    if still_running and force:
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "%s.exe" % clean],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                timeout=5, creationflags=no_win
-            )
-        except Exception:
-            pass
+        # force=True：先强杀该进程及其非受保护后代子进程
+        ordered = _collect_descendant_pids([pid], raw_now, self_pids)
+        _, d1 = _terminate_pids_win32(ordered)
+        denied_pids.update(d1)
+        if _pid_still_alive() and pid not in denied_pids:
+            _taskkill_pids_fallback([pid])
         for _ in range(10):
+            if not _pid_still_alive():
+                break
             time.sleep(0.1)
-            if not _engine_process_is_running(clean + ".exe"):
-                still_running = False
+        still = _pid_still_alive()
+        closed = not still
+        if still and not denied_pids:
+            _, probe_d = _probe_terminate_access([pid])
+            denied_pids.update(probe_d)
+        reason = "closed" if closed else ("access_denied" if denied_pids else "terminate_failed")
+        return {
+            "ok": True,
+            "pid": pid,
+            "name": name or real_exe,
+            "was_running": True,
+            "initial_count": 1,
+            "terminated_count": 1 if closed else 0,
+            "remaining_count": 0 if closed else 1,
+            "remaining_pids": [] if closed else [pid],
+            "skipped_self_count": 0,
+            "closed": closed,
+            "still_running": still,
+            "admin_required": bool(still and denied_pids),
+            "respawned": False,
+            "reason": reason,
+            "message": "已强制终止进程" if closed else (
+                "权限不足，需要管理员权限才能终止该进程" if denied_pids
+                else "进程未能终止（可能受系统保护或正在内核态等待）"
+            )
+        }
+
+    # --- 路径 B：按进程名关闭整个应用进程组 ---
+    raw_lower = name.lower()
+    target_exe = clean + ".exe"
+    target_names = {target_exe, raw_lower} if raw_lower else {target_exe}
+
+    def _find_matching_pids(snap_raw, excl):
+        hits = []
+        self_hits = []
+        for p_id, _, exe_n, _ in snap_raw:
+            if exe_n.lower() in target_names:
+                if p_id in excl:
+                    self_hits.append(p_id)
+                elif p_id > 4:
+                    hits.append(p_id)
+        return hits, self_hits
+
+    initial_pids, skipped_self = _find_matching_pids(raw_now, self_pids)
+    if not initial_pids:
+        if skipped_self:
+            raise EngineError("【%s】仅包含轻盘自身正在使用的进程，禁止关闭以防界面异常" % (name or target_exe))
+        return {
+            "ok": True,
+            "name": clean,
+            "was_running": False,
+            "initial_count": 0,
+            "terminated_count": 0,
+            "remaining_count": 0,
+            "remaining_pids": [],
+            "skipped_self_count": 0,
+            "closed": False,
+            "still_running": False,
+            "admin_required": False,
+            "respawned": False,
+            "reason": "not_running",
+            "message": "该进程当前未在运行"
+        }
+
+    initial_set = set(initial_pids)
+    denied_pids = set()
+
+    # 1. 非强制模式：通过 Win32 EnumWindows + WM_CLOSE 优雅通知退出（完整支持含空格/中文名进程）
+    if not force:
+        sent_w, vis_w = _send_wm_close_to_pids(initial_pids)
+        wait_steps = 25 if vis_w > 0 else (6 if sent_w > 0 else 2)
+        rem_pids = list(initial_pids)
+        for _ in range(wait_steps):
+            time.sleep(0.1)
+            snap_chk = _snapshot_processes_raw()
+            self_chk = _get_self_protected_pids(snap_chk)
+            rem_pids, skipped_self = _find_matching_pids(snap_chk, self_chk)
+            if not rem_pids:
                 break
 
-    closed = not _engine_process_is_running(clean + ".exe")
+        if rem_pids:
+            _, probe_denied = _probe_terminate_access(rem_pids)
+            denied_pids.update(probe_denied)
+
+        closed = len(rem_pids) == 0
+        all_denied = bool(rem_pids and len(denied_pids) >= len(rem_pids))
+        if closed:
+            reason = "closed"
+            msg = "已优雅关闭全部 %d 个进程" % len(initial_pids)
+        elif all_denied:
+            reason = "access_denied"
+            msg = "仍有 %d 个进程未退出且权限不足，需要管理员权限" % len(rem_pids)
+        elif vis_w == 0:
+            reason = "graceful_no_window"
+            msg = "该应用当前在后台驻留（无可见主窗口），优雅通知无法关闭，仍有 %d 个进程在运行" % len(rem_pids)
+        else:
+            reason = "graceful_no_response"
+            msg = "进程未响应优雅退出（可能最小化到托盘或有未保存弹窗），仍有 %d 个进程在运行" % len(rem_pids)
+
+        return {
+            "ok": True,
+            "name": clean,
+            "was_running": True,
+            "initial_count": len(initial_pids),
+            "terminated_count": max(0, len(initial_pids) - len(rem_pids)),
+            "remaining_count": len(rem_pids),
+            "remaining_pids": rem_pids,
+            "skipped_self_count": len(skipped_self),
+            "closed": closed,
+            "still_running": not closed,
+            "admin_required": all_denied,
+            "respawned": False,
+            "reason": reason,
+            "message": msg
+        }
+
+    # 2. 强制模式：先根后子多轮清剿整棵进程树（彻底粉碎 Electron/Chromium 多进程互相拉起）
+    rem_pids = list(initial_pids)
+    for round_idx in range(2):
+        snap_cur = _snapshot_processes_raw()
+        self_cur = _get_self_protected_pids(snap_cur)
+        cur_matches, skipped_self = _find_matching_pids(snap_cur, self_cur)
+        if not cur_matches:
+            rem_pids = []
+            break
+        ordered_tree = _collect_descendant_pids(cur_matches, snap_cur, self_cur)
+        _, d_round = _terminate_pids_win32(ordered_tree)
+        denied_pids.update(d_round)
+
+        # 若仍有非拒绝访问的漏网进程，执行 taskkill /F /T /PID 兜底
+        snap_after = _snapshot_processes_raw()
+        self_after = _get_self_protected_pids(snap_after)
+        rem_pids, skipped_self = _find_matching_pids(snap_after, self_after)
+        killable_rem = [p for p in rem_pids if p not in denied_pids]
+        if killable_rem:
+            _taskkill_pids_fallback(killable_rem)
+            for _ in range(8):
+                time.sleep(0.1)
+                snap_after = _snapshot_processes_raw()
+                self_after = _get_self_protected_pids(snap_after)
+                rem_pids, skipped_self = _find_matching_pids(snap_after, self_after)
+                if not rem_pids:
+                    break
+        if not rem_pids:
+            break
+        # 若全部剩余 PID 均被 WinError 5 拒绝访问，无需空等第二轮
+        if all(p in denied_pids for p in rem_pids):
+            break
+        if round_idx == 0:
+            time.sleep(0.15)
+
+    # 3. 350ms 复生复核：检测系统服务 / 守护进程是否在刚杀完瞬间立即拉起新 PID
+    respawned = False
+    if not rem_pids:
+        time.sleep(0.35)
+        snap_final = _snapshot_processes_raw()
+        self_final = _get_self_protected_pids(snap_final)
+        rem_pids, skipped_self = _find_matching_pids(snap_final, self_final)
+        if rem_pids:
+            respawned = True
+    else:
+        # 复核残存 PID 是否均为新 PID（代表原进程已死但被守护程序重启）
+        if not (set(rem_pids) & initial_set):
+            respawned = True
+        else:
+            _, probe_d = _probe_terminate_access(rem_pids)
+            denied_pids.update(probe_d)
+
+    closed = (len(rem_pids) == 0) and (not respawned)
+    has_denied = bool(rem_pids and any(p in denied_pids for p in rem_pids))
+    if closed:
+        reason = "closed"
+        msg = "已彻底终止全部 %d 个进程" % len(initial_pids)
+    elif respawned:
+        reason = "respawned_by_service_or_watchdog"
+        msg = "原进程已终止，但立即被 Windows 服务或后台守护程序重新拉起（当前仍有 %d 个进程）" % len(rem_pids)
+    elif has_denied:
+        reason = "access_denied"
+        msg = "权限不足（拒绝访问），仍有 %d 个进程运行中，请以管理员身份重试" % len(rem_pids)
+    else:
+        reason = "terminate_failed"
+        msg = "未能彻底结束，仍有 %d 个进程在运行（可能受系统保护进程限制）" % len(rem_pids)
+
     return {
         "ok": True,
         "name": clean,
-        "was_running": was_running,
+        "was_running": True,
+        "initial_count": len(initial_pids),
+        "terminated_count": len(initial_pids) if closed else len(initial_set - set(rem_pids)),
+        "remaining_count": len(rem_pids),
+        "remaining_pids": rem_pids,
+        "skipped_self_count": len(skipped_self),
         "closed": closed,
-        "still_running": not closed
+        "still_running": not closed,
+        "admin_required": bool(has_denied and not respawned),
+        "respawned": respawned,
+        "reason": reason,
+        "message": msg
     }
 
 
 def _engine_process_list(params=None):
-    """process.list：毫秒级快照系统当前运行进程（通过 Win32 Toolhelp32Snapshot + psapi，不产生静默轮询）。"""
+    """process.list：毫秒级快照系统当前运行进程（单句柄 PROCESS_QUERY_LIMITED_INFORMATION + 动态自保护）。"""
     if params is None:
         params = {}
     aggregate = _engine_get(params, "aggregate", True, bool)
@@ -8280,82 +9046,70 @@ def _engine_process_list(params=None):
     if os.name != "nt" or not _k32_proc or not _PE32W:
         return {"items": [], "total_count": 0, "total_memory": 0, "raw_count": 0}
 
-    _SYS_PROTECTED = {
-        "explorer", "dwm", "csrss", "lsass", "services", "smss", "svchost",
-        "startmenuexperiencehost", "tidyassistant", "整理助手", "python", "conhost",
-        "runtimebroker", "taskmgr", "system", "idle", "winlogon", "sihost", "fontdrvhost"
-    }
-
-    hSnap = _k32_proc.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if not hSnap or hSnap == -1 or hSnap == (1 << (8 * ctypes.sizeof(wintypes.HANDLE))) - 1:
-        return {"items": [], "total_count": 0, "total_memory": 0, "raw_count": 0}
-
-    pe = _PE32W()
-    pe.dwSize = ctypes.sizeof(_PE32W)
+    snap_raw = _snapshot_processes_raw()
+    self_pids = _get_self_protected_pids(snap_raw)
 
     raw_procs = []
     total_memory = 0
 
-    try:
-        if _k32_proc.Process32FirstW(hSnap, ctypes.byref(pe)):
-            while True:
-                pid = int(pe.th32ProcessID)
-                name = str(pe.szExeFile)
-                threads = int(pe.cntThreads)
-                mem_size = 0
-                exe_path = ""
+    for pid, ppid, name, threads in snap_raw:
+        mem_size = 0
+        exe_path = ""
 
-                # 获取物理内存工作集
+        # 单次 PROCESS_QUERY_LIMITED_INFORMATION 句柄同时取路径 + 物理内存（无需高权限 PROCESS_VM_READ，支持 UWP/提权进程）
+        h_proc = _k32_proc.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if h_proc:
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if _k32_proc.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                    exe_path = str(buf.value)
                 if _psapi_proc:
-                    hProcMem = _k32_proc.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
-                    if hProcMem:
-                        try:
-                            mem = _PROCESS_MEMORY_COUNTERS()
-                            mem.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
-                            if _psapi_proc.GetProcessMemoryInfo(hProcMem, ctypes.byref(mem), mem.cb):
-                                mem_size = int(mem.WorkingSetSize)
-                        except Exception:
-                            pass
-                        finally:
-                            _k32_proc.CloseHandle(hProcMem)
+                    mem = _PROCESS_MEMORY_COUNTERS()
+                    mem.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
+                    if _psapi_proc.GetProcessMemoryInfo(h_proc, ctypes.byref(mem), mem.cb):
+                        mem_size = int(mem.WorkingSetSize)
+            except Exception:
+                pass
+            finally:
+                _k32_proc.CloseHandle(h_proc)
 
-                # 获取可执行文件路径
-                hProcPath = _k32_proc.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                if hProcPath:
-                    try:
-                        buf = ctypes.create_unicode_buffer(1024)
-                        size = wintypes.DWORD(1024)
-                        if _k32_proc.QueryFullProcessImageNameW(hProcPath, 0, buf, ctypes.byref(size)):
-                            exe_path = str(buf.value)
-                    except Exception:
-                        pass
-                    finally:
-                        _k32_proc.CloseHandle(hProcPath)
+        if mem_size == 0 and _psapi_proc and pid > 4:
+            h_mem = _k32_proc.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+            if h_mem:
+                try:
+                    mem = _PROCESS_MEMORY_COUNTERS()
+                    mem.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
+                    if _psapi_proc.GetProcessMemoryInfo(h_mem, ctypes.byref(mem), mem.cb):
+                        mem_size = int(mem.WorkingSetSize)
+                except Exception:
+                    pass
+                finally:
+                    _k32_proc.CloseHandle(h_mem)
 
-                clean = name.lower()
-                if clean.endswith(".exe"):
-                    clean = clean[:-4]
-                is_system = clean in _SYS_PROTECTED or pid <= 4
+        clean = name.lower()
+        if clean.endswith(".exe"):
+            clean = clean[:-4]
+        is_self = pid in self_pids
+        is_system = (clean in _SYS_PROTECTED_PROCS) or (pid <= 4) or is_self
 
-                icon_src = exe_path if exe_path else ""
-                icon = app_icon_cached(icon_src) if icon_src else ""
+        icon_src = exe_path if exe_path else ""
+        icon = app_icon_cached(icon_src) if icon_src else ""
 
-                total_memory += mem_size
-                raw_procs.append({
-                    "pid": pid,
-                    "name": name,
-                    "clean_name": clean,
-                    "threads": threads,
-                    "memory": mem_size,
-                    "exe_path": exe_path,
-                    "icon_src": icon_src,
-                    "icon": icon,
-                    "is_system": is_system
-                })
-                if not _k32_proc.Process32NextW(hSnap, ctypes.byref(pe)):
-                    break
-    finally:
-        _k32_proc.CloseHandle(hSnap)
+        total_memory += mem_size
+        raw_procs.append({
+            "pid": pid,
+            "ppid": ppid,
+            "name": name,
+            "clean_name": clean,
+            "threads": threads,
+            "memory": mem_size,
+            "exe_path": exe_path,
+            "icon_src": icon_src,
+            "icon": icon,
+            "is_system": is_system,
+            "is_self": is_self
+        })
 
     if aggregate:
         grouped = {}
@@ -8372,7 +9126,11 @@ def _engine_process_list(params=None):
                     "exe_path": p["exe_path"],
                     "icon_src": p["icon_src"],
                     "icon": p["icon"],
-                    "is_system": p["is_system"]
+                    "is_system": p["is_system"],
+                    "is_self": p["is_self"],
+                    "self_protected_count": 1 if p["is_self"] else 0,
+                    "_all_self": p["is_self"],
+                    "_any_sys_name": (p["clean_name"] in _SYS_PROTECTED_PROCS) or (p["pid"] <= 4),
                 }
             else:
                 g = grouped[key]
@@ -8380,11 +9138,23 @@ def _engine_process_list(params=None):
                 g["process_count"] += 1
                 g["threads"] += p["threads"]
                 g["memory"] += p["memory"]
+                if p["is_self"]:
+                    g["self_protected_count"] += 1
+                else:
+                    g["_all_self"] = False
+                if (p["clean_name"] in _SYS_PROTECTED_PROCS) or (p["pid"] <= 4):
+                    g["_any_sys_name"] = True
                 if not g["exe_path"] and p["exe_path"]:
                     g["exe_path"] = p["exe_path"]
                     g["icon_src"] = p["icon_src"]
                     g["icon"] = p["icon"]
-        items = list(grouped.values())
+        items = []
+        for g in grouped.values():
+            # 只有「组名属系统核心」或「组内全部进程均属轻盘自身」时才整组禁用结束；
+            # 若为混合组（如 msedgewebview2.exe 含轻盘 4 个 + 其他应用 28 个），允许关闭外部进程且底层自动跳过轻盘自身 PID
+            g["is_self"] = bool(g.pop("_all_self"))
+            g["is_system"] = bool(g.pop("_any_sys_name") or g["is_self"])
+            items.append(g)
     else:
         items = raw_procs
 
@@ -8402,10 +9172,70 @@ def _engine_process_list(params=None):
 
 
 _SYS_PERF_PREV = [None]
+_SYS_PDH_LOCK = threading.Lock()
+_SYS_PDH_STATE = {"init": False, "ok": False, "pdh": None, "query": None, "h_read": None, "h_write": None, "primed": False}
+
+if os.name == "nt":
+    class _PDH_FMT_VAL(ctypes.Structure):
+        _fields_ = [("CStatus", wintypes.DWORD), ("doubleValue", ctypes.c_double)]
+else:
+    _PDH_FMT_VAL = None
+
+
+def _read_physical_disk_pdh():
+    """通过 Win32 PDH（无需管理员权限、跨中英文系统通用）采集真实物理磁盘读写速率 (read_bps, write_bps)。"""
+    if os.name != "nt" or _PDH_FMT_VAL is None:
+        return None
+
+    with _SYS_PDH_LOCK:
+        st = _SYS_PDH_STATE
+        if not st["init"]:
+            st["init"] = True
+            try:
+                pdh = ctypes.WinDLL("pdh")
+                pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, ctypes.c_size_t, ctypes.POINTER(wintypes.HANDLE)]
+                pdh.PdhOpenQueryW.restype = wintypes.LONG
+                pdh.PdhAddEnglishCounterW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.c_size_t, ctypes.POINTER(wintypes.HANDLE)]
+                pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
+                pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
+                pdh.PdhCollectQueryData.restype = wintypes.LONG
+                pdh.PdhGetFormattedCounterValue.argtypes = [
+                    wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(_PDH_FMT_VAL)
+                ]
+                pdh.PdhGetFormattedCounterValue.restype = wintypes.LONG
+                h_q = wintypes.HANDLE()
+                h_r = wintypes.HANDLE()
+                h_w = wintypes.HANDLE()
+                if (pdh.PdhOpenQueryW(None, 0, ctypes.byref(h_q)) == 0
+                        and pdh.PdhAddEnglishCounterW(h_q, r"\PhysicalDisk(_Total)\Disk Read Bytes/sec", 0, ctypes.byref(h_r)) == 0
+                        and pdh.PdhAddEnglishCounterW(h_q, r"\PhysicalDisk(_Total)\Disk Write Bytes/sec", 0, ctypes.byref(h_w)) == 0):
+                    pdh.PdhCollectQueryData(h_q)
+                    st.update({"ok": True, "pdh": pdh, "query": h_q, "h_read": h_r, "h_write": h_w, "primed": True})
+            except Exception:
+                st["ok"] = False
+
+        if not st["ok"]:
+            return None
+
+        try:
+            pdh = st["pdh"]
+            if pdh.PdhCollectQueryData(st["query"]) != 0:
+                return None
+            vr = _PDH_FMT_VAL()
+            vw = _PDH_FMT_VAL()
+            PDH_FMT_DOUBLE = 0x00000200
+            gr = pdh.PdhGetFormattedCounterValue(st["h_read"], PDH_FMT_DOUBLE, None, ctypes.byref(vr))
+            gw = pdh.PdhGetFormattedCounterValue(st["h_write"], PDH_FMT_DOUBLE, None, ctypes.byref(vw))
+            # CStatus == 0 (PDH_CSTATUS_VALID_DATA) 或 1 (PDH_CSTATUS_NEW_DATA) 才采用，避免首次未双采的异常值
+            r_bps = max(0, int(vr.doubleValue)) if gr == 0 and vr.CStatus in (0, 1) and vr.doubleValue >= 0 else 0
+            w_bps = max(0, int(vw.doubleValue)) if gw == 0 and vw.CStatus in (0, 1) and vw.doubleValue >= 0 else 0
+            return (r_bps, w_bps)
+        except Exception:
+            return None
 
 
 def _engine_system_performance(params=None):
-    """system.performance：高能效快照全盘分区容量、物理内存状态与瞬时 CPU 负载（0 闲置持续负载）。"""
+    """system.performance：高能效精准快照本地磁盘容量、真实物理磁盘 I/O、去重物理网卡吞吐、内存与 CPU 负载。"""
     import shutil
     import ctypes
     from ctypes import wintypes
@@ -8416,31 +9246,69 @@ def _engine_system_performance(params=None):
     used_disk_bytes = 0
 
     if os.name == "nt":
-        for d in range(65, 91):
-            drive_letter = chr(d) + ":\\"
-            try:
-                dtype = ctypes.windll.kernel32.GetDriveTypeW(drive_letter)
-                if dtype in (0, 1, 5):
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        old_mode = wintypes.DWORD(0)
+        has_thread_err_mode = hasattr(k32, "SetThreadErrorMode")
+        SEM_FAILCRITICALERRORS = 0x0001
+        if has_thread_err_mode:
+            k32.SetThreadErrorMode(SEM_FAILCRITICALERRORS, ctypes.byref(old_mode))
+        else:
+            old_mode = wintypes.DWORD(k32.SetErrorMode(SEM_FAILCRITICALERRORS))
+        try:
+            mask = int(k32.GetLogicalDrives())
+            sys_letter = (os.environ.get("SystemDrive", "C:") or "C:")[0].upper()
+            qdos = k32.QueryDosDeviceW
+            qdos.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            qdos.restype = wintypes.DWORD
+            gvol = k32.GetVolumeInformationW
+            gvol.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+                ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR, wintypes.DWORD
+            ]
+            gvol.restype = wintypes.BOOL
+            for idx in range(26):
+                if not (mask & (1 << idx)):
                     continue
-                if not os.path.exists(drive_letter):
+                letter = chr(65 + idx)
+                drive_letter = letter + ":\\"
+                try:
+                    dtype = int(k32.GetDriveTypeW(drive_letter))
+                    # 仅枚举本地固定盘 (3) 与就绪可移动盘 (2)，严格跳过远程网络盘 (4，防 15s 断网阻塞) 与光驱 (5)
+                    if dtype not in (2, 3):
+                        continue
+                    # 跳过 subst 虚拟映射盘（防总容量重复统计）
+                    dos_buf = ctypes.create_unicode_buffer(512)
+                    if qdos(letter + ":", dos_buf, 512) > 0 and dos_buf.value.startswith("\\??\\"):
+                        continue
+                    du = shutil.disk_usage(drive_letter)
+                    if du.total <= 0:
+                        continue
+                    vol_buf = ctypes.create_unicode_buffer(261)
+                    label = ""
+                    if gvol(drive_letter, vol_buf, 261, None, None, None, None, 0):
+                        label = vol_buf.value.strip()
+                    drives.append({
+                        "drive": drive_letter,
+                        "letter": letter,
+                        "label": label,
+                        "drive_type": "fixed" if dtype == 3 else "removable",
+                        "total": int(du.total),
+                        "used": int(du.used),
+                        "free": int(du.free),
+                        "percent": round(du.used / du.total * 100, 1) if du.total else 0.0,
+                        "is_system": letter.upper() == sys_letter
+                    })
+                    total_disk_bytes += int(du.total)
+                    used_disk_bytes += int(du.used)
+                    free_disk_bytes += int(du.free)
+                except OSError:
                     continue
-                du = shutil.disk_usage(drive_letter)
-                if du.total <= 0:
-                    continue
-                drives.append({
-                    "drive": drive_letter,
-                    "letter": chr(d),
-                    "total": int(du.total),
-                    "used": int(du.used),
-                    "free": int(du.free),
-                    "percent": round(du.used / du.total * 100, 1) if du.total else 0.0,
-                    "is_system": chr(d).upper() == os.environ.get("SystemDrive", "C:")[0].upper()
-                })
-                total_disk_bytes += int(du.total)
-                used_disk_bytes += int(du.used)
-                free_disk_bytes += int(du.free)
-            except OSError:
-                continue
+        finally:
+            if has_thread_err_mode:
+                k32.SetThreadErrorMode(old_mode.value, ctypes.byref(wintypes.DWORD(0)))
+            else:
+                k32.SetErrorMode(old_mode.value)
 
         class _MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = [
@@ -8478,11 +9346,12 @@ def _engine_system_performance(params=None):
                 )
             return (0, 0, 0, time.perf_counter())
 
-        # 磁盘 I/O 字节快照 (NtQuerySystemInformation)
-        def _read_disk_transfer():
+        # 磁盘 I/O 兜底字节快照 (NtQuerySystemInformation 512B 缓冲区适配 Win10/11 344B)
+        def _read_disk_transfer_fallback():
             try:
-                buf = (ctypes.c_byte * 312)()
-                if ctypes.windll.ntdll.NtQuerySystemInformation(2, ctypes.byref(buf), 312, None) == 0:
+                buf = (ctypes.c_byte * 512)()
+                ret_len = wintypes.ULONG(0)
+                if ctypes.windll.ntdll.NtQuerySystemInformation(2, ctypes.byref(buf), 512, ctypes.byref(ret_len)) == 0:
                     import struct
                     _, r_b, w_b, _ = struct.unpack_from('<qqqq', buf, 0)
                     return int(r_b), int(w_b)
@@ -8490,7 +9359,7 @@ def _engine_system_performance(params=None):
                 pass
             return 0, 0
 
-        # 网络 I/O 字节快照 (GetIfTable2)
+        # 网络 I/O 字节快照 (GetIfTable2：过滤全部 NDIS 过滤驱动与虚拟隧道重算，对齐任务管理器真实网速)
         class _MIB_IF_ROW2(ctypes.Structure):
             _fields_ = [
                 ('InterfaceLuid', ctypes.c_uint64),
@@ -8543,23 +9412,48 @@ def _engine_system_performance(params=None):
             ]
 
         def _read_network_transfer():
+            pTable = ctypes.POINTER(_MIB_IF_TABLE2)()
             try:
-                pTable = ctypes.POINTER(_MIB_IF_TABLE2)()
-                if ctypes.windll.iphlpapi.GetIfTable2(ctypes.byref(pTable)) == 0:
-                    table = pTable.contents
-                    num = table.NumEntries
-                    rows = ctypes.cast(ctypes.byref(table.Table), ctypes.POINTER(_MIB_IF_ROW2 * num)).contents
-                    in_b = sum(r.InOctets for r in rows if r.OperStatus == 1 and r.Type != 24)
-                    out_b = sum(r.OutOctets for r in rows if r.OperStatus == 1 and r.Type != 24)
-                    ctypes.windll.iphlpapi.FreeMibTable(pTable)
-                    return int(in_b), int(out_b)
+                if ctypes.windll.iphlpapi.GetIfTable2(ctypes.byref(pTable)) == 0 and pTable:
+                    try:
+                        table = pTable.contents
+                        num = int(table.NumEntries)
+                        if num <= 0:
+                            return 0, 0, ()
+                        rows = ctypes.cast(ctypes.byref(table.Table), ctypes.POINTER(_MIB_IF_ROW2 * num)).contents
+                        hw_in = hw_out = 0
+                        hw_luids = []
+                        fb_in = fb_out = 0
+                        fb_luids = []
+                        for r in rows:
+                            if r.OperStatus != 1 or r.Type == 24:  # 非 UP 或软件环回
+                                continue
+                            flags_b = int(r.InterfaceAndOperStatusFlags) & 0xFF
+                            if flags_b & 0x02:  # FilterInterface（WFP/QoS/Npcap 过滤驱动会 6× 重复计入同一物理网卡流量）
+                                continue
+                            luid = int(r.InterfaceLuid)
+                            if flags_b & 0x01:  # HardwareInterface（真实物理网卡）
+                                hw_luids.append(luid)
+                                hw_in += int(r.InOctets)
+                                hw_out += int(r.OutOctets)
+                            elif r.TunnelType == 0 and r.Type != 53:  # 非虚拟隧道兜底（无物理网卡的云主机/容器环境）
+                                fb_luids.append(luid)
+                                fb_in += int(r.InOctets)
+                                fb_out += int(r.OutOctets)
+                        if hw_luids:
+                            return hw_in, hw_out, tuple(sorted(hw_luids))
+                        return fb_in, fb_out, tuple(sorted(fb_luids))
+                    finally:
+                        ctypes.windll.iphlpapi.FreeMibTable(pTable)
             except Exception:
                 pass
-            return 0, 0
+            return 0, 0, ()
 
         now_times = _get_times()
-        disk_r, disk_w = _read_disk_transfer()
-        net_in, net_out = _read_network_transfer()
+        net_in, net_out, net_luids = _read_network_transfer()
+        pdh_disk = _read_physical_disk_pdh()
+        disk_r, disk_w = (0, 0) if pdh_disk is not None else _read_disk_transfer_fallback()
+        disk_mode = "pdh" if pdh_disk is not None else "fallback"
 
         cpu_pct = 0.0
         disk_r_bps = 0
@@ -8568,7 +9462,7 @@ def _engine_system_performance(params=None):
         net_out_bps = 0
 
         prev = _SYS_PERF_PREV[0]
-        if prev and (now_times[3] - prev[3]) < 5.0 and (now_times[3] - prev[3]) >= 0.05:
+        if prev and (now_times[3] - prev[3]) < 8.0 and (now_times[3] - prev[3]) >= 0.05:
             dt = now_times[3] - prev[3]
             idle_delta = now_times[0] - prev[0]
             kern_delta = now_times[1] - prev[1]
@@ -8576,16 +9470,23 @@ def _engine_system_performance(params=None):
             total_delta = kern_delta + user_delta
             if total_delta > 0:
                 cpu_pct = round(max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0)), 1)
-            if len(prev) >= 8 and dt > 0:
+            if pdh_disk is not None:
+                disk_r_bps, disk_w_bps = pdh_disk
+            elif len(prev) >= 9 and prev[8] == "fallback" and dt > 0 and prev[4] > 0:
                 disk_r_bps = max(0, int((disk_r - prev[4]) / dt))
                 disk_w_bps = max(0, int((disk_w - prev[5]) / dt))
+            # 仅当活跃物理网卡集合未变化时才做差分，防插拔网线/切网卡瞬间的数 GB/s 假尖峰
+            prev_luids = prev[9] if len(prev) >= 10 else net_luids
+            if len(prev) >= 8 and dt > 0 and prev_luids == net_luids and (prev[6] > 0 or prev[7] > 0):
                 net_in_bps = max(0, int((net_in - prev[6]) / dt))
                 net_out_bps = max(0, int((net_out - prev[7]) / dt))
         else:
-            time.sleep(0.04)
+            time.sleep(0.06)
             t2 = _get_times()
-            d2_r, d2_w = _read_disk_transfer()
-            n2_in, n2_out = _read_network_transfer()
+            n2_in, n2_out, n2_luids = _read_network_transfer()
+            pdh_disk2 = _read_physical_disk_pdh()
+            d2_r, d2_w = (0, 0) if pdh_disk2 is not None else _read_disk_transfer_fallback()
+            disk_mode2 = "pdh" if pdh_disk2 is not None else "fallback"
             dt = t2[3] - now_times[3]
             idle_delta = t2[0] - now_times[0]
             kern_delta = t2[1] - now_times[1]
@@ -8593,16 +9494,20 @@ def _engine_system_performance(params=None):
             total_delta = kern_delta + user_delta
             if total_delta > 0:
                 cpu_pct = round(max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0)), 1)
-            if dt > 0:
+            if pdh_disk2 is not None:
+                disk_r_bps, disk_w_bps = pdh_disk2
+            elif disk_mode == "fallback" and disk_mode2 == "fallback" and dt > 0 and disk_r > 0:
                 disk_r_bps = max(0, int((d2_r - disk_r) / dt))
                 disk_w_bps = max(0, int((d2_w - disk_w) / dt))
+            if dt > 0 and n2_luids == net_luids and (net_in > 0 or net_out > 0):
                 net_in_bps = max(0, int((n2_in - net_in) / dt))
                 net_out_bps = max(0, int((n2_out - net_out) / dt))
             now_times = t2
             disk_r, disk_w = d2_r, d2_w
-            net_in, net_out = n2_in, n2_out
+            disk_mode = disk_mode2
+            net_in, net_out, net_luids = n2_in, n2_out, n2_luids
 
-        _SYS_PERF_PREV[0] = (now_times[0], now_times[1], now_times[2], now_times[3], disk_r, disk_w, net_in, net_out)
+        _SYS_PERF_PREV[0] = (now_times[0], now_times[1], now_times[2], now_times[3], disk_r, disk_w, net_in, net_out, disk_mode, net_luids)
         cpu_cores = os.cpu_count() or 1
     else:
         mem_total = mem_avail = mem_used = mem_load = 0

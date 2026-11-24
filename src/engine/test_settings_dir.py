@@ -94,12 +94,23 @@ class TestLocator(Base):
             captured.append((args, kwargs))
             return mock.Mock(returncode=0)
 
-        with mock.patch.object(tidy, "_engine_process_is_running", side_effect=[True, False, False]), \
+        # 模拟强杀阶段原生 TerminateProcess 未能一次清除，触发 taskkill /F /T /PID 兜底；
+        # 必须带 CREATE_NO_WINDOW 与 stdin=DEVNULL（严禁弹出黑色控制台窗口）。
+        snaps = [
+            [(98765, 1000, "chrome.exe", 4)],  # 初始扫描
+            [(98765, 1000, "chrome.exe", 4)],  # 轮次 1 cur_matches
+            [(98765, 1000, "chrome.exe", 4)],  # TerminateProcess 后仍存活 -> 触发 taskkill 兜底
+            [],                                 # taskkill 后退出
+            [],                                 # 350ms 复生复核：彻底关闭
+        ]
+        with mock.patch.object(tidy, "_snapshot_processes_raw", side_effect=snaps), \
+             mock.patch.object(tidy, "_terminate_pids_win32", return_value=(0, set())), \
+             mock.patch.object(tidy.time, "sleep", return_value=None), \
              mock.patch.object(subprocess, "run", side_effect=fake_run):
-            res = tidy._engine_process_close({"name": "chrome"})
+            res = tidy._engine_process_close({"name": "chrome", "force": True})
         self.assertTrue(res["ok"])
         self.assertTrue(res["closed"])
-        self.assertTrue(captured, "expected taskkill invocation")
+        self.assertTrue(captured, "expected taskkill fallback invocation")
         expected_flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         for _a, kw in captured:
             self.assertEqual(kw.get("creationflags"), expected_flag)

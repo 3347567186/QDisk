@@ -2772,5 +2772,239 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.updaterChangelog = origUpdChangelog;
 }
 
-console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含幽灵目录根治、全能文件预览、原生弹窗历史更新日志、一键全盘主要磁盘索引与全站红队回归）`);
+// 回归 18：红队专项 —— 后台进程绝不假成功（优雅→强制/复生/提权防环/自保护）、开机自启 setStartupView 与文件重命名同步、资源概览（原空间画像）改名与实时图读数刷新
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const origEngine = sandbox.API.engine;
+  const origIsAdmin = sandbox.API.isAdmin;
+  const modalRoot18 = sandbox.document._byId['modal-root'];
+  const toastsRoot18 = new FakeElement('div');
+  sandbox.document._byId['toasts'] = toastsRoot18;
+
+  const getToasts = () => findNodes(toastsRoot18, (n) => n.classList && n.classList.contains('toast')).map((n) => ({
+    kind: n.classList.contains('ok') ? 'ok' : (n.classList.contains('error') ? 'error' : (n.classList.contains('warn') ? 'warn' : 'info')),
+    msg: txt(n)
+  }));
+  const clearToasts = () => { toastsRoot18.children = []; };
+  const clickModalBtn = (labelMatch) => {
+    const btns = findNodes(modalRoot18, (n) => n.tagName === 'BUTTON' && txt(n).includes(labelMatch));
+    if (btns.length) clickBtn(btns[btns.length - 1]);
+    return btns.length > 0;
+  };
+
+  let mockIsAdmin = false;
+  let mockProcs = [
+    { name: 'ChatGPT.exe', clean_name: 'chatgpt', pids: [101, 102, 103], process_count: 10, threads: 259, memory: 1100 * 1024 * 1024, exe_path: 'C:\\Program Files\\WindowsApps\\OpenAI\\ChatGPT.exe', is_system: false, is_self: false, self_protected_count: 0 },
+    { name: 'msedgewebview2.exe', clean_name: 'msedgewebview2', pids: [201, 202], process_count: 12, threads: 120, memory: 800 * 1024 * 1024, exe_path: 'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\msedgewebview2.exe', is_system: false, is_self: false, self_protected_count: 4 },
+    { name: 'WatchdogSvc.exe', clean_name: 'watchdogsvc', pids: [301, 302], process_count: 2, threads: 16, memory: 120 * 1024 * 1024, exe_path: 'C:\\Program Files\\Vendor\\WatchdogSvc.exe', is_system: false, is_self: false, self_protected_count: 0 },
+    { name: 'PplGuard.exe', clean_name: 'pplguard', pids: [401], process_count: 1, threads: 8, memory: 90 * 1024 * 1024, exe_path: 'C:\\Program Files\\Guard\\PplGuard.exe', is_system: false, is_self: false, self_protected_count: 0 }
+  ];
+  let mockStartup = [
+    { id: 'folder_user_MyTool.lnk', name: 'MyTool', command: 'C:\\Users\\u\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\MyTool.lnk', exe_path: 'C:\\Tools\\MyTool.exe', exists: true, enabled: true, status: 'enabled', location: '用户启动目录', scope: 'user', source_type: 'folder', hive: '', key: '', file_path: 'C:\\Users\\u\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\MyTool.lnk' },
+    { id: 'HKCU_BrokenApp', name: 'BrokenApp', command: 'C:\\Missing\\app.exe', exe_path: 'C:\\Missing\\app.exe', exists: false, enabled: true, status: 'broken', location: '当前用户注册表', scope: 'user', source_type: 'registry', hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', file_path: '' }
+  ];
+  let perfSeq = 0;
+  let closeCalls = [];
+
+  sandbox.API.isAdmin = async () => mockIsAdmin;
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'apps.list') {
+      return { items: [{ name: 'BigStudio', version: '1.0', size: 2 * 1024 ** 3, install_path: '"C:\\Program Files\\BigStudio"' }], total: 1 };
+    }
+    if (method === 'process.list') {
+      return { items: mockProcs.slice(), total_count: mockProcs.length, raw_count: mockProcs.reduce((s, x) => s + x.process_count, 0), total_memory: mockProcs.reduce((s, x) => s + x.memory, 0) };
+    }
+    if (method === 'process.close') {
+      closeCalls.push(Object.assign({}, params));
+      if (params.name === 'chatgpt' && !params.force) {
+        return { ok: true, name: 'chatgpt', was_running: true, initial_count: 10, terminated_count: 0, remaining_count: 10, closed: false, still_running: true, admin_required: false, respawned: false, reason: 'graceful_no_window', message: '该应用当前在后台驻留（无可见主窗口），优雅通知无法关闭，仍有 10 个进程在运行' };
+      }
+      if (params.name === 'chatgpt' && params.force) {
+        mockProcs = mockProcs.filter((x) => x.clean_name !== 'chatgpt');
+        return { ok: true, name: 'chatgpt', was_running: true, initial_count: 10, terminated_count: 10, remaining_count: 0, closed: true, still_running: false, admin_required: false, respawned: false, reason: 'closed' };
+      }
+      if (params.name === 'msedgewebview2') {
+        return { ok: true, name: 'msedgewebview2', was_running: true, initial_count: 8, terminated_count: 8, remaining_count: 0, skipped_self_count: 4, closed: true, still_running: false, admin_required: false, respawned: false, reason: 'closed' };
+      }
+      if (params.name === 'watchdogsvc') {
+        return { ok: true, name: 'watchdogsvc', was_running: true, initial_count: 2, terminated_count: 2, remaining_count: 2, closed: false, still_running: true, admin_required: false, respawned: true, reason: 'respawned_by_service_or_watchdog' };
+      }
+      if (params.name === 'pplguard') {
+        return { ok: true, name: 'pplguard', was_running: true, initial_count: 1, terminated_count: 0, remaining_count: 1, closed: false, still_running: true, admin_required: true, respawned: false, reason: 'access_denied' };
+      }
+      return { ok: true, was_running: false, closed: false, still_running: false };
+    }
+    if (method === 'startup.list') {
+      return { total: mockStartup.length, enabled_count: 1, disabled_count: 0, broken_count: 1, items: mockStartup.map((x) => Object.assign({}, x)) };
+    }
+    if (method === 'startup.toggle') {
+      return { ok: true, name: params.name, enabled: params.enabled, new_file_path: params.file_path + '.disabled' };
+    }
+    if (method === 'system.performance') {
+      perfSeq += 1;
+      const cpuPct = perfSeq === 1 ? 11.0 : 42.5;
+      const usedC = perfSeq === 1 ? 150 * 1024 ** 3 : 170 * 1024 ** 3;
+      return {
+        timestamp: Date.now(),
+        drives: [{ drive: 'C:\\', letter: 'C', label: '系统', drive_type: 'fixed', total: 256 * 1024 ** 3, used: usedC, free: (256 * 1024 ** 3) - usedC, percent: perfSeq === 1 ? 58.6 : 66.4, is_system: true }],
+        disk_summary: { total: 256 * 1024 ** 3, used: usedC, free: (256 * 1024 ** 3) - usedC, percent: perfSeq === 1 ? 58.6 : 66.4 },
+        disk_io: { read_bps: perfSeq * 2 * 1024 * 1024, write_bps: 1024 * 1024, total_bps: (perfSeq * 2 + 1) * 1024 * 1024 },
+        network_io: { in_bps: perfSeq * 100 * 1024, out_bps: 20 * 1024, total_bps: (perfSeq * 100 + 20) * 1024 },
+        memory: { total: 32 * 1024 ** 3, available: 16 * 1024 ** 3, used: 16 * 1024 ** 3, percent: perfSeq === 1 ? 45 : 52 },
+        cpu: { percent: cpuPct, cores: 16 }
+      };
+    }
+    return origEngine(method, params);
+  };
+
+  const appsHost18 = new FakeElement('div');
+  const umApps18 = await sandbox.Pages.apps.mount(appsHost18);
+  await new Promise((r) => setTimeout(r, 30));
+
+  // 18a. 改名检查：可见 UI 不得出现「空间画像」，Tab 与标题必须为「资源概览」/「系统资源与存储概览」
+  const allAppsTxt = txt(appsHost18);
+  if (allAppsTxt.includes('空间画像') || !allAppsTxt.includes('资源概览') || !allAppsTxt.includes('系统资源与存储概览')) {
+    console.error('[红队回归 18] 「空间画像」未完整更名为「资源概览」/「系统资源与存储概览」');
+    process.exit(1);
+  }
+
+  // 18b. 后台进程：ChatGPT.exe 优雅关闭失败 + 用户点取消 -> 绝不弹成功 ok toast，且弹窗按钮正确显示「强制终止 (10)」！
+  await sandbox.Pages.apps.jump({ tab: 'procs', filter: '' });
+  await new Promise((r) => setTimeout(r, 30));
+  const findCloseBtnFor = (host, procName) => {
+    const trs = findNodes(host, (n) => n.tagName === 'TR' && txt(n).includes(procName));
+    if (!trs.length) return null;
+    return findNodes(trs[0], (n) => n.tagName === 'BUTTON' && txt(n).includes('结束'))[0] || null;
+  };
+  clearToasts(); closeCalls.length = 0; modalRoot18.children = [];
+  clickBtn(findCloseBtnFor(appsHost18, 'ChatGPT.exe'));
+  await new Promise((r) => setTimeout(r, 270)); // 等待 UI.busy 220ms 最小展示时长
+  const hasForceBtnLabel = txt(modalRoot18).includes('强制终止 (10)');
+  if (!hasForceBtnLabel || !clickModalBtn('取消')) {
+    console.error(`[红队回归 18] 优雅关闭失败未弹出「强制终止 (10)」确认框: modal=${txt(modalRoot18)}, calls=${closeCalls.length}`);
+    process.exit(1);
+  }
+  await new Promise((r) => setTimeout(r, 40));
+  const toastsCancel = getToasts();
+  if (toastsCancel.some((t) => t.kind === 'ok') || !toastsCancel.some((t) => t.kind === 'warn') || closeCalls.length !== 1) {
+    console.error(`[红队回归 18] 取消强制终止后竟假报成功: toasts=${JSON.stringify(toastsCancel)}, calls=${closeCalls.length}`);
+    process.exit(1);
+  }
+
+  // 18c. 后台进程：ChatGPT.exe 优雅关闭失败 + 用户点「强制终止 (10)」 -> 触发 force:true、真实成功并从列表消失
+  clearToasts(); closeCalls.length = 0; modalRoot18.children = [];
+  clickBtn(findCloseBtnFor(appsHost18, 'ChatGPT.exe'));
+  await new Promise((r) => setTimeout(r, 270));
+  if (!clickModalBtn('强制终止')) {
+    console.error('[红队回归 18] 未找到「强制终止」确认按钮');
+    process.exit(1);
+  }
+  await new Promise((r) => setTimeout(r, 280));
+  const toastsForce = getToasts();
+  if (closeCalls.length !== 2 || closeCalls[1].force !== true || !toastsForce.some((t) => t.kind === 'ok' && t.msg.includes('已彻底关闭')) || findCloseBtnFor(appsHost18, 'ChatGPT.exe')) {
+    console.error(`[红队回归 18] 强制终止流程异常: calls=${JSON.stringify(closeCalls)}, toasts=${JSON.stringify(toastsForce)}`);
+    process.exit(1);
+  }
+
+  // 18d. 后台进程：混合 WebView2 跳过轻盘自身 4 个进程 -> 明确告知自动保护
+  clearToasts();
+  clickBtn(findCloseBtnFor(appsHost18, 'msedgewebview2.exe'));
+  await new Promise((r) => setTimeout(r, 280));
+  const toastsSelf = getToasts();
+  if (!toastsSelf.some((t) => t.kind === 'ok' && t.msg.includes('自动保护轻盘自身 4 个进程'))) {
+    console.error(`[红队回归 18] 混合进程组未提示自动保护轻盘自身进程: ${JSON.stringify(toastsSelf)}`);
+    process.exit(1);
+  }
+
+  // 18e. 后台进程：被服务/守护程序复生 -> 严禁弹 ok，必须弹 warn 提示复生
+  clearToasts(); modalRoot18.children = [];
+  clickBtn(findCloseBtnFor(appsHost18, 'WatchdogSvc.exe'));
+  await new Promise((r) => setTimeout(r, 270));
+  clickModalBtn('强制终止');
+  await new Promise((r) => setTimeout(r, 280));
+  const toastsRespawn = getToasts();
+  if (toastsRespawn.some((t) => t.kind === 'ok') || !toastsRespawn.some((t) => t.kind === 'warn' && t.msg.includes('重新拉起'))) {
+    console.error(`[红队回归 18] 服务复生进程未给出诚实警告: ${JSON.stringify(toastsRespawn)}`);
+    process.exit(1);
+  }
+
+  // 18f. 后台进程：已是管理员模式仍遇 PPL/拒绝访问 -> 严禁再弹「是否以管理员重启」死循环，改弹 error 说明
+  mockIsAdmin = true;
+  umApps18();
+  const appsHost18b = new FakeElement('div');
+  const umApps18b = await sandbox.Pages.apps.mount(appsHost18b);
+  await new Promise((r) => setTimeout(r, 40));
+  await sandbox.Pages.apps.jump({ tab: 'procs', filter: '' });
+  await new Promise((r) => setTimeout(r, 30));
+  clearToasts(); modalRoot18.children = [];
+  clickBtn(findCloseBtnFor(appsHost18b, 'PplGuard.exe'));
+  await new Promise((r) => setTimeout(r, 280));
+  const toastsPpl = getToasts();
+  const openMasksPpl = findNodes(modalRoot18, (n) => n.classList && n.classList.contains('modal-mask'));
+  if (openMasksPpl.length !== 0 || !toastsPpl.some((t) => t.kind === 'error' && t.msg.includes('已是管理员模式'))) {
+    console.error(`[红队回归 18] 管理员模式下遇 PPL 拒绝访问仍触发重启死循环: masks=${openMasksPpl.length}, toasts=${JSON.stringify(toastsPpl)}`);
+    process.exit(1);
+  }
+
+  // 18g. 开机自启：jump({ tab: 'startup', status: 'broken' }) 不再报 setStartupView ReferenceError；切换目录启动项同步更新 command
+  await sandbox.Pages.apps.jump({ tab: 'startup', status: 'broken', filter: '' });
+  await new Promise((r) => setTimeout(r, 25));
+  const brokenTxt = txt(appsHost18b);
+  if (!brokenTxt.includes('BrokenApp') || brokenTxt.includes('MyTool')) {
+    console.error('[红队回归 18] startup jump status=broken 未正确筛选失效项');
+    process.exit(1);
+  }
+  await sandbox.Pages.apps.jump({ tab: 'startup', status: 'all', filter: '' });
+  await new Promise((r) => setTimeout(r, 25));
+  const myToolTr = findNodes(appsHost18b, (n) => n.tagName === 'TR' && txt(n).includes('MyTool'))[0];
+  const disableBtn = findNodes(myToolTr, (n) => n.tagName === 'BUTTON' && (n.attributes['aria-label'] === '禁用' || n.attributes.title === '禁用'))[0];
+  clickBtn(disableBtn);
+  await new Promise((r) => setTimeout(r, 35));
+  const afterToggleTr = findNodes(appsHost18b, (n) => n.tagName === 'TR' && txt(n).includes('MyTool'))[0];
+  if (!afterToggleTr || !txt(afterToggleTr).includes('MyTool.lnk.disabled')) {
+    console.error('[红队回归 18] 启动文件夹项禁用后 command 列未同步更新为 .disabled 路径');
+    process.exit(1);
+  }
+
+  // 18h. 资源概览：jump({ tab: 'overview' }) 兼容路由 + 连续采样必须实时刷新 .chart-cur-val 与磁盘分区已用文本
+  perfSeq = 0;
+  await sandbox.Pages.apps.jump({ tab: 'overview' });
+  await new Promise((r) => setTimeout(r, 35));
+  const cpuCard1 = findNodes(appsHost18b, (n) => n.id === 'fp-chart-card-cpu-ram')[0];
+  const curVal1 = cpuCard1 && findNodes(cpuCard1, (n) => n.classList && n.classList.contains('chart-cur-val'))[0];
+  const driveRow1 = findNodes(appsHost18b, (n) => n.id === 'fp-drive-row-C')[0];
+  if (!curVal1 || !txt(curVal1).includes('11%') || !driveRow1 || !txt(driveRow1).includes('58.6%')) {
+    console.error(`[红队回归 18] 资源概览首次采样渲染异常: curVal=${txt(curVal1)}, drive=${txt(driveRow1)}`);
+    process.exit(1);
+  }
+  await new Promise((r) => setTimeout(r, 1650));
+  const cpuCard2 = findNodes(appsHost18b, (n) => n.id === 'fp-chart-card-cpu-ram')[0];
+  const curVal2 = cpuCard2 && findNodes(cpuCard2, (n) => n.classList && n.classList.contains('chart-cur-val'))[0];
+  const driveRow2 = findNodes(appsHost18b, (n) => n.id === 'fp-drive-row-C')[0];
+  if (!curVal2 || !txt(curVal2).includes('42.5%') || !driveRow2 || !txt(driveRow2).includes('66.4%')) {
+    console.error(`[红队回归 18] 资源概览实时轮询未刷新 .chart-cur-val 或分区水位: curVal=${txt(curVal2)}, drive=${txt(driveRow2)}`);
+    process.exit(1);
+  }
+
+  umApps18b();
+  sandbox.UI.closeModals();
+  delete sandbox.document._byId['toasts'];
+  sandbox.API.engine = origEngine;
+  sandbox.API.isAdmin = origIsAdmin;
+}
+
+console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含后台进程真实关闭核验、开机自启排雷、资源概览实时监控与全站红队回归）`);
 process.exit(0);

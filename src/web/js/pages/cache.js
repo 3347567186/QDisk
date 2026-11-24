@@ -802,13 +802,19 @@
               }
               let forceClose = false;
               if (closeRes.still_running) {
+                if (closeRes.admin_required) {
+                  toast(T('结束该浏览器进程需要管理员权限，请以管理员身份运行轻盘后重试', 'Admin rights required to terminate this browser process'), 'warn', 5500);
+                  b.disabled = false;
+                  b.textContent = origLabel;
+                  return;
+                }
                 forceClose = await confirm({
                   title: T('检测到后台驻留进程', 'Background processes still running'),
                   body: T(
-                    '浏览器仍有后台驻留进程未完全退出，是否强制结束以释放缓存文件锁？',
-                    'Background browser processes are still running. Force close them to release cache locks?'
+                    `浏览器仍有 ${Number(closeRes.remaining_count) || 1} 个后台驻留进程未完全退出，是否强制结束以释放缓存文件锁？`,
+                    `${Number(closeRes.remaining_count) || 1} background browser process(es) are still running. Force close them to release cache locks?`
                   ),
-                  ok: T('强制关闭并继续清理', 'Force close & retry'),
+                  okText: T('强制关闭并继续清理', 'Force close & retry'),
                   danger: true
                 });
               }
@@ -816,7 +822,10 @@
                 if (forceClose) {
                   ctrl && ctrl.setText(T('正在强制结束残留进程…', 'Force closing remaining processes…'));
                   ctrl && ctrl.setProgress(25);
-                  await API.engine('process.close', { name: act.proc, force: true });
+                  const forceRes = await API.engine('process.close', { name: act.proc, force: true, confirm_sensitive: true });
+                  if (forceRes && forceRes.still_running) {
+                    toast(forceRes.message || T('仍有残留进程未能彻底结束，部分缓存可能继续被占用', 'Some processes remain running; locks may persist'), 'warn', 5000);
+                  }
                 }
                 ctrl && ctrl.setText(T('正在重新清理被占用的缓存…', 'Retrying cache cleanup…'));
                 ctrl && ctrl.setProgress(60);

@@ -177,15 +177,17 @@
     return { el: box, close };
   }
 
-  function confirmBox({ title, body, ok = T('确定', 'OK'), cancel = T('取消', 'Cancel'), danger = false }) {
+  function confirmBox({ title, body, ok, okText, cancel, cancelText, danger = false }) {
+    const okLabel = ok || okText || T('确定', 'OK');
+    const cancelLabel = cancel || cancelText || T('取消', 'Cancel');
     return new Promise((resolve) => {
       let settled = false;
       const m = modal({
         title: title || T('确认操作', 'Confirm'),
         body: body || '',
         buttons: [
-          { id: 'cancel', label: cancel, kind: 'ghost' },
-          { id: 'ok', label: ok, kind: danger ? 'danger' : 'primary' }
+          { id: 'cancel', label: cancelLabel, kind: 'ghost' },
+          { id: 'ok', label: okLabel, kind: danger ? 'danger' : 'primary' }
         ],
         onClose: (v) => { if (!settled) { settled = true; resolve(v === 'ok'); } }
       });

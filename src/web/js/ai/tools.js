@@ -835,7 +835,10 @@
             processes: { page: 'apps', tab: 'procs' },
             procs: { page: 'apps', tab: 'procs' },
             startup: { page: 'apps', tab: 'startup' },
-            footprint: { page: 'apps', tab: 'footprint' }
+            footprint: { page: 'apps', tab: 'footprint' },
+            overview: { page: 'apps', tab: 'footprint' },
+            resources: { page: 'apps', tab: 'footprint' },
+            monitor: { page: 'apps', tab: 'footprint' }
           };
           const mapped = ALIASES[rawPage] || { page: rawPage };
           const page = mapped.page;

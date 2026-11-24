@@ -3543,6 +3543,141 @@ class TestSystemPerformance(EngineCase):
         r3 = self.rpc_ok("search.index", {"roots": [dir_a, dir_b], "reuse": True, "full": False})
         self.assertTrue(r3.get("reused"))
 
+    def test_process_close_truthful_verification_real_subprocess_and_guards(self):
+        """红队回归：无窗后台进程优雅关闭绝不假报成功、强制终止真实消灭进程、PID 绕过与轻盘自身保护生效、空格进程名放行。"""
+        import subprocess
+        import sys as _sys
+        import tidy as T
+
+        # 1. 启动一个真实无顶层窗口的后台子进程（精确复现托盘/无窗 ChatGPT.exe 场景）
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        child = subprocess.Popen(
+            [_sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=no_win,
+        )
+        try:
+            # 1a. 非强制优雅关闭无窗进程：后端必须如实返回 closed=False, still_running=True，绝不假成功
+            r_grace = self.rpc_ok("process.close", {"pid": child.pid, "force": False})
+            self.assertTrue(r_grace["ok"])
+            self.assertTrue(r_grace["was_running"])
+            self.assertFalse(r_grace["closed"])
+            self.assertTrue(r_grace["still_running"])
+            self.assertEqual(r_grace["remaining_count"], 1)
+            self.assertIsNone(child.poll(), "非强制关闭无窗子进程时子进程应仍存活")
+
+            # 1b. 强制终止整棵进程树：后端必须真实消灭进程并核验 closed=True, still_running=False
+            r_force = self.rpc_ok("process.close", {"pid": child.pid, "force": True})
+            self.assertTrue(r_force["ok"])
+            self.assertTrue(r_force["closed"])
+            self.assertFalse(r_force["still_running"])
+            self.assertEqual(r_force["remaining_count"], 0)
+            self.assertIsNotNone(child.wait(timeout=3), "强制终止后真实子进程必须已退出")
+
+            # 1c. 再次关闭已退出 PID：应如实返回 was_running=False
+            r_gone = self.rpc_ok("process.close", {"pid": child.pid, "force": True})
+            self.assertFalse(r_gone["was_running"])
+            self.assertFalse(r_gone["closed"])
+            self.assertFalse(r_gone["still_running"])
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=3)
+
+        # 2. PID 路径同样拦截系统核心进程与轻盘自身引擎进程（杜绝传 PID 绕过白名单）
+        r_self = self.rpc("process.close", {"pid": self.engine.proc.pid, "force": True})
+        self.assertFalse(r_self["ok"])
+        self.assertIn("禁止关闭", r_self["error"])
+
+        for protected_name in ("tidy-assistant.exe", "整理助手引擎.exe"):
+            r_p = self.rpc("process.close", {"name": protected_name, "force": True})
+            self.assertFalse(r_p["ok"])
+            self.assertIn("禁止关闭", r_p["error"])
+
+        # 3. 合法含空格与括号的应用进程名（如 Clawd on Desk.exe）不得被正则误杀
+        r_space = self.rpc_ok("process.close", {"name": "My Test App (x64) Not Running.exe", "force": False})
+        self.assertTrue(r_space["ok"])
+        self.assertFalse(r_space["was_running"])
+
+        # 4. 微信 4.0（weixin.exe）同样触发本地数据库保护二次确认
+        r_wx = self.rpc_ok("process.close", {"name": "weixin.exe", "confirm_sensitive": False})
+        self.assertFalse(r_wx["ok"])
+        self.assertTrue(r_wx.get("need_confirm"))
+
+        # 5. 验证 process.list 暴露 self_protected_count / is_self 字段
+        r_list = self.rpc_ok("process.list", {"aggregate": True})
+        self.assertGreater(len(r_list["items"]), 0)
+        self.assertIn("is_self", r_list["items"][0])
+        self.assertIn("self_protected_count", r_list["items"][0])
+
+    def test_startup_security_guards_and_lnk_and_desktop_ini(self):
+        """红队回归：startup.list 屏蔽 desktop.ini、统计口径一致、HKLM32 对接 Run32、越界路径/注册表键拦截与 PATH 解析。"""
+        import tidy as T
+
+        # 1. desktop.ini / thumbs.db 绝不出现在自启动列表，且 enabled + disabled + broken == total
+        res = self.rpc_ok("startup.list")
+        for it in res["items"]:
+            self.assertNotIn(os.path.basename(it.get("file_path") or "").lower(), ("desktop.ini", "thumbs.db"))
+            self.assertNotEqual((it.get("name") or "").lower(), "desktop")
+        self.assertEqual(res["enabled_count"] + res["disabled_count"] + res["broken_count"], res["total"])
+
+        # 2. HKLM32 必须映射到 64 位视图 StartupApproved\Run32（对齐任务管理器）
+        h_spec, sub_spec = T._startup_approved_reg_spec("HKLM32", is_folder=False)
+        self.assertEqual(h_spec, "HKLM64")
+        self.assertTrue(sub_spec.endswith(r"StartupApproved\Run32"))
+
+        # 3. 越界路径、desktop.ini、非法注册表键与不存在的 Run 项必须被严格拒绝
+        r_bad_file = self.rpc("startup.delete", {
+            "name": "notepad", "source_type": "folder", "file_path": r"C:\Windows\notepad.exe"
+        })
+        self.assertFalse(r_bad_file["ok"])
+        self.assertIn("不在系统开机启动目录内", r_bad_file["error"])
+
+        r_desk = self.rpc("startup.toggle", {
+            "name": "desktop", "source_type": "folder",
+            "file_path": os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\desktop.ini"),
+            "enabled": False
+        })
+        self.assertFalse(r_desk["ok"])
+        self.assertIn("禁止", r_desk["error"])
+
+        r_bad_key = self.rpc("startup.delete", {
+            "name": "Foo", "source_type": "registry", "hive": "HKCU",
+            "key": r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+        })
+        self.assertFalse(r_bad_key["ok"])
+        self.assertIn("仅允许删除系统标准自启动注册表项", r_bad_key["error"])
+
+        r_ghost = self.rpc("startup.toggle", {
+            "name": "TidyGhostNeverExists_987654", "source_type": "registry",
+            "hive": "HKCU", "enabled": False
+        })
+        self.assertFalse(r_ghost["ok"])
+        self.assertIn("未在", r_ghost["error"])
+
+        # 4. PATH 裸命令（如 notepad.exe）应解析为真实存在路径，不误判失效项
+        resolved_np = T._parse_cmd_exe("notepad.exe /A")
+        self.assertTrue(resolved_np and os.path.isfile(resolved_np), resolved_np)
+
+    def test_system_performance_pdh_and_nic_dedup_stability(self):
+        """红队回归：system.performance 连续两次采样不触发 ctypes 类型冲突、不产生假百 GB/s 尖峰且磁盘总计口径一致。"""
+        import time as _time
+        p1 = self.rpc_ok("system.performance", {})
+        _time.sleep(0.15)
+        p2 = self.rpc_ok("system.performance", {})
+        for p in (p1, p2):
+            self.assertLess(p["disk_io"]["read_bps"], 20 * 1024 ** 3, "磁盘读速异常尖峰")
+            self.assertLess(p["disk_io"]["write_bps"], 20 * 1024 ** 3, "磁盘写速异常尖峰")
+            self.assertGreaterEqual(p["network_io"]["in_bps"], 0)
+            self.assertGreaterEqual(p["network_io"]["out_bps"], 0)
+            self.assertEqual(p["disk_summary"]["total"], sum(d["total"] for d in p["drives"]))
+            for d in p["drives"]:
+                self.assertIn("label", d)
+                self.assertIn("drive_type", d)
+                self.assertIn(d["drive_type"], ("fixed", "removable"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

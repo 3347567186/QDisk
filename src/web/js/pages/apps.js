@@ -35,7 +35,7 @@
     procView: 'all',
     procPage: 1,
 
-    // 空间画像 Tab
+    // 资源概览 Tab
     perfSamples: [],
     perfData: null,
 
@@ -536,7 +536,7 @@
 
 
     /* ================================================================
-       顶级领域分类 Tab 切换器：严格物理隔离【软件本体】/【开机自启动】/【空间画像】
+       顶级领域分类 Tab 切换器：严格物理隔离【已安装程序】/【开机自启】/【后台进程】/【资源概览】
        ================================================================ */
     let currentTab = 'apps';
 
@@ -554,7 +554,7 @@
     const tabAppsBtn = makeTabBtn('apps', 'apps', '已安装程序', 'Installed Apps');
     const tabStartupBtn = makeTabBtn('startup', 'spark', '开机自启', 'Startup Apps');
     const tabProcsBtn = makeTabBtn('procs', 'scan', '后台进程', 'Running Procs');
-    const tabFootprintBtn = makeTabBtn('footprint', 'chart', '空间画像', 'Space Footprint');
+    const tabFootprintBtn = makeTabBtn('footprint', 'chart', '资源概览', 'Resource Overview');
 
     function setTabBadge(btnEl, n) {
       if (!btnEl || !btnEl._badge) return;
@@ -577,7 +577,7 @@
     /* 面板内【问助手】入口（Tab 感知上下文） */
     let isMounted = true;
     const topAskBtn = UI.askBtn({
-      title: T('让助手分析已安装软件、开机自启与磁盘空间画像', 'Ask AI about apps, startup items, and space footprint'),
+      title: T('让助手分析已安装软件、开机自启、后台进程与系统资源概览', 'Ask AI about apps, startup items, processes, and system resources'),
       ctx: () => {
         if (currentTab === 'startup') {
           return {
@@ -585,7 +585,7 @@
             tool: '开机自启动',
             tab: 'startup',
             count: StartupState.items.length,
-            note: `共 ${StartupState.items.length} 个自启动项（已启用 ${StartupState.items.filter((i) => i.enabled).length}，失效 ${StartupState.items.filter((i) => !i.exists).length}）`
+            note: `共 ${StartupState.items.length} 个自启动项（已启用 ${StartupState.items.filter((i) => i.enabled && i.exists).length}，失效 ${StartupState.items.filter((i) => !i.exists).length}）`
           };
         }
         if (currentTab === 'procs') {
@@ -603,13 +603,17 @@
             return Object.assign({}, it, { size: sz });
           }).filter((it) => (it.size || 0) > 0);
           const total = valid.reduce((sum, it) => sum + (it.size || 0), 0);
+          const p = PerfState.perfData;
+          const perfNote = p
+            ? `CPU ${(p.cpu && p.cpu.percent) || 0}% · 内存 ${(p.memory && p.memory.percent) || 0}% · 已测算 ${valid.length} 款软件`
+            : `已测算 ${valid.length} 款软件的磁盘空间占用`;
           return {
             page: '应用与自启',
-            tool: '磁盘空间画像',
+            tool: '系统资源概览',
             tab: 'footprint',
             count: S.items.length,
             size: fmtBytes(total),
-            note: `已测算 ${valid.length} 款软件的磁盘空间占用`
+            note: perfNote
           };
         }
         return {
@@ -668,16 +672,23 @@
 
     // 状态分类按钮与来源范围按钮
     const startupViewBtns = {};
+    function setStartupView(kind) {
+      const valid = ['all', 'enabled', 'disabled', 'broken'].includes(kind) ? kind : 'all';
+      StartupState.view = valid;
+      GlobalAppsCache.startupView = valid;
+      Object.entries(startupViewBtns).forEach(([k, el]) => el.classList.toggle('active', k === valid));
+      StartupState.page = 1;
+      GlobalAppsCache.startupPage = 1;
+      applyStartupFilter();
+    }
+
     function startupViewBtn(kind, zh, en) {
       const b = h('button', {
         class: 'chip' + (StartupState.view === kind ? ' active' : ''),
         type: 'button',
         onclick: () => {
           if (StartupState.view === kind) return;
-          StartupState.view = kind;
-          Object.entries(startupViewBtns).forEach(([k, el]) => el.classList.toggle('active', k === kind));
-          StartupState.page = 1;
-          applyStartupFilter();
+          setStartupView(kind);
         }
       }, T(zh, en));
       startupViewBtns[kind] = b;
@@ -692,8 +703,10 @@
         onclick: () => {
           if (StartupState.scope === scope) return;
           StartupState.scope = scope;
+          GlobalAppsCache.startupScope = scope;
           Object.entries(startupScopeBtns).forEach(([k, el]) => el.classList.toggle('active', k === scope));
           StartupState.page = 1;
+          GlobalAppsCache.startupPage = 1;
           applyStartupFilter();
         }
       }, T(zh, en));
@@ -756,9 +769,13 @@
       h('span', { class: 'spacer' }),
       h('span', { class: 'muted small' }, T('每页', 'Per page')),
       UI.pageSizePick((n) => {
-        PAGE_SIZE = n;
-        StartupState.page = 1;
-        applyStartupFilter();
+        if (window.App && typeof App.setPageSize === 'function') {
+          App.setPageSize(n);
+        } else {
+          PAGE_SIZE = n;
+          StartupState.page = 1;
+          applyStartupFilter();
+        }
       })
     );
 
@@ -883,6 +900,11 @@
       const msg = (err && (err.message || err.error)) || String(err || '');
       const isDenied = msg.includes('管理员权限') || msg.includes('拒绝访问') || msg.includes('WinError 5') || (err && err.code === 'admin_required');
       if (isDenied) {
+        if (S.isAdmin) {
+          toast(T(`当前已是管理员模式，但${actionName || '该操作'}仍被系统安全策略（TrustedInstaller/ACL）拒绝`,
+            `Already elevated as Admin, yet ${actionName || 'this action'} was denied by system ACL/TrustedInstaller`), 'error', 5500);
+          return true;
+        }
         const goAdmin = await confirm({
           title: T('需要管理员权限', 'Administrator Privileges Required'),
           body: T(`${actionName || '此操作'}涉及系统级（HKLM）注册表或系统启动目录，需要以管理员身份运行才能修改。\n\n是否立即以管理员身份重启轻盘？`,
@@ -895,6 +917,48 @@
         return true;
       }
       return false;
+    }
+
+    const startupToggling = new Set();
+    async function toggleStartupItem(it, btnEl) {
+      if (!it) return;
+      const lockKey = it.id || (it.source_type + ':' + it.name);
+      if (startupToggling.has(lockKey)) return;
+      startupToggling.add(lockKey);
+      if (btnEl) btnEl.disabled = true;
+      try {
+        const r = await API.engine('startup.toggle', {
+          name: it.name,
+          source_type: it.source_type,
+          hive: it.hive,
+          file_path: it.file_path,
+          enabled: !it.enabled
+        });
+        if (r && r.ok) {
+          it.enabled = !it.enabled;
+          if (r.new_file_path) {
+            it.file_path = r.new_file_path;
+            it.command = r.new_file_path;
+            const leaf = String(r.new_file_path).split(/[\\/]/).pop() || '';
+            if (leaf) it.id = `folder_${it.scope || 'user'}_${leaf}`;
+            // 去重：若目录内此前同时存在同名 .lnk 与 .lnk.disabled，清理已被覆盖的旧重复行
+            const normNew = String(r.new_file_path).toLowerCase();
+            StartupState.items = StartupState.items.filter((other) => other === it || String(other.file_path || '').toLowerCase() !== normNew);
+            GlobalAppsCache.startup = StartupState.items;
+          }
+          it.status = !it.exists ? 'broken' : (it.enabled ? 'enabled' : 'disabled');
+          toast(T(`已${it.enabled ? '启用' : '禁用'}自启动项：${it.name}`, `${it.enabled ? 'Enabled' : 'Disabled'} ${it.name}`), 'ok');
+          applyStartupFilter();
+        } else {
+          toast((r && (r.error || r.message)) || T('切换自启动状态失败', 'Failed to toggle startup status'), 'error');
+        }
+      } catch (e) {
+        const handled = await handleStartupAdminError(e, T('切换自启动状态', 'Toggle startup status'));
+        if (!handled) toast(errText(e), 'error');
+      } finally {
+        startupToggling.delete(lockKey);
+        if (btnEl) btnEl.disabled = false;
+      }
     }
 
     function renderStartupTable() {
@@ -956,29 +1020,7 @@
               const acts = [];
               if (it.exists) {
                 const bToggle = iconBtn(it.enabled ? '禁用' : '启用', it.enabled ? 'Disable' : 'Enable',
-                  it.enabled ? 'close' : 'check', async () => {
-                    bToggle.disabled = true;
-                    try {
-                      const r = await API.engine('startup.toggle', {
-                        name: it.name,
-                        source_type: it.source_type,
-                        hive: it.hive,
-                        file_path: it.file_path,
-                        enabled: !it.enabled
-                      });
-                      if (r && r.ok) {
-                        it.enabled = !it.enabled;
-                        if (r.new_file_path) it.file_path = r.new_file_path;
-                        it.status = it.enabled ? 'enabled' : 'disabled';
-                        toast(T(`已${it.enabled ? '启用' : '禁用'}自启动项：${it.name}`, `${it.enabled ? 'Enabled' : 'Disabled'} ${it.name}`), 'ok');
-                        applyStartupFilter();
-                      }
-                    } catch (e) {
-                      const handled = await handleStartupAdminError(e, T('切换自启动状态', 'Toggle startup status'));
-                      if (!handled) toast(errText(e), 'error');
-                      bToggle.disabled = false;
-                    }
-                  });
+                  it.enabled ? 'close' : 'check', () => toggleStartupItem(it, bToggle));
                 acts.push(bToggle);
               }
               if (it.exe_path && it.exists) {
@@ -1031,27 +1073,7 @@
           it.exists ? {
             label: T(it.enabled ? '禁用自启动' : '启用自启动', it.enabled ? 'Disable' : 'Enable'),
             icon: it.enabled ? 'close' : 'check',
-            action: async () => {
-              try {
-                const r = await API.engine('startup.toggle', {
-                  name: it.name,
-                  source_type: it.source_type,
-                  hive: it.hive,
-                  file_path: it.file_path,
-                  enabled: !it.enabled
-                });
-                if (r && r.ok) {
-                  it.enabled = !it.enabled;
-                  if (r.new_file_path) it.file_path = r.new_file_path;
-                  it.status = it.enabled ? 'enabled' : 'disabled';
-                  toast(T(`已${it.enabled ? '启用' : '禁用'}自启动项：${it.name}`, `${it.enabled ? 'Enabled' : 'Disabled'} ${it.name}`), 'ok');
-                  applyStartupFilter();
-                }
-              } catch (err) {
-                const handled = await handleStartupAdminError(err, T('切换自启动状态', 'Toggle startup status'));
-                if (!handled) toast(errText(err), 'error');
-              }
-            }
+            action: () => toggleStartupItem(it, null)
           } : null,
           it.exe_path && it.exists ? {
             label: T('在软件内定位文件', 'Locate in app'),
@@ -1125,6 +1147,7 @@
 
       let cleaned = 0;
       let denied = 0;
+      let otherFailed = 0;
       for (const it of brokenList) {
         try {
           await API.engine('startup.delete', {
@@ -1139,21 +1162,25 @@
           const msg = (e && (e.message || e.error)) || String(e || '');
           if (msg.includes('管理员权限') || msg.includes('拒绝访问') || msg.includes('WinError 5') || (e && e.code === 'admin_required')) {
             denied += 1;
+          } else {
+            otherFailed += 1;
           }
         }
       }
       if (denied > 0) {
         const promptText = cleaned > 0
-          ? T(`已成功清理 ${cleaned} 项失效项，其余 ${denied} 项位于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启轻盘继续清理？`,
-              `Cleaned ${cleaned} items. Remaining ${denied} items are in HKLM registry.\n\nRestart QDisk as admin to clean?`)
-          : T(`清理失败：${denied} 项失效项属于系统级（HKLM）注册表，需要管理员权限。\n\n是否以管理员身份重启轻盘？`,
-              `Failed: ${denied} items are in HKLM registry.\n\nRestart QDisk as admin?`);
+          ? T(`已成功清理 ${cleaned} 项失效项，其余 ${denied} 项位于系统级（HKLM）注册表，需要管理员权限${otherFailed ? `（另有 ${otherFailed} 项清理失败）` : ''}。\n\n是否以管理员身份重启轻盘继续清理？`,
+              `Cleaned ${cleaned} items. Remaining ${denied} items are in HKLM registry${otherFailed ? ` (${otherFailed} failed)` : ''}.\n\nRestart QDisk as admin to clean?`)
+          : T(`清理失败：${denied} 项失效项属于系统级（HKLM）注册表，需要管理员权限${otherFailed ? `（另有 ${otherFailed} 项清理失败）` : ''}。\n\n是否以管理员身份重启轻盘？`,
+              `Failed: ${denied} items are in HKLM registry${otherFailed ? ` (${otherFailed} failed)` : ''}.\n\nRestart QDisk as admin?`);
         const goAdmin = await confirm({
           title: T('需要管理员权限', 'Admin Required'),
           body: promptText,
           okText: T('以管理员身份重启', 'Restart as admin')
         });
         if (goAdmin) doRestartAsAdmin();
+      } else if (otherFailed > 0) {
+        toast(T(`已清理 ${fmtCount(cleaned)} 项，另有 ${fmtCount(otherFailed)} 项清理失败`, `Cleaned ${fmtCount(cleaned)}, ${fmtCount(otherFailed)} failed`), 'warn');
       } else if (cleaned > 0) {
         toast(T(`已清理 ${fmtCount(cleaned)} 项失效启动残留`, `Cleaned ${fmtCount(cleaned)} broken items`), 'ok');
       }
@@ -1195,16 +1222,23 @@
     const btnRefreshProc = btn('刷新快照', 'Refresh', 'ghost sm', 'refresh', () => loadProcs(true));
 
     const procViewBtns = {};
+    function setProcView(kind) {
+      const valid = ['all', 'apps', 'system'].includes(kind) ? kind : 'all';
+      ProcState.view = valid;
+      GlobalAppsCache.procView = valid;
+      Object.entries(procViewBtns).forEach(([k, el]) => el.classList.toggle('active', k === valid));
+      ProcState.page = 1;
+      GlobalAppsCache.procPage = 1;
+      applyProcFilter();
+    }
+
     function procViewBtn(kind, zh, en) {
       const b = h('button', {
         class: 'chip' + (ProcState.view === kind ? ' active' : ''),
         type: 'button',
         onclick: () => {
           if (ProcState.view === kind) return;
-          ProcState.view = kind;
-          Object.entries(procViewBtns).forEach(([k, el]) => el.classList.toggle('active', k === kind));
-          ProcState.page = 1;
-          applyProcFilter();
+          setProcView(kind);
         }
       }, T(zh, en));
       procViewBtns[kind] = b;
@@ -1243,9 +1277,13 @@
     const statProcMem = h('span', { class: 'badge accent', title: T('当前进程总物理内存工作集', 'Total RAM') }, '内存 0 B');
 
     const procPagePicker = UI.pageSizePick(PAGE_SIZE, [15, 30, 60, 100, 200], (n) => {
-      PAGE_SIZE = n;
-      ProcState.page = 1;
-      applyProcFilter();
+      if (window.App && typeof App.setPageSize === 'function') {
+        App.setPageSize(n);
+      } else {
+        PAGE_SIZE = n;
+        ProcState.page = 1;
+        applyProcFilter();
+      }
     });
 
     const procToolbar1 = h('div', { class: 'toolbar row wrap', style: { gap: '8px', alignItems: 'center' } },
@@ -1313,8 +1351,15 @@
     procsCard.style.display = 'none';
 
     let procLoadP = null;
+    let procReqSeq = 0;
     async function loadProcs(force, silent = false) {
-      if (ProcState.loading && procLoadP) return procLoadP;
+      if (ProcState.loading && procLoadP) {
+        if (!force) return procLoadP;
+        // 强制刷新（如刚结束完进程）绝不复用旧的在途快照：等在途结束后立即发一次最新快照
+        try { await procLoadP; } catch (_) {}
+        if (!isMounted) return;
+      }
+      const mySeq = ++procReqSeq;
       ProcState.loading = true;
       if (!silent && (force || !ProcState.items.length)) {
         procTableBox.innerHTML = '';
@@ -1324,7 +1369,7 @@
       procLoadP = (async () => {
         try {
           const res = await API.engine('process.list', { aggregate: true });
-          if (!isMounted) return;
+          if (!isMounted || mySeq !== procReqSeq) return;
           ProcState.items = Array.isArray(res && res.items) ? res.items : [];
           ProcState.totalMemory = Number(res && res.total_memory) || 0;
           ProcState.rawCount = Number(res && res.raw_count) || ProcState.items.length;
@@ -1334,14 +1379,17 @@
           if (!silent) ProcState.page = 1;
           applyProcFilter();
           renderProcVisual();
+          if (currentTab === 'footprint') renderFootprint();
         } catch (err) {
-          if (!silent) {
+          if (!silent && isMounted && mySeq === procReqSeq) {
             procTableBox.innerHTML = '';
             procTableBox.appendChild(empty(T('读取进程列表失败', 'Failed to read processes'), (err && err.message) || String(err)));
           }
         } finally {
-          ProcState.loading = false;
-          procLoadP = null;
+          if (mySeq === procReqSeq) {
+            ProcState.loading = false;
+            procLoadP = null;
+          }
         }
       })();
       return procLoadP;
@@ -1398,10 +1446,10 @@
       const total = ProcState.items.length;
       const apps = ProcState.items.filter((it) => !it.is_system).length;
       const sys = ProcState.items.filter((it) => it.is_system).length;
-      statProcAll.textContent = `共 ${fmtCount(total)} 个应用 (${ProcState.rawCount} 进程)`;
-      statProcApps.textContent = `后台应用 ${fmtCount(apps)}`;
-      statProcSys.textContent = `系统保护 ${fmtCount(sys)}`;
-      statProcMem.textContent = `总内存 ${fmtSize(ProcState.totalMemory)}`;
+      statProcAll.textContent = T(`共 ${fmtCount(total)} 个应用 (${ProcState.rawCount} 进程)`, `${fmtCount(total)} apps (${ProcState.rawCount} procs)`);
+      statProcApps.textContent = T(`后台应用 ${fmtCount(apps)}`, `Apps ${fmtCount(apps)}`);
+      statProcSys.textContent = T(`系统保护 ${fmtCount(sys)}`, `Protected ${fmtCount(sys)}`);
+      statProcMem.textContent = T(`总内存 ${fmtSize(ProcState.totalMemory)}`, `Total RAM ${fmtSize(ProcState.totalMemory)}`);
       updateTabBadges();
 
       const pages = Math.max(1, Math.ceil(ProcState.filtered.length / PAGE_SIZE));
@@ -1718,43 +1766,147 @@
       procVisualBox.appendChild(visualGrid);
     }
 
-    async function closeProcOne(it, force) {
-      if (!it) return;
-      if (it.is_system) {
-        toast(T('系统核心组件受保护，禁止关闭', 'System component is protected'), 'warn');
+    const closingProcs = new Set();
+
+    async function handleProcAdminPrompt(procName, remaining) {
+      if (!isMounted) return;
+      if (S.isAdmin) {
+        toast(
+          T(`当前已是管理员模式，但【${procName}】的剩余 ${remaining || 1} 个进程仍被系统拒绝访问（属于受保护内核/安全进程 PPL 或 SYSTEM 隔离服务，Windows 禁止外部强杀）`,
+            `Already elevated as Admin, yet ${remaining || 1} process(es) of "${procName}" are protected by Windows PPL/SYSTEM isolation.`),
+          'error',
+          6500
+        );
         return;
       }
-      const r = await busy(
-        () => API.engine('process.close', {
-          name: it.clean_name,
-          force: !!force,
-          confirm_sensitive: false
-        }),
-        T(`正在关闭进程【${it.name}】…`, `Closing process [${it.name}]…`),
-        'apps'
-      );
-      if (!r) return;
-      if (r.need_confirm) {
-        const ok = await UI.confirm({
-          title: T('敏感数据应用提示', 'Sensitive App Warning'),
-          body: r.warning + '\n\n' + T('确定要强制关闭该进程吗？', 'Are you sure you want to close it?'),
-          ok: T('强制关闭', 'Force close'),
-          danger: true
-        });
-        if (!ok) return;
-        const r2 = await busy(
+      const goAdmin = await confirm({
+        title: T('需要管理员权限', 'Administrator Privileges Required'),
+        body: T(`终止【${procName}】的剩余 ${remaining || 1} 个进程被系统拒绝访问，需要以管理员身份运行轻盘。\n\n是否立即以管理员身份重启轻盘？`,
+          `Access denied when closing remaining ${remaining || 1} process(es) of "${procName}". Administrator privileges are required.\n\nRestart QDisk as Administrator now?`),
+        okText: T('以管理员身份重启', 'Restart as admin')
+      });
+      if (goAdmin && isMounted) doRestartAsAdmin();
+    }
+
+    async function closeProcOne(it, force) {
+      if (!it) return null;
+      if (it.is_system) {
+        toast(it.is_self
+          ? T('这是轻盘自身正在运行的进程，受保护禁止关闭', 'This is QDisk itself and is protected')
+          : T('系统核心组件受保护，禁止关闭', 'System component is protected'), 'warn');
+        return null;
+      }
+      const lockKey = String(it.clean_name || it.name || '').toLowerCase();
+      if (!lockKey || closingProcs.has(lockKey)) return null;
+      closingProcs.add(lockKey);
+
+      try {
+        let usedForce = !!force;
+        let res = await busy(
           () => API.engine('process.close', {
-            name: it.clean_name,
-            force: true,
-            confirm_sensitive: true
+            name: it.clean_name || it.name,
+            force: usedForce,
+            confirm_sensitive: false
           }),
-          T(`正在强制关闭【${it.name}】…`, `Force closing [${it.name}]…`),
+          usedForce
+            ? T(`正在强制终止【${it.name}】及其子进程…`, `Force terminating [${it.name}]…`)
+            : T(`正在通知关闭【${it.name}】…`, `Closing process [${it.name}]…`),
           'apps'
         );
-        if (!r2) return;
+        if (!res || !isMounted) return res || null;
+
+        // 1. 敏感数据应用二次确认（微信/QQ 等）
+        if (res.need_confirm) {
+          const ok = await confirm({
+            title: T('敏感数据应用提示', 'Sensitive App Warning'),
+            body: (res.warning || '') + '\n\n' + T('确定要强制关闭该进程及其子进程吗？', 'Force terminate this process tree?'),
+            okText: T('强制关闭', 'Force close'),
+            danger: true
+          });
+          if (!ok || !isMounted) return res;
+          usedForce = true;
+          res = await busy(
+            () => API.engine('process.close', {
+              name: it.clean_name || it.name,
+              force: true,
+              confirm_sensitive: true
+            }),
+            T(`正在强制关闭【${it.name}】…`, `Force closing [${it.name}]…`),
+            'apps'
+          );
+          if (!res || !isMounted) return res || null;
+        }
+
+        // 2. 优雅关闭未退净：真实展示残留进程数，提供一键强制终止整棵进程树
+        if (res.still_running && !usedForce) {
+          if (res.admin_required) {
+            await handleProcAdminPrompt(it.name, res.remaining_count);
+            if (isMounted) await loadProcs(true);
+            return res;
+          }
+          const remCnt = Number(res.remaining_count) || Number(it.process_count) || 1;
+          const goForce = await confirm({
+            title: T(`【${it.name}】仍在后台运行`, `[${it.name}] is still running`),
+            body: T(
+              `${res.message || `优雅关闭未能退出该应用，当前仍有 ${remCnt} 个后台进程在运行。`}\n\n（常见于最小化到系统托盘或 Electron/Chromium 多进程应用）\n\n是否立即强制终止全部 ${remCnt} 个进程及其子进程？`,
+              `${res.message || `Graceful close did not terminate this app; ${remCnt} background process(es) are still running.`}\n\nForce terminate all ${remCnt} process(es) and child processes now?`
+            ),
+            okText: T(`强制终止 (${remCnt})`, `Force terminate (${remCnt})`),
+            danger: true
+          });
+          if (!isMounted) return res;
+          if (!goForce) {
+            toast(T(`已取消强制结束，【${it.name}】仍有 ${remCnt} 个进程在后台运行`, `Cancelled; ${remCnt} process(es) of [${it.name}] still running`), 'warn');
+            await loadProcs(true);
+            return res;
+          }
+          usedForce = true;
+          res = await busy(
+            () => API.engine('process.close', {
+              name: it.clean_name || it.name,
+              force: true,
+              confirm_sensitive: true
+            }),
+            T(`正在强制终止【${it.name}】整棵进程树…`, `Force terminating [${it.name}] process tree…`),
+            'apps'
+          );
+          if (!res || !isMounted) return res || null;
+        }
+
+        // 3. 终态诚实反馈：仅当后端实测 remaining_count === 0 且未复生（closed === true）才报成功
+        if (res.closed) {
+          const killed = Number(res.terminated_count) || Number(res.initial_count) || 1;
+          const selfSkipped = Number(res.skipped_self_count) || 0;
+          const extra = selfSkipped > 0
+            ? T(`（已自动保护轻盘自身 ${selfSkipped} 个进程）`, ` (${selfSkipped} QDisk process(es) protected)`)
+            : '';
+          toast(T(`已彻底关闭【${it.name}】（结束 ${killed} 个进程）${extra}`, `Closed [${it.name}] (${killed} process(es) terminated)${extra}`), 'ok');
+        } else if (res.was_running === false && !res.still_running) {
+          toast(T(`【${it.name}】当前已不在运行`, `[${it.name}] is no longer running`), 'ok');
+        } else if (res.admin_required) {
+          await handleProcAdminPrompt(it.name, res.remaining_count);
+        } else if (res.respawned) {
+          const remCnt = Number(res.remaining_count) || 1;
+          toast(
+            T(`【${it.name}】已被终止，但立即被系统服务或守护程序重新拉起（当前仍有 ${remCnt} 个进程），建议在「开机自启」或系统服务中停用`,
+              `[${it.name}] was terminated but immediately respawned by a service/watchdog (${remCnt} running). Disable it in Startup or Services.`),
+            'warn',
+            6500
+          );
+        } else {
+          const remCnt = Number(res.remaining_count) || 1;
+          toast(
+            res.message || T(`未能彻底关闭【${it.name}】，仍有 ${remCnt} 个进程在运行`, `Failed to fully close [${it.name}]; ${remCnt} process(es) still running`),
+            'error',
+            5500
+          );
+        }
+
+        await loadProcs(true);
+        return res;
+      } finally {
+        closingProcs.delete(lockKey);
       }
-      toast(T(`已关闭进程【${it.name}】`, `Closed process [${it.name}]`), 'ok');
-      loadProcs(true);
     }
 
     function renderProcTable() {
@@ -1771,7 +1923,7 @@
           render: (it) => {
             const iconEl = appIcon(it);
             const countTag = it.process_count > 1
-              ? h('span', { class: 'badge', style: { marginLeft: '6px', flexShrink: '0' } }, `${it.process_count} 进程`)
+              ? h('span', { class: 'badge', style: { marginLeft: '6px', flexShrink: '0' } }, T(`${it.process_count} 进程`, `${it.process_count} procs`))
               : (it.pids && it.pids.length ? h('span', { class: 'badge neutral', style: { marginLeft: '6px', flexShrink: '0' } }, `PID ${it.pids[0]}`) : null);
 
             return h('div', { class: 'name', style: { minWidth: '0' } },
@@ -1819,10 +1971,16 @@
           width: '80px',
           className: 'col-type',
           render: (it) => {
+            if (it.is_self) {
+              return h('span', { class: 'tag system', style: { whiteSpace: 'nowrap' }, title: T('轻盘自身进程，受保护禁止关闭', 'QDisk self process (protected)') }, T('🛡️ 轻盘', '🛡️ QDisk'));
+            }
             if (it.is_system) {
               return h('span', { class: 'tag system', style: { whiteSpace: 'nowrap' }, title: T('Windows 系统核心与关键保护组件，严禁终止', 'Protected system component') }, T('🛡️ 系统', '🛡️ System'));
             }
-            return h('span', { class: 'tag user', style: { color: 'var(--c-accent, #3b82f6)', background: 'rgba(59, 130, 246, 0.1)', borderColor: 'rgba(59, 130, 246, 0.25)', whiteSpace: 'nowrap' }, title: T('用户态运行的第三方应用程序', 'User app') }, T('👤 应用', '👤 App'));
+            const selfNote = it.self_protected_count > 0
+              ? T(`用户态运行的应用（含轻盘自身 ${it.self_protected_count} 个进程，结束时自动跳过保护）`, `User app (${it.self_protected_count} QDisk process(es) auto-protected)`)
+              : T('用户态运行的第三方应用程序', 'User app');
+            return h('span', { class: 'tag user', style: { color: 'var(--c-accent, #3b82f6)', background: 'rgba(59, 130, 246, 0.1)', borderColor: 'rgba(59, 130, 246, 0.25)', whiteSpace: 'nowrap' }, title: selfNote }, T('👤 应用', '👤 App'));
           }
         },
         {
@@ -1832,10 +1990,14 @@
           align: 'right',
           className: 'col-actions',
           render: (it) => {
-            const bClose = btn(T('结束', 'Kill'), T('结束任务', 'Close task'), 'ghost danger sm', 'power', () => closeProcOne(it, false));
+            const bClose = btn('结束', 'End', 'ghost danger sm', 'power', () => closeProcOne(it, false));
             if (it.is_system) {
               bClose.disabled = true;
-              bClose.title = T('系统核心保护组件受系统级保护，禁止关闭', 'Protected system component');
+              bClose.title = it.is_self
+                ? T('轻盘自身运行进程受保护，禁止关闭', 'QDisk self process is protected')
+                : T('系统核心保护组件受系统级保护，禁止关闭', 'Protected system component');
+            } else if (it.self_protected_count > 0) {
+              bClose.title = T(`关闭外部进程（自动跳过轻盘自身的 ${it.self_protected_count} 个进程）`, `Close external processes (${it.self_protected_count} QDisk process(es) skipped)`);
             }
             const bFolder = iconBtn('在软件内定位', 'Locate in app', 'scan', () => {
               if (it.exe_path) openPath(it.exe_path);
@@ -1904,7 +2066,7 @@
     });
 
     /* ================================================================
-       TAB 4: 空间透视与系统画像 (Storage & System Performance Footprint)
+       TAB 4: 系统资源与存储概览 (Resource Overview & Storage Monitor)
        ================================================================ */
     const PerfState = {
       perfData: GlobalAppsCache.perfData || null,
@@ -1913,8 +2075,38 @@
         : [],
       liveTimer: null,
       isLive: true,
+      inFlight: false,
+      pendingForce: false,
+      error: '',
+      hoveredCharts: new Map(), // cardId -> lastMouseMoveMs（超 8s 自动过期，防 Alt+Tab 永远卡死）
       lastFetch: 0
     };
+
+    function isChartHovered(cardId) {
+      if (!cardId || !PerfState.hoveredCharts.has(cardId)) return false;
+      const ts = PerfState.hoveredCharts.get(cardId) || 0;
+      if (Date.now() - ts > 8000) {
+        PerfState.hoveredCharts.delete(cardId);
+        return false;
+      }
+      return true;
+    }
+
+    function cpuLoadLabel(pct) {
+      const n = Number(pct) || 0;
+      if (n > 70) return T('负载偏高', 'High load');
+      if (n >= 30) return T('正在运转', 'Active');
+      return T('负载平稳', 'Idle / Smooth');
+    }
+
+    function computeTimeAxisLabels(count) {
+      if (!count || count <= 1) return ['', '', '', T('实时', 'Live')];
+      const totalSec = Math.max(3, Math.round((count - 1) * 1.5));
+      const s1 = '-' + totalSec + 's';
+      const s2 = '-' + Math.max(2, Math.round(totalSec * 2 / 3)) + 's';
+      const s3 = '-' + Math.max(1, Math.round(totalSec / 3)) + 's';
+      return [s1, s2, s3, T('实时', 'Live')];
+    }
 
     const livePerfBadge = h('span', {
       class: 'chip ok sm',
@@ -1949,12 +2141,12 @@
     const btnPerfRefresh = btn('刷新快照', 'Refresh Snapshot', 'ghost sm', 'refresh', () => {
       fetchPerfSample(true);
       if (!S.items.length) loadApps(false);
-      if (!ProcState.items.length) loadProcs(false);
+      loadProcs(false, true);
     });
 
     const footprintCard = card(
       h('div', { class: 'card-title' },
-        h('h2', null, T('空间透视与系统画像', 'Storage & System Footprint')),
+        h('h2', null, T('系统资源与存储概览', 'System Resources & Storage')),
         h('span', { class: 'spacer' }),
         livePerfBadge,
         btnPerfRefresh
@@ -1965,11 +2157,21 @@
 
     async function fetchPerfSample(force) {
       if (!isMounted || (!PerfState.isLive && !force) || currentTab !== 'footprint') return;
+      if (PerfState.inFlight) {
+        if (force) PerfState.pendingForce = true;
+        return;
+      }
+      PerfState.inFlight = true;
       try {
         const isFirst = !PerfState.perfData;
+        const prevDriveSig = (PerfState.perfData && Array.isArray(PerfState.perfData.drives))
+          ? PerfState.perfData.drives.map((d) => d.drive).join('|')
+          : '';
         const data = await API.engine('system.performance', {});
         if (!isMounted || !data) return;
+        PerfState.error = '';
         PerfState.perfData = data;
+        PerfState.lastFetch = Date.now();
         const now = new Date();
         const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
         const memPct = Number(data.memory && data.memory.percent) || 0;
@@ -1994,13 +2196,26 @@
         }
         GlobalAppsCache.perfSamples = PerfState.samples.slice();
         GlobalAppsCache.perfData = PerfState.perfData;
-        if ((isFirst || force) && currentTab === 'footprint') {
+
+        const nextDriveSig = Array.isArray(data.drives) ? data.drives.map((d) => d.drive).join('|') : '';
+        const container = footprintCard.querySelector('.footprint-body');
+        const hasDom = !!(container && container.querySelector('#fp-kpi-mem-val'));
+        if ((isFirst || force || !hasDom || prevDriveSig !== nextDriveSig) && currentTab === 'footprint') {
           renderFootprint();
-        } else {
+        } else if (currentTab === 'footprint') {
           updateFootprintLiveView();
         }
       } catch (err) {
-        // 静默单次采样失败
+        if (!PerfState.perfData && currentTab === 'footprint') {
+          PerfState.error = errText(err);
+          renderFootprint();
+        }
+      } finally {
+        PerfState.inFlight = false;
+        if (PerfState.pendingForce && isMounted && currentTab === 'footprint') {
+          PerfState.pendingForce = false;
+          fetchPerfSample(true);
+        }
       }
     }
 
@@ -2013,6 +2228,7 @@
     }
 
     function stopLiveMonitoring() {
+      PerfState.hoveredCharts.clear();
       if (PerfState.liveTimer) {
         clearInterval(PerfState.liveTimer);
         PerfState.liveTimer = null;
@@ -2045,7 +2261,7 @@
         return `
           <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display: block;">
             <line x1="0" y1="${padTop + plotH}" x2="${W}" y2="${padTop + plotH}" stroke="var(--line)" stroke-width="1" />
-            <text x="${W / 2}" y="${H / 2}" fill="var(--text-3)" font-size="11" text-anchor="middle">正在采集动态样本…</text>
+            <text x="${W / 2}" y="${H / 2}" fill="var(--text-3)" font-size="11" text-anchor="middle">${T('正在采集动态样本…', 'Collecting samples…')}</text>
           </svg>
         `;
       }
@@ -2060,7 +2276,7 @@
       }
 
       const getX = (i) => {
-        if (count <= 1) return W / 2;
+        if (count <= 1) return W - 10;
         return (i / (count - 1)) * (W - 20) + 10;
       };
       const getY = (val) => padTop + (1.0 - Math.min(maxVal, Math.max(0, val || 0)) / maxVal) * plotH;
@@ -2073,7 +2289,7 @@
       const baseH = (padTop + plotH).toFixed(1);
 
       const lineA = `M ${ptsA.join(' L ')}`;
-      const areaA = `M ${firstX},${baseH} L ${ptsA.join(' L ')} L ${lastX},${baseH} Z`;
+      const areaA = count > 1 ? `M ${firstX},${baseH} L ${ptsA.join(' L ')} L ${lastX},${baseH} Z` : '';
       const lineB = `M ${ptsB.join(' L ')}`;
 
       const latest = samples[count - 1];
@@ -2093,9 +2309,9 @@
           <line x1="0" y1="${padTop + plotH * 0.5}" x2="${W}" y2="${padTop + plotH * 0.5}" stroke="var(--line)" stroke-dasharray="3 3" opacity="0.4" />
           <line x1="0" y1="${baseH}" x2="${W}" y2="${baseH}" stroke="var(--line)" opacity="0.8" />
 
-          <path d="${areaA}" fill="url(#${gradId})" />
-          <path d="${lineA}" fill="none" stroke="${colorA}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-          <path d="${lineB}" fill="none" stroke="${colorB}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" />
+          ${areaA ? `<path d="${areaA}" fill="url(#${gradId})" />` : ''}
+          ${count > 1 ? `<path d="${lineA}" fill="none" stroke="${colorA}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />` : ''}
+          ${count > 1 ? `<path d="${lineB}" fill="none" stroke="${colorB}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" />` : ''}
 
           <circle cx="${curX}" cy="${curYA}" r="3" fill="${colorA}" stroke="var(--surface)" stroke-width="1.5" />
           <circle cx="${curX}" cy="${curYB}" r="3" fill="${colorB}" stroke="var(--surface)" stroke-width="1.5" />
@@ -2114,7 +2330,7 @@
       `;
     }
 
-    // 绑定交互：鼠标滑过时动态展示光标、高亮样本点与悬浮数值（零布局位移 CLS 防护）
+    // 绑定交互：鼠标滑过时动态展示光标、高亮样本点与悬浮数值（悬停期间防实时轮询打断）
     function attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt) {
       const svg = cardEl.querySelector('svg');
       const crosshair = cardEl.querySelector('.chart-crosshair');
@@ -2144,10 +2360,11 @@
         maxVal = Math.max(1.0, maxVal * 1.25);
       }
 
-      const getX = (i) => (count <= 1 ? W / 2 : (i / (count - 1)) * (W - 20) + 10);
+      const getX = (i) => (count <= 1 ? W - 10 : (i / (count - 1)) * (W - 20) + 10);
       const getY = (val) => padTop + (1.0 - Math.min(maxVal, Math.max(0, val || 0)) / maxVal) * plotH;
 
       svg.onmousemove = (e) => {
+        if (cardEl.id) PerfState.hoveredCharts.set(cardEl.id, Date.now());
         const rect = svg.getBoundingClientRect();
         const mouseX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
         const ratio = rect.width > 0 ? mouseX / rect.width : 0;
@@ -2180,19 +2397,37 @@
           tipGroup.setAttribute('transform', `translate(${clampedX}, ${padTop})`);
         }
 
-        // 顶部文本保持精简，避免折行破坏卡片高度
         if (valEl) {
           valEl.textContent = defaultFmt(s);
         }
       };
 
-      svg.onmouseleave = () => {
+      const onLeave = () => {
+        if (cardEl.id) PerfState.hoveredCharts.delete(cardEl.id);
         crosshair.style.display = 'none';
-        if (valEl && samples.length) {
-          const latest = samples[samples.length - 1];
-          valEl.textContent = defaultFmt(latest);
+        const curSamples = PerfState.samples;
+        if (valEl && curSamples.length) {
+          valEl.textContent = defaultFmt(curSamples[curSamples.length - 1]);
         }
+        // 若悬停期间有新采样到达，移开后立刻追平最新曲线
+        if (currentTab === 'footprint') updateFootprintLiveView();
       };
+      svg.onmouseleave = onLeave;
+      cardEl.onmouseleave = onLeave;
+    }
+
+    function updateChartCardLive(cardEl, samples, keyA, keyB, colorA, colorB, maxFixed, gradId, unit, defaultFmt, compactFmt) {
+      if (!cardEl) return;
+      if (isChartHovered(cardEl.id)) return;
+      const latest = samples.length ? samples[samples.length - 1] : { memPct: 0, cpuPct: 0, diskR: 0, diskW: 0, netIn: 0, netOut: 0 };
+      const valEl = cardEl.querySelector('.chart-cur-val');
+      if (valEl) valEl.textContent = defaultFmt(latest);
+      const svgBox = cardEl.querySelector('.chart-svg-box');
+      if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, maxFixed, gradId);
+      const axisSpans = cardEl.querySelectorAll('.chart-time-axis span');
+      const labels = computeTimeAxisLabels(samples.length);
+      axisSpans.forEach((sp, idx) => { sp.textContent = labels[idx] || ''; });
+      attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt);
     }
 
     function updateFootprintLiveView() {
@@ -2203,11 +2438,9 @@
       const mem = p.memory || {};
       const cpu = p.cpu || {};
       const disk = p.disk_summary || {};
-      const drives = p.drives || [];
       const samples = PerfState.samples;
-      const latest = samples.length ? samples[samples.length - 1] : { memPct: 0, cpuPct: 0, diskR: 0, diskW: 0, netIn: 0, netOut: 0 };
 
-      // 更新顶部 4 KPI 卡片
+      // 更新顶部 KPI 卡片
       const elMemVal = container.querySelector('#fp-kpi-mem-val');
       const elMemBar = container.querySelector('#fp-kpi-mem-bar');
       const elMemSub = container.querySelector('#fp-kpi-mem-sub');
@@ -2224,7 +2457,7 @@
 
       if (elCpuVal) elCpuVal.textContent = (cpu.percent || 0).toFixed(1) + '%';
       if (elCpuBar) elCpuBar.style.width = Math.min(100, Math.max(0, cpu.percent || 0)) + '%';
-      if (elCpuFoot) elCpuFoot.textContent = (cpu.percent > 70 ? T('负载偏高', 'High load') : T('负载平稳', 'Stable load'));
+      if (elCpuFoot) elCpuFoot.textContent = cpuLoadLabel(cpu.percent);
 
       const elDiskVal = container.querySelector('#fp-kpi-disk-val');
       const elDiskBar = container.querySelector('#fp-kpi-disk-bar');
@@ -2236,46 +2469,72 @@
       if (elDiskSub) elDiskSub.textContent = T(`已用 ${fmtSize(disk.used || 0)} (${disk.percent || 0}%)`, `Used ${fmtSize(disk.used || 0)} (${disk.percent || 0}%)`);
       if (elDiskFoot) elDiskFoot.textContent = T(`可用 ${fmtSize(disk.free || 0)}`, `Free ${fmtSize(disk.free || 0)}`);
 
-      // 实时更新 3 张动态图表
-      const cardCpuRam = container.querySelector('#fp-chart-card-cpu-ram');
-      const cardDisk = container.querySelector('#fp-chart-card-disk');
-      const cardNet = container.querySelector('#fp-chart-card-net');
+      // 就地同步每个磁盘分区的实时已用/剩余水位（零 DOM 重建）
+      const drives = Array.isArray(p.drives) ? p.drives : [];
+      drives.forEach((d) => {
+        const letterUpper = (d.letter || 'C').toUpperCase();
+        const rowEl = container.querySelector(`#fp-drive-row-${letterUpper}`);
+        if (!rowEl) return;
+        const dUsed = Math.max(0, d.used || 0);
+        const dAppRaw = Number(rowEl.dataset.appSize) || 0;
+        const dAppSize = Math.min(dAppRaw, dUsed);
+        const dOtherSize = Math.max(0, dUsed - dAppSize);
+        const dFree = d.free || 0;
+        const dTotal = Math.max(1, d.total || 1);
+        const pctApp = Math.min(100, (dAppSize / dTotal) * 100);
+        const pctOther = Math.min(100 - pctApp, (dOtherSize / dTotal) * 100);
+        const pctFree = Math.max(0, 100 - pctApp - pctOther);
+        const usedEl = rowEl.querySelector('.fp-drive-used');
+        const otherEl = rowEl.querySelector('.fp-drive-other');
+        const freeEl = rowEl.querySelector('.fp-drive-free');
+        const bApp = rowEl.querySelector('.fp-bar-app');
+        const bOther = rowEl.querySelector('.fp-bar-other');
+        const bFree = rowEl.querySelector('.fp-bar-free');
+        if (usedEl) usedEl.textContent = T(`已用 ${fmtBytes(dUsed)} (${d.percent || 0}%)`, `Used ${fmtBytes(dUsed)} (${d.percent || 0}%)`);
+        if (otherEl) otherEl.textContent = T(`系统及其他: ${fmtBytes(dOtherSize)}`, `Other: ${fmtBytes(dOtherSize)}`);
+        if (freeEl) freeEl.textContent = T(`剩余 ${fmtBytes(dFree)}`, `Free ${fmtBytes(dFree)}`);
+        if (bApp) bApp.style.width = pctApp + '%';
+        if (bOther) bOther.style.width = pctOther + '%';
+        if (bFree) bFree.style.width = pctFree + '%';
+      });
 
-      if (cardCpuRam) {
-        const svgBox = cardCpuRam.querySelector('.chart-svg-box');
-        if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'memPct', 'cpuPct', 'var(--chart-1)', 'var(--chart-2)', 100, 'gradCpuRam');
-        attachChartCrosshair(cardCpuRam, samples, 'memPct', 'cpuPct', '%',
-          (s) => `内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`,
-          (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`
-        );
-      }
-
-      if (cardDisk) {
-        const svgBox = cardDisk.querySelector('.chart-svg-box');
-        if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'diskR', 'diskW', '#38bdf8', '#f43f5e', 0, 'gradDiskIO');
-        attachChartCrosshair(cardDisk, samples, 'diskR', 'diskW', 'MB/s',
-          (s) => `读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`,
-          (s) => `读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`
-        );
-      }
-
-      if (cardNet) {
-        const svgBox = cardNet.querySelector('.chart-svg-box');
-        if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, 'netIn', 'netOut', '#10b981', '#a855f7', 0, 'gradNetIO');
-        attachChartCrosshair(cardNet, samples, 'netIn', 'netOut', 'KB/s',
-          (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
-          (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`
-        );
-      }
+      // 实时更新 3 张动态图表与右上角实时读数
+      updateChartCardLive(
+        container.querySelector('#fp-chart-card-cpu-ram'),
+        samples, 'memPct', 'cpuPct', 'var(--chart-1)', 'var(--chart-2)', 100, 'gradCpuRam', '%',
+        (s) => T(`内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`, `RAM ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`),
+        (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`
+      );
+      updateChartCardLive(
+        container.querySelector('#fp-chart-card-disk'),
+        samples, 'diskR', 'diskW', '#38bdf8', '#f43f5e', 0, 'gradDiskIO', 'MB/s',
+        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M · W ${(s.diskW || 0).toFixed(1)}M`),
+        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M / W ${(s.diskW || 0).toFixed(1)}M`)
+      );
+      updateChartCardLive(
+        container.querySelector('#fp-chart-card-net'),
+        samples, 'netIn', 'netOut', '#10b981', '#a855f7', 0, 'gradNetIO', 'KB/s',
+        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
+        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`
+      );
     }
 
     function renderFootprint() {
       const container = footprintCard.querySelector('.footprint-body');
       if (!container) return;
+      PerfState.hoveredCharts.clear();
       container.innerHTML = '';
 
-      if (!PerfState.perfData) {
-        fetchPerfSample(true);
+      if (!PerfState.perfData && PerfState.error) {
+        const errBox = empty(
+          T('读取系统性能数据失败', 'Failed to read system performance'),
+          PerfState.error
+        );
+        errBox.appendChild(h('div', { style: { marginTop: '10px' } },
+          btn('重新采样', 'Retry', 'primary sm', 'refresh', () => fetchPerfSample(true))
+        ));
+        container.appendChild(errBox);
+        return;
       }
 
       const valid = S.items.map((it) => {
@@ -2349,7 +2608,7 @@
         'fp-kpi-mem-sub',
         fmtBytes(mem.used || 0) + ' / ' + fmtBytes(mem.total || 0),
         'fp-kpi-mem-foot',
-        T('可用 ', 'Free ') + fmtBytes(mem.available || 0)
+        T('可用 ', 'Avail ') + fmtBytes(mem.available || 0)
       );
 
       const cardCpu = createKpiCard(
@@ -2363,7 +2622,7 @@
         'fp-kpi-cpu-sub',
         (cpu.cores || 1) + T(' 个逻辑处理器', ' Cores'),
         'fp-kpi-cpu-foot',
-        (cpu.percent || 0) < 30 ? T('负载平稳', 'Idle/Smooth') : T('正在运转', 'Active')
+        cpuLoadLabel(cpu.percent)
       );
 
       const cardApps = createKpiCard(
@@ -2372,12 +2631,12 @@
         'fp-kpi-apps-val',
         fmtBytes(totalAppsSize),
         'fp-kpi-apps-bar',
-        disk.total ? (totalAppsSize / disk.total) * 100 : 0,
+        disk.total ? Math.min(100, (totalAppsSize / disk.total) * 100) : 0,
         'var(--chart-3)',
         'fp-kpi-apps-sub',
-        `已统计 ${valid.length} 款软件`,
+        T(`已统计 ${valid.length} 款软件`, `${valid.length} apps measured`),
         'fp-kpi-apps-foot',
-        totalAppsSize ? `Top 6 占 ${((topSum / totalAppsSize) * 100).toFixed(1)}%` : '—'
+        totalAppsSize ? T(`Top 6 占 ${((topSum / totalAppsSize) * 100).toFixed(1)}%`, `Top 6: ${((topSum / totalAppsSize) * 100).toFixed(1)}%`) : '—'
       );
 
       const cardDisk = createKpiCard(
@@ -2459,11 +2718,12 @@
         const svgBox = h('div', { class: 'chart-svg-box', style: { width: '100%', height: '76px' } });
         svgBox.innerHTML = buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, unit === '%' ? 100 : 0, gradId);
 
-        const timeAxis = h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-3)', marginTop: '2px' } },
-          h('span', null, '-45s'),
-          h('span', null, '-30s'),
-          h('span', null, '-15s'),
-          h('span', null, T('实时', 'Live'))
+        const axisLabels = computeTimeAxisLabels(samples.length);
+        const timeAxis = h('div', { class: 'row chart-time-axis', style: { justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-3)', marginTop: '2px' } },
+          h('span', null, axisLabels[0]),
+          h('span', null, axisLabels[1]),
+          h('span', null, axisLabels[2]),
+          h('span', null, axisLabels[3])
         );
 
         const cardEl = h('div', {
@@ -2489,7 +2749,7 @@
         T('内存', 'RAM'), 'CPU',
         'var(--chart-1)', 'var(--chart-2)',
         'memPct', 'cpuPct', '%',
-        (s) => `内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`,
+        (s) => T(`内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`, `RAM ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`),
         (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`,
         'gradCpuRam'
       );
@@ -2500,8 +2760,8 @@
         T('读', 'Read'), T('写', 'Write'),
         '#38bdf8', '#f43f5e',
         'diskR', 'diskW', 'MB/s',
-        (s) => `读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`,
-        (s) => `读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`,
+        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M · W ${(s.diskW || 0).toFixed(1)}M`),
+        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M / W ${(s.diskW || 0).toFixed(1)}M`),
         'gradDiskIO'
       );
 
@@ -2536,15 +2796,26 @@
         },
           h('div', { class: 'row', style: { alignItems: 'center', justifyContent: 'space-between' } },
             h('strong', { style: { fontSize: '13px', color: 'var(--text-1)' } }, T('全盘存储水位与应用分布', 'Disk Partitions & App Distribution')),
-            h('span', { class: 'muted small' }, `共 ${drives.length} 个逻辑驱动器`)
+            h('span', { class: 'muted small' }, T(`共 ${drives.length} 个本地驱动器`, `${drives.length} local drive(s)`))
           )
         );
 
         drives.forEach((d) => {
           const letterUpper = (d.letter || 'C').toUpperCase();
-          const dApps = valid.filter((it) => (it.install_path || '').toUpperCase().startsWith(letterUpper + ':'));
-          const dAppSize = dApps.reduce((s, it) => s + (it.size || 0), 0);
-          const dOtherSize = Math.max(0, (d.used || 0) - dAppSize);
+          // 去引号 + 规范安装路径去重，避免多条同目录注册表项重复叠加
+          const seenInstallDirs = new Set();
+          let dAppSizeRaw = 0;
+          valid.forEach((it) => {
+            const pNorm = String(it.install_path || '').trim().replace(/^"+|"+$/g, '').replace(/[\\/]+$/, '');
+            if (!pNorm || !pNorm.toUpperCase().startsWith(letterUpper + ':')) return;
+            const pKey = pNorm.toLowerCase();
+            if (seenInstallDirs.has(pKey)) return;
+            seenInstallDirs.add(pKey);
+            dAppSizeRaw += (it.size || 0);
+          });
+          const dUsed = Math.max(0, d.used || 0);
+          const dAppSize = Math.min(dAppSizeRaw, dUsed);
+          const dOtherSize = Math.max(0, dUsed - dAppSize);
           const dFree = d.free || 0;
           const dTotal = Math.max(1, d.total || 1);
 
@@ -2562,22 +2833,29 @@
               margin: '6px 0'
             }
           },
-            h('div', { style: { width: pctApp + '%', background: 'var(--chart-1)', transition: 'width 0.3s ease' }, title: `已安装软件: ${fmtBytes(dAppSize)}` }),
-            h('div', { style: { width: pctOther + '%', background: '#94a3b8', transition: 'width 0.3s ease' }, title: `系统与其他数据: ${fmtBytes(dOtherSize)}` }),
-            h('div', { style: { width: pctFree + '%', background: 'var(--line)', opacity: 0.4 }, title: `空闲可用: ${fmtBytes(dFree)}` })
+            h('div', { class: 'fp-bar-app', style: { width: pctApp + '%', background: 'var(--chart-1)', transition: 'width 0.3s ease' }, title: T(`已安装软件: ${fmtBytes(dAppSize)}`, `Installed apps: ${fmtBytes(dAppSize)}`) }),
+            h('div', { class: 'fp-bar-other', style: { width: pctOther + '%', background: '#94a3b8', transition: 'width 0.3s ease' }, title: T(`系统与其他数据: ${fmtBytes(dOtherSize)}`, `System & other: ${fmtBytes(dOtherSize)}`) }),
+            h('div', { class: 'fp-bar-free', style: { width: pctFree + '%', background: 'var(--line)', opacity: 0.4 }, title: T(`空闲可用: ${fmtBytes(dFree)}`, `Free: ${fmtBytes(dFree)}`) })
           );
 
-          const driveRow = h('div', { style: { display: 'flex', flexDirection: 'column' } },
+          const labelSuffix = d.label ? ` ${d.label}` : '';
+          const sysSuffix = d.is_system ? T(' (系统盘)', ' (System)') : (d.drive_type === 'removable' ? T(' (可移动)', ' (Removable)') : '');
+          const driveRow = h('div', {
+            id: `fp-drive-row-${letterUpper}`,
+            class: 'fp-drive-row',
+            dataset: { driveLetter: letterUpper, appSize: String(dAppSizeRaw) },
+            style: { display: 'flex', flexDirection: 'column' }
+          },
             h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '12px' } },
               h('div', { class: 'row', style: { alignItems: 'center', gap: '6px' } },
                 icon('folder', 14),
-                h('strong', { style: { color: 'var(--text-1)' } }, d.drive + (d.is_system ? ' (系统盘)' : '')),
-                h('span', { class: 'muted small' }, `已用 ${fmtBytes(d.used || 0)} (${d.percent || 0}%)`)
+                h('strong', { style: { color: 'var(--text-1)' } }, d.drive + labelSuffix + sysSuffix),
+                h('span', { class: 'muted small fp-drive-used' }, T(`已用 ${fmtBytes(dUsed)} (${d.percent || 0}%)`, `Used ${fmtBytes(dUsed)} (${d.percent || 0}%)`))
               ),
               h('div', { class: 'row', style: { gap: '10px', fontSize: '11px', color: 'var(--text-3)' } },
-                h('span', null, `软件: ${fmtBytes(dAppSize)} (${pctApp.toFixed(1)}%)`),
-                h('span', null, `系统及其他: ${fmtBytes(dOtherSize)}`),
-                h('span', { style: { fontWeight: '600', color: 'var(--text-2)' } }, `剩余 ${fmtBytes(dFree)}`)
+                h('span', { class: 'fp-drive-app' }, T(`软件: ${fmtBytes(dAppSize)} (${pctApp.toFixed(1)}%)`, `Apps: ${fmtBytes(dAppSize)} (${pctApp.toFixed(1)}%)`)),
+                h('span', { class: 'fp-drive-other' }, T(`系统及其他: ${fmtBytes(dOtherSize)}`, `Other: ${fmtBytes(dOtherSize)}`)),
+                h('span', { class: 'fp-drive-free', style: { fontWeight: '600', color: 'var(--text-2)' } }, T(`剩余 ${fmtBytes(dFree)}`, `Free ${fmtBytes(dFree)}`))
               )
             ),
             bar
@@ -2691,10 +2969,15 @@
             ),
             h('span', { class: 'badge mono accent sm' }, fmtBytes(a.size || 0)),
             btn('定位', 'Inspect', 'ghost sm', 'external', () => {
-              switchTab('apps');
+              S.view = 'all';
+              GlobalAppsCache.appsView = 'all';
+              Object.entries(viewBtns).forEach(([k, el]) => el.classList.toggle('active', k === 'all'));
+              S.page = 1;
+              GlobalAppsCache.appsPage = 1;
               filterInput.value = a.name;
-              S.filter = a.name.toLowerCase();
-              applyFilter();
+              S.filter = String(a.name || '').toLowerCase();
+              GlobalAppsCache.appsFilter = S.filter;
+              switchTab('apps');
             })
           );
           listWrap.appendChild(row);
@@ -2808,13 +3091,16 @@
             h('span', { class: 'badge mono sm' }, fmtSize(p.memory || 0)),
             btn('结束', 'Close', 'ghost sm danger', 'close', async () => {
               await closeProcOne(p, false);
-              renderFootprint();
+              if (isMounted) renderFootprint();
             }),
             btn('管理', 'Manage', 'ghost sm', 'external', () => {
-              switchTab('procs');
               procFilterInput.value = p.clean_name;
-              ProcState.filter = p.clean_name;
-              applyProcFilter();
+              ProcState.filter = String(p.clean_name || '').toLowerCase();
+              GlobalAppsCache.procFilter = ProcState.filter;
+              ProcState.page = 1;
+              GlobalAppsCache.procPage = 1;
+              setProcView('all');
+              switchTab('procs');
             })
           );
           listProcWrap.appendChild(row);
@@ -2866,9 +3152,7 @@
           applyStartupFilter();
         }
       } else if (tab === 'procs') {
-        if (!ProcState.items.length) {
-          loadProcs(false);
-        } else {
+        if (ProcState.items.length) {
           applyProcFilter();
         }
       } else if (tab === 'footprint') {
@@ -2997,16 +3281,20 @@
           adminBar.style.display = '';
           fusedAdminBtn.style.display = 'none';
         } else {
-          // 横幅被用户关闭，或在其他 Tab：在顶栏保留低调警示融合按钮，确保入口永不丢失
+          // 横幅被用户关闭，或在后台进程 Tab：在顶栏保留低调警示融合按钮，确保提权入口永不丢失
           adminBar.style.display = 'none';
-          fusedAdminBtn.style.display = isAppsOrStartup ? 'inline-flex' : 'none';
+          fusedAdminBtn.style.display = (isAppsOrStartup || currentTab === 'procs') ? 'inline-flex' : 'none';
           fusedAdminBtn.className = 'btn sm admin-fused-btn warn';
           fusedAdminLabel.textContent = T('普通权限', 'Standard User');
-          fusedAdminBtn.title = T('当前以普通权限运行，点击重新展开提醒或以管理员身份重启',
+          fusedAdminBtn.title = T('当前以普通权限运行，点击查看详情或以管理员身份重启',
             'Standard user; click to elevate or view details');
           fusedAdminBtn.onclick = () => {
-            adminBannerDismissed = false;
-            updateAdminDisplay();
+            if (isAppsOrStartup) {
+              adminBannerDismissed = false;
+              updateAdminDisplay();
+            } else {
+              showAdminDetailsModal();
+            }
           };
         }
       }
@@ -3151,6 +3439,7 @@
         }
         if (S.items.length || S.store.length) applyFilter();
         else renderTable();
+        if (currentTab === 'footprint') renderFootprint();
       }
     }
 
@@ -4115,7 +4404,8 @@
 
     liveJump = async (payload) => {
       const p = payload || {};
-      const tab = p.tab || (p.status ? 'startup' : 'apps');
+      const rawTab = String(p.tab || (p.status ? 'startup' : 'apps')).toLowerCase();
+      const tab = (rawTab === 'overview' || rawTab === 'resources' || rawTab === 'monitor') ? 'footprint' : rawTab;
       switchTab(tab);
       let kw = String(p.filter || p.name || p.q || '').trim();
       if (!kw && Array.isArray(p.paths) && p.paths.length) {
@@ -4124,9 +4414,14 @@
         kw = leaf.replace(/\.exe$/i, '');
       }
       if (tab === 'startup') {
-        if (kw) {
+        if (kw || p.filter === '') {
           startupFilterInput.value = kw;
           StartupState.filter = kw.toLowerCase();
+          GlobalAppsCache.startupFilter = StartupState.filter;
+          if (!p.status) setStartupView('all');
+          StartupState.scope = 'all';
+          GlobalAppsCache.startupScope = 'all';
+          Object.entries(startupScopeBtns).forEach(([k, el]) => el.classList.toggle('active', k === 'all'));
         }
         if (p.status) {
           const st = String(p.status).toLowerCase();
@@ -4141,9 +4436,11 @@
           applyStartupFilter();
         }
       } else if (tab === 'procs') {
-        if (kw) {
+        if (kw || p.filter === '' || p.view) {
           procFilterInput.value = kw;
           ProcState.filter = kw.toLowerCase();
+          GlobalAppsCache.procFilter = ProcState.filter;
+          setProcView(p.view || 'all');
         }
         /* 等待在途或冷启动进程快照；若旧缓存未命中目标进程则强制刷新一次 */
         if (procLoadP || !ProcState.items.length) {
@@ -4155,9 +4452,13 @@
           applyProcFilter();
         }
       } else if (tab === 'apps') {
-        if (kw) {
+        if (kw || p.filter === '') {
           filterInput.value = kw;
           S.filter = kw.toLowerCase();
+          GlobalAppsCache.appsFilter = S.filter;
+          S.view = 'all';
+          GlobalAppsCache.appsView = 'all';
+          Object.entries(viewBtns).forEach(([k, el]) => el.classList.toggle('active', k === 'all'));
         }
         if (!S.items.length) {
           try { await loadApps(false); } catch (_) {}
@@ -4176,6 +4477,7 @@
       isMounted = false;
       liveJump = null;
       PerfState.isLive = false;
+      PerfState.hoveredCharts.clear();
       stopLiveMonitoring();
       ProcState.isLive = false;
       stopProcLiveMonitoring();
@@ -4205,8 +4507,8 @@
   window.Pages = window.Pages || {};
   window.Pages.apps = {
     title: ['应用与自启', 'Apps & Startup'],
-    subtitle: ['全面管理已安装程序、开机自启动项与磁盘空间画像',
-      'Manage installed software, startup items, and disk space footprint'],
+    subtitle: ['全面管理已安装程序、开机自启、后台进程与系统资源概览',
+      'Manage installed software, startup items, running processes, and system resources'],
     mount: mount,
     jump(payload) {
       return liveJump ? liveJump(payload || {}) : undefined;

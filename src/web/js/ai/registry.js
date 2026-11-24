@@ -1116,12 +1116,28 @@
         };
       },
       async run(p) {
-        const r = await E('process.close', { pid: p.pid || 0, name: p.name || '', force: !!p.force });
+        const targetLabel = p.name || ('PID ' + p.pid);
+        const r = await E('process.close', {
+          pid: p.pid || 0,
+          name: p.name || '',
+          force: !!p.force,
+          confirm_sensitive: true
+        });
         if (r && r.error) throw new Error(r.error);
+        if (r && r.need_confirm) throw new Error(r.warning || ('关闭 ' + targetLabel + ' 需要明确确认'));
+        if (r && r.still_running) {
+          const hint = r.admin_required
+            ? '需要管理员权限才能终止'
+            : (r.respawned ? '终止后被服务或守护进程自动重启' : (r.message || '进程仍在后台运行（可改用 force: true 强制终止）'));
+          throw new Error(`未能彻底关闭 ${targetLabel}（剩余 ${r.remaining_count || 1} 个进程）：${hint}`);
+        }
+        const msg = r && r.was_running === false
+          ? `进程 ${targetLabel} 当前未在运行`
+          : `已彻底关闭进程 ${targetLabel}（结束 ${(r && (r.terminated_count || r.initial_count)) || 1} 个进程）`;
         return {
           result: r || { closed: true },
           undo: null,
-          message: '已请求关闭进程 ' + (p.name || p.pid)
+          message: msg
         };
       }
     };
