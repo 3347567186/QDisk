@@ -81,7 +81,9 @@ function Get-Version {
 }
 
 function Set-Version([string]$v) {
-  if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "版本号格式错误：$v（应为 1.2.3）" }
+  if ($v -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+    throw "版本号格式错误：$v（应为 1.2.3 或 1.2.3-beta.1）"
+  }
   $enc = New-Object Text.UTF8Encoding($false)
 
   $conf = [IO.File]::ReadAllText($confPath, [Text.Encoding]::UTF8)
@@ -94,12 +96,20 @@ function Set-Version([string]$v) {
 }
 
 function Next-Version([string]$cur, [string]$kind) {
-  $p = $cur.Split('.')
-  $a = [int]$p[0]; $b = [int]$p[1]; $c = [int]$p[2]
+  $m = [regex]::Match($cur.Trim(), '^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$')
+  if (-not $m.Success) { throw "无法解析当前版本号：$cur（应为 1.2.3 或 1.2.3-beta.1）" }
+  $a = [int]$m.Groups[1].Value
+  $b = [int]$m.Groups[2].Value
+  $c = [int]$m.Groups[3].Value
+  $pre = $m.Groups[4].Value
   switch ($kind) {
     'major' { return "$($a + 1).0.0" }
     'minor' { return "$a.$($b + 1).0" }
-    'patch' { return "$a.$b.$($c + 1)" }
+    'patch' {
+      # 若当前为预发布版（如 1.46.7-beta.1），patch 按 SemVer 直接转正为 1.46.7，不跳号
+      if ($pre) { return "$a.$b.$c" }
+      return "$a.$b.$($c + 1)"
+    }
   }
 }
 
@@ -138,10 +148,11 @@ function Test-EngineStale {
   $exe = Join-Path $root '引擎\整理助手引擎.exe'
   if (-not (Test-Path $exe)) { return $true }
   $built = (Get-Item $exe).LastWriteTimeUtc
-  $skip = @('数据', 'cache', '__pycache__', '.pytest_cache')
+  $skip = @('数据', 'cache', '__pycache__', '.pytest_cache', 'target', 'dist', 'build')
   $newer = Get-ChildItem $engineSrc -Recurse -File -ErrorAction SilentlyContinue |
     Where-Object {
-      $_.Extension -in @('.py', '.spec', '.json', '.yaml', '.yml', '.txt', '.md') -and
+      $_.Extension -in @('.py', '.spec', '.json', '.yaml', '.yml', '.txt', '.rs', '.toml') -and
+      $_.Name -notmatch '^(test_.*|.*_test)\.py$' -and
       -not ($_.FullName -split '\\' | Where-Object { $skip -contains $_ })
     } |
     Where-Object { $_.LastWriteTimeUtc -gt $built }
@@ -341,29 +352,74 @@ function Invoke-TidyTestGate {
     }
   }
 
-  # Rust 侧单元测试：只在 Rust 源码比上次成功跑过时更新时才跑。
-  # 为什么加条件：cargo test 首轮要编译 3 分多钟，每次都跑会把「改一行前端」
-  # 的迭代成本抬高。但只要 src-tauri 下有任何 .rs / Cargo.toml 变过，就必须跑——
-  # 1.42.x 这一轮我在 archive 模块做去重（三处手写 from_utf16 收成一处），
-  # 这类改动编译期零警告、运行期只在遇到特定压缩包时才露头，没有测试就是裸奔。
+  # Rust 侧单元测试与零警告门禁：按源码与依赖内容指纹判定（剥离 package version 字段），
+  # 避免「只递增版本号 / 只改前端或 Python」误触发 5 分钟全量重编。
+  # 真正改动了 Rust 代码、依赖或 Tauri 权限配置时：
+  #   1) cargo test（默认开发配置，增量极快且保留 debug_assertions）跑全部单测并检出 cfg(test) 警告；
+  #   2) cargo check --release（关闭 cfg(test) 与 release CFG，100% 检出死代码与发布警告，但跳过 3 分钟 LTO 链接，
+  #      最终正式发布产物仍由 cargo-tauri build 完整执行 lto=true + codegen-units=1）。
   $rustDir = Join-Path $root 'src\src-tauri'
   $stampPath = 'D:\Builds\.rust-test-stamp'
-  $newest = Get-ChildItem $rustDir -Recurse -File -Include *.rs, Cargo.toml -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\target\\' } |
-    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-  $stamp = if (Test-Path $stampPath) { (Get-Item $stampPath).LastWriteTimeUtc } else { [datetime]::MinValue }
-  if ($newest -and $newest.LastWriteTimeUtc -gt $stamp) {
+  $rustFp = & {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $sb = New-Object System.Text.StringBuilder
+      $items = New-Object System.Collections.Generic.List[object]
+
+      foreach ($f in (Get-ChildItem $rustDir -Recurse -File -Filter '*.rs' -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -notmatch '\\(target|gen)\\' })) {
+        $rel = $f.FullName.Substring($rustDir.Length).TrimStart('\').ToLowerInvariant()
+        $items.Add([pscustomobject]@{ Key = $rel; Text = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8) })
+      }
+      $capDir = Join-Path $rustDir 'capabilities'
+      if (Test-Path $capDir) {
+        foreach ($f in (Get-ChildItem $capDir -Recurse -File -Filter '*.json' -ErrorAction SilentlyContinue)) {
+          $rel = $f.FullName.Substring($rustDir.Length).TrimStart('\').ToLowerInvariant()
+          $items.Add([pscustomobject]@{ Key = $rel; Text = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8) })
+        }
+      }
+      $ct = Join-Path $rustDir 'Cargo.toml'
+      if (Test-Path $ct) {
+        $raw = [IO.File]::ReadAllText($ct, [Text.Encoding]::UTF8)
+        $norm = [regex]::Replace($raw, '(?m)^(\s*version\s*=\s*")[^"]+(")', '${1}<VER>${2}', 1)
+        $items.Add([pscustomobject]@{ Key = 'cargo.toml'; Text = $norm })
+      }
+      $cl = Join-Path $rustDir 'Cargo.lock'
+      if (Test-Path $cl) {
+        $raw = [IO.File]::ReadAllText($cl, [Text.Encoding]::UTF8)
+        $norm = [regex]::Replace($raw, '(?ms)(\[\[package\]\]\r?\nname\s*=\s*"tidy-assistant"\r?\nversion\s*=\s*")[^"]+(")', '${1}<VER>${2}', 1)
+        $items.Add([pscustomobject]@{ Key = 'cargo.lock'; Text = $norm })
+      }
+      $tc = Join-Path $rustDir 'tauri.conf.json'
+      if (Test-Path $tc) {
+        $raw = [IO.File]::ReadAllText($tc, [Text.Encoding]::UTF8)
+        $norm = [regex]::Replace($raw, '("version"\s*:\s*")[^"]+(")', '${1}<VER>${2}', 1)
+        $items.Add([pscustomobject]@{ Key = 'tauri.conf.json'; Text = $norm })
+      }
+
+      foreach ($it in ($items | Sort-Object Key)) {
+        [void]$sb.Append($it.Key).Append("`0").Append($it.Text).Append("`0")
+      }
+      $bytes = [Text.Encoding]::UTF8.GetBytes($sb.ToString())
+      $hash = $sha.ComputeHash($bytes)
+      'fp:v1:' + ([BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant())
+    } finally {
+      $sha.Dispose()
+    }
+  }
+  $prevStamp = if (Test-Path $stampPath) { (Get-Content -Path $stampPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue).Trim() } else { '' }
+  if ($rustFp -ne $prevStamp) {
     $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
     if (-not $cargo) {
       Write-Host '  警告：没找到 cargo，跳过 Rust 测试' -ForegroundColor Yellow
     } else {
       # 与 Build-IndexWalk 用同一套工具链变量：gnu-d 工具链、ASCII 的 CARGO_HOME、
-      # 独立 target 目录（不和构建共用，避免互相把对方的产物判成过期）。
+      # 独立 target 目录（不和正式构建共用，避免互相把对方的产物判成过期）。
       $env:RUSTUP_TOOLCHAIN = 'gnu-d'
-      $env:CARGO_HOME = 'D:\Tool\cargo-ASCII'
+      $env:CARGO_HOME = 'D:\Tool\cargo-ascii'
       $env:CARGO_TARGET_DIR = 'D:\Builds\tidyassistant-test-target'
       $env:PATH = "D:\Tool\binutils\mingw64\bin;$env:PATH"
-      $out = & $cargo test --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
+      $out = & $cargo test --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
       $code = $LASTEXITCODE
       $tail = ($out | Select-String -Pattern '^test result' | ForEach-Object { $_.Line }) -join ' '
       $warns = ($out | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
@@ -380,31 +436,29 @@ function Invoke-TidyTestGate {
         Write-Host ("  [红] cargo 警告：{0} 条" -f $warns) -ForegroundColor Red
       }
 
-      # 还要单独看一次「不带 cfg(test)」的编译：cargo test 是在 cfg(test) 下编译的，
-      # 只在测试里用到的函数在那次编译里是「有调用者」的，一条警告都不会有；
-      # 而真正发出去的 exe 不带 cfg(test)，同样的函数就是死代码。
-      # 1.42.7 就是这么漏过去的：Budget::used() 只有测试在用，cargo test 全绿，
-      # 构建时刷出一条 warning: method `used` is never used。
-      # 判据和上面一致：0 条，除非显式 #[allow(dead_code)]。
-      $bout = & $cargo build --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
+      # 还要单独看一次「不带 cfg(test)」的发布配置检查：cargo check --release 与真正发出去的 exe
+      # 同为非 cfg(test) 且关闭 debug_assertions，可 100% 检出死代码与发布警告，但跳过 3 分钟 LTO 链接。
+      $bout = & $cargo check --release --manifest-path (Join-Path $rustDir 'Cargo.toml') 2>&1
       $bcode = $LASTEXITCODE
       $bwarns = ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } | Measure-Object).Count
       if ($bcode -ne 0) {
-        $failed += "Rust 发布构建失败（cargo build --release 退出码 $bcode）"
-        Write-Host ("  [红] cargo build --release：退出码 {0}" -f $bcode) -ForegroundColor Red
+        $failed += "Rust 发布检查失败（cargo check --release 退出码 $bcode）"
+        Write-Host ("  [红] cargo check --release：退出码 {0}" -f $bcode) -ForegroundColor Red
       } elseif ($bwarns -gt 0) {
-        $failed += "Rust 发布构建有 $bwarns 条警告（基线是 0；注意这与 cargo test 的警告不是一回事）"
-        Write-Host ("  [红] cargo build 警告：{0} 条" -f $bwarns) -ForegroundColor Red
+        $failed += "Rust 发布检查有 $bwarns 条警告（基线是 0；注意这与 cargo test 的警告不是一回事）"
+        Write-Host ("  [红] cargo check 警告：{0} 条" -f $bwarns) -ForegroundColor Red
         ($bout | Select-String -Pattern '^warning: ' | Where-Object { $_.Line -notmatch 'generated \d+ warning' } |
             Select-Object -First 5 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
       } else {
-        Write-Host '  [绿] cargo build --release：0 条警告' -ForegroundColor DarkGray
+        Write-Host '  [绿] cargo check --release：0 条警告' -ForegroundColor DarkGray
       }
 
-      if ($code -eq 0) { Set-Content -Path $stampPath -Value (Get-Date -Format o) -Encoding UTF8 }
+      if ($code -eq 0 -and $warns -eq 0 -and $bcode -eq 0 -and $bwarns -eq 0) {
+        Set-Content -Path $stampPath -Value $rustFp -Encoding UTF8
+      }
     }
   } else {
-    Write-Host '  [跳过] cargo test：Rust 源码自上次通过后没变过' -ForegroundColor DarkGray
+    Write-Host '  [跳过] cargo test / check：Rust 源码与依赖指纹未变（仅版本或非 Rust 文件变动）' -ForegroundColor DarkGray
   }
 
   if ($failed.Count -gt 0) {
