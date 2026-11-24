@@ -36,6 +36,7 @@
       </a>
 
       <nav class="site-nav" aria-label="Primary">
+        <a href="#film" data-section="film" data-i18n="nav.film">宣传片</a>
         <a href="#showcase" data-section="showcase" data-i18n="nav.showcase">核心体验</a>
         <a href="#benchmarks" data-section="benchmarks" data-i18n="nav.bench">实测数据</a>
         <a href="#download" data-section="download" data-i18n="nav.download">下载获取</a>
@@ -99,6 +100,13 @@
               <span data-i18n="hero.dlZip">便携免安装版</span>
               <span class="btn-meta mono" id="hero-zip-size">25.5 MB</span>
             </a>
+            <button type="button" class="btn film-cta lg" id="hero-watch-film">
+              <span class="film-play-dot" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+              </span>
+              <span data-i18n="hero.watchFilm">观看宣传片</span>
+              <span class="btn-meta mono">0:56</span>
+            </button>
           </div>
         </div>
 
@@ -123,17 +131,122 @@
 
             <div class="stage-panels">
               <div role="tabpanel" id="panel-ai" aria-labelledby="tab-ai" tabindex="0">
-                <img id="img-ai" src="assets/screenshots/01-ai-assistant.png" alt="QDisk AI Assistant runtime UI" width="2560" height="1640" fetchpriority="high" decoding="async">
+                <button type="button" class="zoom-trigger zoom-stage" id="zoom-stage-ai" data-lightbox-id="ai" aria-label="点击放大查看：可审计本地 AI 助手界面">
+                  <img id="img-ai" src="assets/screenshots/01-ai-assistant.png" alt="QDisk AI Assistant runtime UI" width="2560" height="1640" fetchpriority="high" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
               <div role="tabpanel" id="panel-org" aria-labelledby="tab-org" hidden="until-found">
-                <img src="assets/screenshots/02-organize.png" alt="QDisk File Organizer dry-run preview" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-stage" id="zoom-stage-org" data-lightbox-id="org" aria-label="点击放大查看：智能整理预演界面">
+                  <img src="assets/screenshots/02-organize.png" alt="QDisk File Organizer dry-run preview" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
               <div role="tabpanel" id="panel-arc" aria-labelledby="tab-arc" hidden="until-found">
-                <img src="assets/screenshots/03-archive.png" alt="QDisk multi-core archive manager" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-stage" id="zoom-stage-arc" data-lightbox-id="arc" aria-label="点击放大查看：Rust 多核压缩包管理界面">
+                  <img src="assets/screenshots/03-archive.png" alt="QDisk multi-core archive manager" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
               <div role="tabpanel" id="panel-cache" aria-labelledby="tab-cache" hidden="until-found">
-                <img src="assets/screenshots/04-cache.png" alt="QDisk risk-tiered cache cleaner" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-stage" id="zoom-stage-cache" data-lightbox-id="cache" aria-label="点击放大查看：分级安全缓存清理界面">
+                  <img src="assets/screenshots/04-cache.png" alt="QDisk risk-tiered cache cleaner" width="2560" height="1640" fetchpriority="low" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Act I.5: Seamless Editorial Product Film Stage -->
+    <section class="section film-section" id="film">
+      <div class="container">
+        <div class="section-head film-head float-in">
+          <p class="eyebrow" data-i18n="film.eyebrow">PRODUCT FILM · 56 秒官方实机宣传片</p>
+          <h2 data-i18n="film.title">56 秒，看懂轻盘如何干净利落地接管磁盘</h2>
+          <p class="section-desc" data-i18n="film.desc">全程 1080p 真实界面演示 · 暖白与炭黑双主题呈现 · 点下方章节可直达任意亮点。</p>
+        </div>
+
+        <div class="film-stage float-in" style="--float-delay: 80ms">
+          <div class="film-frame">
+            <div class="window-chrome film-chrome">
+              <span class="win-brand">
+                <img src="assets/logo.svg" alt="" width="15" height="15" loading="lazy">
+                <span data-i18n="film.chromeTitle">QDisk 官方实机宣传片</span>
+              </span>
+              <span class="win-caption" id="film-active-caption" data-i18n="film.defaultCaption">先预演再落盘 · 7 格式真暂停 · 0.31 ms 真停止</span>
+              <div class="film-chrome-actions">
+                <span class="film-spec-pill mono">1080p · 0:56</span>
+                <button type="button" class="film-theater-btn" id="film-open-cinema" aria-label="以影院弹窗模式观看宣传片">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+                  <span data-i18n="film.theater">影院模式</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="film-viewport" id="film-viewport">
+              <video
+                id="promo-video"
+                class="film-video"
+                controls
+                playsinline
+                loading="lazy"
+                preload="none"
+                width="1920"
+                height="1080"
+                poster="assets/media/promo-poster.jpg"
+                aria-label="轻盘 QDisk 56 秒官方实机宣传片"
+              >
+                <source src="assets/media/qdisk-promo.mp4" type="video/mp4">
+                <source src="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4" type="video/mp4">
+              </video>
+
+              <button type="button" class="film-facade" id="film-play-facade" aria-label="播放 56 秒官方实机宣传片">
+                <img src="assets/media/promo-poster.jpg" alt="轻盘 QDisk 56 秒官方宣传片封面" width="1920" height="1080" loading="lazy" decoding="async">
+                <span class="film-facade-scrim" aria-hidden="true"></span>
+                <span class="film-play-center" aria-hidden="true">
+                  <span class="film-play-medallion">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><polygon points="7 4.5 20 12 7 19.5 7 4.5"/></svg>
+                  </span>
+                  <span class="film-play-label">
+                    <span data-i18n="film.playLabel">播放实机宣传片</span>
+                    <span class="mono">0:56</span>
+                  </span>
+                </span>
+              </button>
+            </div>
+
+            <div class="film-chapters" role="group" aria-label="宣传片章节快捷跳转">
+              <button type="button" class="film-chapter" id="film-ch-0" data-film-seek="13" data-film-end="22" data-cap-zh="0:13 · 智能整理预演 & 1.39 秒全量撤回" data-cap-en="0:13 · Dry-Run Organizer & 1.39s Full Undo">
+                <span class="ch-time mono">0:13</span>
+                <span class="ch-name" data-i18n="film.ch1">整理预演 & 1 秒撤回</span>
+              </button>
+              <button type="button" class="film-chapter" id="film-ch-1" data-film-seek="22" data-film-end="34" data-cap-zh="0:22 · 7 大格式四档多核解压 & 分块真暂停" data-cap-en="0:22 · 7-Format Multi-Core Archiver & Chunk Pause">
+                <span class="ch-time mono">0:22</span>
+                <span class="ch-name" data-i18n="film.ch2">7 格式多核 & 真暂停</span>
+              </button>
+              <button type="button" class="film-chapter" id="film-ch-2" data-film-seek="34" data-film-end="45" data-cap-zh="0:34 · 暖白切炭黑 · 可审计本地 AI 审批卡片" data-cap-en="0:34 · Light-to-Dark Flip · Auditable Local AI Approval">
+                <span class="ch-time mono">0:34</span>
+                <span class="ch-name" data-i18n="film.ch3">暖白→炭黑 · 本地 AI</span>
+              </button>
+              <button type="button" class="film-chapter" id="film-ch-3" data-film-seek="45" data-film-end="56" data-cap-zh="0:45 · 304.3 MB/s · 0.31 ms · 6.53 ms 实测三连" data-cap-en="0:45 · 304.3 MB/s · 0.31 ms · 6.53 ms Bare-Metal Proof">
+                <span class="ch-time mono">0:45</span>
+                <span class="ch-name" data-i18n="film.ch4">Rust 实测硬核三连</span>
+              </button>
             </div>
           </div>
         </div>
@@ -164,7 +277,13 @@
             </div>
             <figure class="story-visual float-item" style="--float-delay: 150ms">
               <div class="media-shell">
-                <img id="story-img-ai" src="assets/screenshots/01-ai-assistant.png" alt="Auditable local AI assistant" width="2560" height="1640" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-story" id="zoom-story-ai" data-lightbox-id="ai" aria-label="点击放大查看：可审计本地 AI 助手">
+                  <img id="story-img-ai" src="assets/screenshots/01-ai-assistant.png" alt="Auditable local AI assistant" width="2560" height="1640" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
             </figure>
           </article>
@@ -184,7 +303,13 @@
             </div>
             <figure class="story-visual float-item" style="--float-delay: 20ms">
               <div class="media-shell">
-                <img src="assets/screenshots/02-organize.png" alt="Dry-run file organizer preview" width="2560" height="1640" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-story" id="zoom-story-org" data-lightbox-id="org" aria-label="点击放大查看：先预演再落盘的智能整理">
+                  <img src="assets/screenshots/02-organize.png" alt="Dry-run file organizer preview" width="2560" height="1640" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
             </figure>
           </article>
@@ -204,7 +329,13 @@
             </div>
             <figure class="story-visual float-item" style="--float-delay: 150ms">
               <div class="media-shell">
-                <img src="assets/screenshots/03-archive.png" alt="Rust multi-core archive manager" width="2560" height="1640" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-story" id="zoom-story-arc" data-lightbox-id="arc" aria-label="点击放大查看：Rust 多核零广告压缩内核">
+                  <img src="assets/screenshots/03-archive.png" alt="Rust multi-core archive manager" width="2560" height="1640" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
             </figure>
           </article>
@@ -224,10 +355,21 @@
             </div>
             <figure class="story-visual visual-layered float-item" style="--float-delay: 20ms">
               <div class="media-shell">
-                <img src="assets/screenshots/04-cache.png" alt="Risk-tiered cache cleaner" width="2560" height="1640" loading="lazy" decoding="async">
+                <button type="button" class="zoom-trigger zoom-story" id="zoom-story-cache" data-lightbox-id="cache" aria-label="点击放大查看：分级安全缓存清理">
+                  <img src="assets/screenshots/04-cache.png" alt="Risk-tiered cache cleaner" width="2560" height="1640" loading="lazy" decoding="async">
+                  <span class="zoom-hint" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                    <span data-i18n="lightbox.hint">查看大图</span>
+                  </span>
+                </button>
               </div>
-              <div class="media-inset" aria-hidden="true">
-                <img src="assets/screenshots/05-space-tools.png" alt="" width="2560" height="1640" loading="lazy" decoding="async">
+              <div class="media-inset">
+                <button type="button" class="zoom-trigger zoom-inset" id="zoom-story-space" data-lightbox-id="space" aria-label="点击放大查看：大文件排行与数字签名溯源">
+                  <img src="assets/screenshots/05-space-tools.png" alt="Large file scanner and Authenticode signature verification" width="2560" height="1640" loading="lazy" decoding="async">
+                  <span class="zoom-hint zoom-hint-sm" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+                  </span>
+                </button>
               </div>
             </figure>
           </article>
@@ -471,6 +613,87 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1</code></pre>
         <p class="sponsor-note" data-i18n="sponsor.note">轻盘永久免费开源、零广告 · 随心赞赏，在 GitHub 点 Star 同样是莫大的鼓励</p>
         <button type="button" class="btn secondary sm" id="sponsor-close-btn" data-i18n="sponsor.close">谢谢，先逛逛</button>
       </div>
+    </div>
+  </dialog>
+
+  <!-- Immersive Theater Promo Video Dialog -->
+  <dialog class="cinema-dialog" id="cinema-dialog" closedby="any" aria-labelledby="cinema-title">
+    <div class="cinema-sheet">
+      <div class="cinema-bar">
+        <div class="cinema-title-wrap">
+          <img src="assets/logo.svg" alt="" width="18" height="18" loading="lazy">
+          <h2 class="cinema-title" id="cinema-title" data-i18n="film.cinemaTitle">轻盘 QDisk · 56 秒官方实机宣传片</h2>
+          <span class="film-spec-pill mono">1080p</span>
+        </div>
+        <button type="button" class="dialog-close-btn" id="cinema-close-btn" aria-label="关闭">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="cinema-stage">
+        <video
+          id="cinema-video"
+          class="cinema-video"
+          controls
+          playsinline
+          preload="none"
+          width="1920"
+          height="1080"
+          poster="assets/media/promo-poster.jpg"
+          aria-label="轻盘 QDisk 56 秒官方实机宣传片（影院模式）"
+        >
+          <source src="assets/media/qdisk-promo.mp4" type="video/mp4">
+          <source src="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4" type="video/mp4">
+        </video>
+      </div>
+
+      <div class="cinema-chapters" role="group" aria-label="影院模式章节快捷跳转">
+        <button type="button" class="cinema-chip" data-cinema-seek="13"><span class="mono">0:13</span> <span data-i18n="film.ch1">整理预演 & 1 秒撤回</span></button>
+        <button type="button" class="cinema-chip" data-cinema-seek="22"><span class="mono">0:22</span> <span data-i18n="film.ch2">7 格式多核 & 真暂停</span></button>
+        <button type="button" class="cinema-chip" data-cinema-seek="34"><span class="mono">0:34</span> <span data-i18n="film.ch3">暖白→炭黑 · 本地 AI</span></button>
+        <button type="button" class="cinema-chip" data-cinema-seek="45"><span class="mono">0:45</span> <span data-i18n="film.ch4">Rust 实测硬核三连</span></button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Shared-Element Seamless Image Lightbox Dialog -->
+  <dialog class="media-lightbox" id="media-lightbox" closedby="any" aria-labelledby="lb-title">
+    <div class="lb-shell">
+      <div class="lb-topbar">
+        <div class="lb-meta">
+          <span class="lb-counter mono" id="lb-counter">1 / 5</span>
+          <h2 class="lb-title" id="lb-title">可审计本地 AI 助手</h2>
+        </div>
+        <div class="lb-actions">
+          <button type="button" class="lb-tool-btn" id="lb-zoom-btn" aria-pressed="false" aria-label="切换 2 倍细节放大">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3M11 8v6M8 11h6"/></svg>
+            <span id="lb-zoom-label" data-i18n="lightbox.zoomIn">2× 细节</span>
+          </button>
+          <button type="button" class="dialog-close-btn lb-close-btn" id="lb-close-btn" aria-label="关闭">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="lb-body">
+        <button type="button" class="lb-nav lb-prev" id="lb-prev" aria-label="上一张截图">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+
+        <div class="lb-viewport" id="lb-viewport">
+          <img id="lb-img" class="lb-img" src="assets/screenshots/01-ai-assistant.png" alt="可审计本地 AI 助手" width="2560" height="1640" decoding="async">
+        </div>
+
+        <button type="button" class="lb-nav lb-next" id="lb-next" aria-label="下一张截图">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+
+      <div class="lb-foot">
+        <p class="lb-caption" id="lb-caption">透明查证 · 0.31 ms 真停止 · 四档权限审批</p>
+        <span class="lb-keys mono" data-i18n="lightbox.keys">← / → 切换 · 点击图片 2× 细节 · Esc 关闭</span>
+      </div>
+      <span class="sr-only" id="lb-live" aria-live="polite"></span>
     </div>
   </dialog>
 

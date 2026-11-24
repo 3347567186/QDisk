@@ -17,6 +17,7 @@
   const COPY = {
     zh: {
       brand: '轻盘',
+      'nav.film': '宣传片',
       'nav.showcase': '核心体验',
       'nav.bench': '实测数据',
       'nav.download': '下载获取',
@@ -26,10 +27,27 @@
       'hero.sub': '将智能整理、Rust 四档多核压缩、分级安全清理与可审计本地 AI 助手凝进 21.0 MB 原生客户端。高危操作先预演再落盘，全部数据留在本机。',
       'hero.dlExe': '下载安装版',
       'hero.dlZip': '便携免安装版',
+      'hero.watchFilm': '观看宣传片',
       'tabs.ai': 'AI 助手',
       'tabs.org': '智能整理',
       'tabs.arc': '高速压缩',
       'tabs.cache': '安全清理',
+      'film.eyebrow': 'PRODUCT FILM · 56 秒官方实机宣传片',
+      'film.title': '56 秒，看懂轻盘如何干净利落地接管磁盘',
+      'film.desc': '全程 1080p 真实界面演示 · 暖白与炭黑双主题呈现 · 点下方章节可直达任意亮点。',
+      'film.chromeTitle': 'QDisk 官方实机宣传片',
+      'film.defaultCaption': '先预演再落盘 · 7 格式真暂停 · 0.31 ms 真停止',
+      'film.theater': '影院模式',
+      'film.playLabel': '播放实机宣传片',
+      'film.cinemaTitle': '轻盘 QDisk · 56 秒官方实机宣传片',
+      'film.ch1': '整理预演 & 1 秒撤回',
+      'film.ch2': '7 格式多核 & 真暂停',
+      'film.ch3': '暖白→炭黑 · 本地 AI',
+      'film.ch4': 'Rust 实测硬核三连',
+      'lightbox.hint': '查看大图',
+      'lightbox.zoomIn': '2× 细节',
+      'lightbox.zoomOut': '适应窗口',
+      'lightbox.keys': '← / → 切换 · 点击图片 2× 细节 · Esc 关闭',
       'story.eyebrow': 'CRAFTED FOR CLARITY · 核心体验',
       'story.title': '把四件高频麻烦事，做到透明且零焦虑',
       'story.s1Title': '可审计本地 AI 助手',
@@ -92,6 +110,7 @@
     },
     en: {
       brand: 'QDisk',
+      'nav.film': 'Film',
       'nav.showcase': 'Features',
       'nav.bench': 'Benchmarks',
       'nav.download': 'Download',
@@ -101,10 +120,27 @@
       'hero.sub': 'Dry-Run file organization, a 4-tier multi-core Rust archiver, risk-tiered cleanup, and an auditable local AI assistant in one 21.0 MB native app. Every risky action previews first.',
       'hero.dlExe': 'Download Installer',
       'hero.dlZip': 'Portable ZIP',
+      'hero.watchFilm': 'Watch Film',
       'tabs.ai': 'AI Assistant',
       'tabs.org': 'Organizer',
       'tabs.arc': 'Archiver',
       'tabs.cache': 'Safe Cleaner',
+      'film.eyebrow': 'PRODUCT FILM · 56-SECOND OFFICIAL DEMO',
+      'film.title': '56 seconds to see QDisk take control of your disk',
+      'film.desc': '1080p footage straight from the real Windows UI · Light & Dark themes · Jump to any chapter below.',
+      'film.chromeTitle': 'QDisk Official Product Film',
+      'film.defaultCaption': 'Dry-Run first · 7-format true pause · 0.31 ms socket abort',
+      'film.theater': 'Theater',
+      'film.playLabel': 'Play Product Film',
+      'film.cinemaTitle': 'QDisk · 56-Second Official Product Film',
+      'film.ch1': 'Dry-Run & 1s Undo',
+      'film.ch2': '7-Format Multi-Core',
+      'film.ch3': 'Light→Dark · Local AI',
+      'film.ch4': 'Rust Bare-Metal Proof',
+      'lightbox.hint': 'Inspect',
+      'lightbox.zoomIn': '2× Detail',
+      'lightbox.zoomOut': 'Fit Screen',
+      'lightbox.keys': '← / → Navigate · Click image for 2× · Esc to close',
       'story.eyebrow': 'CRAFTED FOR CLARITY',
       'story.title': 'Four daily disk headaches, solved with total transparency',
       'story.s1Title': 'Auditable Local-First AI Assistant',
@@ -185,6 +221,7 @@
   let curLang = 'zh';
   let curBenchMode = 'create';
   let currentVer = 'v1.46.0';
+  let mediaUiReady = false;
 
   /* ---- Two-State Color Scheme Toggle (modern-web-guidance: dark-mode-toggle) ---- */
   const metaScheme = document.querySelector('meta[name="color-scheme"]');
@@ -323,6 +360,26 @@
     if (closeX) {
       closeX.setAttribute('aria-label', curLang === 'en' ? 'Close' : '关闭');
     }
+    const cinemaClose = document.getElementById('cinema-close-btn');
+    if (cinemaClose) cinemaClose.setAttribute('aria-label', curLang === 'en' ? 'Close video dialog' : '关闭宣传片影院');
+    const lbClose = document.getElementById('lb-close-btn');
+    if (lbClose) lbClose.setAttribute('aria-label', curLang === 'en' ? 'Close image viewer' : '关闭大图查看器');
+    const lbPrev = document.getElementById('lb-prev');
+    if (lbPrev) lbPrev.setAttribute('aria-label', curLang === 'en' ? 'Previous screenshot' : '上一张截图');
+    const lbNext = document.getElementById('lb-next');
+    if (lbNext) lbNext.setAttribute('aria-label', curLang === 'en' ? 'Next screenshot' : '下一张截图');
+    const lbZoom = document.getElementById('lb-zoom-btn');
+    if (lbZoom) lbZoom.setAttribute('aria-label', curLang === 'en' ? 'Toggle 2x detail zoom' : '切换 2 倍细节放大');
+    const filmOpenCinema = document.getElementById('film-open-cinema');
+    if (filmOpenCinema) filmOpenCinema.setAttribute('aria-label', curLang === 'en' ? 'Open film in theater dialog' : '以影院弹窗模式观看宣传片');
+    const filmFacade = document.getElementById('film-play-facade');
+    if (filmFacade) filmFacade.setAttribute('aria-label', curLang === 'en' ? 'Play 56-second official product film' : '播放 56 秒官方实机宣传片');
+
+    if (mediaUiReady) {
+      syncLightboxLanguage();
+      syncFilmChapterCaption();
+    }
+
     const activeTab = document.querySelector('.stage-tabs [role="tab"][aria-selected="true"]');
     updateStageCaption(activeTab);
     renderBenchMode(curBenchMode);
@@ -433,7 +490,7 @@
   syncChromeOnScroll();
 
   if ('IntersectionObserver' in window) {
-    const sections = ['showcase', 'benchmarks', 'download']
+    const sections = ['film', 'showcase', 'benchmarks', 'download']
       .map((id) => document.getElementById(id))
       .filter(Boolean);
     const navLinks = Array.from(document.querySelectorAll('.site-nav [data-section]'));
@@ -671,13 +728,14 @@
 
   let sponsorSeq = 0;
 
-  async function closeSponsorDialog() {
-    if (!sponsorDialog || !sponsorDialog.open) return;
-    const seq = ++sponsorSeq;
+  async function closeTopLayerDialog(dialog, getSeq, bumpSeq, beforeClose) {
+    if (!dialog || !dialog.open) return;
+    const seq = bumpSeq();
+    if (typeof beforeClose === 'function') beforeClose();
     if (!supportsTopLayerExit()) {
-      sponsorDialog.setAttribute('data-closing', '');
-      const animations = typeof sponsorDialog.getAnimations === 'function'
-        ? sponsorDialog.getAnimations({ subtree: true })
+      dialog.setAttribute('data-closing', '');
+      const animations = typeof dialog.getAnimations === 'function'
+        ? dialog.getAnimations({ subtree: true })
         : [];
       if (animations.length > 0) {
         await Promise.race([
@@ -685,11 +743,34 @@
           new Promise((r) => setTimeout(r, 600))
         ]);
       }
-      if (seq !== sponsorSeq || !sponsorDialog.hasAttribute('data-closing')) return;
-      sponsorDialog.removeAttribute('data-closing');
+      if (seq !== getSeq() || !dialog.hasAttribute('data-closing')) return;
+      dialog.removeAttribute('data-closing');
     }
-    if (seq !== sponsorSeq || !sponsorDialog.open) return;
-    sponsorDialog.close();
+    if (seq !== getSeq() || !dialog.open) return;
+    dialog.close();
+  }
+
+  function wireLightDismissFallback(dialog, onDismiss) {
+    if (!dialog || ('closedBy' in HTMLDialogElement.prototype)) return;
+    dialog.addEventListener('click', (event) => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      const inside = (
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width
+      );
+      if (!inside) onDismiss();
+    });
+  }
+
+  function closeSponsorDialog() {
+    return closeTopLayerDialog(
+      sponsorDialog,
+      () => sponsorSeq,
+      () => ++sponsorSeq
+    );
   }
 
   if (sponsorDialog) {
@@ -712,19 +793,708 @@
       }
     });
 
-    // Fallback for browsers without <dialog closedby="any"> support (e.g. Safari)
-    if (!('closedBy' in HTMLDialogElement.prototype)) {
-      sponsorDialog.addEventListener('click', (event) => {
-        if (event.target !== sponsorDialog) return;
-        const rect = sponsorDialog.getBoundingClientRect();
-        const inside = (
-          rect.top <= event.clientY &&
-          event.clientY <= rect.top + rect.height &&
-          rect.left <= event.clientX &&
-          event.clientX <= rect.left + rect.width
-        );
-        if (!inside) closeSponsorDialog();
+    wireLightDismissFallback(sponsorDialog, closeSponsorDialog);
+  }
+
+  /* ---- Lazy Media Fallback (modern-web-guidance: lazy-load-video-and-audio) ---- */
+  function hydrateVideoElement(video) {
+    if (!video) return;
+    let changed = false;
+    if (video.dataset && video.dataset.poster) {
+      video.poster = video.dataset.poster;
+      delete video.dataset.poster;
+      changed = true;
+    }
+    if (video.dataset && video.dataset.preload) {
+      video.preload = video.dataset.preload;
+      delete video.dataset.preload;
+      changed = true;
+    }
+    if (video.dataset && video.dataset.src) {
+      video.src = video.dataset.src;
+      delete video.dataset.src;
+      changed = true;
+    }
+    const deferredSources = typeof video.querySelectorAll === 'function'
+      ? Array.from(video.querySelectorAll('source[data-src]'))
+      : [];
+    deferredSources.forEach((source) => {
+      source.src = source.dataset.src;
+      delete source.dataset.src;
+      changed = true;
+    });
+    if (changed && typeof video.load === 'function') {
+      video.load();
+    }
+  }
+
+  const supportsLazyMedia = typeof HTMLMediaElement !== 'undefined' && Object.hasOwn(HTMLMediaElement.prototype, 'loading');
+  if (!supportsLazyMedia && 'IntersectionObserver' in window) {
+    const lazyMediaElements = Array.from(document.querySelectorAll('video[loading="lazy"]'));
+    if (lazyMediaElements.length > 0) {
+      const mediaObserver = new IntersectionObserver((entries, observer) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          hydrateVideoElement(entry.target);
+          observer.unobserve(entry.target);
+        });
+      }, { rootMargin: '200px 0px' });
+
+      lazyMediaElements.forEach((media) => {
+        if (media.hasAttribute('poster')) {
+          media.dataset.poster = media.getAttribute('poster');
+          media.removeAttribute('poster');
+        }
+        if (media.hasAttribute('preload') && media.getAttribute('preload') !== 'none') {
+          media.dataset.preload = media.getAttribute('preload');
+        }
+        media.preload = 'none';
+        if (typeof media.querySelectorAll === 'function') {
+          Array.from(media.querySelectorAll('source[src]')).forEach((srcEl) => {
+            srcEl.dataset.src = srcEl.getAttribute('src');
+            srcEl.removeAttribute('src');
+          });
+        }
+        mediaObserver.observe(media);
       });
     }
   }
+
+  /* ---- Editorial Product Film + Immersive Cinema <dialog> Controller ---- */
+  const filmViewport = document.getElementById('film-viewport');
+  const filmFacade = document.getElementById('film-play-facade');
+  const promoVideo = document.getElementById('promo-video');
+  const filmActiveCaption = document.getElementById('film-active-caption');
+  const filmChapters = Array.from(document.querySelectorAll('.film-chapter'));
+  const heroWatchBtn = document.getElementById('hero-watch-film');
+  const filmOpenCinemaBtn = document.getElementById('film-open-cinema');
+  const cinemaDialog = document.getElementById('cinema-dialog');
+  const cinemaVideo = document.getElementById('cinema-video');
+  const cinemaCloseBtn = document.getElementById('cinema-close-btn');
+  const cinemaChips = Array.from(document.querySelectorAll('[data-cinema-seek]'));
+
+  let cinemaSeq = 0;
+  let cinemaReturnEl = null;
+  let activeChapterIdx = -1;
+
+  function safePlay(video) {
+    if (!video || typeof video.play !== 'function') return;
+    try {
+      const res = video.play();
+      if (res && typeof res.catch === 'function') res.catch(() => {});
+    } catch (_) {}
+  }
+
+  function safePause(video) {
+    if (!video || typeof video.pause !== 'function') return;
+    try { video.pause(); } catch (_) {}
+  }
+
+  function safeSeek(video, seconds) {
+    if (!video) return;
+    const t = Math.max(0, Number(seconds) || 0);
+    try {
+      if (typeof video.readyState === 'number' && video.readyState >= 1) {
+        video.currentTime = t;
+      } else {
+        video.currentTime = t;
+        const onMeta = () => {
+          try { video.currentTime = t; } catch (_) {}
+        };
+        if (typeof video.addEventListener === 'function') {
+          video.addEventListener('loadedmetadata', onMeta, { once: true });
+        }
+      }
+    } catch (_) {}
+  }
+
+  function syncFilmChapterCaption() {
+    if (!filmActiveCaption) return;
+    if (activeChapterIdx >= 0 && filmChapters[activeChapterIdx]) {
+      const ch = filmChapters[activeChapterIdx];
+      filmActiveCaption.textContent = curLang === 'en' ? (ch.dataset.capEn || '') : (ch.dataset.capZh || '');
+    } else {
+      filmActiveCaption.textContent = COPY[curLang]['film.defaultCaption'];
+    }
+  }
+
+  function highlightChapterByTime(sec) {
+    let found = -1;
+    filmChapters.forEach((btn, idx) => {
+      const start = parseFloat(btn.dataset.filmSeek || '0');
+      const end = parseFloat(btn.dataset.filmEnd || '60');
+      if (sec >= start - 0.15 && sec < end) found = idx;
+    });
+    activeChapterIdx = found;
+    filmChapters.forEach((btn, idx) => {
+      const on = idx === found;
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    cinemaChips.forEach((btn, idx) => {
+      btn.classList.toggle('is-active', idx === found);
+    });
+    syncFilmChapterCaption();
+  }
+
+  function revealInlinePlayer() {
+    if (filmViewport) filmViewport.classList.add('is-playing');
+    if (filmFacade) filmFacade.setAttribute('aria-hidden', 'true');
+  }
+
+  function playInlineFilm(seekSeconds) {
+    if (!promoVideo) return;
+    hydrateVideoElement(promoVideo);
+    if (typeof seekSeconds === 'number') {
+      safeSeek(promoVideo, seekSeconds);
+      highlightChapterByTime(seekSeconds);
+    }
+    let revealed = false;
+    const revealOnce = () => {
+      if (revealed) return;
+      revealed = true;
+      revealInlinePlayer();
+    };
+    if (typeof promoVideo.addEventListener === 'function') {
+      promoVideo.addEventListener('playing', revealOnce, { once: true });
+    }
+    safePlay(promoVideo);
+    // Avoid flash or waiting forever if playback is deferred in tests/headless
+    setTimeout(revealOnce, 160);
+  }
+
+  if (filmFacade) {
+    filmFacade.addEventListener('click', () => playInlineFilm());
+  }
+
+  filmChapters.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = parseFloat(btn.dataset.filmSeek || '0');
+      playInlineFilm(target);
+    });
+  });
+
+  if (promoVideo) {
+    promoVideo.addEventListener('play', revealInlinePlayer);
+    promoVideo.addEventListener('timeupdate', () => {
+      if (typeof promoVideo.currentTime === 'number') {
+        highlightChapterByTime(promoVideo.currentTime);
+      }
+    });
+  }
+
+  function openCinemaDialog(triggerEl, startTime) {
+    if (!cinemaDialog) return;
+    cinemaReturnEl = triggerEl || document.activeElement;
+    cinemaSeq++;
+    cinemaDialog.removeAttribute('data-closing');
+    if (promoVideo) safePause(promoVideo);
+    if (cinemaVideo) {
+      hydrateVideoElement(cinemaVideo);
+      if (typeof startTime === 'number' && startTime > 0) {
+        safeSeek(cinemaVideo, startTime);
+        highlightChapterByTime(startTime);
+      }
+    }
+    if (!cinemaDialog.open) cinemaDialog.showModal();
+    safePlay(cinemaVideo);
+  }
+
+  function closeCinemaDialog() {
+    const syncBackTime = cinemaVideo && typeof cinemaVideo.currentTime === 'number'
+      ? cinemaVideo.currentTime
+      : 0;
+    return closeTopLayerDialog(
+      cinemaDialog,
+      () => cinemaSeq,
+      () => ++cinemaSeq,
+      () => {
+        safePause(cinemaVideo);
+        if (promoVideo && filmViewport && filmViewport.classList.contains('is-playing') && syncBackTime > 0) {
+          safeSeek(promoVideo, syncBackTime);
+        }
+      }
+    ).finally(() => {
+      if (cinemaReturnEl && typeof cinemaReturnEl.focus === 'function') {
+        try { cinemaReturnEl.focus({ preventScroll: true }); } catch (_) { cinemaReturnEl.focus(); }
+      }
+    });
+  }
+
+  if (heroWatchBtn) {
+    heroWatchBtn.addEventListener('click', () => openCinemaDialog(heroWatchBtn, 0));
+  }
+
+  if (filmOpenCinemaBtn) {
+    filmOpenCinemaBtn.addEventListener('click', () => {
+      const cur = promoVideo && typeof promoVideo.currentTime === 'number' ? promoVideo.currentTime : 0;
+      openCinemaDialog(filmOpenCinemaBtn, cur);
+    });
+  }
+
+  if (cinemaCloseBtn) {
+    cinemaCloseBtn.addEventListener('click', () => closeCinemaDialog());
+  }
+
+  cinemaChips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const sec = parseFloat(chip.dataset.cinemaSeek || '0');
+      if (cinemaVideo) {
+        hydrateVideoElement(cinemaVideo);
+        safeSeek(cinemaVideo, sec);
+        highlightChapterByTime(sec);
+        safePlay(cinemaVideo);
+      }
+    });
+  });
+
+  if (cinemaVideo) {
+    cinemaVideo.addEventListener('timeupdate', () => {
+      if (typeof cinemaVideo.currentTime === 'number') {
+        highlightChapterByTime(cinemaVideo.currentTime);
+      }
+    });
+  }
+
+  if (cinemaDialog) {
+    cinemaDialog.addEventListener('cancel', (event) => {
+      safePause(cinemaVideo);
+      if (!supportsTopLayerExit()) {
+        event.preventDefault();
+        closeCinemaDialog();
+      }
+    });
+    cinemaDialog.addEventListener('close', () => {
+      safePause(cinemaVideo);
+    });
+    wireLightDismissFallback(cinemaDialog, closeCinemaDialog);
+  }
+
+  /* ---- Shared-Element Seamless Image Lightbox (View Transitions + WAAPI FLIP Fallback) ---- */
+  const LIGHTBOX_ITEMS = [
+    {
+      id: 'ai',
+      srcZh: 'assets/screenshots/01-ai-assistant.png',
+      srcEn: 'assets/screenshots/07-en-ai-ui.png',
+      titleZh: '可审计本地 AI 助手',
+      titleEn: 'Auditable Local-First AI Assistant',
+      capZh: '透明思考链路 · 工具参数与毫秒耗时完整可查 · 0.31 ms 真停止 · 四档审批卡片',
+      capEn: 'Transparent traces · Exact tool latency · 0.31 ms true socket abort · 4-tier approval cards'
+    },
+    {
+      id: 'org',
+      srcZh: 'assets/screenshots/02-organize.png',
+      srcEn: 'assets/screenshots/02-organize.png',
+      titleZh: '先预演再落盘的智能整理',
+      titleEn: 'Dry-Run File Organizer',
+      capZh: '扫描先渲染分类预演与跳过原因 · 自动保护代码仓库 · 1,000 文件 1.39 s 原路全撤回',
+      capEn: 'Preview every destination and skip reason before touching disk · 1.39 s full 1,000-file Undo'
+    },
+    {
+      id: 'arc',
+      srcZh: 'assets/screenshots/03-archive.png',
+      srcEn: 'assets/screenshots/03-archive.png',
+      titleZh: 'Rust 四档多核压缩内核',
+      titleEn: 'Multi-Core Ad-Free Rust Archiver',
+      capZh: '7 大格式原生浏览与创建 · 四档动态多核 304.3 MB/s · 分块级真暂停与单槽撤回',
+      capEn: '7 formats natively · 4-tier adaptive cores up to 304.3 MB/s · Chunk-level true pause'
+    },
+    {
+      id: 'cache',
+      srcZh: 'assets/screenshots/04-cache.png',
+      srcEn: 'assets/screenshots/04-cache.png',
+      titleZh: '分级安全缓存清理',
+      titleEn: 'Risk-Tiered Safe Cache Cleaner',
+      capZh: '严格区分「安全可重建」与「谨慎复核」 · 硬闸门绝不误删聊天记录与个人文档',
+      capEn: 'Separates safe rebuildable caches from careful items · Personal chats & docs stay protected'
+    },
+    {
+      id: 'space',
+      srcZh: 'assets/screenshots/05-space-tools.png',
+      srcEn: 'assets/screenshots/05-space-tools.png',
+      titleZh: '大文件排行与数字签名溯源',
+      titleEn: 'Large Files & Authenticode Signature Audit',
+      capZh: '大文件排行直读 Authenticode 发行商签名 · 跨盘迁移哈希校验与事务日志保障',
+      capEn: 'Inspect Authenticode publishers on large files · Hash-verified cross-drive migration'
+    }
+  ];
+
+  const lightboxDialog = document.getElementById('media-lightbox');
+  const lbViewport = document.getElementById('lb-viewport');
+  const lbImg = document.getElementById('lb-img');
+  const lbTitle = document.getElementById('lb-title');
+  const lbCaption = document.getElementById('lb-caption');
+  const lbCounter = document.getElementById('lb-counter');
+  const lbZoomBtn = document.getElementById('lb-zoom-btn');
+  const lbZoomLabel = document.getElementById('lb-zoom-label');
+  const lbCloseBtn = document.getElementById('lb-close-btn');
+  const lbPrevBtn = document.getElementById('lb-prev');
+  const lbNextBtn = document.getElementById('lb-next');
+  const lbLive = document.getElementById('lb-live');
+  const zoomTriggers = Array.from(document.querySelectorAll('.zoom-trigger'));
+
+  let lbIndex = 0;
+  let lbSeq = 0;
+  let lbOriginTrigger = null;
+  let lbOriginImg = null;
+  let lbOriginId = '';
+  let lbZoomed = false;
+  let lbPanX = 0;
+  let lbPanY = 0;
+  let lbDragging = false;
+  let lbDidDrag = false;
+  let lbDragStartX = 0;
+  let lbDragStartY = 0;
+  let lbTransitioning = false;
+
+  function isReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+
+  function getItemSrc(item) {
+    return curLang === 'en' ? item.srcEn : item.srcZh;
+  }
+
+  function clearAllTransitionNames() {
+    if (lbImg && lbImg.style) lbImg.style.viewTransitionName = '';
+    zoomTriggers.forEach((btn) => {
+      const img = btn.querySelector ? btn.querySelector('img') : null;
+      if (img && img.style) img.style.viewTransitionName = '';
+    });
+    if (document.documentElement && document.documentElement.dataset) {
+      delete document.documentElement.dataset.vtMedia;
+    }
+    if (lightboxDialog) lightboxDialog.removeAttribute('data-vt-active');
+  }
+
+  function applyZoomTransform() {
+    if (!lbImg || !lbImg.style) return;
+    if (lbZoomed) {
+      lbImg.style.transform = `translate3d(${lbPanX}px, ${lbPanY}px, 0) scale(2)`;
+    } else {
+      lbImg.style.transform = '';
+    }
+    if (lbViewport) lbViewport.classList.toggle('is-zoomed', lbZoomed);
+    if (lbZoomBtn) lbZoomBtn.setAttribute('aria-pressed', lbZoomed ? 'true' : 'false');
+    if (lbZoomLabel) {
+      lbZoomLabel.textContent = COPY[curLang][lbZoomed ? 'lightbox.zoomOut' : 'lightbox.zoomIn'];
+    }
+  }
+
+  function resetLightboxZoom() {
+    lbZoomed = false;
+    lbPanX = 0;
+    lbPanY = 0;
+    lbDragging = false;
+    if (lbViewport) lbViewport.classList.remove('is-dragging');
+    applyZoomTransform();
+  }
+
+  function renderLightboxItem(index, announce) {
+    const total = LIGHTBOX_ITEMS.length;
+    lbIndex = ((index % total) + total) % total;
+    const item = LIGHTBOX_ITEMS[lbIndex];
+    const title = curLang === 'en' ? item.titleEn : item.titleZh;
+    const caption = curLang === 'en' ? item.capEn : item.capZh;
+    const src = getItemSrc(item);
+
+    resetLightboxZoom();
+    if (lbImg) {
+      lbImg.src = src;
+      lbImg.alt = title;
+    }
+    if (lbTitle) lbTitle.textContent = title;
+    if (lbCaption) lbCaption.textContent = caption;
+    if (lbCounter) lbCounter.textContent = `${lbIndex + 1} / ${total}`;
+    if (announce && lbLive) {
+      lbLive.textContent = `${lbIndex + 1} / ${total}: ${title}`;
+    }
+  }
+
+  function syncLightboxLanguage() {
+    zoomTriggers.forEach((btn) => {
+      const id = btn.dataset ? btn.dataset.lightboxId : '';
+      const item = LIGHTBOX_ITEMS.find((x) => x.id === id);
+      if (!item) return;
+      const title = curLang === 'en' ? item.titleEn : item.titleZh;
+      btn.setAttribute('aria-label', curLang === 'en' ? `Inspect screenshot: ${title}` : `点击放大查看：${title}`);
+    });
+    if (lightboxDialog && lightboxDialog.open) {
+      renderLightboxItem(lbIndex, false);
+    } else if (lbZoomLabel) {
+      lbZoomLabel.textContent = COPY[curLang][lbZoomed ? 'lightbox.zoomOut' : 'lightbox.zoomIn'];
+    }
+  }
+
+  function getRectIfVisible(el) {
+    if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 12 || r.height < 12) return null;
+    const vh = window.innerHeight || 900;
+    const vw = window.innerWidth || 1440;
+    if (r.bottom < -40 || r.top > vh + 40 || r.right < -40 || r.left > vw + 40) return null;
+    return r;
+  }
+
+  function findReturnImageForCurrentSlide() {
+    const curItem = LIGHTBOX_ITEMS[lbIndex];
+    if (!curItem) return null;
+    if (lbOriginImg && curItem.id === lbOriginId && getRectIfVisible(lbOriginImg)) {
+      return lbOriginImg;
+    }
+    for (let i = 0; i < zoomTriggers.length; i++) {
+      const btn = zoomTriggers[i];
+      if (!btn.dataset || btn.dataset.lightboxId !== curItem.id) continue;
+      const img = btn.querySelector ? btn.querySelector('img') : null;
+      if (img && getRectIfVisible(img)) return img;
+    }
+    return null;
+  }
+
+  function focusSafely(el) {
+    if (!el || typeof el.focus !== 'function') return;
+    try { el.focus({ preventScroll: true }); } catch (_) { el.focus(); }
+  }
+
+  async function waitImageReady(img) {
+    if (!img || typeof img.decode !== 'function') return;
+    try {
+      await Promise.race([
+        img.decode(),
+        new Promise((r) => setTimeout(r, 120))
+      ]);
+    } catch (_) {}
+  }
+
+  async function openLightbox(triggerEl) {
+    if (!lightboxDialog || lbTransitioning) return;
+    const targetId = triggerEl && triggerEl.dataset ? triggerEl.dataset.lightboxId : 'ai';
+    const foundIdx = LIGHTBOX_ITEMS.findIndex((x) => x.id === targetId);
+    lbOriginTrigger = triggerEl || document.activeElement;
+    lbOriginImg = triggerEl && typeof triggerEl.querySelector === 'function'
+      ? triggerEl.querySelector('img')
+      : null;
+    lbOriginId = foundIdx >= 0 ? targetId : 'ai';
+
+    lbSeq++;
+    lightboxDialog.removeAttribute('data-closing');
+    renderLightboxItem(foundIdx >= 0 ? foundIdx : 0, true);
+    await waitImageReady(lbImg);
+
+    const reduced = isReducedMotion();
+    const originRect = getRectIfVisible(lbOriginImg);
+
+    // Path 1: Native View Transitions API (same-document-transitions)
+    if (!reduced && originRect && typeof document.startViewTransition === 'function') {
+      lbTransitioning = true;
+      clearAllTransitionNames();
+      lbOriginImg.style.viewTransitionName = 'qdisk-zoom-media';
+      document.documentElement.dataset.vtMedia = 'open';
+      lightboxDialog.setAttribute('data-vt-active', '');
+
+      try {
+        const vt = document.startViewTransition(() => {
+          lbOriginImg.style.viewTransitionName = '';
+          if (lbImg) lbImg.style.viewTransitionName = 'qdisk-zoom-media';
+          if (!lightboxDialog.open) lightboxDialog.showModal();
+        });
+        await vt.finished.catch(() => {});
+      } finally {
+        clearAllTransitionNames();
+        lbTransitioning = false;
+        focusSafely(lbCloseBtn);
+      }
+      return;
+    }
+
+    // Path 2: Seamless WAAPI FLIP geometric morph fallback
+    if (!lightboxDialog.open) lightboxDialog.showModal();
+    if (!reduced && originRect && lbImg && typeof lbImg.animate === 'function') {
+      const destRect = lbImg.getBoundingClientRect();
+      if (destRect && destRect.width > 12 && destRect.height > 12) {
+        const dx = (originRect.left + originRect.width / 2) - (destRect.left + destRect.width / 2);
+        const dy = (originRect.top + originRect.height / 2) - (destRect.top + destRect.height / 2);
+        const sx = originRect.width / destRect.width;
+        const sy = originRect.height / destRect.height;
+        lbImg.animate(
+          [
+            { transform: `translate3d(${dx}px, ${dy}px, 0) scale(${sx}, ${sy})`, borderRadius: '18px' },
+            { transform: 'translate3d(0, 0, 0) scale(1, 1)', borderRadius: '14px' }
+          ],
+          { duration: 380, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+        );
+      }
+    }
+    focusSafely(lbCloseBtn);
+  }
+
+  async function closeLightbox() {
+    if (!lightboxDialog || !lightboxDialog.open) return;
+    if (lbTransitioning) {
+      clearAllTransitionNames();
+      lbTransitioning = false;
+      lightboxDialog.close();
+      focusSafely(lbOriginTrigger);
+      return;
+    }
+
+    resetLightboxZoom();
+    const reduced = isReducedMotion();
+    const returnImg = findReturnImageForCurrentSlide();
+
+    // Path 1: Reverse Shared-Element View Transition fly-back
+    if (!reduced && returnImg && lbImg && typeof document.startViewTransition === 'function') {
+      lbTransitioning = true;
+      clearAllTransitionNames();
+      lbImg.style.viewTransitionName = 'qdisk-zoom-media';
+      document.documentElement.dataset.vtMedia = 'close';
+      lightboxDialog.setAttribute('data-vt-active', '');
+
+      try {
+        const vt = document.startViewTransition(() => {
+          lbImg.style.viewTransitionName = '';
+          returnImg.style.viewTransitionName = 'qdisk-zoom-media';
+          lightboxDialog.close();
+        });
+        await vt.finished.catch(() => {});
+      } finally {
+        clearAllTransitionNames();
+        lbTransitioning = false;
+        focusSafely(lbOriginTrigger);
+      }
+      return;
+    }
+
+    // Path 2: Reverse WAAPI FLIP fly-back fallback
+    const returnRect = getRectIfVisible(returnImg);
+    if (!reduced && returnRect && lbImg && typeof lbImg.animate === 'function') {
+      const fromRect = lbImg.getBoundingClientRect();
+      if (fromRect && fromRect.width > 12 && fromRect.height > 12) {
+        lbTransitioning = true;
+        const dx = (returnRect.left + returnRect.width / 2) - (fromRect.left + fromRect.width / 2);
+        const dy = (returnRect.top + returnRect.height / 2) - (fromRect.top + fromRect.height / 2);
+        const sx = returnRect.width / fromRect.width;
+        const sy = returnRect.height / fromRect.height;
+        const anim = lbImg.animate(
+          [
+            { transform: 'translate3d(0, 0, 0) scale(1, 1)', opacity: 1 },
+            { transform: `translate3d(${dx}px, ${dy}px, 0) scale(${sx}, ${sy})`, opacity: 0.92 }
+          ],
+          { duration: 320, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' }
+        );
+        await Promise.race([anim.finished.catch(() => {}), new Promise((r) => setTimeout(r, 380))]);
+        anim.cancel();
+        lbTransitioning = false;
+        lightboxDialog.close();
+        focusSafely(lbOriginTrigger);
+        return;
+      }
+    }
+
+    // Path 3: Standard top-layer dialog exit
+    await closeTopLayerDialog(
+      lightboxDialog,
+      () => lbSeq,
+      () => ++lbSeq
+    );
+    focusSafely(lbOriginTrigger);
+  }
+
+  function stepLightbox(delta) {
+    if (!lightboxDialog || !lightboxDialog.open) return;
+    renderLightboxItem(lbIndex + delta, true);
+    if (!isReducedMotion() && lbImg && typeof lbImg.animate === 'function') {
+      const shift = delta > 0 ? 18 : -18;
+      lbImg.animate(
+        [
+          { opacity: 0.45, transform: `translate3d(${shift}px, 0, 0) scale(0.985)` },
+          { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' }
+        ],
+        { duration: 220, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+      );
+    }
+  }
+
+  zoomTriggers.forEach((btn) => {
+    btn.addEventListener('click', () => openLightbox(btn));
+  });
+
+  if (lbCloseBtn) lbCloseBtn.addEventListener('click', () => closeLightbox());
+  if (lbPrevBtn) lbPrevBtn.addEventListener('click', () => stepLightbox(-1));
+  if (lbNextBtn) lbNextBtn.addEventListener('click', () => stepLightbox(1));
+
+  if (lbZoomBtn) {
+    lbZoomBtn.addEventListener('click', () => {
+      lbZoomed = !lbZoomed;
+      if (!lbZoomed) { lbPanX = 0; lbPanY = 0; }
+      applyZoomTransform();
+    });
+  }
+
+  if (lbImg) {
+    lbImg.addEventListener('click', () => {
+      if (lbDidDrag) {
+        lbDidDrag = false;
+        return;
+      }
+      lbZoomed = !lbZoomed;
+      if (!lbZoomed) { lbPanX = 0; lbPanY = 0; }
+      applyZoomTransform();
+    });
+
+    lbImg.addEventListener('pointerdown', (e) => {
+      if (!lbZoomed) return;
+      lbDragging = true;
+      lbDidDrag = false;
+      lbDragStartX = e.clientX - lbPanX;
+      lbDragStartY = e.clientY - lbPanY;
+      if (lbViewport) lbViewport.classList.add('is-dragging');
+      if (typeof lbImg.setPointerCapture === 'function') {
+        try { lbImg.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+    });
+  }
+
+  window.addEventListener('pointermove', (e) => {
+    if (!lbDragging || !lbZoomed) return;
+    const nextX = e.clientX - lbDragStartX;
+    const nextY = e.clientY - lbDragStartY;
+    if (Math.abs(nextX - lbPanX) > 3 || Math.abs(nextY - lbPanY) > 3) {
+      lbDidDrag = true;
+    }
+    const maxPan = 420;
+    lbPanX = Math.max(-maxPan, Math.min(maxPan, nextX));
+    lbPanY = Math.max(-maxPan, Math.min(maxPan, nextY));
+    applyZoomTransform();
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!lbDragging) return;
+    lbDragging = false;
+    if (lbViewport) lbViewport.classList.remove('is-dragging');
+  });
+
+  if (lightboxDialog) {
+    lightboxDialog.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        stepLightbox(1);
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        stepLightbox(-1);
+      }
+    });
+
+    // Always route Esc & light-dismiss cancel through reverse shared-element morph
+    lightboxDialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeLightbox();
+    });
+
+    wireLightDismissFallback(lightboxDialog, closeLightbox);
+  }
+
+  mediaUiReady = true;
+  syncLightboxLanguage();
+  syncFilmChapterCaption();
 })();

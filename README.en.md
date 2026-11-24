@@ -28,9 +28,21 @@
 
 ---
 
+## 🎬 56-Second Official Product Film
+
+<!-- For native inline GitHub video playback, drag the generated <9.5 MB qdisk-promo-github-10mb.mp4 into any GitHub Issue box and paste the returned https://github.com/user-attachments/assets/... URL on its own line here -->
+<div align="center">
+  <a href="https://3347567186.github.io/QDisk/?lang=en#film">
+    <img src="website/assets/media/promo-poster.jpg" alt="Watch the 56-second 1080p QDisk official product film (Light & Dark UI)" width="100%" />
+  </a>
+  <p><sub>▶ <a href="https://3347567186.github.io/QDisk/?lang=en#film"><strong>Watch the 1080p Product Film with Sound on the Official Site (0:56 · Chapters)</strong></a> · or download <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 (8.5 MB)</a></sub></p>
+</div>
+
+---
+
 ## 1. Four Everyday Windows Headaches QDisk Solves
 
-> Short 10-second demo GIFs are on the way; explore interactive previews right now on the **[Official Website](https://3347567186.github.io/QDisk/?lang=en)** or inspect the live UI screenshots below.
+> Explore the live interactive showcase and seamless full-screen screenshot inspector on the **[Official Website](https://3347567186.github.io/QDisk/?lang=en)**, or browse the real Windows captures below.
 
 ### 1. Hundreds of cluttered files in Downloads — tidy in 2 seconds, undo everything in 1.39 seconds
 

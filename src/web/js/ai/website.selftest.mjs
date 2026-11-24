@@ -10,20 +10,27 @@ const siteDir = path.join(repoRoot, 'website');
 const html = fs.readFileSync(path.join(siteDir, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(siteDir, 'app.js'), 'utf8');
 const css = fs.readFileSync(path.join(siteDir, 'styles.css'), 'utf8');
+const pagesYml = fs.readFileSync(path.join(repoRoot, '.github/workflows/pages.yml'), 'utf8');
 
 const fail = (msg) => {
   console.error('[官网红队自测失败] ' + msg);
   process.exit(1);
 };
 
-// 1. 静态资源、页面锚点与截图完备性校验（含 pages.yml 部署复制的 docs/assets/screenshots）
-const assetHrefs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)].map((m) => m[1]);
+// 1. 静态资源、页面锚点与截图完备性校验（含 pages.yml 部署复制的 docs/assets/screenshots 与 Release 拉取的 qdisk-promo.mp4）
+const assetHrefs = [...html.matchAll(/(?:src|href|poster)="([^"]+)"/g)].map((m) => m[1]);
 const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
 for (const ref of assetHrefs) {
   if (/^https?:|^mailto:|^data:/.test(ref)) continue;
   if (ref.startsWith('#')) {
     const anchor = ref.slice(1);
     if (!ids.has(anchor)) fail(`发现断链锚点 href="${ref}"`);
+    continue;
+  }
+  if (ref === 'assets/media/qdisk-promo.mp4') {
+    if (!pagesYml.includes('_site/assets/media/qdisk-promo.mp4')) {
+      fail('index.html 引用了 assets/media/qdisk-promo.mp4，但 pages.yml 未配置拉取步骤');
+    }
     continue;
   }
   const direct = path.join(siteDir, ref);
@@ -75,6 +82,9 @@ class MiniEl {
     this.hidden = false;
     this.open = false;
     this.disabled = false;
+    this.currentTime = 0;
+    this.readyState = 4;
+    this.paused = true;
     this.classList = new MiniClassList(attrs.class || '');
     for (const [k, v] of Object.entries(attrs)) {
       this.setAttribute(k, v);
@@ -125,8 +135,22 @@ class MiniEl {
   setSelectionRange() {}
   getBoundingClientRect() { return { top: 100, left: 100, width: 400, height: 300, bottom: 400, right: 500 }; }
   showModal() { this.open = true; }
-  close() { this.open = false; }
+  close() { this.open = false; this.dispatchEvent({ type: 'close' }); }
+  play() { this.paused = false; this.dispatchEvent({ type: 'play' }); this.dispatchEvent({ type: 'playing' }); return Promise.resolve(); }
+  pause() { this.paused = true; }
+  load() {}
   getAnimations() { return []; }
+  querySelector(sel) {
+    if (sel === 'img') {
+      const idx = allEls.indexOf(this);
+      if (idx >= 0) {
+        for (let i = idx + 1; i < Math.min(allEls.length, idx + 4); i++) {
+          if (allEls[i].tagName === 'IMG') return allEls[i];
+        }
+      }
+    }
+    return allEls.find((el) => matchesSelector(el, sel)) || null;
+  }
   querySelectorAll(sel) {
     return allEls.filter((el) => matchesSelector(el, sel));
   }
@@ -176,6 +200,12 @@ function matchesSelector(el, sel) {
     if (s === '.site-nav [data-section]') return el.hasAttribute('data-section');
     if (s === '.float-in' || s === '.float-group') return el.classList.contains(s.slice(1));
     if (s === '[data-scroll-hero="copy"]') return el.getAttribute('data-scroll-hero') === 'copy';
+    if (s === '.film-chapter') return el.classList.contains('film-chapter');
+    if (s === '[data-cinema-seek]') return el.hasAttribute('data-cinema-seek');
+    if (s === '.zoom-trigger') return el.classList.contains('zoom-trigger');
+    if (s === 'video[loading="lazy"]') return el.tagName === 'VIDEO' && el.getAttribute('loading') === 'lazy';
+    if (s === 'source[data-src]') return el.tagName === 'SOURCE' && el.hasAttribute('data-src');
+    if (s === 'source[src]') return el.tagName === 'SOURCE' && el.hasAttribute('src');
     return false;
   });
 }
@@ -334,10 +364,99 @@ dialog.dispatchEvent({ type: 'cancel' });
 await new Promise((r) => setTimeout(r, 15));
 if (dialog.open) fail('赞赏弹窗 Escape(cancel) 关闭失效');
 
-// 3g. 校验样式表无断规则（.sr-only 与 sponsor-dialog 样式存在）
-if (!css.includes('.sr-only') || !css.includes('dialog.sponsor-dialog')) {
-  fail('website/styles.css 缺少 .sr-only 或 sponsor-dialog 核心样式');
+// 3g. 宣传片影幕起播、章节跳播与影院模式弹窗（含关闭自动暂停）
+const filmViewport = byId.get('film-viewport');
+const filmFacade = byId.get('film-play-facade');
+const promoVideo = byId.get('promo-video');
+const cinemaDialog = byId.get('cinema-dialog');
+const cinemaVideo = byId.get('cinema-video');
+if (!filmFacade || !promoVideo || !cinemaDialog || !cinemaVideo) {
+  fail('缺少宣传片影幕或影院模式关键 DOM 元素');
+}
+if (promoVideo.getAttribute('loading') !== 'lazy' || promoVideo.getAttribute('preload') !== 'none' || !promoVideo.getAttribute('width') || !promoVideo.getAttribute('height')) {
+  fail('promo-video 未满足 lazy-load-video-and-audio 规范（需 loading=lazy, preload=none, 显式宽高）');
+}
+filmFacade.dispatchEvent({ type: 'click' });
+if (!filmViewport.classList.contains('is-playing') || promoVideo.paused) {
+  fail('点击影幕封面未能无缝切入播放');
+}
+const ch2 = byId.get('film-ch-2');
+ch2.dispatchEvent({ type: 'click' });
+if (promoVideo.currentTime !== 34 || !ch2.classList.contains('is-active')) {
+  fail(`章节跳播失败: currentTime=${promoVideo.currentTime}, active=${ch2.classList.contains('is-active')}`);
+}
+byId.get('film-open-cinema').dispatchEvent({ type: 'click' });
+if (!cinemaDialog.open || !promoVideo.paused || cinemaVideo.paused || cinemaVideo.currentTime !== 34) {
+  fail('影院模式未能接力时间戳并暂停页面内嵌视频');
+}
+cinemaDialog.dispatchEvent({ type: 'cancel' });
+await new Promise((r) => setTimeout(r, 15));
+if (cinemaDialog.open || !cinemaVideo.paused) {
+  fail('关闭影院弹窗后未自动暂停视频或未关闭');
+}
+byId.get('hero-watch-film').dispatchEvent({ type: 'click' });
+if (!cinemaDialog.open || cinemaVideo.paused) {
+  fail('首屏「观看宣传片」按钮未能打开影院弹窗起播');
+}
+byId.get('cinema-close-btn').dispatchEvent({ type: 'click' });
+await new Promise((r) => setTimeout(r, 15));
+if (cinemaDialog.open || !cinemaVideo.paused) {
+  fail('影院关闭按钮未能关闭并暂停视频');
 }
 
-console.log('结果：官网（website/）全部按钮、资源、锚点、双语、主题、Tab 键盘导航、基准切换、剪贴板降级与赞赏弹窗红队自测全绿');
+// 3h. 全站 9 处产品截图点击无缝放大灯箱（含图集切换、2× 缩放、焦点归还与 Esc/遮罩关闭）
+const zoomTriggers = allEls.filter((e) => e.classList.contains('zoom-trigger'));
+if (zoomTriggers.length !== 9) {
+  fail(`预期 9 处可放大产品截图，实测 ${zoomTriggers.length} 处`);
+}
+const lbDialog = byId.get('media-lightbox');
+const lbImg = byId.get('lb-img');
+const lbCounter = byId.get('lb-counter');
+const lbZoomBtn = byId.get('lb-zoom-btn');
+const spaceTrigger = byId.get('zoom-story-space');
+spaceTrigger.dispatchEvent({ type: 'click' });
+await new Promise((r) => setTimeout(r, 20));
+if (!lbDialog.open || !lbImg.src.includes('05-space-tools.png') || lbCounter.textContent !== '5 / 5') {
+  fail(`点击 Story 04 叠加副图打开灯箱失败: open=${lbDialog.open}, src=${lbImg.src}, counter=${lbCounter.textContent}`);
+}
+lbDialog.dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+if (!lbImg.src.includes('01-ai-assistant.png') || lbCounter.textContent !== '1 / 5') {
+  fail(`灯箱 ArrowRight 循环切图失败: src=${lbImg.src}, counter=${lbCounter.textContent}`);
+}
+lbZoomBtn.dispatchEvent({ type: 'click' });
+if (lbZoomBtn.getAttribute('aria-pressed') !== 'true') {
+  fail('灯箱 2× 细节放大按钮状态未切换');
+}
+lbDialog.dispatchEvent({ type: 'cancel' });
+await new Promise((r) => setTimeout(r, 20));
+if (lbDialog.open || focusedEl !== spaceTrigger) {
+  fail(`灯箱 Esc 关闭或焦点归还失败: open=${lbDialog.open}, focus=${focusedEl && focusedEl.id}`);
+}
+// 遮罩点击降级关闭
+byId.get('zoom-stage-org').dispatchEvent({ type: 'click' });
+await new Promise((r) => setTimeout(r, 20));
+if (!lbDialog.open || !lbImg.src.includes('02-organize.png')) {
+  fail('点击首屏智能整理截图未能打开灯箱');
+}
+lbDialog.dispatchEvent({ type: 'click', target: lbDialog, clientX: 5, clientY: 5 });
+await new Promise((r) => setTimeout(r, 20));
+if (lbDialog.open) {
+  fail('灯箱遮罩点击关闭降级失效');
+}
+
+// 3i. 校验样式表无断规则（.sr-only、sponsor-dialog、film-frame、cinema-dialog、media-lightbox 与 View Transition）
+const requiredCss = [
+  '.sr-only',
+  'dialog.sponsor-dialog',
+  '.film-frame',
+  'dialog.cinema-dialog',
+  'dialog.media-lightbox',
+  '::view-transition-group(qdisk-zoom-media)',
+  'overscroll-behavior: contain'
+];
+for (const rule of requiredCss) {
+  if (!css.includes(rule)) fail(`website/styles.css 缺少核心样式规则: ${rule}`);
+}
+
+console.log('结果：官网（website/）全部按钮、宣传片影幕、影院弹窗、9 处图片放大灯箱、资源、锚点、双语、主题、Tab 键盘导航、基准切换、剪贴板降级与赞赏弹窗红队自测全绿');
 process.exit(0);

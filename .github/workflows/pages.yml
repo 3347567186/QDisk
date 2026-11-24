@@ -28,9 +28,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p _site/assets/screenshots
+          mkdir -p _site/assets/screenshots _site/assets/media
           cp -r website/* _site/
           cp -r docs/assets/screenshots/* _site/assets/screenshots/
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v1.46.2/qdisk-promo.mp4" -o _site/assets/media/qdisk-promo.mp4 || rm -f _site/assets/media/qdisk-promo.mp4
           curl -fsSL "https://github.com/${{ github.repository }}/releases/latest/download/latest.json" -o _site/latest.json || true
           STARS=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${{ github.repository }}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('stargazers_count',0))" 2>/dev/null || echo 0)
           printf '{"stars":%s}\n' "${STARS:-0}" > _site/repo-meta.json
