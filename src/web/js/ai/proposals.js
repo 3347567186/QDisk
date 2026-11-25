@@ -412,24 +412,31 @@
       }
 
       const act = actions.get(p.action);
+      /* 同步抢占状态锁：必须在任何 await 之前脱离 pending，彻底杜绝双击确认导致并发双执行 */
+      p.status = 'running';
       /* 子集要重新预演：卡片上那串数字是「整批」的，勾掉一半还按整批记账就是骗人 */
       let card = p.card;
       if (pick) {
         try {
           card = await act.plan(args);
         } catch (e) {
+          p.status = 'pending';
           return { ok: false, error: (e && e.message) || '预演失败' };
         }
-        if (!card || !card.count) return { ok: false, error: '勾选的这几项已经没有可执行的内容了' };
+        if (!card || !card.count) {
+          p.status = 'pending';
+          return { ok: false, error: '勾选的这几项已经没有可执行的内容了' };
+        }
         if (card.count > capItemsOf(p.action)) {
+          p.status = 'pending';
           return { ok: false, error: '勾选的这几项有 ' + card.count + ' 项，超过单次上限' };
         }
         if (card.bytes > capBytesNow()) {
+          p.status = 'pending';
           return { ok: false, error: '勾选的这几项合计 ' + (card.bytes / 1073741824).toFixed(1) + ' GB，超过单次上限' };
         }
       }
 
-      p.status = 'running';
       p.picked = pick || null;
       execs += 1;
       await journal({ phase: 'approve', id, action: p.action, cat: p.cat, items: card.count, bytes: card.bytes, hash: p.hash });

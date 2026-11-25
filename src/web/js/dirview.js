@@ -12,7 +12,9 @@
   const errText = UI.errText;
 
   const PAGE = 200;                 // 与 Rust list_dir 的 cap 上限一致
-  const EXEC_EXT = ['exe', 'msi', 'msix', 'appx', 'bat', 'cmd', 'com', 'scr', 'ps1', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'jar', 'lnk', 'reg', 'hta'];
+  const EXEC_EXT = ['exe', 'msi', 'msp', 'mst', 'msix', 'appx', 'bat', 'cmd', 'com', 'scr', 'pif',
+    'cpl', 'msc', 'ps1', 'psm1', 'psd1', 'ps1xml', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh', 'jar',
+    'lnk', 'url', 'reg', 'hta', 'chm', 'inf', 'scf', 'appref-ms', 'application', 'gadget'];
   const IMG_EXT = ['png', 'jpg', 'jpeg', 'jfif', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'];
   const ARCHIVE_RE = /\.(?:tar\.(?:gz|bz2|xz|zst)|zip|rar|7z|tar|tgz|tbz2|txz|gz|bz2|xz|zst)$/i;
 
@@ -734,8 +736,9 @@
     pathIn.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      const v = pathIn.value.trim();
+      const v = pathIn.value.trim().replace(/^"+|"+$/g, '').trim();
       if (!v) return;
+      if (v !== pathIn.value.trim()) pathIn.value = v;
       if (root.AIEntries && typeof root.AIEntries.open === 'function') {
         root.AIEntries.open(v);
       } else {

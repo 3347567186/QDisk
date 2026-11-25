@@ -10,13 +10,15 @@ use anyhow::{bail, Context, Result};
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
     WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE,
+    WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 use super::util::to_wide as wide;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DOWNLOAD_TIMEOUT_MS: i32 = 30_000;
+const DOWNLOAD_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 pub fn download(url: &str, dest: &Path) -> Result<()> {
     let rest = url
@@ -45,6 +47,13 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
             bail!("WinHTTP 初始化失败");
         }
         let result = (|| -> Result<()> {
+            WinHttpSetTimeouts(
+                session,
+                DOWNLOAD_TIMEOUT_MS,
+                DOWNLOAD_TIMEOUT_MS,
+                DOWNLOAD_TIMEOUT_MS,
+                DOWNLOAD_TIMEOUT_MS,
+            );
             let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
             if connect.is_null() {
                 bail!("无法连接下载服务器");
@@ -86,6 +95,7 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
                 let mut file = File::create(dest)
                     .with_context(|| format!("无法写入 {}", dest.display()))?;
                 let mut buf = vec![0u8; 64 * 1024];
+                let mut total_written: u64 = 0;
                 loop {
                     let mut available: u32 = 0;
                     if WinHttpQueryDataAvailable(request, &mut available) == 0 {
@@ -107,6 +117,10 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
                     }
                     if got == 0 {
                         break;
+                    }
+                    total_written = total_written.saturating_add(got as u64);
+                    if total_written > DOWNLOAD_MAX_BYTES {
+                        bail!("下载文件体积超过上限（32 MB），已中止");
                     }
                     file.write_all(&buf[..got as usize])?;
                 }

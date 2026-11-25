@@ -344,6 +344,76 @@ ok('AIRegistry 动态注册扩展动作同步进入 ids/list/catalog',
 unregExt();
 ok('AIRegistry 注销扩展动作干净回收', !actions.ids.includes('ext.ping') && actions.get('ext.ping') === null);
 
+/* 19 全站红队二轮加固：AIGuard 上级/尾点/跨盘回收站/..与未展开环境变量 + proposals 并发双提交锁 + 动作契约核验 */
+ok('AIGuard 拒绝波及程序目录的上级路径', !!sandbox.AIGuard.denyWhy('D:\\Tools'));
+ok('AIGuard 拒绝包含用户主目录的 C:\\Users', !!sandbox.AIGuard.denyWhy('C:\\Users'));
+ok('AIGuard 拒绝非系统盘 $Recycle.Bin', !!sandbox.AIGuard.denyWhy('D:\\$Recycle.Bin\\S-1-5-21'));
+ok('AIGuard 拒绝 Windows 尾点规范化绕过', !!sandbox.AIGuard.denyWhy('C:\\Windows.\\System32') && !!sandbox.AIGuard.denyWhy('D:\\repo\\.git.\\HEAD'));
+ok('AIGuard 拒绝原始 .. 穿越段', !!sandbox.AIGuard.denyWhy('D:\\safe\\..\\safe\\a.txt'));
+ok('AIGuard 拒绝未展开环境变量绕过', !!sandbox.AIGuard.denyWhy('C:\\Users\\%USERNAME%'));
+
+// 19b. files.remove_empty 返回数字 removed 时正确汇报数字而非 undefined
+const origRemoveEmpty = API.removeEmptyDirs;
+API.removeEmptyDirs = async (paths) => ({ removed: paths.length, failed: [] });
+props.setPolicy({ mode: 'confirm' });
+props.startTurn();
+const pRmEmpty = await props.propose({ action: 'files.remove_empty', args: { paths: ['D:\\Users\\me\\Downloads\\empty1', 'D:\\Users\\me\\Downloads\\empty2'] } });
+const cRmEmpty = pRmEmpty.ok ? await props.commit(pRmEmpty.proposal.id, { approvedBy: 'user' }) : { ok: false };
+ok('files.remove_empty 正确统计数字 removed 不再显示 undefined', cRmEmpty.ok && cRmEmpty.message.includes('2 个空文件夹') && !cRmEmpty.message.includes('undefined'), cRmEmpty.message || cRmEmpty.error);
+API.removeEmptyDirs = origRemoveEmpty;
+
+// 19c. archive.extract 传字符串 overwrite 策略并使用 archive-undo 精确撤销（绝不把目标目录整棵扔回收站）
+let gotExtractArgs = null;
+let gotUndoId = null;
+API.archiveOpen = async () => ({ entries: [{ name: 'a.txt', size: 10, dir: false }], totalSize: 10 });
+API.archiveExtract = async (path, out, idx, pw, overwrite, mode) => {
+  gotExtractArgs = { path, out, overwrite, mode };
+  return { files: 1, bytes: 10, undoId: 'u-arc-99' };
+};
+API.archiveUndo = async (id) => { gotUndoId = id; return { removedFiles: 1, restoredFiles: 0 }; };
+props.startTurn();
+const pArc = await props.propose({ action: 'archive.extract', args: { path: 'D:\\Users\\me\\Downloads\\demo.zip', out_dir: 'D:\\Users\\me\\Downloads\\out', overwrite: false } });
+const cArc = pArc.ok ? await props.commit(pArc.proposal.id, { approvedBy: 'user' }) : { ok: false };
+const uArc = cArc.ok ? await props.undo(cArc.proposal.id) : { ok: false };
+ok('archive.extract 传字符串策略且走 archiveUndo 精确撤销',
+  cArc.ok && gotExtractArgs && typeof gotExtractArgs.overwrite === 'string' && gotExtractArgs.overwrite === 'rename'
+  && uArc.ok && gotUndoId === 'u-arc-99',
+  JSON.stringify({ gotExtractArgs, gotUndoId, cArc: cArc.error, uArc }));
+
+// 19d. apps.remove_store 在仅传 name 时自动反查 package 并成功卸载
+let removedPkg = '';
+API.storeApps = async () => [{ name: 'DemoStoreApp', version: '1.0', publisher: 'Test', package: 'DemoStoreApp_1.0_x64__abc' }];
+API.removeStoreApp = async (pkg, confirm) => { removedPkg = confirm ? pkg : ''; return { removed: true }; };
+props.startTurn();
+const pStore = await props.propose({ action: 'apps.remove_store', args: { name: 'DemoStoreApp' } });
+const cStore = pStore.ok ? await props.commit(pStore.proposal.id, { approvedBy: 'user' }) : { ok: false };
+ok('apps.remove_store 反查 package 正常卸载', pStore.ok && cStore.ok && removedPkg === 'DemoStoreApp_1.0_x64__abc', removedPkg || cStore.error);
+
+// 19e. proposals.commit 子集异步预演期间同步加锁，防双击并发双执行
+let slowRunCount = 0;
+const origDeleteEngine = API.engine;
+API.engine = async (m, p) => {
+  if (m === 'files.delete' && p.confirm === false) {
+    await new Promise((r) => setTimeout(r, 30));
+    return { items: p.paths.map((x) => ({ path: x, size: 100 })), failed: [], total_size: p.paths.length * 100, count: p.paths.length };
+  }
+  if (m === 'files.delete' && p.confirm === true) {
+    slowRunCount += 1;
+    return { deleted: p.paths, failed: [] };
+  }
+  return origDeleteEngine(m, p);
+};
+props.startTurn();
+const pRace = await props.propose({ action: 'files.delete', args: { paths: ['D:\\Users\\me\\Downloads\\r1.txt', 'D:\\Users\\me\\Downloads\\r2.txt'], mode: 'trash' } });
+const [rRace1, rRace2] = pRace.ok
+  ? await Promise.all([
+    props.commit(pRace.proposal.id, { approvedBy: 'user', paths: ['D:\\Users\\me\\Downloads\\r1.txt'] }),
+    props.commit(pRace.proposal.id, { approvedBy: 'user', paths: ['D:\\Users\\me\\Downloads\\r1.txt'] })
+  ])
+  : [{ ok: false }, { ok: false }];
+ok('proposals.commit 并发双击仅允许一次执行', slowRunCount === 1 && (rRace1.ok !== rRace2.ok), `runs=${slowRunCount}`);
+API.engine = origDeleteEngine;
+
 console.log(out.join('\n'));
 const failed = out.filter((x) => x.startsWith('FAIL')).length;
 console.log('\n' + (out.length - failed) + '/' + out.length + ' 通过，失败 ' + failed);

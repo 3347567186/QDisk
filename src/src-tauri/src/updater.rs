@@ -1964,7 +1964,7 @@ Start-Sleep -Milliseconds 250
 
 try {
   if (Test-Path -LiteralPath $bakDir) { Remove-Item -LiteralPath $bakDir -Recurse -Force -ErrorAction SilentlyContinue }
-  New-Item -ItemType Directory -Path $bakDir -Force | Out-Null
+  [void][System.IO.Directory]::CreateDirectory($bakDir)
 
   # 1. 备份旧版程序与引擎，失败时可完整回滚
   $oldExe = Join-Path $appDir 'tidy-assistant.exe'
@@ -1979,6 +1979,10 @@ try {
   # 2. 替换新版核心文件（保留用户本地数据目录不受影响）
   $newExe = Join-Path $srcDir 'tidy-assistant.exe'
   Copy-Item -LiteralPath $newExe -Destination $oldExe -Force
+  $newWv = Join-Path $srcDir 'WebView2Loader.dll'
+  if (Test-Path -LiteralPath $newWv) {
+    Copy-Item -LiteralPath $newWv -Destination (Join-Path $appDir 'WebView2Loader.dll') -Force -ErrorAction SilentlyContinue
+  }
 
   $newEng = Join-Path $srcDir '引擎'
   if (Test-Path -LiteralPath $newEng) {

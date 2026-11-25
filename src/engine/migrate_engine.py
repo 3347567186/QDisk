@@ -143,43 +143,113 @@ def read_link(path):
     return t
 
 
+def _win32_make_junction(link, target):
+    """纯 Win32 DeviceIoControl(FSCTL_SET_REPARSE_POINT) 创建 NTFS Junction：
+    零 cmd.exe、零 PowerShell、零注入面、零通配符问题，支持 &/%/^/[2026]/中文/长路径，无需管理员权限。
+    """
+    import struct
+    from ctypes import wintypes
+
+    abs_target = os.path.abspath(target)
+    if abs_target.startswith("\\\\?\\"):
+        abs_target = abs_target[4:]
+    sub_name = "\\??\\" + abs_target
+    print_name = abs_target
+    sub_b = sub_name.encode("utf-16-le")
+    print_b = print_name.encode("utf-16-le")
+
+    # MOUNT_POINT_REPARSE_BUFFER: SubstituteNameOffset(H), SubstituteNameLength(H),
+    # PrintNameOffset(H), PrintNameLength(H), PathBuffer (含各自 2 字节 NUL 终止符)
+    path_buf = sub_b + b"\x00\x00" + print_b + b"\x00\x00"
+    reparse_data_len = 8 + len(path_buf)
+    header = struct.pack(
+        "<IHHHHHH",
+        0xA0000003,          # IO_REPARSE_TAG_MOUNT_POINT
+        reparse_data_len,    # ReparseDataLength
+        0,                   # Reserved
+        0,                   # SubstituteNameOffset
+        len(sub_b),          # SubstituteNameLength
+        len(sub_b) + 2,      # PrintNameOffset
+        len(print_b),        # PrintNameLength
+    )
+    payload = header + path_buf
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    k32.DeviceIoControl.restype = wintypes.BOOL
+    k32.DeviceIoControl.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    GENERIC_WRITE = 0x40000000
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FSCTL_SET_REPARSE_POINT = 0x000900A4
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+
+    link_lp = lp(link)
+    os.mkdir(link_lp)
+    h = INVALID_HANDLE_VALUE
+    ok = False
+    try:
+        h = k32.CreateFileW(
+            link_lp,
+            GENERIC_WRITE,
+            0,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if not h or h == INVALID_HANDLE_VALUE:
+            raise OSError("CreateFileW 打开联接目录失败 (err=%d)" % ctypes.get_last_error())
+        returned = wintypes.DWORD(0)
+        res = k32.DeviceIoControl(
+            h,
+            FSCTL_SET_REPARSE_POINT,
+            payload,
+            len(payload),
+            None,
+            0,
+            ctypes.byref(returned),
+            None,
+        )
+        if not res:
+            raise OSError("FSCTL_SET_REPARSE_POINT 失败 (err=%d)" % ctypes.get_last_error())
+        ok = True
+    finally:
+        if h and h != INVALID_HANDLE_VALUE:
+            k32.CloseHandle(h)
+        if not ok:
+            try:
+                os.rmdir(link_lp)
+            except OSError:
+                pass
+
+
 def make_junction(link, target):
     """junction 不需要管理员权限，是最稳的跨卷链接重建方式。
 
-    严禁拼串调 os.system（含 &/%/^/" 的路径会触发 cmd 注入并闪黑窗）：
-    常规路径走无窗 subprocess(cmd /d /c mklink /J)，含 cmd 元字符路径改经
-    环境变量交给 PowerShell New-Item -ItemType Junction，彻底杜绝命令注入。
+    Windows 下直调原生 Win32 DeviceIoControl(FSCTL_SET_REPARSE_POINT)，彻底绕开
+    cmd.exe / PowerShell 的命令注入与 [2026] 通配符陷阱。
     """
     for val in (link, target):
         if not val or any(c in val for c in '\r\n\0"'):
             raise OSError("链接路径包含非法字符：%r" % (val,))
-    if os.path.lexists(link):
+    if os.path.lexists(lp(link)):
         raise OSError("链接位置已被占用：%s" % link)
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
-    has_cmd_meta = any(c in s for s in (link, target) for c in "&|^%!<>")
-    if has_cmd_meta:
-        env = dict(os.environ)
-        env["_TIDY_MJ_LINK"] = link
-        env["_TIDY_MJ_TARGET"] = target
-        res = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "New-Item -ItemType Junction -Path $env:_TIDY_MJ_LINK "
-                "-Target $env:_TIDY_MJ_TARGET | Out-Null",
-            ],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=flags,
-        )
+    if IS_WIN:
+        _win32_make_junction(link, target)
     else:
-        res = subprocess.run(
-            ["cmd", "/d", "/c", "mklink", "/J", link, target],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=flags,
-        )
-    if res.returncode != 0 or not os.path.lexists(link):
+        os.symlink(target, link)
+    if not os.path.lexists(lp(link)):
         raise OSError("重建 junction 失败：%s -> %s" % (link, target))
 
 
@@ -1359,6 +1429,7 @@ def _safe_move(src, dst):
     if os.path.exists(lp(tmp)):
         _force_rm(tmp)
     size = os.path.getsize(lp(src))
+    replaced = False
     try:
         with open(lp(src), "rb", buffering=0) as fi, open(lp(tmp), "wb", buffering=0) as fo:
             while True:
@@ -1371,13 +1442,13 @@ def _safe_move(src, dst):
         _copy_attrs(src, tmp)
         if os.path.getsize(lp(tmp)) != size:
             raise OSError("回滚复制后大小不一致")
-        if os.path.isdir(lp(src)):
-            shutil.rmtree(lp(src))
-        else:
-            os.remove(lp(src))
+        # 必须先原子落位 dst 再删 src：若 os.replace 失败，src 完好无损；绝不允许先删 src 再在 except 里删 tmp 造成双毁
         os.replace(lp(tmp), lp(dst))
+        replaced = True
+        os.remove(lp(src))
     except Exception:
-        _force_rm(tmp)
+        if not replaced:
+            _force_rm(tmp)
         raise
 
 

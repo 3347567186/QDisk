@@ -272,12 +272,18 @@
         );
       }
 
+      let unmounted = false;
+      const stripQuotes = (s) => String(s || '').trim().replace(/^"+|"+$/g, '').trim();
+      const normPathKey = (s) => stripQuotes(s).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+
       function checkInputs() {
         if (!state.sources.length) {
           toast(T('请先添加来源', 'Add a source first'), 'warn');
           return false;
         }
-        if (!state.destination.trim()) {
+        const dest = stripQuotes(state.destination);
+        if (dest !== state.destination) state.destination = dest;
+        if (!dest) {
           toast(T('请先选择目标目录', 'Choose a destination first'), 'warn');
           return false;
         }
@@ -285,9 +291,9 @@
       }
 
       function planParams() {
-        const destination = state.destination.trim();
+        const destination = stripQuotes(state.destination);
         return {
-          sources: state.sources.slice(),
+          sources: state.sources.map(stripQuotes).filter(Boolean),
           destination,
           target: destination,
           mode: state.mode,
@@ -297,6 +303,7 @@
 
       /* ---------- 预演 ---------- */
       async function doPlan() {
+        if (state.running) return;
         if (!checkInputs()) return;
         state.running = true;
         paint();
@@ -305,6 +312,7 @@
           T('正在预演迁移计划…', 'Planning migration…'), 'migrate'
         );
         state.running = false;
+        if (unmounted) return;
         if (res) {
           state.plan = res;
           state.result = null;
@@ -318,8 +326,11 @@
 
       /* ---------- 执行 ---------- */
       async function doApply() {
+        if (state.running) return;
         if (!checkInputs()) return;
-        const destination = state.destination.trim();
+        const destination = stripQuotes(state.destination);
+        state.running = true;
+        paint();
         const ok = await confirm({
           title: T('确认执行迁移', 'Run migration'),
           body: T(
@@ -331,15 +342,18 @@
           ok: T('开始迁移', 'Start'),
           danger: true
         });
-        if (!ok) return;
+        if (!ok || unmounted) {
+          state.running = false;
+          if (!unmounted) paint();
+          return;
+        }
 
-        state.running = true;
-        paint();
         const res = await busy(
           () => API.engine('migrate.apply', Object.assign(planParams(), { confirm: true })),
           T('正在迁移，请勿关闭窗口…', 'Migrating, keep this window open…'), 'migrate'
         );
         state.running = false;
+        if (unmounted) return;
         if (res) {
           if (res.refused) {
             state.result = res;
@@ -350,11 +364,18 @@
           } else {
             state.result = res;
             state.plan = null;
-            state.sources = [];
-            const failed = (res.failed || []).length;
-            toast(failed
-              ? T('迁移完成，{n} 个来源失败', 'Finished, {n} source(s) failed').replace('{n}', fmtCount(failed))
-              : T('迁移完成', 'Migration complete'), failed ? 'warn' : 'ok');
+            const failed = Array.isArray(res.failed) ? res.failed : [];
+            if (!failed.length) {
+              state.sources = [];
+            } else {
+              // 仅保留失败的来源以便重试，避免失败时清空用户已选列表
+              const failKeys = new Set(failed.map((f) => normPathKey(f && f.source)).filter(Boolean));
+              const kept = state.sources.filter((s) => failKeys.has(normPathKey(s)));
+              state.sources = kept.length ? kept : state.sources;
+            }
+            toast(failed.length
+              ? T('迁移完成，{n} 个来源失败', 'Finished, {n} source(s) failed').replace('{n}', fmtCount(failed.length))
+              : T('迁移完成', 'Migration complete'), failed.length ? 'warn' : 'ok');
           }
         }
         paint();
@@ -499,10 +520,12 @@
       liveJump = function (payload) {
         const p = payload || {};
         const srcs = Array.isArray(p.sources) ? p.sources : (Array.isArray(p.paths) ? p.paths : []);
-        srcs.filter(Boolean).map(String).forEach((s) => {
-          if (!state.sources.includes(s)) state.sources.push(s);
+        const seen = new Set(state.sources.map(normPathKey));
+        srcs.filter(Boolean).map(stripQuotes).filter(Boolean).forEach((s) => {
+          const k = normPathKey(s);
+          if (!seen.has(k)) { seen.add(k); state.sources.push(s); }
         });
-        if (p.destination || p.target) state.destination = String(p.destination || p.target).trim();
+        if (p.destination || p.target) state.destination = stripQuotes(p.destination || p.target);
         state.plan = null;
         paint();
       };
@@ -510,6 +533,7 @@
       paint();
 
       return function unmount() {
+        unmounted = true;
         liveJump = null;
         setActions();
       };

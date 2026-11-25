@@ -29,7 +29,7 @@
       push('R', t.tagName.toLowerCase() + ' 加载失败 ' + (t.src || t.href || ''));
       return;
     }
-    push('E', (e && e.message) || '脚本错误' + ' @ ' + where(e && e.filename, e && e.lineno, e && e.colno));
+    push('E', ((e && e.message) || '脚本错误') + ' @ ' + where(e && e.filename, e && e.lineno, e && e.colno));
   }, true);
 
   window.addEventListener('unhandledrejection', (e) => {

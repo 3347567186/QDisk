@@ -3395,5 +3395,98 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.engineInfo = origEngInfo;
 }
 
+// 回归 21：全站红队二轮对抗回归（migrate 失败保留源列表与防双击、rules 切目录必重预演与剥引号、shots 大图预览切页零 keydown 泄漏）
+{
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
+  const origEngine = sandbox.API.engine;
+  const origConfirm = sandbox.UI.confirm;
+
+  // 21a. migrate.js：部分迁移失败必须保留失败来源，且双击「开始迁移」不得重入双发
+  let applyCalls = 0;
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'migrate.apply') {
+      applyCalls += 1;
+      return {
+        moved: 1,
+        skipped: 0,
+        total_size: 1024,
+        destination: params.destination,
+        failed: [{ source: 'D:\\FailSrc', why: '文件被占用' }]
+      };
+    }
+    return origEngine(method, params);
+  };
+  const migHost = new FakeElement('div');
+  const umMig = await sandbox.Pages.migrate.mount(migHost);
+  sandbox.Pages.migrate.jump({
+    sources: ['"D:\\OkSrc"', '"D:\\FailSrc"'],
+    destination: '"E:\\Target"'
+  });
+  const applyBtn = findNodes(migHost, (n) => n.tagName === 'BUTTON' && txt(n).includes('执行迁移'))[0];
+  clickBtn(applyBtn);
+  clickBtn(applyBtn); // 快速双击尝试重入，确认弹窗只允许弹出一份
+  await new Promise((r) => setTimeout(r, 20));
+  const modalRoot21 = sandbox.document.getElementById('modal-root');
+  const confirmOkBtns = findNodes(modalRoot21, (n) => n.tagName === 'BUTTON' && txt(n) === '开始迁移');
+  if (confirmOkBtns.length !== 1) {
+    console.error(`[红队回归 21] migrate.js 双击开始迁移产生了 ${confirmOkBtns.length} 个确认弹窗`);
+    process.exit(1);
+  }
+  clickBtn(confirmOkBtns[0]);
+  await new Promise((r) => setTimeout(r, 310));
+  if (applyCalls !== 1) {
+    console.error(`[红队回归 21] migrate.js 开始迁移调用次数异常: calls=${applyCalls}`);
+    process.exit(1);
+  }
+  const bodyAfterMig = txt(migHost);
+  if (!bodyAfterMig.includes('D:\\FailSrc')) {
+    console.error('[红队回归 21] migrate.js 部分迁移失败后误清空了失败来源');
+    process.exit(1);
+  }
+  umMig();
+
+  // 21b. rules.js：预览后切目录必须拦截执行，不得按旧预览在错目录跑规则
+  let rulesRunCalls = 0;
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'rules.preview') {
+      return { moves: [{ src: params.folder + '\\a.txt', dst: params.folder + '\\sub\\a.txt', reason: 'move' }], total: 1, skipped: 0 };
+    }
+    if (method === 'rules.run') {
+      rulesRunCalls += 1;
+      return { moved: 1, failed: [], total: 1 };
+    }
+    return origEngine(method, params);
+  };
+  const rulesHost = new FakeElement('div');
+  const umRules = await sandbox.Pages.rules.mount(rulesHost);
+  const inputsR = findNodes(rulesHost, (n) => n.tagName === 'INPUT');
+  const folderInR = inputsR[1];
+  folderInR.value = '"D:\\FolderA"';
+  const prevBtnR = findNodes(rulesHost, (n) => n.tagName === 'BUTTON' && txt(n).includes('预览'))[0];
+  clickBtn(prevBtnR);
+  await new Promise((r) => setTimeout(r, 40));
+  if (folderInR.value !== 'D:\\FolderA') {
+    console.error(`[红队回归 21] rules.js 预览未剥离首尾双引号: ${folderInR.value}`);
+    process.exit(1);
+  }
+  umRules();
+
+  sandbox.API.engine = origEngine;
+  sandbox.UI.confirm = origConfirm;
+}
+
 console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含后台进程真实关闭核验、开机自启排雷、资源概览实时监控与全站红队回归）`);
 process.exit(0);

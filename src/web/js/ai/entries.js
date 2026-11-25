@@ -23,9 +23,10 @@
   const T = UIx.T;
 
   /* 可执行文件不交给系统默认程序去跑：路径是模型给的，
-     点一下就跑起来等于把「模型写的话」变成「用户执行的程序」。 */
-  const EXEC_EXT = ['exe', 'msi', 'bat', 'cmd', 'ps1', 'scr', 'com', 'vbs', 'vbe',
-    'js', 'jse', 'wsf', 'lnk', 'reg', 'hta'];
+     点一下就跑起来等于把「模型写的话」变成「用户执行的程序」。与 Rust LOCAL_EXEC_EXTS 保持一致。 */
+  const EXEC_EXT = ['exe', 'msi', 'msp', 'mst', 'bat', 'cmd', 'ps1', 'psm1', 'psd1', 'ps1xml',
+    'scr', 'com', 'pif', 'cpl', 'msc', 'jar', 'vbs', 'vbe', 'js', 'jse', 'wsf', 'wsh',
+    'lnk', 'url', 'reg', 'hta', 'chm', 'msix', 'appx', 'inf', 'scf', 'appref-ms', 'application', 'gadget'];
 
   const ARCHIVE_RE = /\.(?:tar\.(?:gz|bz2|xz|zst)|zip|rar|7z|tar|tgz|tbz2|txz|gz|bz2|xz|zst)$/i;
 

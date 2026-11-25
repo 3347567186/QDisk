@@ -19,13 +19,16 @@
 
   const errText = UI.errText;
 
-  /* 本地路径 -> Tauri asset 地址；convertFileSrc 不可用时退回 file:// */
+  /* 本地路径 -> Tauri asset 地址；剥离 \\?\ 前缀，convertFileSrc 不可用时退回 file:// */
   function fileSrc(p) {
+    let s = String(p || '');
+    if (s.startsWith('\\\\?\\UNC\\')) s = '\\\\' + s.slice(8);
+    else if (s.startsWith('\\\\?\\')) s = s.slice(4);
     try {
       const core = window.__TAURI__ && window.__TAURI__.core;
-      if (core && typeof core.convertFileSrc === 'function') return core.convertFileSrc(p);
+      if (core && typeof core.convertFileSrc === 'function') return core.convertFileSrc(s);
     } catch (e) { /* 忽略，走 file:// */ }
-    return 'file:///' + String(p).replace(/\\/g, '/');
+    return 'file:///' + s.replace(/\\/g, '/');
   }
 
   function clampInt(v, min, max) {
@@ -685,7 +688,12 @@
         openViewerNow(startPath);
       }
 
+      let activeViewerClose = null;
+      let shotsUnmounted = false;
+
       function openViewerNow(startPath) {
+        if (shotsUnmounted) return;
+        if (activeViewerClose) { try { activeViewerClose(); } catch (_) {} activeViewerClose = null; }
         const rootEl = document.getElementById('preview-root');
         if (!rootEl) return;
         let list = sortedItems();
@@ -887,12 +895,18 @@
           render();
         }
 
+        let closed = false;
         function close() {
+          if (closed) return;
+          closed = true;
+          if (activeViewerClose === close) activeViewerClose = null;
           document.removeEventListener('keydown', onKey);
           stopSettle();
           if (frame) { cancelAnimationFrame(frame); frame = 0; }
           rootEl.innerHTML = '';
         }
+        activeViewerClose = close;
+        if (typeof UI.registerModalClose === 'function') UI.registerModalClose(close);
 
         /* 删除当前图：确认 -> 引擎移入回收站 -> 原地显示下一张 */
         async function delCurrent() {
@@ -1348,6 +1362,8 @@
       }
 
       return function unmount() {
+        shotsUnmounted = true;
+        if (activeViewerClose) { try { activeViewerClose(); } catch (_) {} activeViewerClose = null; }
         liveJump = null;
         if (window.App) window.App._onPageSize = null;
         setActions();

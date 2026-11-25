@@ -73,6 +73,7 @@
   let dropUnlisten = null;
   let dropLayer = null;
   let destroyed = false;
+  let mountGen = 0;
   let keyHandler = null;
   const hooks = new Map();
 
@@ -499,8 +500,26 @@
   // 没有序号就会把 A 的内容显示成 B 的。
   let previewSeq = 0;
 
+  function releasePreviewMedia() {
+    if (!els.side) return;
+    if (UI && typeof UI.releaseMediaHandles === 'function') {
+      UI.releaseMediaHandles(els.side);
+      return;
+    }
+    try {
+      els.side.querySelectorAll('video, audio').forEach((m) => {
+        try { m.pause(); } catch (_) {}
+        try { m.removeAttribute('src'); m.load(); } catch (_) {}
+      });
+      els.side.querySelectorAll('iframe').forEach((f) => {
+        try { f.setAttribute('src', 'about:blank'); } catch (_) {}
+      });
+    } catch (_) {}
+  }
+
   function closePreview() {
     previewSeq += 1; // 关掉之后别再让在途请求把面板弹回来
+    releasePreviewMedia();
     if (S.preview) API.archivePreviewClear().catch(() => {});
     S.preview = null;
     S.previewLoading = false;
@@ -1832,7 +1851,8 @@
     const show = !!(S.preview || S.previewLoading);
     els.side.hidden = !show;
     if (els.grid) els.grid.classList.toggle('has-side', show);
-    if (!show) return;
+    if (!show) { releasePreviewMedia(); return; }
+    releasePreviewMedia();
     els.side.innerHTML = '';
     if (S.previewLoading) {
       els.side.appendChild(h('div', { class: 'arc-side-head' }, h('strong', null, T('预览', 'Preview'))));
@@ -1869,7 +1889,7 @@
       if (d.file) {
         const execBlocked = (window.AIEntries && typeof window.AIEntries.isExecPath === 'function')
           ? window.AIEntries.isExecPath(d.name || d.file)
-          : /\.(?:exe|msi|bat|cmd|ps1|scr|com|vbs|vbe|js|jse|wsf|lnk|reg|hta)$/i.test(String(d.name || d.file || ''));
+          : /\.(?:exe|msi|msp|mst|msix|appx|bat|cmd|ps1|psm1|psd1|ps1xml|scr|com|pif|cpl|msc|jar|vbs|vbe|js|jse|wsf|wsh|lnk|url|reg|hta|chm|inf|scf|appref-ms|application|gadget)$/i.test(String(d.name || d.file || ''));
         if (execBlocked) {
           body.appendChild(h('div', { class: 'small muted' }, T('安全保护：压缩包内可执行文件禁止直接运行，请先核验来源。', 'Safety guard: executables inside archives cannot be launched directly.')));
           const b = h('button', { class: 'btn sm ghost' }, icon('external', 13), T('在系统文件管理器中定位（不运行）', 'Reveal in Explorer (safe)'));
@@ -2383,7 +2403,7 @@
     openArchive(archive, null);
   }
 
-  async function bindDropTarget() {
+  async function bindDropTarget(gen) {
     const tauri = window.__TAURI__;
     if (!tauri) return;
     let view = null;
@@ -2395,7 +2415,7 @@
     if (!view || typeof view.onDragDropEvent !== 'function') return;
     try {
       const off = await view.onDragDropEvent((ev) => {
-        if (destroyed) return;
+        if (destroyed || gen !== mountGen) return;
         const p = (ev && ev.payload) || {};
         if (p.type === 'enter' || p.type === 'over') {
           syncDropText();
@@ -2407,14 +2427,18 @@
           showDrop(false);
         }
       });
-      // 页面在注册完成前就被切走时，立刻退订，避免留下悬空监听。
-      if (destroyed) { try { off(); } catch { /* ignore */ } }
-      else dropUnlisten = off;
+      // 页面在注册完成前就被切走或被新挂载覆盖时，立刻退订，避免留下悬空监听。
+      if (destroyed || gen !== mountGen) { try { off(); } catch { /* ignore */ } }
+      else {
+        if (dropUnlisten) { try { dropUnlisten(); } catch { /* ignore */ } }
+        dropUnlisten = off;
+      }
     } catch { dropUnlisten = null; }
   }
 
   /* ---------------------------------------------------------------- 生命周期 */
   async function mount(node) {
+    const myGen = ++mountGen;
     destroyed = false;
     root = node;
     root.classList.add('arc-page');
@@ -2443,8 +2467,8 @@
 
     try {
       if (window.__TAURI__ && window.__TAURI__.event) {
-        unlisten = await window.__TAURI__.event.listen('archive-progress', (ev) => {
-          if (destroyed || !S.busy) return;
+        const offProgress = await window.__TAURI__.event.listen('archive-progress', (ev) => {
+          if (destroyed || myGen !== mountGen || !S.busy) return;
           const p = ev.payload || {};
           S.progress = p;
           if (p.mode) S.activeMode = p.mode;
@@ -2476,11 +2500,18 @@
           }
           renderProgress();
         });
+        if (destroyed || myGen !== mountGen) {
+          try { offProgress(); } catch { /* ignore */ }
+          return () => unmount(myGen);
+        }
+        if (unlisten) { try { unlisten(); } catch { /* ignore */ } }
+        unlisten = offProgress;
       }
     } catch { /* 事件不可用时仍有返回结果 */ }
 
     try {
       const cfg = await API.configGet();
+      if (destroyed || myGen !== mountGen) return () => unmount(myGen);
       if (['saver', 'balanced', 'performance', 'hyper'].includes(cfg && cfg.archive_mode)) {
         S.create.mode = cfg.archive_mode;
         renderCreateChoices();
@@ -2495,33 +2526,38 @@
     if (typeof API.archiveCapabilities === 'function') {
       try {
         const caps = await API.archiveCapabilities();
-        if (!destroyed && caps && typeof caps === 'object') {
+        if (!destroyed && myGen === mountGen && caps && typeof caps === 'object') {
           S.caps = cloneCaps(caps);
           renderCreateChoices();
           emitHook('capabilities:ready', cloneCaps(S.caps));
         }
       } catch { /* 能力查询失败时平滑退回默认文案 */ }
     }
+    if (destroyed || myGen !== mountGen) return () => unmount(myGen);
 
     refreshRar();
     if (S.info) renderOpen();
     setActions();
 
+    if (dropLayer) { dropLayer.remove(); dropLayer = null; }
     dropLayer = buildDropLayer();
     document.body.appendChild(dropLayer);
-    bindDropTarget();
+    bindDropTarget(myGen);
 
+    if (keyHandler) { document.removeEventListener('keydown', keyHandler); keyHandler = null; }
     keyHandler = (e) => {
       if (e.key === 'Escape' && S.preview) closePreview();
     };
     document.addEventListener('keydown', keyHandler);
 
-    return unmount;
+    return () => unmount(myGen);
   }
 
-  function unmount() {
+  function unmount(gen) {
+    if (gen !== undefined && gen !== mountGen) return;
     destroyed = true;
     setActions();
+    releasePreviewMedia();
     if (S.busy) {
       // 离开页面会中断任务：把状态收干净，回到本页时不能停在「永远处理中」
       API.archiveCancel().catch(() => {});
@@ -2566,6 +2602,7 @@
           if (resolved && resolved.length) paths = resolved;
         } catch (_) {}
       }
+      if (destroyed) return undefined;
       const arc = paths.find((p) => isArchivePath(p) || /\.zst$/i.test(p));
       if (!arc) return undefined;
       try {

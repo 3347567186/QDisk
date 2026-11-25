@@ -176,13 +176,24 @@ fn scan_dir(dir: &Path) -> Block {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
-                // file_type() 不跟随链接：符号链接与 junction 都不进队，避免绕圈
+                // file_type() 不跟随链接；Windows 上额外检查 FILE_ATTRIBUTE_REPARSE_POINT，
+                // 彻底拦截 NTFS Junction 防止循环目录联接导致遍历死循环或重复计数。
                 let ft = match ent.file_type() {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
                 if ft.is_symlink() {
                     continue;
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+                    if let Ok(lm) = fs::symlink_metadata(ent.path()) {
+                        if lm.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                            continue;
+                        }
+                    }
                 }
                 let name = ent.file_name();
                 let name = name.to_string_lossy();

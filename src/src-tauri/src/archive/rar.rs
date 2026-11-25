@@ -118,6 +118,15 @@ struct RarApi {
 
 impl RarApi {
     fn load(dll: &Path) -> Result<Self> {
+        // 每次 LoadLibraryW 前强校官方 UnRAR64.dll 的体积与 SHA-256，防止数据目录内 DLL 被篡改劫持
+        let meta = fs::metadata(dll).with_context(|| format!("找不到 {}", dll.display()))?;
+        if meta.len() != DLL_SIZE {
+            bail!("UnRAR64.dll 体积校验失败，拒绝加载（请重新安装 RAR 组件）");
+        }
+        let got = sha256_file(dll)?;
+        if got != DLL_SHA256 {
+            bail!("UnRAR64.dll SHA-256 校验失败，拒绝加载（请重新安装 RAR 组件）");
+        }
         unsafe {
             let lib = Library::new(dll)
                 .with_context(|| format!("无法加载 {}", dll.display()))?;
@@ -685,7 +694,7 @@ pub fn extract(
             }
             report.skipped += 1;
             report.warnings.push(format!("{name}: {}", rar_error(rc)));
-            let _ = api.process(handle, RAR_SKIP, None, None);
+            // RARProcessFileW(RAR_EXTRACT) 已推进当前条目状态，绝不再重复调 RAR_SKIP 避免误跳过下一条目
             continue;
         }
         if extracted != target {

@@ -72,7 +72,9 @@
       savedText: '',
       validated: null,
       preview: null,
-      run: null
+      run: null,
+      busy: false,
+      unmounted: false
     };
 
     /* ---------------- 规则文件 ---------------- */
@@ -121,7 +123,10 @@
     const btnBrowse = mkBtn('选择目录', 'Browse', 'ghost', 'folder', async () => {
       try {
         const picked = await API.pickFolder(folderInput.value.trim());
-        if (picked) folderInput.value = String(picked);
+        if (picked) {
+          folderInput.value = String(picked);
+          if (S.preview) { S.preview = null; renderPreview(null); }
+        }
       } catch (e) {
         toast(e.message || String(e), 'error');
       }
@@ -387,17 +392,28 @@
     }
 
     async function ensureOnDisk() {
-      const p = pathInput.value.trim();
+      const p = pathInput.value.trim().replace(/^"+|"+$/g, '').trim();
+      if (p !== pathInput.value.trim()) pathInput.value = p;
       if (!p) {
-        toast(T('请先填写或选择规则文件路径', 'Enter or choose a rule file path first'), 'warn');
-        pathInput.focus();
-        return false;
+        if (!editor.value.trim()) {
+          toast(T('请先编写规则内容', 'Write rules first'), 'warn');
+          editor.focus();
+          return false;
+        }
+        const yes = await confirm({
+          title: T('保存规则文件', 'Save rule file'),
+          body: T('执行规则需要先将当前草稿保存为 YAML 文件，是否现在保存并继续？',
+            'Running rules requires saving the current draft to a YAML file first. Save now and continue?'),
+          ok: T('保存并继续', 'Save and continue')
+        });
+        if (!yes) return false;
+        return await saveFile(true);
       }
       if (S.diskPath !== p || editor.value !== S.savedText) {
         const yes = await confirm({
           title: T('内容尚未保存', 'Unsaved content'),
-          body: T('校验、预览和执行读取的是磁盘上的规则文件，当前编辑内容还没有保存到该路径。是否先保存？',
-            'Validate, preview and run read the rule file from disk, but the current content is not saved there. Save it first?'),
+          body: T('执行规则读取的是磁盘上的规则文件，当前编辑内容还没有保存到该路径。是否先保存？',
+            'Running rules reads the rule file from disk, but the current content is not saved there. Save it first?'),
           ok: T('保存并继续', 'Save and continue')
         });
         if (!yes) return false;
@@ -480,6 +496,7 @@
       setBtnBusy(btnValidate, true, T('校验中…', 'Checking…'));
       try {
         const r = await API.engine('rules.validate', { text: editor.value });
+        if (S.unmounted) return false;
         S.validated = r;
         renderValidation(r);
         if (r.ok) {
@@ -492,9 +509,11 @@
         toast(T('规则校验未通过', 'Validation failed'), 'error');
         return false;
       } catch (e) {
-        S.validated = null;
-        renderValidation(null);
-        toast(e.message || String(e), 'error');
+        if (!S.unmounted) {
+          S.validated = null;
+          renderValidation(null);
+          toast(e.message || String(e), 'error');
+        }
         return false;
       } finally {
         setBtnBusy(btnValidate, false);
@@ -502,7 +521,9 @@
     }
 
     async function preview() {
-      const folder = folderInput.value.trim();
+      if (S.busy) return;
+      const folder = folderInput.value.trim().replace(/^"+|"+$/g, '').trim();
+      if (folder !== folderInput.value.trim()) folderInput.value = folder;
       if (!folder) {
         toast(T('请选择目标目录', 'Choose a target folder'), 'warn');
         folderInput.focus();
@@ -512,59 +533,72 @@
         toast(T('编辑器还是空的，先写规则或插入示例', 'Editor is empty — write rules or insert the sample first'), 'warn');
         return;
       }
+      S.busy = true;
       setBtnBusy(btnPreview, true, T('预览中…', 'Previewing…'));
       try {
         const r = await API.engine('rules.preview', { text: editor.value, folder: folder });
-        S.preview = r;
-        renderPreview(r);
+        if (S.unmounted) return;
+        S.preview = Object.assign({ folder }, r);
+        renderPreview(S.preview);
         toast(T('预演完成：' + fmtCount(r.total) + ' 项将被移动', 'Preview: ' + fmtCount(r.total) + ' item(s) to move'), 'ok');
       } catch (e) {
-        S.preview = null;
-        renderPreview(null);
-        toast(e.message || String(e), 'error');
+        if (!S.unmounted) {
+          S.preview = null;
+          renderPreview(null);
+          toast(e.message || String(e), 'error');
+        }
       } finally {
+        S.busy = false;
         setBtnBusy(btnPreview, false);
       }
     }
 
     async function runRules() {
-      const folder = folderInput.value.trim();
+      if (S.busy) return;
+      const folder = folderInput.value.trim().replace(/^"+|"+$/g, '').trim();
+      if (folder !== folderInput.value.trim()) folderInput.value = folder;
       if (!folder) {
         toast(T('请选择目标目录', 'Choose a target folder'), 'warn');
         folderInput.focus();
         return;
       }
-      if (!(await ensureOnDisk())) return;
-      const path = pathInput.value.trim();
-      if (S.preview && S.preview.folder && S.preview.folder !== folder) {
-        toast(T('目标目录已改，请重新预览再执行', 'Folder changed — preview again first'), 'warn');
-        return;
+      S.busy = true;
+      try {
+        if (!(await ensureOnDisk())) return;
+        const path = pathInput.value.trim().replace(/^"+|"+$/g, '').trim();
+        if (S.preview && S.preview.folder && S.preview.folder !== folder) {
+          toast(T('目标目录已改，请重新预览再执行', 'Folder changed — preview again first'), 'warn');
+          return;
+        }
+        const yes = await confirm({
+          title: T('执行规则', 'Run rules'),
+          body: T('将按规则移动「' + folder + '」中匹配的文件。\n\n此操作会真实修改磁盘文件，执行后无法通过本页撤销。建议先点「预览」确认结果。',
+            'Files matching the rules in "' + folder + '" will be moved.\n\nThis really changes files on disk and cannot be undone from this page. Preview first.'),
+          ok: T('执行', 'Run'),
+          danger: true
+        });
+        if (!yes || S.unmounted) return;
+        setBtnBusy(btnRun, true, T('执行中…', 'Running…'));
+        const r = await busy(
+          () => API.engine('rules.run', { path: path, folder: folder, confirm: true }),
+          T('正在按规则移动文件…', 'Moving files by rules…'), 'rules'
+        );
+        setBtnBusy(btnRun, false);
+        if (!r || S.unmounted) return;
+        renderRun(r);
+        const failed = Array.isArray(r.failed) ? r.failed.length : 0;
+        if (!failed) {
+          toast(T('执行完成：移动 ' + fmtCount(r.moved) + ' 项', 'Done: ' + fmtCount(r.moved) + ' moved'), 'ok');
+        } else {
+          toast(T('执行完成：移动 ' + fmtCount(r.moved) + ' 项，失败 ' + fmtCount(failed) + ' 项',
+            'Done: ' + fmtCount(r.moved) + ' moved, ' + fmtCount(failed) + ' failed'), 'warn');
+        }
+        S.preview = null;
+        renderPreview(null);
+      } finally {
+        S.busy = false;
+        setBtnBusy(btnRun, false);
       }
-      const yes = await confirm({
-        title: T('执行规则', 'Run rules'),
-        body: T('将按规则移动「' + folder + '」中匹配的文件。\n\n此操作会真实修改磁盘文件，执行后无法通过本页撤销。建议先点「预览」确认结果。',
-          'Files matching the rules in "' + folder + '" will be moved.\n\nThis really changes files on disk and cannot be undone from this page. Preview first.'),
-        ok: T('执行', 'Run'),
-        danger: true
-      });
-      if (!yes) return;
-      setBtnBusy(btnRun, true, T('执行中…', 'Running…'));
-      const r = await busy(
-        () => API.engine('rules.run', { path: path, folder: folder, confirm: true }),
-        T('正在按规则移动文件…', 'Moving files by rules…'), 'rules'
-      );
-      setBtnBusy(btnRun, false);
-      if (!r) return;
-      renderRun(r);
-      const failed = Array.isArray(r.failed) ? r.failed.length : 0;
-      if (!failed) {
-        toast(T('执行完成：移动 ' + fmtCount(r.moved) + ' 项', 'Done: ' + fmtCount(r.moved) + ' moved'), 'ok');
-      } else {
-        toast(T('执行完成：移动 ' + fmtCount(r.moved) + ' 项，失败 ' + fmtCount(failed) + ' 项',
-          'Done: ' + fmtCount(r.moved) + ' moved, ' + fmtCount(failed) + ' failed'), 'warn');
-      }
-      S.preview = null;
-      renderPreview(null);
     }
 
     setActions();
@@ -581,6 +615,7 @@
 
     /* 切页后编辑器和函数都成了孤儿：清掉桥，草稿改为挂起等下次挂载 */
     return function () {
+      S.unmounted = true;
       liveFill = null;
       liveJump = null;
       setActions();

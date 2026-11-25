@@ -499,7 +499,8 @@
     }
 
     async function scanBig() {
-      const dir = bigInput.value.trim();
+      const dir = bigInput.value.trim().replace(/^"+|"+$/g, '').trim();
+      if (dir !== bigInput.value.trim()) bigInput.value = dir;
       if (!dir) { toast(T('先填一个目录', 'Enter a folder first'), 'warn'); return; }
       if (bigBusy) return;
       bigBusy = true;
@@ -698,7 +699,8 @@
     }
 
     async function scanEmpty() {
-      const dir = emptyInput.value.trim();
+      const dir = emptyInput.value.trim().replace(/^"+|"+$/g, '').trim();
+      if (dir !== emptyInput.value.trim()) emptyInput.value = dir;
       if (!dir) { toast(T('先填一个目录', 'Enter a folder first'), 'warn'); return; }
       if (emptyBusy) return;
       emptyBusy = true;
@@ -818,24 +820,30 @@
     };
 
     async function deleteEmpty() {
+      if (emptyBusy) return;
       const paths = Array.from(emptyChecked);
       if (!paths.length) return;
-      const yes = await confirm({
-        title: T('删除空文件夹', 'Delete empty folders'),
-        body: T('将删除 ' + paths.length + ' 个空文件夹（只删空目录，不影响文件）。',
-          'Delete ' + paths.length + ' empty folders. Only empty directories are removed.'),
-        ok: T('删除', 'Delete'),
-        danger: true
-      });
-      if (!yes) return;
-      const res = await busy(() => API.removeEmptyDirs(paths), T('正在删除…', 'Deleting…'), 'scan');
-      if (!res) return;
-      const removed = Number(res && res.removed) || 0;
-      const failed = (res && res.failed) || [];
-      toast(T('已删除 ' + removed + ' 个空文件夹' +
-        (failed.length ? '，' + failed.length + ' 个失败' : ''),
-        'Deleted ' + removed + (failed.length ? ', ' + failed.length + ' failed' : '')),
-        failed.length ? 'warn' : 'ok');
+      emptyBusy = true;
+      try {
+        const yes = await confirm({
+          title: T('删除空文件夹', 'Delete empty folders'),
+          body: T('将删除 ' + paths.length + ' 个空文件夹（只删空目录，不影响文件）。',
+            'Delete ' + paths.length + ' empty folders. Only empty directories are removed.'),
+          ok: T('删除', 'Delete'),
+          danger: true
+        });
+        if (!yes) return;
+        const res = await busy(() => API.removeEmptyDirs(paths), T('正在删除…', 'Deleting…'), 'scan');
+        if (!res) return;
+        const removed = Number(res && res.removed) || 0;
+        const failed = (res && res.failed) || [];
+        toast(T('已删除 ' + removed + ' 个空文件夹' +
+          (failed.length ? '，' + failed.length + ' 个失败' : ''),
+          'Deleted ' + removed + (failed.length ? ', ' + failed.length + ' failed' : '')),
+          failed.length ? 'warn' : 'ok');
+      } finally {
+        emptyBusy = false;
+      }
       await scanEmpty();
     }
 

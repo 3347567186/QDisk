@@ -407,6 +407,8 @@
         if (contentBox) contentBox.scrollTop = contentBox.scrollHeight;
       }
 
+      let unmounted = false;
+
       async function clearLogs() {
         const ok = await confirm({
           title: T('清空日志', 'Clear logs'),
@@ -414,16 +416,22 @@
           ok: T('清空', 'Clear'),
           danger: true
         });
-        if (!ok) return;
+        if (!ok || unmounted) return;
         await busy(async () => {
           await API.logClear();
           state.selected = null;
           state.content = null;
           state.contentError = null;
           await loadFiles();
-          toast(T('日志已清空', 'Logs cleared'), 'ok');
+          const left = (state.files || []).length;
+          if (left > 0) {
+            toast(T('已尝试清空日志，但有 ' + fmtCount(left) + ' 个文件正在被占用未能删除',
+              'Cleared logs, but ' + fmtCount(left) + ' locked file(s) remain'), 'warn');
+          } else {
+            toast(T('日志已清空', 'Logs cleared'), 'ok');
+          }
         }, T('正在清空日志…', 'Clearing logs…'), 'log');
-        paint();
+        if (!unmounted) paint();
       }
 
       async function openLogDir() {
@@ -463,10 +471,12 @@
 
       paint();
       await Promise.all([loadFiles(), loadEngine(), loadAppInfo()]);
+      if (unmounted) return function () {};
       state.loading = false;
       paint();
 
       return function unmount() {
+        unmounted = true;
         openToken++;
         liveJump = null;
         const st = askBtn && askBtn.querySelector ? askBtn.querySelector('.steve') : null;

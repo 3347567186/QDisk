@@ -53,6 +53,93 @@ else:
     BUNDLE_DIR = HERE
 
 EXTERNAL_RULES = os.path.join(HERE, "rules.json")
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def _is_reparse_point(path):
+    """判定路径是否为符号链接或 Windows NTFS 目录联接（Python 3.11 上 islink 对 junction 误返 False）。"""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _unlink_reparse_only(path):
+    """仅摘除符号链接或目录联接本身，绝不进入或删除其指向的目标目录内容。"""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    try:
+        os.rmdir(path)
+        return
+    except OSError as ex1:
+        try:
+            os.unlink(path)
+            return
+        except OSError:
+            raise ex1
+
+
+def _lp_win(path):
+    """Windows 超长路径（>=240 字符）自动补 \\\\?\\ 前缀，避免深层 node_modules 删除失败。"""
+    if os.name != "nt" or not path:
+        return path
+    s = str(path)
+    if s.startswith("\\\\?\\") or len(s) < 240 or not os.path.isabs(s):
+        return s
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s
+
+
+def _safe_rmtree(path):
+    """防 NTFS Junction 穿透的安全递归删除（根治 CPython 3.11 shutil.rmtree 跟随目录联接误删目标盘的漏洞）。"""
+    path = _lp_win(path)
+    if not os.path.lexists(path):
+        return
+    if _is_reparse_point(path):
+        _unlink_reparse_only(path)
+        return
+    if not os.path.isdir(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            try:
+                os.chmod(path, stat.S_IWRITE)
+            except OSError:
+                pass
+            os.unlink(path)
+        return
+    with os.scandir(path) as it:
+        entries = list(it)
+    for e in entries:
+        ep = e.path
+        if _is_reparse_point(ep):
+            _unlink_reparse_only(ep)
+        elif e.is_dir(follow_symlinks=False):
+            _safe_rmtree(ep)
+        else:
+            try:
+                os.unlink(ep)
+            except OSError:
+                try:
+                    os.chmod(ep, stat.S_IWRITE)
+                except OSError:
+                    pass
+                os.unlink(ep)
+    try:
+        os.rmdir(path)
+    except OSError:
+        try:
+            os.chmod(path, stat.S_IWRITE)
+        except OSError:
+            pass
+        os.rmdir(path)
 BUNDLED_RULES = os.path.join(BUNDLE_DIR, "rules.json")
 
 
@@ -425,8 +512,10 @@ def _prune_keep_newest(folder, keep, pattern=None, dirs_only=False, protect=None
             except Exception:
                 continue
         try:
-            if os.path.isdir(path):
-                shutil.rmtree(path)
+            if _is_reparse_point(path):
+                _unlink_reparse_only(path)
+            elif os.path.isdir(path):
+                _safe_rmtree(path)
             else:
                 os.remove(path)
             gone += 1
@@ -638,7 +727,7 @@ def prune_data_dir(dry_run=False):
                         w_bytes += size
                         continue
                     try:
-                        shutil.rmtree(e.path)
+                        _safe_rmtree(e.path)
                         w_files += 1
                         w_bytes += size
                     except OSError:
@@ -1577,7 +1666,8 @@ def undo(folder):
             continue
         p = os.path.join(hist_dir(), fn)
         try:
-            d = json.load(open(p, encoding="utf-8"))
+            with open(p, encoding="utf-8") as fh:
+                d = json.load(fh)
         except Exception:
             continue
         if norm(d.get("folder", "")) == base:
@@ -1592,7 +1682,8 @@ def undo(folder):
                 continue
             p = os.path.join(hist_dir(), fn)
             try:
-                d = json.load(open(p, encoding="utf-8"))
+                with open(p, encoding="utf-8") as fh:
+                    d = json.load(fh)
             except Exception:
                 continue
             if any(norm(str(mv.get("from", ""))).startswith(prefix)
@@ -1605,12 +1696,14 @@ def undo(folder):
 
     restored, failed = 0, []
     back = []
+    remaining_moves = []
     for mv in reversed(d["moves"]):
         src, dst = mv["to"], mv["from"]
         if not os.path.exists(src):
             continue
         if os.path.exists(dst):
             failed.append((os.path.basename(dst), "原位置已有同名文件"))
+            remaining_moves.append(mv)
             continue
         try:
             shutil.move(src, dst)
@@ -1618,17 +1711,32 @@ def undo(folder):
             back.extend([src, dst])
         except OSError as ex:
             failed.append((os.path.basename(src), str(ex).split(":")[0]))
+            remaining_moves.append(mv)
 
-    for cp in d.get("created_dirs", []):
+    # 倒序删新建空目录（先子目录如按日期建的 年/月，再删父分类目录），且跳过重解析点
+    for cp in reversed(d.get("created_dirs", [])):
         if not os.path.isabs(cp):
             cp = os.path.join(folder, cp)
-        if os.path.isdir(cp) and not os.listdir(cp):
+        if not _is_reparse_point(cp) and os.path.isdir(cp) and not os.listdir(cp):
             try:
                 os.rmdir(cp)
                 back.append(cp)
             except OSError:
                 pass
-    os.remove(p)
+    if remaining_moves:
+        # 部分文件被占用/冲突未还原时保留剩余撤销记录，允许用户关闭占用后继续撤销
+        try:
+            d_left = dict(d)
+            d_left["moves"] = list(reversed(remaining_moves))
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(d_left, fh, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+    else:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     # 撤销也是改磁盘：还原后的位置要立刻写回索引，否则搜索还指着分类夹里
     index_touch(back)
     return restored, failed
@@ -1667,6 +1775,78 @@ rules:
 """
 
 
+_UNSAFE_RULE_OPS = {"shell", "python"}
+
+
+def _scan_yaml_rule_ops(entries):
+    """仅在 filters/actions 算子层（及 not/all/any 逻辑组合器内）拦截 shell / python，
+    不对普通参数值（如 extension: [python] 或目标目录名 python）误报。"""
+    if isinstance(entries, dict):
+        for k, v in entries.items():
+            kl = str(k).strip().lower()
+            if kl in _UNSAFE_RULE_OPS:
+                return kl
+            if kl in ("not", "all", "any"):
+                hit = _scan_yaml_rule_ops(v)
+                if hit:
+                    return hit
+    elif isinstance(entries, list):
+        for item in entries:
+            if isinstance(item, str) and item.strip().lower() in _UNSAFE_RULE_OPS:
+                return item.strip().lower()
+            if isinstance(item, dict):
+                hit = _scan_yaml_rule_ops(item)
+                if hit:
+                    return hit
+    return None
+
+
+def _scan_parsed_ops(seq):
+    for op in seq or []:
+        cls_name = type(op).__name__.lower()
+        op_name = str(getattr(op, "name", "") or "").lower()
+        if cls_name in _UNSAFE_RULE_OPS or op_name in _UNSAFE_RULE_OPS:
+            return cls_name if cls_name in _UNSAFE_RULE_OPS else op_name
+        # 兼容 organize 的 Not / All / Any 嵌套过滤器容器
+        for sub_attr in ("filters", "filter", "actions"):
+            sub = getattr(op, sub_attr, None)
+            if isinstance(sub, (list, tuple)):
+                hit = _scan_parsed_ops(sub)
+                if hit:
+                    return hit
+            elif sub is not None and not isinstance(sub, (str, bytes, int, float, bool)):
+                hit = _scan_parsed_ops([sub])
+                if hit:
+                    return hit
+    return None
+
+
+def _reject_unsafe_rules(config_text, cfg=None):
+    """拒绝包含 shell / python 动作或过滤器的 YAML 规则（防止 preview 或 run 执行任意命令/代码）。"""
+    try:
+        import yaml as _yaml
+        raw = _yaml.safe_load(config_text)
+        if isinstance(raw, dict):
+            rules_list = raw.get("rules")
+            if isinstance(rules_list, list):
+                for r in rules_list:
+                    if not isinstance(r, dict):
+                        continue
+                    for section_key in ("filters", "actions"):
+                        hit = _scan_yaml_rule_ops(r.get(section_key))
+                        if hit:
+                            return f"出于安全考虑，高级规则禁止使用 {hit} 动作或过滤器"
+    except Exception:
+        pass
+    if cfg is not None:
+        for r in getattr(cfg, "rules", []) or []:
+            for seq in (getattr(r, "filters", []) or [], getattr(r, "actions", []) or []):
+                hit = _scan_parsed_ops(seq)
+                if hit:
+                    return f"出于安全考虑，高级规则禁止使用 {hit} 动作或过滤器"
+    return None
+
+
 def run_rules(config_text, simulate=True, tags=None, skip_tags=None,
               output=None, working_dir=None):
     """调用内置的 organize 引擎。返回 (输出文本, 是否成功)。
@@ -1675,6 +1855,10 @@ def run_rules(config_text, simulate=True, tags=None, skip_tags=None,
     事件，working_dir 用来把规则里的相对路径锚到调用方指定的目录。
     默认值（None）保持界面与命令行的原有行为。
     """
+    unsafe_why = _reject_unsafe_rules(config_text)
+    if unsafe_why:
+        return unsafe_why, False
+
     try:
         from organize import Config
     except Exception as ex:
@@ -1684,6 +1868,10 @@ def run_rules(config_text, simulate=True, tags=None, skip_tags=None,
         cfg = Config.from_string(config_text)
     except Exception as ex:
         return f"配置有误：{ex}", False
+
+    unsafe_why = _reject_unsafe_rules(config_text, cfg)
+    if unsafe_why:
+        return unsafe_why, False
 
     buf = io.StringIO()
     ok = True
@@ -1704,9 +1892,15 @@ def run_rules(config_text, simulate=True, tags=None, skip_tags=None,
 
 
 def check_rules(config_text):
+    unsafe_why = _reject_unsafe_rules(config_text)
+    if unsafe_why:
+        return unsafe_why, False
     try:
         from organize import Config
-        Config.from_string(config_text)
+        cfg = Config.from_string(config_text)
+        unsafe_why = _reject_unsafe_rules(config_text, cfg)
+        if unsafe_why:
+            return unsafe_why, False
         return "配置校验通过", True
     except Exception as ex:
         return f"配置有误：{ex}", False
@@ -1884,24 +2078,91 @@ def _reg_key_mtime(key):
         return 0.0
 
 
+_RESERVED_DEV_RE = re.compile(
+    r"^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\.|$)", re.I
+)
+
+
+def _safe_dir_why(p):
+    """判定应用残留/强制删除目录是否安全；返回 None 表示放行，否则返回中文原因。"""
+    raw = str(p or "").strip()
+    if not raw or any(ord(c) < 0x20 or ord(c) == 0x7f for c in raw):
+        return "已拒绝：路径不合法"
+    norm_slash = raw.replace("/", "\\")
+    if norm_slash.startswith("\\\\"):
+        return "已拒绝：不允许删除网络路径或设备路径"
+    after_drv = norm_slash[2:] if len(norm_slash) >= 2 and norm_slash[1] == ":" else norm_slash
+    if ":" in after_drv:
+        return "已拒绝：不允许操作 NTFS 备用数据流路径"
+    try:
+        ap = os.path.normpath(os.path.abspath(raw))
+    except Exception:
+        return "已拒绝：路径不合法"
+    drive, tail = os.path.splitdrive(ap)
+    if not drive or not tail.strip("\\"):
+        return "已拒绝：%s\\ 是盘符根目录，不能删" % (drive or ap)
+    parts = [x.rstrip(" .").lower() for x in ap.split("\\") if x]
+    if len(ap) < 10:
+        return "已拒绝：路径太短（%s），疑似系统目录，不能删" % ap
+    if len(parts) <= 2:
+        return "已拒绝：这是分区顶层目录，不能删"
+    for seg in parts[1:]:
+        if _RESERVED_DEV_RE.match(seg):
+            return "已拒绝：包含 Windows 保留设备名，不能删"
+    if parts[-1] in SAFE_ROOT_DENY:
+        return "已拒绝：%s 是系统关键目录，不能删" % parts[-1]
+    low = os.path.normcase(ap).rstrip("\\")
+    # 1. Windows 整棵树（含 System32 / SysWOW64 / drivers 等任何深层子目录）一律禁删
+    sys_drive = (os.environ.get("SystemDrive") or "C:").strip().rstrip("\\/") or "C:"
+    win_roots = {
+        os.path.normcase(os.path.abspath(x)).rstrip("\\")
+        for x in (os.environ.get("SystemRoot"), os.environ.get("WINDIR"), os.path.join(sys_drive, "Windows"))
+        if x
+    }
+    for wr in win_roots:
+        if low == wr or low.startswith(wr + "\\"):
+            return "已拒绝：Windows 系统目录及其子目录不能删"
+    # 2. 保护轻盘自身数据目录（整树与上级）与程序目录（本体、上级；打包冻结版保护整棵引擎树）
+    dd = data_dir()
+    if dd:
+        ok_dd = os.path.normcase(os.path.abspath(dd)).rstrip("\\")
+        if low == ok_dd or low.startswith(ok_dd + "\\"):
+            return "已拒绝：这是整理助手自己的数据目录，不能删"
+        if ok_dd.startswith(low + "\\"):
+            return "已拒绝：删除它会连整理助手数据目录一起删掉"
+    if HERE:
+        ok_here = os.path.normcase(os.path.abspath(HERE)).rstrip("\\")
+        if low == ok_here or (getattr(sys, "frozen", False) and low.startswith(ok_here + "\\")):
+            return "已拒绝：这是整理助手自己的程序目录，不能删"
+        if ok_here.startswith(low + "\\"):
+            return "已拒绝：删除它会连整理助手程序目录一起删掉"
+    # 3. 保护用户主目录及常见个人资料目录本体（其下应用子目录允许，但桌面/文档/下载等本体绝不删）
+    self_only = set()
+    for base in (os.environ.get("USERPROFILE"), os.environ.get("OneDrive"),
+                 os.environ.get("OneDriveConsumer"), os.environ.get("OneDriveCommercial"),
+                 os.environ.get("PUBLIC")):
+        if not base:
+            continue
+        bp = os.path.normcase(os.path.abspath(base)).rstrip("\\")
+        self_only.add(bp)
+        for sh in ("Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music",
+                   "OneDrive", "AppData", "桌面", "文档", "下载", "图片"):
+            self_only.add(os.path.normcase(os.path.join(bp, sh)).rstrip("\\"))
+    for env_k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramData", "LOCALAPPDATA", "APPDATA"):
+        v = os.environ.get(env_k)
+        if v:
+            self_only.add(os.path.normcase(os.path.abspath(v)).rstrip("\\"))
+    if low in self_only:
+        return "已拒绝：这是受保护的系统或用户关键目录，不能删"
+    # 4. 任意盘符的回收站与卷信息目录
+    if len(parts) >= 2 and parts[1] in ("$recycle.bin", "system volume information", "recovery", "boot"):
+        return "已拒绝：这是系统保留目录，不能删"
+    return None
+
+
 def _safe_dir(p):
     """目录是否允许删除"""
-    try:
-        p = os.path.abspath(p)
-    except Exception:
-        return False
-    if len(p) < 10:
-        return False
-    drive, tail = os.path.splitdrive(p)
-    if not tail.strip("\\"):
-        return False
-    parts = [x.lower() for x in p.split("\\") if x]
-    if len(parts) <= 2:
-        return False
-    last = parts[-1]
-    if last in SAFE_ROOT_DENY:
-        return False
-    return True
+    return _safe_dir_why(p) is None
 
 
 def _safe_reg_key(hive_name, key_path):
@@ -2136,10 +2397,15 @@ def _flag(hive_name):
 
 
 def export_reg_key(hive_name, key_path, out_file):
-    """导出注册表备份（对应 BCU 的 export）"""
+    """导出注册表备份（对应 BCU 的 export；HKLM32/HKLM64 显式指定视图防止导出错分支）"""
     hive_txt = {"HKLM64": "HKLM", "HKLM32": "HKLM", "HKCU": "HKCU"}[hive_name]
+    cmd = ["reg", "export", f"{hive_txt}\\{key_path}", out_file, "/y"]
+    if hive_name == "HKLM32":
+        cmd.append("/reg:32")
+    elif hive_name == "HKLM64":
+        cmd.append("/reg:64")
     try:
-        r = subprocess.run(["reg", "export", f"{hive_txt}\\{key_path}", out_file, "/y"],
+        r = subprocess.run(cmd,
                            capture_output=True, text=True,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return r.returncode == 0 and os.path.exists(out_file)
@@ -2195,9 +2461,11 @@ def delete_paths(paths, progress=None):
             except Exception:
                 pass
         try:
-            if os.path.isdir(p):
-                shutil.rmtree(p)
-            elif os.path.exists(p):
+            if _is_reparse_point(p):
+                _unlink_reparse_only(p)
+            elif os.path.isdir(p):
+                _safe_rmtree(p)
+            elif os.path.lexists(p):
                 os.remove(p)
             ok.append(p)
         except Exception as ex:
@@ -2270,33 +2538,40 @@ def trash_delete(paths):
 
 
 def hard_delete(paths):
-    """强制删除：去只读 → 改名解毒 → 仍不行就登记重启删除。
+    """强制删除：防 Junction 穿透、去只读 → 文件改名解毒（真实登记重启删）→ 兜底重启删。
 
     返回 (已删除, 失败列表, 已登记重启删除)。
     """
     ok, fail, pending = [], [], []
     for p in paths:
-        if not os.path.exists(p):
+        if not os.path.lexists(p):
             ok.append(p)
             continue
+        # 重解析点（符号链接 / NTFS Junction）：仅摘除链接本身，绝不穿透删目标内容
+        if _is_reparse_point(p):
+            try:
+                _unlink_reparse_only(p)
+                ok.append(p)
+            except OSError as ex:
+                if _movefile_reboot(p):
+                    pending.append(p)
+                else:
+                    fail.append((p, str(ex)))
+            continue
+        is_dir = os.path.isdir(p)
         err = None
-        # 1. 直接删
+        # 1. 文件直接删
+        if not is_dir:
+            try:
+                os.remove(p)
+                ok.append(p)
+                continue
+            except OSError as ex:
+                err = ex
+        # 2. 安全去只读后删除（不跟随任何子目录联接）
         try:
-            os.remove(p)
-            ok.append(p)
-            continue
-        except OSError as ex:
-            err = ex
-        # 2. 去掉只读属性再删
-        try:
-            if os.path.isdir(p):
-                for dp, _dns, fns in os.walk(p):
-                    for n in fns:
-                        try:
-                            os.chmod(os.path.join(dp, n), stat.S_IWRITE)
-                        except OSError:
-                            pass
-                shutil.rmtree(p)
+            if is_dir:
+                _safe_rmtree(p)
             else:
                 os.chmod(p, stat.S_IWRITE)
                 os.remove(p)
@@ -2304,18 +2579,34 @@ def hard_delete(paths):
             continue
         except OSError as ex:
             err = ex
-        # 3. 改名（被进程占用的文件通常允许改名，解锁后已无意义）
-        try:
+        # 3. 被占用的普通文件尝试改名解毒：改名后若仍删不掉，必须真实登记 MoveFileExW 重启删除且不谎报 ok
+        if not is_dir:
             tmp = "%s.del%d" % (p, int(time.time() * 1000) % 1000000)
-            os.rename(p, tmp)
+            renamed = False
             try:
-                os.remove(tmp)
-            except OSError:
-                pending.append(tmp)
-            ok.append(p)
-            continue
-        except OSError as ex:
-            err = ex
+                os.rename(p, tmp)
+                renamed = True
+                try:
+                    os.remove(tmp)
+                    ok.append(p)
+                    continue
+                except OSError as ex_rm:
+                    if _movefile_reboot(tmp):
+                        pending.append(tmp)
+                        continue
+                    # 重启删除也失败：把文件名还原回去，不留 .del 孤儿文件
+                    try:
+                        os.rename(tmp, p)
+                    except OSError:
+                        pass
+                    err = ex_rm
+            except OSError as ex:
+                if renamed:
+                    try:
+                        os.rename(tmp, p)
+                    except OSError:
+                        pass
+                err = ex
         # 4. 兜底：登记到重启后删除
         if _movefile_reboot(p):
             pending.append(p)
@@ -3086,31 +3377,53 @@ def _remove_file_stubborn(p):
 
 
 def _rm_tree_reported(p):
-    """整棵删目录；失败时逐个文件再试，回报到底哪几个删不掉、为什么。
+    """整棵删目录（防 NTFS Junction 穿透）；失败时逐个文件再试，回报到底哪几个删不掉、为什么。
 
-    以前这里只有 shutil.rmtree + 一句「被占用或拒绝访问」，
-    日志里「失败 73」查不出是哪些文件、什么原因，所以重写成能留下证据。
     返回 [(路径, 原因)]，空列表表示删干净了。
     """
+    if not os.path.lexists(p):
+        return []
+    if _is_reparse_point(p):
+        try:
+            _unlink_reparse_only(p)
+            return []
+        except OSError as ex:
+            return [(p, _fail_reason(ex))]
     if not os.path.isdir(p):
         return []
     try:
-        shutil.rmtree(p, ignore_errors=False)
+        _safe_rmtree(p)
         return []
     except OSError:
         pass
     stuck = []
-    for base, dirs, files in os.walk(p, topdown=False):
-        for fn in files:
-            fp = os.path.join(base, fn)
-            ok, why = _remove_file_stubborn(fp)
-            if not ok:
-                stuck.append((fp, why))
-        for dn in dirs:
-            try:
-                os.rmdir(os.path.join(base, dn))
-            except OSError:
-                pass
+
+    def _walk_delete(cur):
+        try:
+            with os.scandir(cur) as it:
+                entries = list(it)
+        except OSError as ex:
+            stuck.append((cur, _fail_reason(ex)))
+            return
+        for e in entries:
+            ep = e.path
+            if _is_reparse_point(ep):
+                try:
+                    _unlink_reparse_only(ep)
+                except OSError as ex:
+                    stuck.append((ep, _fail_reason(ex)))
+            elif e.is_dir(follow_symlinks=False):
+                _walk_delete(ep)
+                try:
+                    os.rmdir(ep)
+                except OSError:
+                    pass
+            else:
+                ok, why = _remove_file_stubborn(ep)
+                if not ok:
+                    stuck.append((ep, why))
+
+    _walk_delete(p)
     try:
         os.rmdir(p)
     except OSError:
@@ -6536,7 +6849,7 @@ def _engine_files_delete(params):
         total = 0
         for p in paths:
             why = _files_delete_guard_why(p)
-            exists = os.path.exists(p)
+            exists = os.path.lexists(p)
             if not why and not exists:
                 why = "路径不存在"
             size = None
@@ -6544,9 +6857,12 @@ def _engine_files_delete(params):
             partial = False
             if not why:
                 try:
-                    size, files = _tree_size(p, 20000)
+                    if _is_reparse_point(p):
+                        size, files = 0, 1
+                    else:
+                        size, files = _tree_size(p, 20000)
                     total += size
-                    if os.path.isdir(p) and files >= 20000:
+                    if os.path.isdir(p) and not _is_reparse_point(p) and files >= 20000:
                         partial = True
                 except OSError:
                     size = None
@@ -6562,7 +6878,7 @@ def _engine_files_delete(params):
     deleted, failed, todo = [], [], []
     for p in paths:
         why = _files_delete_guard_why(p)
-        if not why and not os.path.exists(p):
+        if not why and not os.path.lexists(p):
             why = "路径不存在"
         if why:
             failed.append({"target": p, "why": why})
@@ -7362,56 +7678,115 @@ def _engine_uninstall_command(app, mode="auto"):
     return plain or quiet
 
 
+def _unquote_arg(tok):
+    """仅剥离成对外层双引号，不破坏 --flag="a b" 等内嵌引号参数。"""
+    if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':
+        return tok[1:-1]
+    return tok
+
+
+def _split_win_args(s):
+    """按 Windows 命令行引号规则拆分参数，正确保留 --flag="a b" 等中间引号参数不被空格截断。"""
+    args = []
+    cur = []
+    in_quotes = False
+    for ch in s or "":
+        if ch == '"':
+            in_quotes = not in_quotes
+            cur.append(ch)
+        elif ch.isspace() and not in_quotes:
+            if cur:
+                args.append(_unquote_arg("".join(cur)))
+                cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        args.append(_unquote_arg("".join(cur)))
+    return [a for a in args if a != ""]
+
+
+def _resolve_uninstaller_argv(cmd):
+    """把 Windows UninstallString 解析成 (resolved_exe, args_list)，兼容多空格与带空格未加引号的路径。"""
+    cmd = os.path.expandvars((cmd or "").strip())
+    if not cmd:
+        return "", []
+    # 1. 若以引号开头，优先按引号规则拆出可执行文件
+    if cmd.startswith('"'):
+        argv = _split_win_args(cmd)
+        if argv:
+            exe = argv[0]
+            res = exe if (os.path.isabs(exe) and os.path.isfile(exe)) else (shutil.which(exe) or "")
+            if res:
+                return res, argv[1:]
+    # 2. 兼容未加引号且含空格/多空格的经典注册表路径：用真实字符偏移切分，绝不因空格折叠切歪文件名
+    cut_positions = [m.start() for m in re.finditer(r"\s+", cmd)]
+    cut_positions.append(len(cmd))
+    for pos in reversed(cut_positions):
+        cand = _unquote_arg(cmd[:pos].strip())
+        if not cand:
+            continue
+        if os.path.isabs(cand) and os.path.isfile(cand):
+            rest_raw = cmd[pos:].strip()
+            return cand, _split_win_args(rest_raw) if rest_raw else []
+    # 3. 退回 PATH 查找（如 msiexec.exe /X{GUID}）
+    argv = _split_win_args(cmd)
+    if argv:
+        exe = argv[0]
+        res = exe if (os.path.isabs(exe) and os.path.isfile(exe)) else (shutil.which(exe) or "")
+        if res:
+            return res, argv[1:]
+    return "", []
+
+
 def _spawn_detached(cmd):
-    """把一条完整命令行交给系统执行，不阻塞、不弹控制台、不污染 RPC 流。
+    """安全启动卸载命令，绝不经过 cmd.exe /c 拼接（杜绝 &/|/^/%VAR% 提权命令注入）。
 
-    做法：先把命令行解析成 argv（shlex），再用 shell=False 启动。
-    这样既不会像旧实现那样「整串当成 exe 路径」导致点了没反应，
-    也不会把参数交给 shell 解释（去掉注入面）。
-    只有解析不出可执行文件、或需要提权（WinError 740）时，
-    才退回 ShellExecute 的 runas 动词弹 UAC。
+    1. 兼容未加引号的带空格 Windows 卸载路径，精准拆出真实可执行文件与参数；
+    2. 普通权限直接 CreateProcess(shell=False)；
+    3. 遇到 WinError 740 需要提权时，直接对已解析的可执行文件调 ShellExecuteW("runas", exe, params)，
+       绝不落回 cmd.exe /c。
     """
-    import shlex
-    import shutil
-
     cmd = (cmd or "").strip()
     if not cmd:
         raise EngineError("卸载命令为空")
 
-    try:
-        argv = [a.strip('"') for a in shlex.split(cmd, posix=False)]
-    except ValueError:
-        argv = []
-    argv = [a for a in argv if a != ""]
+    resolved, rest_args = _resolve_uninstaller_argv(cmd)
+    if not resolved:
+        raise EngineError("找不到卸载程序对应的可执行文件，无法安全启动")
+
+    # .msi 文件直接交给系统 msiexec.exe，不经 shell 解释
+    if resolved.lower().endswith(".msi"):
+        msiexec = shutil.which("msiexec.exe") or os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"), "System32", "msiexec.exe")
+        if not any(a.lower().startswith(("/x", "/i")) for a in rest_args):
+            rest_args = ["/X", resolved] + rest_args
+        resolved = msiexec
+
+    # 拦截 BatBadBut（CVE-2024-24576）：Windows CreateProcess 跑 .bat/.cmd 会隐式拉起 cmd.exe，
+    # 若参数含壳元字符直接拒绝，杜绝借卸载脚本触发命令注入。
+    if resolved.lower().endswith((".bat", ".cmd")):
+        if any(any(ch in a for ch in "&|^%<>\r\n") for a in rest_args):
+            raise EngineError("批处理卸载命令参数包含不安全字符，已拒绝执行")
 
     flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-             | getattr(subprocess, "DETACHED_PROCESS", 0)
-             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+             | getattr(subprocess, "DETACHED_PROCESS", 0))
 
-    exe = argv[0] if argv else ""
-    resolved = ""
-    if exe:
-        if os.path.isabs(exe) and os.path.exists(exe):
-            resolved = exe
-        else:
-            resolved = shutil.which(exe) or ""
-
-    # 解析出了真实可执行文件：直接 CreateProcess，参数原样传，不经 shell
-    if resolved:
-        try:
-            subprocess.Popen([resolved] + argv[1:], shell=False, creationflags=flags,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-            return True
-        except Exception as ex:
-            if getattr(ex, "winerror", None) != 740:
-                raise EngineError("卸载器启动失败：%s" % ex)
-
-    # 需要提权或解析不出 exe：交给 shell 的 runas 动词（会弹 UAC）
     try:
-        import ctypes
-        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe",
-                                                 "/c " + cmd, None, 0)
+        subprocess.Popen([resolved] + rest_args, shell=False, creationflags=flags,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return True
+    except Exception as ex:
+        if getattr(ex, "winerror", None) != 740:
+            raise EngineError("卸载器启动失败：%s" % ex)
+
+    # 需要 UAC 提权：直接对真实可执行文件调 ShellExecuteW("runas")，绝不拼接 cmd.exe /c
+    try:
+        param_str = subprocess.list2cmdline(rest_args) if rest_args else None
+        cwd_dir = os.path.dirname(resolved) or None
+        rc = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", resolved, param_str, cwd_dir, 1
+        )
         if int(rc) > 32:
             return True
         if int(rc) == 5:
@@ -7554,22 +7929,23 @@ def _engine_apps_force_remove(params):
         return {"dry_run": True, "name": name, "dirs": dirs,
                 "hive": app.get("hive") or "", "key": app.get("key") or ""}
     failed = []
+    removed_dirs = []
     for d in dirs:
-        # 安全闸：盘符根目录、系统目录、用户主目录一律不动
-        low = d.lower().rstrip("\\")
-        if (len(low) <= 3 or low in (os.environ.get("SystemRoot", "").lower(),
-                                     os.environ.get("USERPROFILE", "").lower())):
-            failed.append({"path": d, "why": "受保护路径"})
+        # 复用全量安全闸 _safe_dir_why（阻止盘符根、Windows 整树、Program Files/用户目录本体、轻盘自身与 ADS/UNC）
+        why = _safe_dir_why(d)
+        if why:
+            failed.append({"path": d, "why": why})
             continue
-        if not os.path.exists(d):
+        if not os.path.lexists(d):
             continue
         try:
-            shutil.rmtree(d)
+            _safe_rmtree(d)
+            removed_dirs.append(d)
         except Exception as ex:
             failed.append({"path": d, "why": str(ex)})
     removed_keys = _reg_delete_tree(app.get("hive") or "", app.get("key") or "") \
         if app.get("key") else 0
-    return {"name": name, "dirs": dirs, "failed": failed,
+    return {"name": name, "dirs": dirs, "removed_dirs": removed_dirs, "failed": failed,
             "removed_keys": removed_keys}
 
 
@@ -7665,22 +8041,8 @@ def _engine_backup_root(name):
 
 
 def _engine_dir_reject_why(p):
-    """给 _safe_dir 的 False 补一句人能看懂的原因（判定与 _safe_dir 一致）。"""
-    try:
-        ap = os.path.abspath(p)
-    except Exception:
-        return "已拒绝：路径不合法"
-    drive, tail = os.path.splitdrive(ap)
-    if not tail.strip("\\"):
-        return "已拒绝：%s\\ 是盘符根目录，不能删" % drive
-    parts = [x for x in ap.split("\\") if x]
-    if len(ap) < 10:
-        return "已拒绝：路径太短（%s），疑似系统目录，不能删" % ap
-    if len(parts) <= 2:
-        return "已拒绝：这是分区顶层目录，不能删"
-    if parts[-1].lower() in SAFE_ROOT_DENY:
-        return "已拒绝：%s 是系统关键目录，不能删" % parts[-1]
-    return "已拒绝：这个目录不在允许删除的范围"
+    """给 _safe_dir 的 False 补一句人能看懂的原因（与 _safe_dir_why 单源一致）。"""
+    return _safe_dir_why(p) or "已拒绝：这个目录不在允许删除的范围"
 
 
 def _engine_apps_cleanup(params):
@@ -7733,11 +8095,11 @@ def _engine_apps_cleanup(params):
         if not _safe_dir(p):
             failed.append({"target": p, "why": _engine_dir_reject_why(p)})
             continue
-        if not os.path.isdir(p):
+        if not os.path.lexists(p) or (not _is_reparse_point(p) and not os.path.isdir(p)):
             failed.append({"target": p, "why": "目录不存在"})
             continue
         try:
-            shutil.rmtree(p, ignore_errors=False)
+            _safe_rmtree(p)
         except OSError as ex:
             failed.append({"target": p, "why": "删除失败：%s" % ex})
             continue

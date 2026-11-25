@@ -306,10 +306,17 @@
       },
       async run(p) {
         const r = await API.removeEmptyDirs(p.paths);
+        const removedCount = typeof (r && r.removed) === 'number'
+          ? r.removed
+          : (Array.isArray(r && r.removed) ? r.removed.length : 0);
+        const failedCount = Array.isArray(r && r.failed) ? r.failed.length : 0;
+        if (!removedCount && failedCount > 0) {
+          throw new Error('空文件夹未能删除：' + ((r.failed[0] && r.failed[0].why) || '目录受保护或非空'));
+        }
         return {
-          result: { removed: (r && r.removed || []).length, failed: (r && r.failed || []).length },
+          result: { removed: removedCount, failed: failedCount },
           undo: null,
-          message: '已删除 ' + ((r && r.removed || []).length) + ' 个空文件夹'
+          message: '已删除 ' + removedCount + ' 个空文件夹' + (failedCount ? '（' + failedCount + ' 个失败）' : '')
         };
       }
     };
@@ -352,10 +359,16 @@
       },
       async run(p) {
         const out = p.out_dir || p.path.replace(/\.[^.\\]+$/, '');
-        const r = await API.archiveExtract(p.path, out, null, p.password || null, p.overwrite === true, null);
+        /* archive_extract 的 overwrite 参数在 Rust 端是 Option<String>("overwrite"|"skip"|"rename")，严禁传布尔 */
+        const policy = p.overwrite === true ? 'overwrite' : 'rename';
+        const r = await API.archiveExtract(p.path, out, null, p.password || null, policy, 'balanced');
+        /* 使用 Rust 精准撤销记录（archiveUndo），绝不再用 trash-path 把用户原有目录整棵扔进回收站 */
+        const undoInfo = (r && r.undoId)
+          ? { kind: 'archive-undo', undoId: r.undoId, label: '精确撤销本次解压' }
+          : null;
         return {
-          result: { files: (r && r.files) || 0, bytes: (r && r.bytes) || 0, out },
-          undo: { kind: 'trash-path', path: out, label: '移除解压出的目录' },
+          result: { files: (r && r.files) || 0, bytes: (r && r.bytes) || 0, out, undoId: (r && r.undoId) || null },
+          undo: undoInfo,
           message: '已解压 ' + ((r && r.files) || 0) + ' 个文件到 ' + out
         };
       }
@@ -391,10 +404,13 @@
         };
       },
       async run(p) {
-        const r = await API.archiveCreate(p.sources, p.dest, p.format, 'add', p.password || null);
+        const r = await API.archiveCreate(p.sources, p.dest, p.format, 'balanced', p.password || null);
+        const undoInfo = (r && r.undoId)
+          ? { kind: 'archive-undo', undoId: r.undoId, label: '精确撤销本次压缩' }
+          : { kind: 'trash-file', path: p.dest, label: '删除这个压缩包' };
         return {
-          result: { dest: p.dest, bytes: (r && r.bytes) || 0 },
-          undo: { kind: 'trash-file', path: p.dest, label: '删除这个压缩包' },
+          result: { dest: p.dest, bytes: (r && r.bytes) || 0, undoId: (r && r.undoId) || null },
+          undo: undoInfo,
           message: '已生成 ' + base(p.dest)
         };
       }
@@ -581,7 +597,19 @@
       },
       async run(p) {
         const r = await E('apps.force_remove', { name: p.name, confirm: true });
-        return { result: { removed: (r.removed || []).length, failed: (r.failed || []).length }, undo: null, message: '已删除' };
+        const removedDirs = Array.isArray(r && r.removed_dirs)
+          ? r.removed_dirs.length
+          : (Array.isArray(r && r.removed) ? r.removed.length : 0);
+        const removedKeys = Number(r && r.removed_keys) || 0;
+        const failed = Array.isArray(r && r.failed) ? r.failed : [];
+        if (!removedDirs && !removedKeys && failed.length > 0) {
+          throw new Error('强制删除失败：' + ((failed[0] && failed[0].why) || '目录受保护或无权限'));
+        }
+        return {
+          result: { removed: removedDirs, removed_keys: removedKeys, failed: failed.length },
+          undo: null,
+          message: '已删除 ' + removedDirs + ' 个目录与 ' + removedKeys + ' 条注册表项' + (failed.length ? '（' + failed.length + ' 项失败）' : '')
+        };
       }
     };
 
@@ -613,10 +641,16 @@
       },
       async run(p) {
         const r = await E('apps.cleanup', { name: p.name, confirm: true });
+        const dCnt = (r.removed_dirs || []).length;
+        const rCnt = (r.removed_regs || []).length;
+        const fList = Array.isArray(r.failed) ? r.failed : [];
+        if (!dCnt && !rCnt && fList.length > 0) {
+          throw new Error('清理残留失败：' + ((fList[0] && fList[0].why) || '目标受保护或需要管理员权限'));
+        }
         return {
-          result: { dirs: (r.removed_dirs || []).length, regs: (r.removed_regs || []).length, failed: (r.failed || []).length },
+          result: { dirs: dCnt, regs: rCnt, failed: fList.length },
           undo: null,
-          message: '已清理残留'
+          message: '已清理 ' + dCnt + ' 个残留目录与 ' + rCnt + ' 个注册表键' + (fList.length ? '（' + fList.length + ' 项失败）' : '')
         };
       }
     };
@@ -655,8 +689,23 @@
         };
       },
       async run(p) {
-        await API.removeStoreApp(p.package, true);
-        return { result: { name: p.name }, undo: null, message: '已卸载 ' + p.name };
+        let pkg = p && p.package;
+        let dispName = p && p.name;
+        if (!pkg) {
+          const list = (await API.storeApps()) || [];
+          const q = String(dispName || '').trim().toLowerCase();
+          const exact = list.filter((it) => String(it.name || '').toLowerCase() === q
+            || String(it.package || '').toLowerCase() === q);
+          const hit = exact.length === 1 ? exact
+            : list.filter((it) => String(it.name || '').toLowerCase().indexOf(q) >= 0);
+          if (hit.length !== 1) {
+            throw new Error(hit.length > 1 ? '匹配到多个商店应用，请给完整包名' : '未找到该商店应用');
+          }
+          pkg = hit[0].package;
+          dispName = hit[0].name || dispName;
+        }
+        await API.removeStoreApp(pkg, true);
+        return { result: { name: dispName, package: pkg }, undo: null, message: '已卸载 ' + dispName };
       }
     };
 
@@ -1345,9 +1394,17 @@
         await API.setAutostart(!!u.enabled);
         return { ok: true, message: '开机启动已改回' };
       }
+      if (u.kind === 'archive-undo') {
+        if (!u.undoId || typeof API.archiveUndo !== 'function') {
+          return { ok: false, message: '本次归档操作没有可用的精确撤销记录' };
+        }
+        const rep = await API.archiveUndo(u.undoId);
+        const undone = ((rep && rep.removedFiles) || 0) + ((rep && rep.restoredFiles) || 0);
+        return { ok: true, message: '已精确撤销归档操作（处理 ' + undone + ' 项）' };
+      }
       if (u.kind === 'schedule') {
         const p = u.prev || {};
-        await API.scheduleSet(!!p.enabled, p.time || '03:00', p.days || [], !!p.cache, !!p.screenshots);
+        await API.scheduleSet(!!p.enabled, p.time || '03:00', Number(p.days) || 30, !!p.cache, !!p.screenshots);
         return { ok: true, message: '定时设置已恢复' };
       }
       return { ok: false, message: '这个操作没有自动撤销' };

@@ -47,6 +47,8 @@
       if (k === 'SYSTEMDRIVE') return cfg.sysDrive;
       return m;
     });
+    /* 拒绝未展开的 %VAR% 环境变量写法，杜绝前端放行后被后端 expandvars 展开到受保护目录的脱节绕过 */
+    if (/%[^%\r\n]+%/.test(s)) return '';
     s = s.replace(/\//g, '\\');
     if (/^[A-Za-z]:$/.test(s)) s += '\\';
     /* 设备路径与网络路径一律不处理：解引用、符号链接、远程共享都超出本工具的边界 */
@@ -59,11 +61,8 @@
     const out = [];
     for (const seg of parts) {
       if (!seg || seg === '.') continue;
-      if (seg === '..') {
-        if (!out.length) return '';
-        out.pop();
-        continue;
-      }
+      /* 显式拒绝 `..` 上级目录跳转段，防止任何未重新规范化的下游调用方被穿越 */
+      if (seg === '..') return '';
       out.push(seg);
     }
     return drive + '\\' + out.join('\\');
@@ -101,15 +100,30 @@
     if (!p) return '需要 X:\\ 开头的完整路径（不接受相对路径、..、网络路径）';
 
     const segs = p.split('\\').slice(1);
-    for (const seg of segs) {
-      if (SEG_DENY.indexOf(low(seg)) >= 0) return '这是版本库或凭据目录（' + seg + '），不能由 AI 改动';
-      if (RESERVED_DEV.test(seg.trim())) return 'Windows 保留设备名（' + seg + '）不能操作';
+    const cleanSegs = segs.map((seg) => seg.replace(/[. ]+$/, ''));
+    for (let i = 0; i < segs.length; i += 1) {
+      const seg = segs[i];
+      const clean = cleanSegs[i];
+      if (!clean) return '路径包含非法空白或纯点目录名';
+      if (SEG_DENY.indexOf(low(clean)) >= 0) return '这是版本库或凭据目录（' + seg + '），不能由 AI 改动';
+      if (RESERVED_DEV.test(clean)) return 'Windows 保留设备名（' + seg + '）不能操作';
     }
-    const base = segs.length ? segs[segs.length - 1] : '';
+    const base = cleanSegs.length ? cleanSegs[cleanSegs.length - 1] : '';
     if (NAME_DENY.indexOf(low(base)) >= 0) return '系统关键文件（' + base + '）不能由 AI 改动';
 
     /* 盘符根：整盘、整分区都不能作为一个动作的对象 */
     if (/^[A-Z]:\\$/.test(p)) return '盘符根目录不能整体操作';
+
+    /* 规范化去尾点/空格后的比较路径，防止 Windows Canonicalization 绕过（如 C:\Windows.\...） */
+    const cleanP = p.slice(0, 2) + '\\' + cleanSegs.join('\\');
+
+    /* 任意盘符的回收站与卷信息目录均受保护（不限系统盘） */
+    if (cleanSegs.length >= 1) {
+      const topLow = low(cleanSegs[0]);
+      if (topLow === '$recycle.bin' || topLow === 'system volume information' || topLow === 'recovery') {
+        return '系统保留目录（' + cleanSegs[0] + '）不能由 AI 改动';
+      }
+    }
 
     const sys = cfg.sysDrive || 'C:';
     const systemDirs = [
@@ -124,30 +138,40 @@
       sys + '\\PerfLogs'
     ];
     for (const d of systemDirs) {
-      if (isUnder(p, d)) return '系统目录（' + d + '）不能由 AI 改动';
+      if (isUnder(cleanP, d)) return '系统目录（' + d + '）不能由 AI 改动';
     }
 
-    if (cfg.appDir && !o.allowApp && isUnder(p, cfg.appDir)) {
-      return '这是整理助手自己的程序目录，AI 不能改动它';
+    if (cfg.appDir && !o.allowApp) {
+      if (isUnder(cleanP, cfg.appDir)) {
+        return '这是整理助手自己的程序目录，AI 不能改动它';
+      }
+      if (isUnder(cfg.appDir, cleanP)) {
+        return '操作该上级目录会波及整理助手程序目录，已拒绝';
+      }
     }
 
-    if (cfg.dataDir && isUnder(p, cfg.dataDir)) {
-      /* 数据目录里只有两处例外：缓存子树（清理缓存是正常功能）与
-         ai 目录之外的会话文件。ai 目录（日志、提案、会话）永远不碰。 */
-      if (isUnder(p, cfg.dataDir + '\\ai')) return '这是 AI 自己的数据目录，不能由 AI 改动';
-      const cacheOk = isUnder(p, cfg.dataDir + '\\cache');
-      if (!cacheOk && !o.allowData) return '这是整理助手的数据目录（配置、历史），不能由 AI 整目录改动';
+    if (cfg.dataDir) {
+      if (isUnder(cleanP, cfg.dataDir)) {
+        /* 数据目录里只有两处例外：缓存子树（清理缓存是正常功能）与
+           ai 目录之外的会话文件。ai 目录（日志、提案、会话）永远不碰。 */
+        if (isUnder(cleanP, cfg.dataDir + '\\ai')) return '这是 AI 自己的数据目录，不能由 AI 改动';
+        const cacheOk = isUnder(cleanP, cfg.dataDir + '\\cache');
+        if (!cacheOk && !o.allowData) return '这是整理助手的数据目录（配置、历史），不能由 AI 整目录改动';
+      } else if (!o.allowData && isUnder(cfg.dataDir, cleanP)) {
+        return '操作该上级目录会波及整理助手数据目录，已拒绝';
+      }
     }
 
     if (cfg.home) {
-      if (low(p) === low(cfg.home)) return '不能对用户主目录本身执行这个动作';
+      if (low(cleanP) === low(cfg.home)) return '不能对用户主目录本身执行这个动作';
+      if (isUnder(cfg.home, cleanP)) return '不能对包含用户主目录的上级目录执行这个动作';
       for (const d of PERSONAL) {
-        if (low(p) === low(cfg.home + '\\' + d)) {
+        if (low(cleanP) === low(cfg.home + '\\' + d)) {
           return '不能对「' + d + '」目录本身执行这个动作（里面的文件可以单独处理）';
         }
       }
       const startup = cfg.home + '\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup';
-      if (isUnder(p, startup)) return '开机启动目录只能通过「开机启动」开关调整，不能直接改文件';
+      if (isUnder(cleanP, startup)) return '开机启动目录只能通过「开机启动」开关调整，不能直接改文件';
     }
 
     return '';

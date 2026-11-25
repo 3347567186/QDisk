@@ -794,7 +794,7 @@
         } finally {
           oneClickProbing = false;
         }
-        if (!go || !picked.size) return;
+        if (!go || !picked.size || !active || active.root !== root) return;
 
         const targetRoots = drives.filter((d) => picked.has(d.root)).map((d) => d.root);
         state.indexing = true;
@@ -872,7 +872,7 @@
             else if (r && r.reused) toast(T('索引已是最新，无需重建', 'Indexes are up to date'), 'info');
             else toast(T('索引完成，共', 'Indexed') + ' ' + UI.fmtCount(n) + ' ' + T('个文件', 'files')
               + (failed.length ? ' · ' + failed.length + ' ' + T('个目录失败', 'failed') : '')
-              + ' · ' + fmtSpan(r && r.elapsed_ms), 'ok');
+              + ' · ' + fmtSpan(r && r.elapsed_ms), failed.length ? 'warn' : 'ok');
           }, T('正在建立索引…', 'Building index…'), 'search');
         } catch (e) {
           toast(errText(e), 'error');

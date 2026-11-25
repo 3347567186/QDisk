@@ -3715,6 +3715,77 @@ class TestSystemPerformance(EngineCase):
                 self.assertIn("drive_type", d)
                 self.assertIn(d["drive_type"], ("fixed", "removable"))
 
+    def test_redteam_junction_safe_rmtree_rules_rce_and_guards(self):
+        """红队对抗回归：NTFS Junction 防穿透删、_safe_dir 系统/数据目录护栏、卸载命令防注入与 YAML shell/python RCE 拦截。"""
+        import sys as _sys
+        if HERE not in _sys.path:
+            _sys.path.insert(0, HERE)
+        import tidy as T
+        import migrate_engine as M
+
+        # 1. NTFS Junction 防穿透删除：删含目录联接的父目录时，绝不删除联接指向目标目录中的文件
+        base = self.new_folder()
+        target_dir = os.path.join(base, "precious_target")
+        os.makedirs(target_dir, exist_ok=True)
+        secret = os.path.join(target_dir, "important.txt")
+        with open(secret, "w", encoding="utf-8") as f:
+            f.write("DO_NOT_DELETE")
+        wrapper = os.path.join(base, "to_delete")
+        os.makedirs(wrapper, exist_ok=True)
+        junc = os.path.join(wrapper, "link_out")
+        M.make_junction(junc, target_dir)
+        self.assertTrue(T._is_reparse_point(junc))
+        T._safe_rmtree(wrapper)
+        self.assertFalse(os.path.lexists(wrapper))
+        self.assertTrue(os.path.isfile(secret), "NTFS Junction 目标目录文件被穿透删除！")
+
+        # 2. _safe_dir_why 拒绝系统树深层、用户个人目录本体、轻盘数据目录、ADS/UNC/设备名
+        self.assertIsNotNone(T._safe_dir_why(r"C:\Windows\System32\drivers"))
+        self.assertIsNotNone(T._safe_dir_why(r"C:\Program Files"))
+        self.assertIsNotNone(T._safe_dir_why(r"\\server\share\foo\bar"))
+        self.assertIsNotNone(T._safe_dir_why(r"D:\Temp\foo:ads"))
+        self.assertIsNotNone(T._safe_dir_why(r"D:\Temp\CON\sub"))
+        self.assertIsNotNone(T._safe_dir_why(r"D:\$Recycle.Bin\S-1-5-21"))
+        self.assertIsNotNone(T._safe_dir_why(T.data_dir()))
+        home = os.environ.get("USERPROFILE")
+        if home:
+            self.assertIsNotNone(T._safe_dir_why(os.path.join(home, "Desktop")))
+        self.assertIsNone(T._safe_dir_why(os.path.join(base, "app_leftover")))
+
+        # 3. _resolve_uninstaller_argv 多空格路径精准解析 + --flag="a b" 保留 + BatBadBut 拦截
+        spaced_dir = os.path.join(base, "My  Spaced App")
+        os.makedirs(spaced_dir, exist_ok=True)
+        fake_exe = os.path.join(spaced_dir, "uninst.exe")
+        with open(fake_exe, "wb") as f:
+            f.write(b"MZ")
+        res_exe, res_args = T._resolve_uninstaller_argv(f'{fake_exe}   --flag="a b" /S')
+        self.assertEqual(os.path.normcase(res_exe), os.path.normcase(fake_exe))
+        self.assertEqual(res_args, ['--flag="a b"', "/S"])
+        fake_bat = os.path.join(spaced_dir, "uninst.bat")
+        with open(fake_bat, "w", encoding="utf-8") as f:
+            f.write("@echo off\n")
+        with self.assertRaises(T.EngineError):
+            T._spawn_detached(f'"{fake_bat}" /S & calc.exe')
+
+        # 4. YAML 高级规则拦截 shell / python 动作与过滤器，且不误伤合法 python 扩展名/目标目录
+        bad_shell = "rules:\n  - name: evil\n    locations: '.'\n    actions:\n      - shell: 'calc.exe'\n"
+        bad_py_filter = "rules:\n  - name: evil2\n    locations: '.'\n    filters:\n      - not:\n          - python: 'import os'\n    actions:\n      - echo: 'x'\n"
+        good_py_ext = "rules:\n  - name: good\n    locations: '.'\n    filters:\n      - extension:\n          - py\n          - python\n    actions:\n      - move:\n          dest: python\n"
+        self.assertIsNotNone(T._reject_unsafe_rules(bad_shell))
+        self.assertIsNotNone(T._reject_unsafe_rules(bad_py_filter))
+        self.assertIsNone(T._reject_unsafe_rules(good_py_ext))
+
+        # 5. migrate_engine.make_junction 纯 Win32 FSCTL 支持 [2026] & ; 特殊字符路径且真实可读
+        br_dir = os.path.join(base, "[2026] & Bracket Dir")
+        os.makedirs(br_dir, exist_ok=True)
+        br_link = os.path.join(br_dir, "j_link")
+        M.make_junction(br_link, target_dir)
+        self.assertTrue(M.is_reparse(br_link))
+        with open(os.path.join(br_link, "important.txt"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "DO_NOT_DELETE")
+        os.rmdir(br_link)
+        self.assertTrue(os.path.isfile(secret))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

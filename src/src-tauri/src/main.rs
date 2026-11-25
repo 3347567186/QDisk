@@ -810,8 +810,9 @@ fn resolve_existing_local_path(raw: &str) -> Option<PathBuf> {
 }
 
 const LOCAL_EXEC_EXTS: &[&str] = &[
-    "exe", "msi", "bat", "cmd", "ps1", "scr", "com", "vbs", "vbe", "js", "jse", "wsf", "lnk",
-    "reg", "hta",
+    "exe", "msi", "msp", "mst", "bat", "cmd", "ps1", "psm1", "psd1", "ps1xml", "scr", "com",
+    "pif", "cpl", "msc", "jar", "vbs", "vbe", "js", "jse", "wsf", "wsh", "lnk", "url", "reg",
+    "hta", "chm", "msix", "appx", "inf", "scf", "appref-ms", "application", "gadget",
 ];
 
 fn path_ext_lower(p: &Path) -> String {
@@ -1125,10 +1126,23 @@ fn reveal(path: String) -> Result<(), String> {
         }
     };
     let mut cmd = Command::new("explorer.exe");
-    if is_dir {
+    let clean_sel = target.trim_end_matches(['\\', '/']);
+    let is_bare_drive = clean_sel.len() == 2
+        && clean_sel.as_bytes()[0].is_ascii_alphabetic()
+        && clean_sel.as_bytes()[1] == b':';
+    if is_dir || is_bare_drive || clean_sel.is_empty() {
         cmd.arg(&target);
     } else {
-        cmd.arg(format!("/select,{target}"));
+        #[cfg(windows)]
+        {
+            // explorer.exe 要求 /select,"<path>" 格式，且末尾绝不能带 `\` 防止 `\"` 转义闭合引号；
+            // 上方已拦截 `"` 与控制字符，raw_arg 不存在注入面。
+            cmd.raw_arg(format!("/select,\"{clean_sel}\""));
+        }
+        #[cfg(not(windows))]
+        {
+            cmd.arg(format!("/select,{clean_sel}"));
+        }
     }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -1489,36 +1503,48 @@ fn is_admin() -> bool {
     })
 }
 
-/// 以管理员身份重新启动自己：走 PowerShell 的 Start-Process -Verb RunAs，
-/// 由系统弹 UAC；提权实例带 `--elevated` 参数（启动时跳过单实例转发），
-/// 本进程在该实例起来后主动退出，把数据目录与 WebView2 profile 让出去。
+/// 以管理员身份重新启动自己：在阻塞线程中直接调用 Win32 ShellExecuteW("runas")，
+/// 仅在 UAC 真正放行（rc > 32）后才停引擎并退出当前进程；若用户取消 UAC，当前窗口与引擎保持完好。
 #[tauri::command]
 async fn run_as_admin(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    // 先把引擎收掉，避免两个引擎同时写同一个数据目录
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_str = exe.to_string_lossy().to_string();
+    let dir_str = exe
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    #[cfg(target_os = "windows")]
+    {
+        let rc = tauri::async_runtime::spawn_blocking(move || -> isize {
+            let op: Vec<u16> = "runas\0".encode_utf16().collect();
+            let file: Vec<u16> = exe_str.encode_utf16().chain(std::iter::once(0)).collect();
+            let params: Vec<u16> = "--elevated\0".encode_utf16().collect();
+            let dir: Vec<u16> = dir_str.encode_utf16().chain(std::iter::once(0)).collect();
+            let dir_ptr = if dir.len() > 1 { dir.as_ptr() } else { std::ptr::null() };
+            unsafe { ShellExecuteW(0, op.as_ptr(), file.as_ptr(), params.as_ptr(), dir_ptr, 1) }
+        })
+        .await
+        .map_err(|e| format!("提权启动失败：{e}"))?;
+        if rc <= 32 {
+            if rc == 5 || rc == 1223 {
+                return Err("已取消管理员提权".into());
+            }
+            return Err(format!("无法以管理员身份重启（错误码 {rc}）"));
+        }
+    }
+
+    // 提权实例已确认启动，再优雅停止当前引擎并退出，释放数据目录与 WebView2 profile
     if let Ok(mut guard) = state.engine.lock() {
         if let Some(mut old) = guard.take() {
             let _ = old.child.kill();
             let _ = old.child.wait();
         }
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let exe = exe.to_string_lossy().to_string();
-    // 用 -EncodedCommand 传脚本：路径里有单引号、空格、中文都不会被解析坏
-    let script = format!(
-        "Start-Process -FilePath '{}' -ArgumentList '--elevated' -Verb RunAs",
-        exe.replace('\'', "''")
-    );
-    let encoded = ps_encoded(&script);
-    let mut cmd = Command::new("powershell");
-    cmd.args(["-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", &encoded]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.spawn().map_err(|e| e.to_string())?;
-    append_log("info", "请求以管理员身份重启");
+    append_log("info", "已请求以管理员身份重启");
     let handle = app.clone();
     std::thread::spawn(move || {
-        // 给提权实例一点启动时间，再释放单实例锁与 profile
-        std::thread::sleep(std::time::Duration::from_millis(900));
+        std::thread::sleep(std::time::Duration::from_millis(600));
         handle.exit(0);
     });
     Ok(())
@@ -1990,27 +2016,6 @@ async fn data_dir_migrate(
     Ok(result)
 }
 
-/// PowerShell `-EncodedCommand` 要 UTF-16LE 字节的 Base64；这里自己编码，不引依赖。
-fn ps_encoded(script: &str) -> String {
-    let mut bytes = Vec::with_capacity(script.len() * 2);
-    for unit in script.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TBL[(n >> 18) as usize & 63] as char);
-        out.push(TBL[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TBL[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TBL[n as usize & 63] as char } else { '=' });
-    }
-    out
-}
-
 // ---------------------------------------------------------------- startup
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -2182,7 +2187,11 @@ fn read_tail_utf8(path: &Path, max_bytes: u64) -> Result<String, String> {
 
 #[tauri::command(async)]
 fn read_text(path: String, max_bytes: Option<u64>) -> Result<String, String> {
-    read_tail_utf8(Path::new(&path), max_bytes.unwrap_or(512 * 1024))
+    if is_windows_device_path(&path) {
+        return Err("拒绝读取系统设备路径或保留设备名".into());
+    }
+    let capped = max_bytes.unwrap_or(512 * 1024).clamp(1, 8 * 1024 * 1024);
+    read_tail_utf8(Path::new(&path), capped)
 }
 
 // ---------------------------------------------------------------- 全能只读文件内容预览（整理文件 / 空间工具 / 目录浏览共用）
@@ -2198,13 +2207,17 @@ const OOXML_MAX_ARCHIVE_ENTRIES: usize = 4096;
 const OOXML_MAX_CHARS: usize = 120_000;
 
 fn is_windows_device_path(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    let low = trimmed.to_ascii_lowercase();
-    if low.starts_with(r"\\.\") || low.starts_with(r"\\?\pipe\") {
+    let norm = raw.trim().replace('/', "\\");
+    let low = norm.to_ascii_lowercase();
+    if low.starts_with(r"\\.\")
+        || low.starts_with(r"\\?\pipe\")
+        || low.starts_with(r"\\?\globalroot")
+        || low.starts_with(r"\\?\device\")
+    {
         return true;
     }
     // 拦截 NTFS 备用数据流（ADS，如 C:\foo.txt:stream），跳过盘符冒号与 \\?\C: 前缀
-    let after_prefix = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    let after_prefix = norm.strip_prefix(r"\\?\").unwrap_or(&norm);
     let after_drive = if after_prefix.len() >= 2
         && after_prefix.as_bytes()[0].is_ascii_alphabetic()
         && after_prefix.as_bytes()[1] == b':'
@@ -2216,18 +2229,23 @@ fn is_windows_device_path(raw: &str) -> bool {
     if after_drive.contains(':') {
         return true;
     }
-    let leaf = trimmed
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or("")
-        .trim_end_matches([' ', '.']);
-    let stem = leaf.split('.').next().unwrap_or("").to_ascii_uppercase();
-    matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
-    )
+    // 逐段检查 Windows 保留设备名（不仅是末段，中间段如 C:\foo\CON\bar 同样会触发设备句柄挂起）
+    for seg in after_drive.split('\\') {
+        let clean = seg.trim_end_matches([' ', '.']);
+        if clean.is_empty() {
+            continue;
+        }
+        let stem = clean.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+                | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_image_preview_ext(ext: &str) -> bool {
@@ -3435,7 +3453,7 @@ fn walk_files<F: FnMut(&std::path::Path, u64, u64)>(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if md.file_type().is_symlink() {
+        if is_reparse_point(&path) || md.file_type().is_symlink() {
             continue;
         }
         if md.is_dir() {
@@ -3499,6 +3517,7 @@ fn top_files(dir: String, limit: usize) -> Result<Value, String> {
 /// 一次 PowerShell 批量问，最多 80 个，避免逐个进程把界面拖住。
 const SIG_SCRIPT: &str = r#"
 $ErrorActionPreference = 'SilentlyContinue'
+try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 # 从 Tauri 启动时 PSModulePath 往往指向 PowerShell 7 的目录，5.1 的 Security 模块会加载失败，
 # 于是 Authenticode 检查全部变成 Unknown。先钉回 Windows PowerShell 自带模块路径。
@@ -3549,7 +3568,15 @@ fn file_signals(paths: Vec<String>) -> Result<Value, String> {
         let _ = si.write_all(payload.as_bytes());
     }
     drop(child.stdin.take());
-    // 最多等 25 秒，PowerShell 卡住就杀掉，别把界面吊死。
+    // 并发排空 stdout，根治批量 80 个路径输出 >4KB 时触发 Windows 匿名管道满写死锁
+    let stdout_handle = child.stdout.take().map(|mut so| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = so.read_to_string(&mut buf);
+            buf
+        })
+    });
+    // 最多等 25 秒，PowerShell 卡住就杀掉并回收句柄，别把界面吊死。
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -3557,17 +3584,21 @@ fn file_signals(paths: Vec<String>) -> Result<Value, String> {
             Ok(None) => {
                 if started.elapsed() > Duration::from_secs(25) {
                     let _ = child.kill();
+                    let _ = child.wait();
                     return Err("读取签名超时".into());
                 }
                 std::thread::sleep(Duration::from_millis(80));
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
         }
     }
-    let mut text = String::new();
-    if let Some(mut so) = child.stdout.take() {
-        let _ = so.read_to_string(&mut text);
-    }
+    let text = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
     let text = text.trim();
     if text.is_empty() {
         return Ok(json!({ "items": [] }));
@@ -3700,7 +3731,7 @@ fn scan_empty_rec(
             return;
         }
         if let Ok(md) = std::fs::symlink_metadata(&p) {
-            if md.is_dir() && !md.file_type().is_symlink() {
+            if md.is_dir() && !is_reparse_point(&p) && !md.file_type().is_symlink() {
                 scan_empty_rec(root, &p, depth + 1, max_depth, st, out);
             }
         }
@@ -3744,8 +3775,8 @@ fn scan_empty_dirs(dir: String, max: usize, depth: Option<usize>) -> Result<Valu
     }))
 }
 
-#[tauri::command(async)]
-/// 空目录清理的安全闸：盘符根、系统目录、用户主目录、程序目录一律不动。
+/// 空目录清理的安全闸：盘符根、系统树、程序目录、数据目录，以及用户主目录/常用个人目录本体一律不动
+/// （注意：桌面/下载/文档等目录下的普通空子目录允许正常清理，不再被 USERPROFILE 前缀误伤）。
 fn empty_dir_denied(path: &Path) -> Option<&'static str> {
     let s = path.to_string_lossy().replace('/', "\\");
     let low = s.trim_end_matches('\\').to_lowercase();
@@ -3755,24 +3786,67 @@ fn empty_dir_denied(path: &Path) -> Option<&'static str> {
     if path.parent().is_none() {
         return Some("盘符根目录");
     }
-    let sysroot = std::env::var("SystemRoot").unwrap_or_default().to_lowercase();
-    let home = std::env::var("USERPROFILE").unwrap_or_default().to_lowercase();
-    let mut roots: Vec<String> = Vec::new();
-    if !sysroot.is_empty() { roots.push(sysroot); }
-    if !home.is_empty() { roots.push(home); }
-    for k in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData", "PUBLIC"] {
+    // 整棵树保护（本身及任何子目录均禁止清理）
+    let mut tree_roots: Vec<String> = Vec::new();
+    for k in ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "PUBLIC"] {
         if let Ok(v) = std::env::var(k) {
-            if !v.is_empty() { roots.push(v.to_lowercase()); }
+            if !v.is_empty() {
+                tree_roots.push(v.replace('/', "\\").trim_end_matches('\\').to_lowercase());
+            }
         }
     }
-    for r in roots {
-        let r = r.trim_end_matches('\\').to_string();
+    let dd = normalize_path_str(&data_dir().to_string_lossy()).to_lowercase();
+    if !dd.is_empty() {
+        if low == dd || low.starts_with(&(dd.clone() + "\\")) {
+            return Some("轻盘自身数据目录");
+        }
+        if dd.starts_with(&(low.clone() + "\\")) {
+            return Some("包含轻盘数据目录的上级目录");
+        }
+    }
+    let ed = normalize_path_str(&exe_dir().to_string_lossy()).to_lowercase();
+    if !ed.is_empty() {
+        if low == ed || low.starts_with(&(ed.clone() + "\\")) {
+            return Some("轻盘程序目录");
+        }
+        if ed.starts_with(&(low.clone() + "\\")) {
+            return Some("包含轻盘程序目录的上级目录");
+        }
+    }
+    // 任意盘符下的系统保留顶层目录（回收站 / 卷信息 / 恢复分区）
+    let mut seg_iter = low.split('\\').filter(|x| !x.is_empty());
+    let _drv = seg_iter.next();
+    if let Some(top) = seg_iter.next() {
+        if matches!(top, "$recycle.bin" | "system volume information" | "recovery") {
+            return Some("系统保留目录");
+        }
+    }
+    for r in tree_roots {
         if low == r || low.starts_with(&(r.clone() + "\\")) {
-            return Some("受保护的系统或用户目录");
+            return Some("受保护的系统或程序目录");
         }
     }
     if low.contains("\\windows\\") || low.ends_with("\\windows") {
         return Some("Windows 目录");
+    }
+    // 仅保护目录本体（不拦截其下用户自己建的空子文件夹）
+    let mut self_only: Vec<String> = Vec::new();
+    let sys_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    self_only.push(format!("{}\\users", sys_drive.trim_end_matches(['\\', '/']).to_lowercase()));
+    for k in ["USERPROFILE", "OneDrive", "OneDriveConsumer", "OneDriveCommercial"] {
+        if let Ok(v) = std::env::var(k) {
+            let base = v.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+            if base.is_empty() {
+                continue;
+            }
+            self_only.push(base.clone());
+            for sh in ["desktop", "documents", "downloads", "pictures", "videos", "music", "appdata", "onedrive", "桌面", "文档", "下载", "图片"] {
+                self_only.push(format!("{base}\\{sh}"));
+            }
+        }
+    }
+    if self_only.iter().any(|r| low == *r) {
+        return Some("受保护的用户关键目录");
     }
     None
 }
@@ -4665,11 +4739,20 @@ fn ai_http(req: Value) -> Result<Value, String> {
     if let Some(h) = req.get("headers").and_then(|v| v.as_object()) {
         for (k, v) in h {
             if let Some(val) = v.as_str() {
-                // 换行会破坏头结束符，直接拒绝而不是偷偷清掉
-                if k.contains('\r') || k.contains('\n') || val.contains('\r') || val.contains('\n') {
+                let kt = k.trim();
+                // 拦截换行/空字节/非法键名，防 WinHTTP 头注入与字符串截断
+                if kt.is_empty()
+                    || kt.contains(':')
+                    || kt.chars().any(|c| c.is_whitespace() || (c as u32) < 0x20 || c == '\u{7f}')
+                    || val.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+                {
                     return Err("请求头包含非法字符".into());
                 }
-                headers.push((k.clone(), val.to_string()));
+                if let Some(slot) = headers.iter_mut().find(|(ek, _)| ek.eq_ignore_ascii_case(kt)) {
+                    slot.1 = val.to_string();
+                } else {
+                    headers.push((kt.to_string(), val.to_string()));
+                }
             }
         }
     }
@@ -4902,10 +4985,19 @@ fn ai_http_stream(req: Value, on_chunk: tauri::ipc::Channel<String>) -> Result<V
     if let Some(h) = req.get("headers").and_then(|v| v.as_object()) {
         for (k, v) in h {
             if let Some(val) = v.as_str() {
-                if k.contains('\r') || k.contains('\n') || val.contains('\r') || val.contains('\n') {
+                let kt = k.trim();
+                if kt.is_empty()
+                    || kt.contains(':')
+                    || kt.chars().any(|c| c.is_whitespace() || (c as u32) < 0x20 || c == '\u{7f}')
+                    || val.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+                {
                     return Err("请求头包含非法字符".into());
                 }
-                headers.push((k.clone(), val.to_string()));
+                if let Some(slot) = headers.iter_mut().find(|(ek, _)| ek.eq_ignore_ascii_case(kt)) {
+                    slot.1 = val.to_string();
+                } else {
+                    headers.push((kt.to_string(), val.to_string()));
+                }
             }
         }
     }
@@ -4942,7 +5034,7 @@ fn store_apps() -> Result<Vec<Value>, String> {
     }
     // 只列用户可卸载的应用：IsFramework / NonRemovable 是运行时与系统组件，
     // 名字也是一串 GUID，列出来只会干扰卸载。
-    let script = "Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.NonRemovable } | Select-Object Name,Version,Publisher,InstallLocation,PackageFullName,PackageFamilyName | ConvertTo-Json -Compress -Depth 3";
+    let script = "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}; Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.NonRemovable } | Select-Object Name,Version,Publisher,InstallLocation,PackageFullName,PackageFamilyName | ConvertTo-Json -Compress -Depth 3";
     let out = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(CREATE_NO_WINDOW)
@@ -6049,6 +6141,39 @@ mod shell_tests {
         assert!(cxt.contains("总览表") && cxt.contains("指标"), "wps_xlsx={cxt}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn redteam_r1_r2_guards_empty_dir_device_path_and_exec_exts() {
+        // 1. empty_dir_denied 必须放行用户目录（下载/桌面）下的普通空子文件夹，同时严格拦截目录本体与系统树
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            let user_sub = PathBuf::from(&home).join("Downloads").join("EmptyTestSubdir_99");
+            assert!(
+                empty_dir_denied(&user_sub).is_none(),
+                "普通用户下载子目录不应被 empty_dir_denied 误杀: {:?}",
+                user_sub
+            );
+            assert!(empty_dir_denied(&PathBuf::from(&home)).is_some());
+            assert!(empty_dir_denied(&PathBuf::from(&home).join("Downloads")).is_some());
+            assert!(empty_dir_denied(&PathBuf::from(&home).join("Desktop")).is_some());
+        }
+        assert!(empty_dir_denied(Path::new(r"C:\Windows\Temp\EmptySub")).is_some());
+        assert!(empty_dir_denied(Path::new(r"D:\$Recycle.Bin\S-1-5-21")).is_some());
+        assert!(empty_dir_denied(&data_dir()).is_some());
+
+        // 2. is_windows_device_path 拦截正斜杠设备路径、GLOBALROOT、中间段保留设备名与 ADS
+        assert!(is_windows_device_path("//./COM1"));
+        assert!(is_windows_device_path(r"\\?\GLOBALROOT\Device\Harddisk0"));
+        assert!(is_windows_device_path(r"C:\foo\CON\bar.txt"));
+        assert!(is_windows_device_path(r"D:\docs\note.txt:hidden"));
+        assert!(!is_windows_device_path(r"D:\docs\config.json"));
+
+        // 3. LOCAL_EXEC_EXTS 覆盖高危 Windows 可执行/帮助/脚本/快捷方式扩展名
+        for ext in ["chm", "cpl", "msc", "jar", "pif", "url", "wsh", "msix", "appref-ms"] {
+            let p = PathBuf::from(format!(r"D:\tmp\payload.{ext}"));
+            assert!(is_exec_path(&p), "未拦截高危可执行扩展名 .{ext}");
+        }
+        assert!(!is_exec_path(Path::new(r"D:\tmp\readme.txt")));
     }
 }
 
