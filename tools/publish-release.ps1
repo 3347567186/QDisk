@@ -123,10 +123,42 @@ $manifest = [ordered]@{
   notes         = $Notes
 }
 
+function Get-Sha256Parallel([string[]]$Paths) {
+  if (-not ([System.Management.Automation.PSTypeName]'TidyFastSha').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Security.Cryptography;
+using System.Threading.Tasks;
+
+public static class TidyFastSha {
+  public static ConcurrentDictionary<string, string> ComputeAll(string[] paths) {
+    var dict = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    Parallel.ForEach(paths, p => {
+      using (var sha = SHA256.Create())
+      using (var fs = new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.Read, 262144)) {
+        var h = sha.ComputeHash(fs);
+        dict[p] = BitConverter.ToString(h).Replace("-", "").ToLowerInvariant();
+      }
+    });
+    return dict;
+  }
+}
+'@
+  }
+  return [TidyFastSha]::ComputeAll($Paths)
+}
+
+$hashTargets = New-Object System.Collections.Generic.List[string]
+if ($hasInst) { $hashTargets.Add($instPath) }
+if ($hasPort) { $hashTargets.Add($portPath) }
+$shaMap = if ($hashTargets.Count -gt 0) { Get-Sha256Parallel -Paths ($hashTargets.ToArray()) } else { @{} }
+
 $sums = New-Object System.Collections.Generic.List[string]
 
 if ($hasInst) {
-  $sha = Get-Sha256Lower $instPath
+  $sha = $shaMap[$instPath]
   $len = (Get-Item -LiteralPath $instPath).Length
   $url = Format-AssetUrl $BaseUrl $instFile
   $manifest['installer'] = [ordered]@{
@@ -147,7 +179,7 @@ if ($hasInst) {
 }
 
 if ($hasPort) {
-  $sha = Get-Sha256Lower $portPath
+  $sha = $shaMap[$portPath]
   $len = (Get-Item -LiteralPath $portPath).Length
   # 纯 ASCII 文件名，确保 GitHub Releases 下载地址与 latest.json 100% 字节对齐、绝不 404
   $remotePortFile = "QDisk_${Version}_x64-portable.zip"
@@ -165,8 +197,12 @@ $enc = New-Object Text.UTF8Encoding($false)
 $latestPath = Join-Path $releaseDir 'latest.json'
 $sumsPath = Join-Path $releaseDir 'SHA256SUMS.txt'
 $jsonText = $manifest | ConvertTo-Json -Depth 6
-[IO.File]::WriteAllText($latestPath, $jsonText + "`n", $enc)
-[IO.File]::WriteAllText($sumsPath, (($sums -join "`n") + "`n"), $enc)
+$latestTmp = "$latestPath.tmp"
+$sumsTmp = "$sumsPath.tmp"
+[IO.File]::WriteAllText($latestTmp, $jsonText + "`n", $enc)
+Move-Item -LiteralPath $latestTmp -Destination $latestPath -Force
+[IO.File]::WriteAllText($sumsTmp, (($sums -join "`n") + "`n"), $enc)
+Move-Item -LiteralPath $sumsTmp -Destination $sumsPath -Force
 
 Write-Host "已生成发包清单：$latestPath（v$Version / $Channel）" -ForegroundColor Green
 Write-Host "已生成校验摘要：$sumsPath" -ForegroundColor DarkGray
@@ -175,12 +211,14 @@ if ($UploadGitHub) {
   if (-not $GitHubRepo) { throw '启用 -UploadGitHub 必须同时提供 -GitHubRepo "owner/repo"' }
   $gh = (Get-Command gh -ErrorAction SilentlyContinue).Source
   if (-not $gh) { throw '未找到 GitHub CLI (gh)，请先安装并执行 gh auth login' }
-  $files = @($latestPath, $sumsPath)
+  $files = @()
   if ($hasInst) { $files += $instPath }
   $tmpAsciiPort = $null
   if ($hasPort) {
     $files += $portPath
   }
+  # Strictly upload SHA256SUMS.txt then latest.json LAST after binary assets
+  $files += @($sumsPath, $latestPath)
   $tag = "v$Version"
   $tmpBody = Join-Path ([IO.Path]::GetTempPath()) "tidy_release_notes_${Version}.md"
   [IO.File]::WriteAllText($tmpBody, $ReleaseBody + "`n", $enc)

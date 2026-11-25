@@ -318,7 +318,7 @@ function Build-App {
   $env:CARGO_TARGET_DIR = $target
   $env:Path             = 'D:\Tool\binutils\mingw64\bin;' + $env:Path
   if (Enable-FastRustLinker) {
-    Write-Host '  链接加速器：已启用 rust-lld + 多核 ThinLTO' -ForegroundColor DarkGray
+    Write-Host '  链接加速器：已启用 rust-lld + 16 核并行编译' -ForegroundColor DarkGray
   }
 
   $cli = Join-Path $root 'tools\cargo-tauri.exe'
@@ -366,6 +366,31 @@ function Build-App {
   }
 }
 
+function Compress-DirectorySmart([string]$SourceDir, [string]$DestZip) {
+  Add-Type -AssemblyName System.IO.Compression
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $alreadyCompressed = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@('.png', '.jpg', '.jpeg', '.webp', '.gif', '.ico', '.woff2', '.zip', '.7z', '.gz', '.xz', '.bz2', '.rar', '.mp4', '.mp3', '.webm'),
+    [System.StringComparer]::OrdinalIgnoreCase
+  )
+  if (Test-Path -LiteralPath $DestZip) { Remove-Item -LiteralPath $DestZip -Force }
+  $baseFull = [IO.Path]::GetFullPath($SourceDir).TrimEnd('\', '/') + '\'
+  $zip = [System.IO.Compression.ZipFile]::Open($DestZip, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    foreach ($f in (Get-ChildItem -LiteralPath $SourceDir -Recurse -File | Sort-Object FullName)) {
+      $rel = $f.FullName.Substring($baseFull.Length).Replace('\', '/')
+      $lvl = if ($alreadyCompressed.Contains($f.Extension)) {
+        [System.IO.Compression.CompressionLevel]::NoCompression
+      } else {
+        [System.IO.Compression.CompressionLevel]::Optimal
+      }
+      [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f.FullName, $rel, $lvl)
+    }
+  } finally {
+    $zip.Dispose()
+  }
+}
+
 function Build-Portable {
   Write-Host '[2/2] 打包便携版…' -ForegroundColor Cyan
   $stage = 'D:\Builds\tidyassistant-portable'
@@ -375,7 +400,7 @@ function Build-Portable {
   Copy-Item (Join-Path $root 'tidy-assistant.exe') $stage -Force
   Copy-Item (Join-Path $root 'WebView2Loader.dll') $stage -Force -ErrorAction SilentlyContinue
   Copy-Item (Join-Path $root 'THIRD_PARTY.md') $stage -Force -ErrorAction SilentlyContinue
-  robocopy (Join-Path $root '引擎') (Join-Path $stage '引擎') /E /NFL /NDL /NJH /NJS /NP | Out-Null
+  robocopy (Join-Path $root '引擎') (Join-Path $stage '引擎') /E /MT:8 /NFL /NDL /NJH /NJS /NP | Out-Null
   Remove-Item (Join-Path $stage '引擎\数据位置.json') -Force -ErrorAction SilentlyContinue   # 运行时会重建，别把本机数据目录带给别人
 
   @"
@@ -389,15 +414,37 @@ RAR：首次打开 RAR 时会自动下载官方 UnRAR64.dll 并校验，需要�
 "@ | Set-Content (Join-Path $stage '使用说明.txt') -Encoding UTF8
 
   $zip = Join-Path $root "release\QDisk_${current}_x64-portable.zip"
+  $zipTmp = "$zip.tmp"
   New-Item -ItemType Directory -Force -Path (Join-Path $root 'release') | Out-Null
-  Remove-Item $zip -Force -ErrorAction SilentlyContinue
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [System.IO.Compression.ZipFile]::CreateFromDirectory(
-    $stage,
-    $zip,
-    [System.IO.Compression.CompressionLevel]::Optimal,
-    $false
-  )
+  Remove-Item -LiteralPath $zipTmp -Force -ErrorAction SilentlyContinue
+  try {
+    Compress-DirectorySmart -SourceDir $stage -DestZip $zipTmp
+
+    # 便携包结构完整性实测校验：先验收临时包，确认主程序与核心引擎均无损入包后再原子落盘
+    $expExeLen = (Get-Item -LiteralPath (Join-Path $stage 'tidy-assistant.exe')).Length
+    $engExePath = Join-Path $stage '引擎\整理助手引擎.exe'
+    $expEngLen = if (Test-Path -LiteralPath $engExePath) { (Get-Item -LiteralPath $engExePath).Length } else { 0 }
+    $zCheck = [System.IO.Compression.ZipFile]::OpenRead($zipTmp)
+    try {
+      $eApp = $zCheck.Entries | Where-Object { $_.FullName -ieq 'tidy-assistant.exe' } | Select-Object -First 1
+      if (-not $eApp -or $eApp.Length -ne $expExeLen) {
+        throw '便携包结构自检失败：tidy-assistant.exe 缺失或体积不匹配'
+      }
+      if ($expEngLen -gt 0) {
+        $eEng = $zCheck.Entries | Where-Object { $_.FullName -ieq '引擎/整理助手引擎.exe' } | Select-Object -First 1
+        if (-not $eEng -or $eEng.Length -ne $expEngLen) {
+          throw '便携包结构自检失败：引擎/整理助手引擎.exe 缺失或体积不匹配'
+        }
+      }
+    } finally {
+      $zCheck.Dispose()
+    }
+    Move-Item -LiteralPath $zipTmp -Destination $zip -Force
+  } catch {
+    Remove-Item -LiteralPath $zipTmp -Force -ErrorAction SilentlyContinue
+    throw
+  }
+
   Write-Host ('便携包：release\{0}（{1:N1} MiB）' -f (Split-Path $zip -Leaf), ((Get-Item $zip).Length / 1MB)) -ForegroundColor Green
 }
 
@@ -475,21 +522,73 @@ function Invoke-TidyTestGate {
     }
   }
   $prevStamp = if (Test-Path $stampPath) { (Get-Content -Path $stampPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue).Trim() } else { '' }
-  $needRust = ($rustFp -ne $prevStamp)
+  # 显式 -TestsOnly 或 -Clean 时强制全跑 Rust 测试与发布检查，绝不跳检
+  $needRust = $TestsOnly -or $Clean -or ($rustFp -ne $prevStamp)
 
-  # 2. 并发启动 4 个隔离 Python 单测 + 8 个前端/官网自测 +（若指纹变化）Rust cargo test
+  # 2. 并发启动：将 183 条 test_engine_rpc 按 TestCase 类 LPT 均衡分片到 6 个隔离 Python 进程 + 3 个独立 Python 套件 + 8 个前端自测 + Rust 测试
   # 注意：每个 worker 独立目录放在 D:\Builds\temp\sub1\w_<pid>_<mod>，与原 sub1\sub2 保持完全相同的目录深度（避免触发 test_app_guard 7 层深度守卫）
   $testTempRoot = 'D:\Builds\temp\sub1'
   if (-not (Test-Path $testTempRoot)) { New-Item -ItemType Directory -Path $testTempRoot -Force | Out-Null }
   $workerTemps = New-Object System.Collections.Generic.List[string]
+  $rpcShardJobs = New-Object System.Collections.Generic.List[object]
   $pyJobs = New-Object System.Collections.Generic.List[object]
   $nodeJobs = New-Object System.Collections.Generic.List[object]
   $allJobs = New-Object System.Collections.Generic.List[object]
   $rustJob = $null
   $cargo = $null
 
+  $rpcShardCount = [Math]::Max(2, [Math]::Min(6, [int][Math]::Floor([Environment]::ProcessorCount / 2)))
+  $rpcShardScript = @'
+import sys, unittest, test_engine_rpc as mod
+shard, total = int(sys.argv[1]), int(sys.argv[2])
+loader = unittest.TestLoader()
+module_total = loader.loadTestsFromModule(mod).countTestCases()
+base_cls = getattr(mod, 'EngineCase', None)
+all_classes = [
+    v for v in vars(mod).values()
+    if isinstance(v, type) and issubclass(v, unittest.TestCase)
+    and v is not unittest.TestCase and v is not base_cls
+]
+counts = [(len(loader.getTestCaseNames(c)), c.__name__, c) for c in all_classes]
+counts = [x for x in counts if x[0] > 0]
+counts.sort(key=lambda x: (-x[0], x[1]))
+total_tests = sum(x[0] for x in counts)
+if total_tests != module_total:
+    print(f"SHARD_DISCOVERY_MISMATCH discovered={total_tests} module_total={module_total}", file=sys.stderr)
+    sys.exit(2)
+bins = [[] for _ in range(total)]
+loads = [0] * total
+for n, _, c in counts:
+    b = min(range(total), key=lambda i: loads[i])
+    bins[b].append(c)
+    loads[b] += n
+picked = bins[shard]
+suite = unittest.TestSuite([loader.loadTestsFromTestCase(c) for c in picked])
+res = unittest.TextTestRunner(verbosity=1).run(suite)
+print(f"SHARD_META ran={res.testsRun} expected_total={total_tests} skipped={len(res.skipped)} classes={len(picked)}")
+sys.exit(0 if res.wasSuccessful() else 1)
+'@
+
   try {
-    $modules = @('test_engine_rpc', 'test_migrate_engine', 'test_settings_dir', 'test_app_guard')
+    for ($s = 0; $s -lt $rpcShardCount; $s++) {
+      $wTmp = Join-Path $testTempRoot ("w_{0}_rpc{1}" -f $PID, $s)
+      New-Item -ItemType Directory -Path $wTmp -Force | Out-Null
+      $workerTemps.Add($wTmp)
+      $job = Start-AsyncGateProcess -Kind 'py-rpc' -Name ("test_engine_rpc#{0}" -f ($s + 1)) -FilePath $py `
+        -Arguments @('-B', '-c', $rpcShardScript, [string]$s, [string]$rpcShardCount) `
+        -WorkingDirectory $engineSrc `
+        -EnvVars @{
+          TEMP                    = $wTmp
+          TMP                     = $wTmp
+          PYTHONDONTWRITEBYTECODE = '1'
+          PYTHONUTF8              = '1'
+          PYTHONIOENCODING        = 'utf-8'
+        }
+      $rpcShardJobs.Add($job)
+      $allJobs.Add($job)
+    }
+
+    $modules = @('test_migrate_engine', 'test_settings_dir', 'test_app_guard')
     foreach ($m in $modules) {
       $wTmp = Join-Path $testTempRoot ("w_{0}_{1}" -f $PID, $m)
       New-Item -ItemType Directory -Path $wTmp -Force | Out-Null
@@ -547,38 +646,7 @@ function Invoke-TidyTestGate {
       }
     }
 
-    # 3. 按确定顺序收集并输出 Python 测试结果
-    foreach ($j in $pyJobs) {
-      $j.Proc.WaitForExit()
-      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
-      $code = $j.Proc.ExitCode
-      $tail = ($combined | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
-      if ($code -ne 0) {
-        $failed += "引擎测试 $($j.Name) 未通过（$tail）"
-        Write-Host ("  [红] {0}：{1}" -f $j.Name, $tail) -ForegroundColor Red
-        ($combined | Select-String -Pattern '^(FAIL:|ERROR:|AssertionError)' |
-            Select-Object -First 6 | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow })
-      } else {
-        Write-Host ("  [绿] {0}：{1}" -f $j.Name, $tail) -ForegroundColor DarkGray
-      }
-    }
-
-    # 4. 按确定顺序收集并输出 Node 自测结果
-    foreach ($j in $nodeJobs) {
-      $j.Proc.WaitForExit()
-      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
-      $code = $j.Proc.ExitCode
-      $last = ($combined | Where-Object { $_ -match '结果：' } | Select-Object -Last 1)
-      if (-not $last) { $last = ($combined | Where-Object { $_ -match '\S' -and $_ -notmatch '^[─━-]+$' } | Select-Object -Last 1) }
-      if ($code -ne 0) {
-        $failed += "前端自测 $($j.Name) 未通过（$last）"
-        Write-Host ("  [红] {0}：{1}" -f $j.Name, $last) -ForegroundColor Red
-      } else {
-        Write-Host ("  [绿] {0}：{1}" -f $j.Name, $last) -ForegroundColor DarkGray
-      }
-    }
-
-    # 5. 收集 Rust 测试结果，并跑非 cfg(test) 的 cargo check --release 零警告门禁
+    # 3. 先收集 Rust 测试并紧接运行 cargo check --release，使其与 Python 分片测试 100% 重叠执行（零额外墙钟时间！）
     if (-not $needRust) {
       Write-Host '  [跳过] cargo test / check：Rust 源码与依赖指纹未变（仅版本或非 Rust 文件变动）' -ForegroundColor DarkGray
     } elseif ($rustJob) {
@@ -623,6 +691,83 @@ function Invoke-TidyTestGate {
 
       if ($code -eq 0 -and $warns -eq 0 -and $bcode -eq 0 -and $bwarns -eq 0) {
         Set-Content -Path $stampPath -Value $rustFp -Encoding UTF8
+      }
+    }
+
+    # 4. 收集 6 路分片的 test_engine_rpc 并严格核对总执行数 == 总发现数（绝不漏测一条）
+    $rpcTotalRan = 0
+    $rpcExpected = 0
+    $rpcSkipped = 0
+    $rpcAnyFailed = $false
+    foreach ($j in $rpcShardJobs) {
+      $j.Proc.WaitForExit()
+      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
+      $code = $j.Proc.ExitCode
+      $metaLine = ($combined | Select-String -Pattern 'SHARD_META ran=(\d+) expected_total=(\d+) skipped=(\d+)' | Select-Object -Last 1)
+      if ($metaLine -and $metaLine.Matches.Count -gt 0) {
+        $rpcTotalRan += [int]$metaLine.Matches[0].Groups[1].Value
+        $rpcExpected = [int]$metaLine.Matches[0].Groups[2].Value
+        $rpcSkipped += [int]$metaLine.Matches[0].Groups[3].Value
+      }
+      if ($code -ne 0) {
+        $rpcAnyFailed = $true
+        $tail = ($combined | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
+        if (-not $tail) { $tail = "退出码 $code" }
+        $failed += "引擎测试 $($j.Name) 未通过（$tail）"
+        Write-Host ("  [红] {0}：{1}" -f $j.Name, $tail) -ForegroundColor Red
+        $diagLines = @($combined | Select-String -Pattern '^(FAIL:|ERROR:|AssertionError|Traceback|SyntaxError|ImportError|ModuleNotFoundError|IndentationError|NameError|RuntimeError|SHARD_DISCOVERY_MISMATCH)' | Select-Object -First 6)
+        if ($diagLines.Count -eq 0) {
+          $diagLines = @($combined | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 5)
+          $diagLines | ForEach-Object { Write-Host ("        " + $_.Trim()) -ForegroundColor DarkYellow }
+        } else {
+          $diagLines | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow }
+        }
+      }
+    }
+    if (-not $rpcAnyFailed) {
+      if ($rpcExpected -le 0 -or $rpcTotalRan -ne $rpcExpected) {
+        $failed += "引擎分片测试计数异常（执行 $rpcTotalRan 条，预期 $rpcExpected 条）"
+        Write-Host ("  [红] test_engine_rpc：分片计数不一致（{0}/{1}）" -f $rpcTotalRan, $rpcExpected) -ForegroundColor Red
+      } else {
+        $skipTxt = if ($rpcSkipped -gt 0) { " (skipped=$rpcSkipped)" } else { '' }
+        Write-Host ("  [绿] test_engine_rpc（{0} 路并行）：Ran {1} tests OK{2}" -f $rpcShardCount, $rpcTotalRan, $skipTxt) -ForegroundColor DarkGray
+      }
+    }
+
+    # 5. 收集其余 Python 单测结果
+    foreach ($j in $pyJobs) {
+      $j.Proc.WaitForExit()
+      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
+      $code = $j.Proc.ExitCode
+      $tail = ($combined | Select-String -Pattern '^(Ran |OK|FAILED)' | ForEach-Object { $_.Line }) -join ' '
+      if ($code -ne 0) {
+        if (-not $tail) { $tail = "退出码 $code" }
+        $failed += "引擎测试 $($j.Name) 未通过（$tail）"
+        Write-Host ("  [红] {0}：{1}" -f $j.Name, $tail) -ForegroundColor Red
+        $diagLines = @($combined | Select-String -Pattern '^(FAIL:|ERROR:|AssertionError|Traceback|SyntaxError|ImportError|ModuleNotFoundError|IndentationError|NameError|RuntimeError)' | Select-Object -First 6)
+        if ($diagLines.Count -eq 0) {
+          $diagLines = @($combined | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 5)
+          $diagLines | ForEach-Object { Write-Host ("        " + $_.Trim()) -ForegroundColor DarkYellow }
+        } else {
+          $diagLines | ForEach-Object { Write-Host ("        " + $_.Line.Trim()) -ForegroundColor DarkYellow }
+        }
+      } else {
+        Write-Host ("  [绿] {0}：{1}" -f $j.Name, $tail) -ForegroundColor DarkGray
+      }
+    }
+
+    # 6. 收集 Node 自测结果
+    foreach ($j in $nodeJobs) {
+      $j.Proc.WaitForExit()
+      $combined = (($j.OutTsk.GetAwaiter().GetResult() + "`n" + $j.ErrTsk.GetAwaiter().GetResult()) -split "`r?`n")
+      $code = $j.Proc.ExitCode
+      $last = ($combined | Where-Object { $_ -match '结果：' } | Select-Object -Last 1)
+      if (-not $last) { $last = ($combined | Where-Object { $_ -match '\S' -and $_ -notmatch '^[─━-]+$' } | Select-Object -Last 1) }
+      if ($code -ne 0) {
+        $failed += "前端自测 $($j.Name) 未通过（$last）"
+        Write-Host ("  [红] {0}：{1}" -f $j.Name, $last) -ForegroundColor Red
+      } else {
+        Write-Host ("  [绿] {0}：{1}" -f $j.Name, $last) -ForegroundColor DarkGray
       }
     }
   } finally {
