@@ -259,26 +259,29 @@ fn append_log(level: &str, msg: &str) {
     }
 }
 
-fn clock() -> String {
-    // 用系统时间做本地时间字符串，避免引入 chrono 依赖
+#[cfg(target_os = "windows")]
+fn local_date_time() -> (u16, u16, u16, u16, u16, u16) {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLocalTime(lp_system_time: *mut SYSTEMTIME);
+    }
+    // 自动跟随 Windows 当前系统时区与夏令时设置，无需硬编码偏移或引入 chrono
+    let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe {
+        GetLocalTime(&mut st);
+    }
+    (st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_date_time() -> (u16, u16, u16, u16, u16, u16) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let secs = now % 86400;
     let days = now / 86400;
-    // 本地时区偏移（秒），Windows 下用 GetTimeZoneInformation 略复杂，这里用文件时间近似
-    let _ = days;
-    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-}
-
-fn chrono_like_stamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = now / 86400;
-    // 1970-01-01 起的天数换算成 yyyyMMdd
     let mut y = 1970i64;
     let mut d = days as i64;
     loop {
@@ -299,7 +302,24 @@ fn chrono_like_stamp() -> String {
         rest -= months[m];
         m += 1;
     }
-    format!("{:04}{:02}{:02}", y, m + 1, rest + 1)
+    (
+        y as u16,
+        (m + 1) as u16,
+        (rest + 1) as u16,
+        (secs / 3600) as u16,
+        ((secs % 3600) / 60) as u16,
+        (secs % 60) as u16,
+    )
+}
+
+fn clock() -> String {
+    let (_, _, _, h, m, s) = local_date_time();
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+fn chrono_like_stamp() -> String {
+    let (y, mo, d, _, _, _) = local_date_time();
+    format!("{:04}{:02}{:02}", y, mo, d)
 }
 
 // ---------------------------------------------------------------- config
@@ -6174,6 +6194,48 @@ mod shell_tests {
             assert!(is_exec_path(&p), "未拦截高危可执行扩展名 .{ext}");
         }
         assert!(!is_exec_path(Path::new(r"D:\tmp\readme.txt")));
+    }
+
+    #[test]
+    fn local_clock_and_stamp_follow_system_timezone() {
+        let (y, mo, d, h, mi, s) = local_date_time();
+        assert!(y >= 2020 && (1..=12).contains(&mo) && (1..=31).contains(&d));
+        assert!(h < 24 && mi < 60 && s < 60);
+
+        let c = clock();
+        let st = chrono_like_stamp();
+        assert_eq!(c.len(), 8);
+        assert_eq!(&c[2..3], ":");
+        assert_eq!(&c[5..6], ":");
+        assert_eq!(st.len(), 8);
+        assert!(st.chars().all(|ch| ch.is_ascii_digit()));
+
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+            let mut tzi: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+            let tz_id = unsafe { GetTimeZoneInformation(&mut tzi) };
+            let bias_min = match tz_id {
+                1 => tzi.Bias + tzi.StandardBias,
+                2 => tzi.Bias + tzi.DaylightBias,
+                _ => tzi.Bias,
+            };
+            // Windows Bias = UTC - Local（单位分钟），本地秒数 = (UTC_secs - bias_min * 60) mod 86400
+            let utc_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let expected_secs = (utc_secs - (bias_min as i64) * 60).rem_euclid(86400);
+            let actual_secs = (h as i64) * 3600 + (mi as i64) * 60 + (s as i64);
+            let mut diff = (actual_secs - expected_secs).abs();
+            if diff > 43200 {
+                diff = 86400 - diff;
+            }
+            assert!(
+                diff <= 2,
+                "local_date_time 与系统时区偏移不一致: actual={actual_secs}, expected={expected_secs}, bias_min={bias_min}"
+            );
+        }
     }
 }
 

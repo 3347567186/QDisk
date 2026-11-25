@@ -1,6 +1,6 @@
 use std::ffi::c_void;
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
@@ -621,6 +621,54 @@ fn extract_xml_href_attr(attrs: &str) -> Option<&str> {
     None
 }
 
+/// 解析 RFC 7233 `Content-Range: bytes <start>-<end>/<total|*>`。
+pub fn parse_content_range(header: &str) -> Option<(u64, u64, Option<u64>)> {
+    let trimmed = header.trim();
+    let rest = trimmed
+        .strip_prefix("bytes ")
+        .or_else(|| trimmed.strip_prefix("BYTES "))
+        .or_else(|| {
+            if trimmed.len() > 6 && trimmed[..6].eq_ignore_ascii_case("bytes ") {
+                Some(&trimmed[6..])
+            } else {
+                None
+            }
+        })?
+        .trim();
+    let (range_part, total_part) = rest.split_once('/')?;
+    let (start_s, end_s) = range_part.split_once('-')?;
+    let start = start_s.trim().parse::<u64>().ok()?;
+    let end = end_s.trim().parse::<u64>().ok()?;
+    if end < start {
+        return None;
+    }
+    let total_t = total_part.trim();
+    let total = if total_t == "*" {
+        None
+    } else {
+        let t = total_t.parse::<u64>().ok()?;
+        if t == 0 || end >= t {
+            return None;
+        }
+        Some(t)
+    };
+    Some((start, end, total))
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct StreamResponseMeta {
+    resumed_from: u64,
+    total_len: u64,
+    etag: Option<String>,
+}
+
+#[cfg(windows)]
+enum StreamEvent<'a> {
+    Headers(&'a StreamResponseMeta),
+    Chunk(&'a [u8], u64),
+}
+
 #[cfg(windows)]
 fn is_retryable_transport_err(msg: &str) -> bool {
     msg.contains("WinHTTP 12")
@@ -632,6 +680,12 @@ fn is_retryable_transport_err(msg: &str) -> bool {
         || msg.contains("代理")
         || msg.contains("握手")
         || msg.contains("读取更新数据")
+        || msg.contains("传输中途中断")
+        || msg.contains("HTTP 416")
+        || msg.contains("HTTP 500")
+        || msg.contains("HTTP 502")
+        || msg.contains("HTTP 503")
+        || msg.contains("HTTP 504")
 }
 
 #[cfg(windows)]
@@ -704,7 +758,12 @@ where
             cancel,
             hard_cap_bytes,
             false,
-            on_chunk,
+            0,
+            None,
+            &mut |ev| match ev {
+                StreamEvent::Headers(_) => Ok(()),
+                StreamEvent::Chunk(c, total) => on_chunk(c, total),
+            },
         );
     }
     let mut received_any = false;
@@ -715,9 +774,14 @@ where
         cancel,
         hard_cap_bytes,
         true,
-        &mut |chunk, expected| {
-            received_any = true;
-            on_chunk(chunk, expected)
+        0,
+        None,
+        &mut |ev| match ev {
+            StreamEvent::Headers(_) => Ok(()),
+            StreamEvent::Chunk(chunk, expected) => {
+                received_any = true;
+                on_chunk(chunk, expected)
+            }
         },
     );
     match first {
@@ -738,7 +802,12 @@ where
                 cancel,
                 hard_cap_bytes,
                 false,
-                on_chunk,
+                0,
+                None,
+                &mut |ev| match ev {
+                    StreamEvent::Headers(_) => Ok(()),
+                    StreamEvent::Chunk(c, total) => on_chunk(c, total),
+                },
             )
             .map_err(|direct_err| {
                 anyhow::anyhow!("{direct_err:#}（自动代理模式：{msg}）")
@@ -748,6 +817,7 @@ where
 }
 
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 fn winhttp_stream_get_with_proxy<F>(
     initial_url: &str,
     timeout_ms: u64,
@@ -755,10 +825,12 @@ fn winhttp_stream_get_with_proxy<F>(
     cancel: Option<&AtomicBool>,
     hard_cap_bytes: u64,
     use_auto_proxy: bool,
-    on_chunk: &mut F,
+    range_start: u64,
+    if_range_etag: Option<&str>,
+    on_event: &mut F,
 ) -> Result<(u32, String)>
 where
-    F: FnMut(&[u8], u64) -> Result<()>,
+    F: FnMut(StreamEvent<'_>) -> Result<()>,
 {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Networking::WinHttp::{
@@ -768,7 +840,8 @@ where
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE,
         WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_CONTENT_LENGTH,
-        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
+        WINHTTP_QUERY_CONTENT_RANGE, WINHTTP_QUERY_ETAG, WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE,
     };
 
     const WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2: u32 = 0x0000_0800;
@@ -780,10 +853,6 @@ where
     let timeout = timeout_ms.clamp(2000, 180_000) as i32;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let agent_w = wide(&format!("TidyAssistant/{}", env!("CARGO_PKG_VERSION")));
-    let header_text = format!(
-        "Accept: {accept}\r\nCache-Control: no-cache\r\nX-GitHub-Api-Version: 2022-11-28\r\n"
-    );
-    let header_w = wide(&header_text);
 
     for hop in 0..=MAX_REDIRECTS {
         if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
@@ -797,6 +866,27 @@ where
         } else {
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
         };
+        // 按目标主机动态拼装请求头：仅向 api.github.com 附带 API 版本头，避免干扰 CDN/Blob 存储；
+        // 显式要求 Accept-Encoding: identity，杜绝代理透明压缩导致体积/进度失真；断点续传时附带 Range + If-Range。
+        let mut header_text = format!(
+            "Accept: {accept}\r\nAccept-Encoding: identity\r\nCache-Control: no-cache\r\n"
+        );
+        if host.eq_ignore_ascii_case("api.github.com") {
+            header_text.push_str("X-GitHub-Api-Version: 2022-11-28\r\n");
+        }
+        if range_start > 0 {
+            header_text.push_str(&format!("Range: bytes={range_start}-\r\n"));
+            if let Some(et) = if_range_etag {
+                let clean = et.trim();
+                if !clean.is_empty()
+                    && !clean.starts_with("W/")
+                    && !clean.chars().any(|c| c == '\r' || c == '\n' || c == '\0')
+                {
+                    header_text.push_str(&format!("If-Range: {clean}\r\n"));
+                }
+            }
+        }
+        let header_w = wide(&header_text);
         let host_w = wide(&host);
         let path_w = wide(&path);
         let method_w = wide("GET");
@@ -939,11 +1029,14 @@ where
                     if status == 403 || status == 429 {
                         bail!("更新服务器触发访问限流（HTTP {status}）");
                     }
-                    if status != 200 {
+                    if status == 416 {
+                        bail!("断点续传偏移超出范围（HTTP 416）");
+                    }
+                    if status != 200 && !(status == 206 && range_start > 0) {
                         bail!("更新服务器返回 HTTP {status}");
                     }
 
-                    // 读取可选 Content-Length（用于实时进度条）
+                    // 读取可选 Content-Length（用于实时进度条与流完整性校验）
                     let mut cl_buf = [0u16; 64];
                     let mut cl_bytes = (cl_buf.len() * 2) as u32;
                     let expected_len = if WinHttpQueryHeaders(
@@ -963,13 +1056,81 @@ where
                     } else {
                         0
                     };
-                    if expected_len > hard_cap_bytes {
+
+                    let (resumed_from, total_len, segment_expected_len) = if status == 206 {
+                        let mut cr_buf = [0u16; 128];
+                        let mut cr_bytes = (cr_buf.len() * 2) as u32;
+                        if WinHttpQueryHeaders(
+                            request,
+                            WINHTTP_QUERY_CONTENT_RANGE,
+                            ptr::null(),
+                            cr_buf.as_mut_ptr() as *mut c_void,
+                            &mut cr_bytes,
+                            ptr::null_mut(),
+                        ) == 0
+                        {
+                            bail!("服务器返回 HTTP 206 但缺少 Content-Range 头");
+                        }
+                        let end = cr_buf.iter().position(|&c| c == 0).unwrap_or(cr_buf.len());
+                        let cr_str = String::from_utf16_lossy(&cr_buf[..end]);
+                        let Some((cr_start, cr_end, cr_total)) = parse_content_range(&cr_str) else {
+                            bail!("服务器返回的 Content-Range 格式非法：{cr_str}");
+                        };
+                        if cr_start != range_start {
+                            bail!(
+                                "断点续传起始偏移不匹配（请求 {range_start}，服务器返回 {cr_start}）"
+                            );
+                        }
+                        let range_span = cr_end.saturating_sub(cr_start).saturating_add(1);
+                        if expected_len > 0 && expected_len != range_span {
+                            bail!(
+                                "断点续传分片长度不一致（Content-Length {expected_len} != Content-Range {range_span}）"
+                            );
+                        }
+                        let full_total = cr_total.unwrap_or(cr_end.saturating_add(1));
+                        let seg_len = if expected_len > 0 { expected_len } else { range_span };
+                        (cr_start, full_total, seg_len)
+                    } else {
+                        (0u64, expected_len, expected_len)
+                    };
+
+                    if total_len > hard_cap_bytes || segment_expected_len > hard_cap_bytes {
                         bail!(
                             "更新文件体积过大（{} B，超过上限 {} B）",
-                            expected_len,
+                            total_len.max(segment_expected_len),
                             hard_cap_bytes
                         );
                     }
+
+                    // 读取可选强 ETag，用于后续断点续传的 If-Range 一致性守卫
+                    let mut et_buf = [0u16; 128];
+                    let mut et_bytes = (et_buf.len() * 2) as u32;
+                    let etag = if WinHttpQueryHeaders(
+                        request,
+                        WINHTTP_QUERY_ETAG,
+                        ptr::null(),
+                        et_buf.as_mut_ptr() as *mut c_void,
+                        &mut et_bytes,
+                        ptr::null_mut(),
+                    ) != 0
+                    {
+                        let end = et_buf.iter().position(|&c| c == 0).unwrap_or(et_buf.len());
+                        let s = String::from_utf16_lossy(&et_buf[..end]).trim().to_string();
+                        if s.is_empty() || s.starts_with("W/") {
+                            None
+                        } else {
+                            Some(s)
+                        }
+                    } else {
+                        None
+                    };
+
+                    let meta = StreamResponseMeta {
+                        resumed_from,
+                        total_len,
+                        etag,
+                    };
+                    on_event(StreamEvent::Headers(&meta))?;
 
                     let mut buf = vec![0u8; 64 * 1024];
                     let mut seen: u64 = 0;
@@ -979,7 +1140,11 @@ where
                         }
                         let mut available: u32 = 0;
                         if WinHttpQueryDataAvailable(request, &mut available) == 0 {
-                            bail!("读取更新数据失败");
+                            let code = GetLastError();
+                            bail!(
+                                "读取更新数据失败：{}（错误码 {code}）",
+                                describe_winhttp_error(code)
+                            );
                         }
                         if available == 0 {
                             break;
@@ -993,16 +1158,29 @@ where
                             &mut got,
                         ) == 0
                         {
-                            bail!("读取更新数据中断");
+                            let code = GetLastError();
+                            bail!(
+                                "读取更新数据中断：{}（错误码 {code}）",
+                                describe_winhttp_error(code)
+                            );
                         }
                         if got == 0 {
                             break;
                         }
                         seen = seen.saturating_add(got as u64);
-                        if seen > hard_cap_bytes {
+                        if resumed_from.saturating_add(seen) > hard_cap_bytes {
                             bail!("下载体积超过安全上限（{} B）", hard_cap_bytes);
                         }
-                        on_chunk(&buf[..got as usize], expected_len)?;
+                        on_event(StreamEvent::Chunk(&buf[..got as usize], total_len))?;
+                    }
+                    // 关键完整性守卫：WinHTTP 在对端/代理提前关闭 TCP 连接时会返回 available=0 而非错误；
+                    // 必须强制核对已读字节数与 Content-Length / Content-Range 分片长度，防止静默截断！
+                    if segment_expected_len > 0 && seen != segment_expected_len {
+                        bail!(
+                            "更新下载在传输中途中断（本段期望 {} B，实际接收 {} B）",
+                            segment_expected_len,
+                            seen
+                        );
                     }
                     Ok(Err((status, current_url.clone())))
                 })();
@@ -1756,53 +1934,195 @@ pub fn download_and_verify_to(
     emit_prog("downloading", 0, expected_size, 0);
 
     let dl_res = (|| -> Result<(u64, String)> {
-        let mut file = File::create(&part_path)
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&part_path)
             .with_context(|| format!("无法创建临时更新文件：{}", part_path.display()))?;
-        let mut hasher = Sha256::new();
+        let (_, init_host, _, _) = validate_update_url(url, false)?;
+        let is_local = is_local_host(&init_host);
+        let mut use_auto_proxy = !is_local;
         let mut downloaded: u64 = 0;
         let mut total_hint = expected_size;
         let started = Instant::now();
         let mut last_emit = Instant::now();
 
-        winhttp_stream_get(
-            url,
-            30_000,
-            "application/octet-stream, */*",
-            Some(cancel),
-            MAX_UPDATE_BYTES,
-            &mut |chunk, content_len| {
-                file.write_all(chunk)?;
-                hasher.update(chunk);
-                downloaded = downloaded.saturating_add(chunk.len() as u64);
-                if total_hint == 0 && content_len > 0 {
-                    total_hint = content_len;
+        const MAX_DOWNLOAD_ATTEMPTS: usize = 5;
+        const RETRY_BACKOFF_MS: [u64; 4] = [500, 1200, 2400, 3500];
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut pinned_etag: Option<String> = None;
+        let mut stalled_streak: usize = 0;
+
+        for attempt in 0..MAX_DOWNLOAD_ATTEMPTS {
+            if cancel.load(Ordering::SeqCst) {
+                bail!("已取消更新下载");
+            }
+            if expected_size > 0 && downloaded >= expected_size {
+                break;
+            }
+            let resume_offset = downloaded;
+            let bytes_before = downloaded;
+            let etag_for_req = if resume_offset > 0 {
+                pinned_etag.clone()
+            } else {
+                None
+            };
+
+            let step = winhttp_stream_get_with_proxy(
+                url,
+                30_000,
+                "application/octet-stream, */*",
+                Some(cancel),
+                MAX_UPDATE_BYTES,
+                use_auto_proxy,
+                resume_offset,
+                etag_for_req.as_deref(),
+                &mut |ev| match ev {
+                    StreamEvent::Headers(meta) => {
+                        if expected_size > 0 && meta.total_len > 0 && meta.total_len != expected_size
+                        {
+                            bail!(
+                                "服务器文件体积与更新清单不一致（清单期望 {} B，服务器声明 {} B）",
+                                expected_size,
+                                meta.total_len
+                            );
+                        }
+                        if total_hint == 0 && meta.total_len > 0 {
+                            total_hint = meta.total_len;
+                        }
+                        if meta.resumed_from == 0 {
+                            if let Some(ref et) = meta.etag {
+                                pinned_etag = Some(et.clone());
+                            }
+                            if downloaded > 0 {
+                                // 服务器不支持 Range 或文件已变更（返回 200），重置临时文件从头写入
+                                file.set_len(0)?;
+                                file.seek(SeekFrom::Start(0))?;
+                                downloaded = 0;
+                            }
+                        } else {
+                            file.seek(SeekFrom::Start(meta.resumed_from))?;
+                            downloaded = meta.resumed_from;
+                        }
+                        Ok(())
+                    }
+                    StreamEvent::Chunk(chunk, content_len) => {
+                        let next_len = downloaded.saturating_add(chunk.len() as u64);
+                        if expected_size > 0 && next_len > expected_size {
+                            bail!(
+                                "下载体积超出清单声明（期望 {} B，已接收 {} B）",
+                                expected_size,
+                                next_len
+                            );
+                        }
+                        file.write_all(chunk)?;
+                        downloaded = next_len;
+                        if total_hint == 0 && content_len > 0 {
+                            total_hint = content_len;
+                        }
+                        if last_emit.elapsed() >= Duration::from_millis(100) {
+                            let secs = started.elapsed().as_secs_f64().max(0.05);
+                            let speed = (downloaded as f64 / secs) as u64;
+                            emit_prog("downloading", downloaded, total_hint, speed);
+                            last_emit = Instant::now();
+                        }
+                        Ok(())
+                    }
+                },
+            );
+
+            // 若服务器使用 chunked/无 Content-Length 且提前 EOF（未报错但不足 expected_size），同样视为可续传的传输中断！
+            let normalized_step = match step {
+                Ok(_) if expected_size > 0 && downloaded < expected_size => Err(anyhow::anyhow!(
+                    "更新下载在传输中途中断（清单期望 {} B，已接收 {} B）",
+                    expected_size,
+                    downloaded
+                )),
+                other => other,
+            };
+
+            match normalized_step {
+                Ok(_) => {
+                    last_err = None;
+                    break;
                 }
-                if last_emit.elapsed() >= Duration::from_millis(100) {
-                    let secs = started.elapsed().as_secs_f64().max(0.05);
-                    let speed = (downloaded as f64 / secs) as u64;
-                    emit_prog("downloading", downloaded, total_hint, speed);
-                    last_emit = Instant::now();
+                Err(e) => {
+                    let _ = file.flush();
+                    if cancel.load(Ordering::SeqCst) {
+                        return Err(e);
+                    }
+                    let msg = format!("{e:#}");
+                    if msg.contains("HTTP 416") {
+                        let _ = file.set_len(0);
+                        let _ = file.seek(SeekFrom::Start(0));
+                        downloaded = 0;
+                        pinned_etag = None;
+                    }
+                    if downloaded > bytes_before {
+                        stalled_streak = 0;
+                    } else {
+                        stalled_streak += 1;
+                    }
+                    let retryable = is_retryable_transport_err(&msg) && !is_dns_err(&msg);
+                    last_err = Some(e);
+                    if !retryable || attempt + 1 >= MAX_DOWNLOAD_ATTEMPTS {
+                        break;
+                    }
+                    // 红队策略：仅当代理 0 字节首连失败或连续 2 次零进展时才切换直连；
+                    // 若代理已稳定下载部分字节（如国内走代理拉 GitHub），继续沿用代理断点续传！
+                    if !is_local && use_auto_proxy && (downloaded == 0 || stalled_streak >= 2) {
+                        append_log(
+                            "warn",
+                            &format!(
+                                "更新下载第 {}/{} 次经自动代理中断（已收 {}/{} B），切换直连断点续传：{msg}",
+                                attempt + 1,
+                                MAX_DOWNLOAD_ATTEMPTS,
+                                downloaded,
+                                total_hint
+                            ),
+                        );
+                        use_auto_proxy = false;
+                        stalled_streak = 0;
+                    } else {
+                        append_log(
+                            "warn",
+                            &format!(
+                                "更新下载第 {}/{} 次中断（已收 {}/{} B），自动断点续传重试：{msg}",
+                                attempt + 1,
+                                MAX_DOWNLOAD_ATTEMPTS,
+                                downloaded,
+                                total_hint
+                            ),
+                        );
+                    }
+                    let wait_ms = RETRY_BACKOFF_MS[attempt.min(RETRY_BACKOFF_MS.len() - 1)];
+                    let mut slept = 0u64;
+                    while slept < wait_ms {
+                        if cancel.load(Ordering::SeqCst) {
+                            bail!("已取消更新下载");
+                        }
+                        let step_ms = (wait_ms - slept).min(100);
+                        std::thread::sleep(Duration::from_millis(step_ms));
+                        slept += step_ms;
+                    }
                 }
-                Ok(())
-            },
-        )?;
+            }
+        }
+        if let Some(err) = last_err {
+            return Err(err);
+        }
+
         file.sync_all()?;
         drop(file);
 
-        emit_prog("verifying", downloaded, total_hint.max(downloaded), 0);
-        if expected_size > 0 && downloaded != expected_size {
-            bail!(
-                "下载体积与清单不一致（期望 {} B，实际 {} B）",
-                expected_size,
-                downloaded
-            );
-        }
-        let got_sha = hex_lower(&hasher.finalize());
-        if got_sha != want_sha {
-            bail!("更新包 SHA-256 校验失败（期望 {want_sha}，实际 {got_sha}）");
-        }
+        let disk_size = fs::metadata(&part_path)?.len();
+        emit_prog("verifying", disk_size, total_hint.max(disk_size), 0);
+        // 断点续传后必须从磁盘完整重算全文件 SHA-256 与真实体积，彻底杜绝拼接错位或篡改
+        let got_sha = Sha256Verifier.verify_file(&part_path, &want_sha, expected_size)?;
         verify_binary_magic(&part_path, package_kind)?;
-        Ok((downloaded, got_sha))
+        Ok((disk_size, got_sha))
     })();
 
     let (downloaded, got_sha) = match dl_res {
@@ -2361,7 +2681,19 @@ pub async fn updater_download(
     .map_err(|e| format!("下载更新任务失败：{e}"));
 
     state.busy.store(false, Ordering::SeqCst);
-    let info = res??;
+    let info = match res {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            if !e.contains("取消") {
+                append_log("error", &format!("更新包下载或校验失败：{e}"));
+            }
+            return Err(e);
+        }
+        Err(e) => {
+            append_log("error", &format!("更新包下载任务异常：{e}"));
+            return Err(e);
+        }
+    };
     if let Ok(mut g) = state.staged.lock() {
         *g = Some(info.clone());
     }
@@ -4101,5 +4433,258 @@ mod tests {
             entries.iter().any(|e| e.version == "1.46.8"),
             "远端日志列表应包含 v1.46.8"
         );
+    }
+
+    #[test]
+    fn parse_content_range_validates_strictly() {
+        assert_eq!(
+            parse_content_range("bytes 100-199/200"),
+            Some((100, 199, Some(200)))
+        );
+        assert_eq!(parse_content_range("BYTES 0-0/*"), Some((0, 0, None)));
+        assert_eq!(parse_content_range("bytes 50-10/100"), None);
+        assert_eq!(parse_content_range("bytes 0-100/100"), None);
+        assert_eq!(parse_content_range("bytes 0-0/0"), None);
+        assert_eq!(parse_content_range("items 0-10/20"), None);
+        assert_eq!(parse_content_range("garbage"), None);
+    }
+
+    /// 红队端到端对抗测试：复现「服务端/代理提前截断流」→ 自动 Range + If-Range 断点续传、
+    /// 无 Content-Length 截断续传、不支持 Range 时 200 全量重置、以及清单与服务器体积不匹配秒级快速失败。
+    #[cfg(windows)]
+    #[test]
+    fn redteam_truncation_resume_with_range_if_range_and_non_range_fallback() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicUsize;
+
+        // 构造合法 PE (MZ) 256 KiB 测试载荷
+        let mut payload = vec![0u8; 256 * 1024];
+        payload[0] = b'M';
+        payload[1] = b'Z';
+        for (i, b) in payload.iter_mut().enumerate().skip(2) {
+            *b = ((i * 31 + 17) & 0xFF) as u8;
+        }
+        let payload_sha = hex_lower(&Sha256::digest(&payload));
+        let total = payload.len() as u64;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let payload_srv = Arc::new(payload.clone());
+        let range_hits = Arc::new(AtomicUsize::new(0));
+        let chunked_hits = Arc::new(AtomicUsize::new(0));
+        let non_range_hits = Arc::new(AtomicUsize::new(0));
+        let saw_if_range = Arc::new(AtomicBool::new(false));
+
+        let p_c = Arc::clone(&payload_srv);
+        let rh_c = Arc::clone(&range_hits);
+        let ch_c = Arc::clone(&chunked_hits);
+        let nh_c = Arc::clone(&non_range_hits);
+        let ir_c = Arc::clone(&saw_if_range);
+
+        let srv = std::thread::spawn(move || {
+            // 最多处理 8 次连接：2(range) + 2(no-cl) + 2(non-range-200) + 1(mismatch-fastfail)
+            for _ in 0..7 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut req_buf = [0u8; 4096];
+                let n = stream.read(&mut req_buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&req_buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let req_range = req.lines().find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    if k.trim().eq_ignore_ascii_case("range") {
+                        Some(v.trim().to_string())
+                    } else {
+                        None
+                    }
+                });
+                let has_if_range = req.lines().any(|l| {
+                    l.to_ascii_lowercase().starts_with("if-range:") && l.contains("\"v-14612\"")
+                });
+
+                match path {
+                    "/trunc-range.exe" => {
+                        let hit = rh_c.fetch_add(1, Ordering::SeqCst);
+                        if hit == 0 {
+                            // 复现用户现场：声明完整 Content-Length，但在 180000 B 处直接断开 TCP 连接！
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nETag: \"v-14612\"\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                p_c.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(&p_c[..180_000]);
+                            let _ = stream.flush();
+                        } else {
+                            if has_if_range {
+                                ir_c.store(true, Ordering::SeqCst);
+                            }
+                            let start = req_range
+                                .as_deref()
+                                .and_then(|r| r.strip_prefix("bytes="))
+                                .and_then(|r| r.split('-').next())
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let slice = &p_c[start..];
+                            let hdr = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nETag: \"v-14612\"\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                start,
+                                p_c.len() - 1,
+                                p_c.len(),
+                                slice.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(slice);
+                            let _ = stream.flush();
+                        }
+                    }
+                    "/trunc-nocl.exe" => {
+                        let hit = ch_c.fetch_add(1, Ordering::SeqCst);
+                        if hit == 0 {
+                            // 无 Content-Length 且提前截断
+                            let hdr = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(&p_c[..100_000]);
+                            let _ = stream.flush();
+                        } else {
+                            let start = req_range
+                                .as_deref()
+                                .and_then(|r| r.strip_prefix("bytes="))
+                                .and_then(|r| r.split('-').next())
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let slice = &p_c[start..];
+                            let hdr = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                start,
+                                p_c.len() - 1,
+                                p_c.len(),
+                                slice.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(slice);
+                            let _ = stream.flush();
+                        }
+                    }
+                    "/non-range.exe" => {
+                        let hit = nh_c.fetch_add(1, Ordering::SeqCst);
+                        if hit == 0 {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                p_c.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(&p_c[..90_000]);
+                            let _ = stream.flush();
+                        } else {
+                            // 忽略 Range，直接返回 200 全量，测试客户端是否正确 truncate(0) 避免双倍拼接！
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                p_c.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(&p_c);
+                            let _ = stream.flush();
+                        }
+                    }
+                    "/mismatch-size.exe" => {
+                        let hdr = "HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(hdr.as_bytes());
+                        let _ = stream.flush();
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let tmp = std::env::temp_dir().join(format!(
+            "qdisk_rt_resume_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let cancel = AtomicBool::new(false);
+
+        // 场景 1：TCP 提前截断后自动 Range + If-Range 续传成功并通过全文件 SHA-256 校验
+        let r1 = download_and_verify_to(
+            &tmp.join("s1"),
+            &format!("{base}/trunc-range.exe"),
+            &payload_sha,
+            total,
+            "99.0.1",
+            "QDisk_99.0.1_x64-setup.exe",
+            "installer",
+            &cancel,
+            None,
+        )
+        .expect("TCP 提前截断应自动断点续传成功");
+        assert_eq!(r1.size, total);
+        assert_eq!(r1.sha256, payload_sha);
+        assert_eq!(range_hits.load(Ordering::SeqCst), 2);
+        assert!(
+            saw_if_range.load(Ordering::SeqCst),
+            "断点续传应携带 If-Range ETag 防文件版本切换错拼"
+        );
+
+        // 场景 2：无 Content-Length 截断也能按 expected_size 触发自动续传并成功
+        let r2 = download_and_verify_to(
+            &tmp.join("s2"),
+            &format!("{base}/trunc-nocl.exe"),
+            &payload_sha,
+            total,
+            "99.0.2",
+            "QDisk_99.0.2_x64-setup.exe",
+            "installer",
+            &cancel,
+            None,
+        )
+        .expect("无 Content-Length 截断也应触发自动续传成功");
+        assert_eq!(r2.size, total);
+        assert_eq!(r2.sha256, payload_sha);
+        assert_eq!(chunked_hits.load(Ordering::SeqCst), 2);
+
+        // 场景 3：服务器忽略 Range 返回 200 全量时，临时文件必须重置为 0，不能拼接腐坏
+        let r3 = download_and_verify_to(
+            &tmp.join("s3"),
+            &format!("{base}/non-range.exe"),
+            &payload_sha,
+            total,
+            "99.0.3",
+            "QDisk_99.0.3_x64-setup.exe",
+            "installer",
+            &cancel,
+            None,
+        )
+        .expect("不支持 Range 返回 200 时应自动重置从头下载并校验通过");
+        assert_eq!(r3.size, total);
+        assert_eq!(r3.sha256, payload_sha);
+        assert_eq!(non_range_hits.load(Ordering::SeqCst), 2);
+
+        // 场景 4：服务器声明的 Content-Length 与清单不符时应秒级快速失败，给出精准错误
+        let err4 = download_and_verify_to(
+            &tmp.join("s4"),
+            &format!("{base}/mismatch-size.exe"),
+            &payload_sha,
+            total,
+            "99.0.4",
+            "QDisk_99.0.4_x64-setup.exe",
+            "installer",
+            &cancel,
+            None,
+        )
+        .expect_err("服务器 Content-Length 与清单不一致应快速拦截");
+        assert!(
+            format!("{err4:#}").contains("服务器文件体积与更新清单不一致"),
+            "实际错误：{err4:#}"
+        );
+
+        let _ = srv.join();
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

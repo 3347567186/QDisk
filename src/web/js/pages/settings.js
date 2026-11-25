@@ -2642,7 +2642,23 @@
           if (state.updError) {
             return h('div', { class: 'upd-box warn' },
               h('div', { class: 'upd-box-title', text: T('检查或下载失败', 'Update failed') }),
-              h('div', { class: 'small muted', text: state.updError })
+              h('div', { class: 'small muted', text: state.updError }),
+              h('div', { class: 'row wrap upd-acts', style: 'margin-top:8px' },
+                (chk && hasNew)
+                  ? h('button', {
+                    type: 'button',
+                    class: 'btn primary sm',
+                    disabled: state.updDownloading || state.updChecking,
+                    onclick: startUpdateDownload
+                  }, icon('download', 14), h('span', { text: T('重试下载', 'Retry download') }))
+                  : null,
+                h('button', {
+                  type: 'button',
+                  class: 'btn ghost sm',
+                  disabled: state.updDownloading || state.updChecking,
+                  onclick: () => runUpdateCheck(false)
+                }, icon('refresh', 14), h('span', { text: T('重新检查', 'Check again') }))
+              )
             );
           }
           if (!chk && !staged) return null;
