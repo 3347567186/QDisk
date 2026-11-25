@@ -93,6 +93,20 @@ function Set-Version([string]$v) {
   $cargo = [IO.File]::ReadAllText($cargoPath, [Text.Encoding]::UTF8)
   $cargo = [regex]::Replace($cargo, '(?m)^(version\s*=\s*")[^"]+(")', { param($m) $m.Groups[1].Value + $v + $m.Groups[2].Value }, 1)
   [IO.File]::WriteAllText($cargoPath, $cargo, $enc)
+
+  $lockPath = Join-Path $tauriDir 'Cargo.lock'
+  if (Test-Path -LiteralPath $lockPath) {
+    $lockRaw = [IO.File]::ReadAllText($lockPath, [Text.Encoding]::UTF8)
+    $lockNew = [regex]::Replace(
+      $lockRaw,
+      '(?ms)(\[\[package\]\]\r?\nname\s*=\s*"tidy-assistant"\r?\nversion\s*=\s*")[^"]+(")(?=(?:\r?\n(?!source\s*=)|\z))',
+      { param($m) $m.Groups[1].Value + $v + $m.Groups[2].Value },
+      1
+    )
+    if ($lockNew -ne $lockRaw) {
+      [IO.File]::WriteAllText($lockPath, $lockNew, $enc)
+    }
+  }
 }
 
 function Next-Version([string]$cur, [string]$kind) {
