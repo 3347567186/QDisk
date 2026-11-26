@@ -1,194 +1,183 @@
 <div align="center">
 
-<img src="docs/assets/logo.svg" width="82" height="82" alt="QDisk Logo" />
+<img src="docs/assets/logo.svg" width="76" height="76" alt="QDisk Logo" />
 
-# QDisk · 轻盘
+# QDisk
 
-**Tired of a messy Downloads folder, a red `C:` drive you're afraid to clean, and ad-filled archivers?**  
-**I built a 20.7 MB, local-only, open-source Windows tool that previews every risky change first — and undoes 1,000 moved files in 1.4 seconds.**
+A local-only Windows desktop utility for folder organization, cache cleanup, and archive management. Open source (MIT), no ads, dry-run preview before changes, and one-click undo.
 
-[![Official Website](https://img.shields.io/badge/Official%20Website-Live%20Site-d44b24?style=for-the-badge)](https://3347567186.github.io/QDisk/?lang=en)
-[![Download Latest](https://img.shields.io/badge/Download%20Free-Windows%20x64%20(20.7%20MB)-161614?style=for-the-badge)](https://github.com/3347567186/QDisk/releases/latest)
-[![Discussions](https://img.shields.io/badge/Feedback%20%26%20Ideas-Discussions-0969da?style=for-the-badge)](https://github.com/3347567186/QDisk/discussions)
-
-[![Latest Release](https://img.shields.io/github/v/release/3347567186/QDisk?color=2ea043&label=Latest%20Release)](https://github.com/3347567186/QDisk/releases/latest)
-[![GitHub Stars](https://img.shields.io/github/stars/3347567186/QDisk?style=flat&color=d44b24)](https://github.com/3347567186/QDisk/stargazers)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6)](#3-download--get-started-in-30-seconds)
+[![Official Website](https://img.shields.io/badge/Website-Live%20Site-d44b24?style=flat-square)](https://3347567186.github.io/QDisk/?lang=en)
+[![Latest Release](https://img.shields.io/github/v/release/3347567186/QDisk?style=flat-square&color=2ea043&label=Latest)](https://github.com/3347567186/QDisk/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6?style=flat-square)](#download--install)
 
 [简体中文](README.md) | **English**
 
 <br />
 
 <a href="https://3347567186.github.io/QDisk/?lang=en">
-  <img src="docs/assets/social-preview.png" alt="QDisk — Messy Windows? Clean & Undo in 1 Click" width="100%" />
+  <img src="docs/assets/social-preview.png" alt="QDisk Preview" width="100%" />
 </a>
 
 </div>
 
 ---
 
-## 🎬 56-Second Official Product Film
+## Demo Video
 
 https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
 
-<p align="center"><sub>▶ 1080p real Windows UI capture with sound (Light &amp; Dark themes) · Also watch with chapter jumps on the <a href="https://3347567186.github.io/QDisk/?lang=en#film"><strong>Official Site</strong></a> or download <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 (8.5 MB)</a></sub></p>
+<p align="center"><sub>1080p Windows UI capture (Light &amp; Dark themes). Also available with chapter markers on the <a href="https://3347567186.github.io/QDisk/?lang=en#film">website</a> or as a direct <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 download (8.5 MB)</a>.</sub></p>
 
 ---
 
-## 1. Four Everyday Windows Headaches QDisk Solves
+## What It Does
 
-> Explore the live interactive showcase and seamless full-screen screenshot inspector on the **[Official Website](https://3347567186.github.io/QDisk/?lang=en)**, or browse the real Windows captures below.
+You can browse full-size screenshots on the [website](https://3347567186.github.io/QDisk/?lang=en). Here is a quick overview of the main modules.
 
-### 1. Hundreds of cluttered files in Downloads — tidy in 2 seconds, undo everything in 1.39 seconds
+### 1. Folder Organization with Dry-Run and Undo
 
-- **Dry-Run first, always**: Scanning previews exact target folders and skip reasons before a single byte moves — automatically protecting code repositories, system folders, and active downloads.
-- **Zero regret**: Organizes `1,000` mixed files in `1.79 s`, and restores every single one back to its original path in `1.39 s` with one click. Supports custom YAML rules (with AI draft generation).
+Scanning Downloads or any target directory lists the planned destination and skip reason for every file before touching disk. Git repositories, system folders, and in-progress downloads are skipped by default.
 
-![File Organizer Dry-Run Preview](docs/assets/screenshots/02-organize.png)
+In local testing, sorting 1,000 mixed files takes about `1.79 s`, and undoing the whole batch back to original paths takes about `1.39 s`. Custom YAML rules are also supported.
 
-### 2. Your `C:` drive is red, but you're scared to delete the wrong thing — ask an approval-gated local AI
+![File Organizer Preview](docs/assets/screenshots/02-organize.png)
 
-- **Verified locally, never acts behind your back**: Ask *"What's eating space on my C: drive and Downloads?"* — QDisk runs real local scanners, shows every tool call and millisecond latency transparently, and turns every delete/clean action into a **checkbox approval card** you must explicitly confirm.
-- **Safe in-app navigation (never blindly runs `.exe` files)**: Clicking any path opens and highlights it right inside QDisk's built-in file browser (with an explicit Explorer button beside it); restricted folders like `WindowsApps` offer one-click UAC relaunch to resume locating; pressing Stop aborts stalled API sockets in `0.31 ms`.
+### 2. Local Disk Inspection with AI Assistant
 
-![Auditable Local-First AI Assistant UI](docs/assets/screenshots/07-en-ai-ui.png)
+The built-in AI assistant reads actual folder sizes through local scanner tools, with every tool call, argument list, and runtime visible in the UI. Any delete or cleanup suggestion is rendered as an explicit checkbox confirmation card and never runs automatically.
 
-### 3. Fed up with ad-ridden archivers that freeze mid-extract — 7 formats, multi-core speed & real Pause
+Clicking file paths opens and highlights them inside QDisk's built-in browser (with a separate button to open Explorer) so `.exe` files are never accidentally executed. Restricted folders such as `WindowsApps` can trigger on-demand UAC elevation. Clicking Stop closes the underlying WinHTTP handle immediately (~`0.31 ms` measured).
 
-- Browse, preview, extract, and create **ZIP / 7Z / RAR / TAR / TAR.GZ / BZ2 / XZ** with zero ads or nags.
-- **4-tier CPU pacing & real chunk-level Pause/Cancel**: Choose `Overwrite` or `Keep Both (Auto-Rename)` on name conflicts, recover overwritten files via built-in single-slot Undo, and block ZIP Slip, symlink escapes, and 32 GiB zip bombs.
+![Local AI Assistant UI](docs/assets/screenshots/07-en-ai-ui.png)
 
-![Ad-Free Multi-Core Archive Manager](docs/assets/screenshots/03-archive.png)
+### 3. Multi-Format Archive Manager
 
-### 4. Reclaim tens of GB safely — tiered cache cleanup, signature audit & transactional drive migration
+Browse, preview, extract, and create **ZIP / 7Z / RAR / TAR / TAR.GZ / BZ2 / XZ** archives without ads or popups.
 
-| Safe vs. Caution Cache Cleanup (never touches personal docs) | Large Files + Authenticode Publisher Inspection |
+Includes 4 CPU/IO concurrency presets and real chunk-level Pause/Cancel for large archives. Name collisions support Overwrite or Keep Both (auto-rename), overwritten files have single-slot undo recovery, and extraction guards against path traversal and zip bombs.
+
+![Archive Manager UI](docs/assets/screenshots/03-archive.png)
+
+### 4. Cache Cleanup, Large File Audit, and Drive Migration
+
+| Tiered Cache Cleanup | Large Files & Authenticode Signatures |
 |---|---|
 | ![Tiered Cache Cleaner](docs/assets/screenshots/04-cache.png) | ![Large Files and Signatures](docs/assets/screenshots/05-space-tools.png) |
 
-- **Only rebuildable caches are auto-checked** (browser, temp, build caches); hard guards protect system folders, `.git` / `.ssh`, and personal documents.
-- **Crash-safe cross-drive migration**: Free-space precheck → copy → hash verification → transaction journal → atomic swap, running unprivileged by default and requesting UAC strictly on demand.
+- **Cache cleanup**: Only rebuildable caches (browser, temp, build caches) are pre-selected; personal documents, chat histories, system directories, and `.git` / `.ssh` are protected.
+- **Large file inspection**: Ranks large files and checks Authenticode publisher signatures on executables.
+- **Cross-drive migration**: Checks free space, copies files, verifies hashes, writes a transaction log, and swaps atomically. Runs without admin rights by default and elevates only when needed.
 
 ---
 
-## 2. How QDisk Compares
+## Download & Install
 
-| Dimension | Ad-Supported Cleaners / Archivers | DIY Scripts / Separate Tools | QDisk |
-|---|---|---|---|
-| **Ads, Popups & Telemetry** | Frequent nags, upsells, or telemetry | Clean, but steep setup | **Zero ads, zero telemetry, 100% local data** |
-| **Mistake Recovery** | Rarely reversible once cleaned | One typo can be permanent | **Dry-Run preview + 1-click Undo on risky actions** |
-| **Large Archive Handling** | Often no true pause; overwrite risk | No GUI preview or conflict prompt | **7 formats, 4-tier pacing, real Pause & Keep Both** |
-| **AI Disk Triage Safety** | None or unchecked scripts | Manual inspection is slow | **Tool-verified + approval cards + safe in-app locate** |
-| **Footprint & Portability** | 150 MB+ installers & background services | Scattered across 5+ apps | **20.7 MB installer / Portable ZIP / MIT Open Source** |
+Requires **Windows 10 / 11 (x64)**.
 
----
+- **Website**: https://3347567186.github.io/QDisk/?lang=en
+- **Installer (~20.7 MB)**: Download `QDisk_*_x64-setup.exe` from [GitHub Releases](https://github.com/3347567186/QDisk/releases/latest)
+- **Portable ZIP (~25.1 MB)**: Download `QDisk_*_x64-portable.zip` from the same page, extract, and run `tidy-assistant.exe`
+- **Checksums & Updates**: Every release includes `SHA256SUMS.txt`. The built-in updater checks GitHub Releases, verifies SHA-256 before applying updates, and rolls back automatically if a portable swap fails.
 
-## 3. Download & Get Started in 30 Seconds
+Settings, rules, and undo journals are stored separately in `%LOCALAPPDATA%\整理助手数据` so upgrades and reinstalls preserve your data.
 
-- **🌐 Official Website**: https://3347567186.github.io/QDisk/?lang=en
-- **⬇️ NSIS Installer (Recommended, ~20.7 MB)**: Grab `QDisk_*_x64-setup.exe` from **[Latest GitHub Release](https://github.com/3347567186/QDisk/releases/latest)**
-- **📦 Portable ZIP (~25.1 MB)**: Grab `QDisk_*_x64-portable.zip` from the same page (extract to an ASCII path and launch `tidy-assistant.exe`)
-- **🔐 Verification & Updates**: Every release ships with `SHA256SUMS.txt`. The built-in updater verifies SHA-256 against official GitHub Releases automatically, with atomic rollback in Portable mode.
-
-> Requires **Windows 10 / 11 (x64)**. Configs, custom rules, and undo journals are isolated in `%LOCALAPPDATA%\整理助手数据`.
-
-💬 **Help shape the safety rules in [GitHub Discussions](https://github.com/3347567186/QDisk/discussions)**: What folder or file type are you most afraid a cleaner might accidentally delete? Drop a comment and I'll add it to the hard-coded protection list.
+If there is a directory or file pattern you want added to the built-in protection list, feel free to open a thread in [Discussions](https://github.com/3347567186/QDisk/discussions) or [Issues](https://github.com/3347567186/QDisk/issues).
 
 ---
 
-## 4. For Engineers & Contributors (Benchmarks, Architecture & Extensions)
+## Benchmarks & Local Build
 
 <details>
-<summary><strong>📊 Expand: Measured Benchmarks (No Estimates — 0.31 ms Socket Abort, 304.3 MB/s Archiving, 370+ Automated Tests)</strong></summary>
+<summary>Measured Benchmarks</summary>
 
-> **Test Machine**: AMD Ryzen 9 5900HX (8C/16T) · Windows 11 x64 · NVMe SSD · QDisk. All numbers measured directly from running binaries.
+Test machine: AMD Ryzen 9 5900HX (8C/16T), Windows 11 x64, NVMe SSD.
 
-| Benchmark | Workload / Conditions | Measured Result | Notes |
+| Benchmark | Workload | Measured Result | Notes |
 |---|---|---|---|
-| **AI Stop Socket Abort** (`ai_cancel`) | Local `TcpListener` stalling `WinHttpReceiveResponse` (5 trials) | **Median `0.31 ms`** (239–323 µs) | Cross-thread WinHTTP handle close vs. 60–300 s hangs |
-| **1,000-File Organize & Full Undo** | 1,000 mixed Downloads files (10 extensions, 5 categories) | Dry-Run **`306.5 ms`** · Move **`1.79 s`** · Undo **`1.39 s`** | `1000/1000` moved and restored cleanly (`0` failures) |
-| **10,001-File Index & FTS5 Search** | 50 folders × 200 files + needle PDF (30 queries) | Index **`68.4 ms`** (~146k files/s) · Median **`6.53 ms`** | Rust `indexwalk` + SQLite FTS5; P95 query `7.23 ms` |
-| **Engine Cold Boot & RPC Roundtrip** | `tidy.py --engine` cold start + 20 warm `ping` calls | Cold boot **`224.4 ms`** · Warm RPC **`0.10 ms`** | Persistent local engine |
-| **Binary & Package Footprint** | Official Release artifacts | Shell exe **`5.56 MB`** · Installer **`20.7 MB`** · Portable **`25.1 MB`** | Zero-framework UI is ~`2.0 MB` total (`0` `node_modules`) |
-| **Automated Release Gate** | Enforced by `build.ps1` on every release | **370+ tests passing** · **`0` Rust warnings** | 237 Python + 62 Rust + 8 JS/Website automated Red-Team suites |
+| AI Stop (`ai_cancel`) | Local `TcpListener` stalling `WinHttpReceiveResponse` (5 runs) | Median `0.31 ms` (239–323 µs) | Cross-thread WinHTTP handle close |
+| 1,000-File Sort & Undo | 1,000 mixed files (10 extensions, 5 categories) | Dry-run `306.5 ms` · Move `1.79 s` · Undo `1.39 s` | `1000/1000` moved and restored |
+| 10,001-File Index & Search | 50 folders × 200 files + target PDF (30 FTS5 queries) | Index `68.4 ms` · Median `6.53 ms` | Rust `indexwalk` + SQLite FTS5, P95 `7.23 ms` |
+| Engine Boot & RPC | `tidy.py --engine` cold start + 20 warm `ping` calls | Cold boot `224.4 ms` · Warm RPC `0.10 ms` | Persistent local engine |
+| Package Footprint | Official Release artifacts | Shell `5.56 MB` · Installer `20.7 MB` · Portable `25.1 MB` | Plain JS UI ~`2.0 MB` (no `node_modules`) |
+| Automated Tests | Run by `build.ps1` before packaging | 370+ tests passing, 0 Rust warnings | 237 Python + 62 Rust + JS/website suites |
 
-#### 4-Tier Adaptive Rust Archive Throughput (64 MB Mixed Set: 75% JSON + 25% PNG, 32 Files)
+#### 4-Tier Rust Archive Throughput (64 MB Mixed Set: 75% JSON + 25% PNG, 32 Files)
 
-| Performance Tier | Threads (16T CPU) | CPU / I/O Duty | Create Time & Speed | Speedup vs. Saver | Warm-Cache Extract |
+| Tier | Threads (16T) | CPU / IO Duty | Create Time & Speed | vs. Saver | Warm-Cache Extract |
 |---|---|---|---|---|---|
-| **Saver** (`saver`) | `1` thread | `35% / 25%` | `3,025.6 ms` · **`21.2 MB/s`** | `1.0×` | `852.6 MB/s` |
-| **Balanced** (`balanced`) | `6` threads | `65% / 50%` | `696.3 ms` · **`91.9 MB/s`** | **`4.3×`** | `2,998.6 MB/s` |
-| **Performance** (`performance`) | `10` threads | `85% / 75%` | `210.3 ms` · **`304.3 MB/s`** | **`14.4×`** | **`3,844.1 MB/s`** |
-| **Hyper** (`hyper`) | `16` threads | `100% / 100%` | `235.1 ms` · **`272.3 MB/s`** \* | **`12.8×`** | `2,661.5 MB/s` |
+| Saver (`saver`) | `1` | `35% / 25%` | `3,025.6 ms` · `21.2 MB/s` | `1.0×` | `852.6 MB/s` |
+| Balanced (`balanced`) | `6` | `65% / 50%` | `696.3 ms` · `91.9 MB/s` | `4.3×` | `2,998.6 MB/s` |
+| Performance (`performance`) | `10` | `85% / 75%` | `210.3 ms` · `304.3 MB/s` | `14.4×` | `3,844.1 MB/s` |
+| Hyper (`hyper`) | `16` | `100% / 100%` | `235.1 ms` · `272.3 MB/s` \* | `12.8×` | `2,661.5 MB/s` |
 
-> \* On a short 64 MB burst, 16-thread pool init slightly trails 10 threads; on multi-GB archives `hyper` saturates all logical cores unthrottled.
+> \* On a 64 MB short burst, 16-thread pool setup overhead slightly trails 10 threads; `hyper` scales better on multi-GB archives.
 
 </details>
 
 <details>
-<summary><strong>🧱 Expand: Architecture, Local Build & 4 Built-In Extension APIs</strong></summary>
+<summary>Stack, Local Build & Extension Points</summary>
 
-#### Built In-House vs. Open-Source Stack
+#### Stack
 
-| Category | Components |
-|---|---|
-| **Built In-House** | **Rust Multi-Core Archive Kernel** (`archive/`: 4-tier `WorkPacer`, chunk pause/cancel, traversal guards, single-slot Undo, `ArchiveCodec`); **Zero-Extra-Dep Updater** (`updater.rs`: Installer/Portable dual mode, repo-scoped URL lock, auto-rollback); **`0.31 ms` Abortable WinHTTP AI Gateway & Native Path Probe** (`main.rs`); **Local AI Agent & 4-Tier Approval Gate** (`web/js/ai/`); **Zero-Framework 12-Page Desktop UI**; **Transactional Python Engine + Rust `indexwalk`** |
-| **Open-Source** | **Tauri v2** & `tauri-plugin-single-instance`, **Rust Crates** (`windows-sys`, `zip`, `sevenz-rust2`, `lzma-rust2`, `flate2`/`zlib-rs`, `bzip2`, `tar`, `sha2`, `walkdir`, `rfd`, `libloading`), **Python 3.11 + SQLite FTS5**, and on-demand official `UnRAR64.dll` with double SHA-256 verification (see [THIRD_PARTY.md](THIRD_PARTY.md)) |
+- **Desktop shell & native modules**: Tauri v2 + Rust (`archive/` multi-core archiver, `updater.rs` updater, `main.rs` WinHTTP proxy and native path reveal, `indexwalk`)
+- **File engine**: Python 3.11 + SQLite FTS5
+- **Frontend**: Plain HTML / CSS / ES Modules (no bundler)
+- **Third-party crates & libraries**: `tauri-plugin-single-instance`, `windows-sys`, `zip`, `sevenz-rust2`, `lzma-rust2`, `flate2`/`zlib-rs`, `bzip2`, `tar`, `sha2`, `walkdir`, `rfd`, `libloading`, and on-demand official `UnRAR64.dll` verified via SHA-256 (see [THIRD_PARTY.md](THIRD_PARTY.md))
 
-#### Build & Test Locally
+#### Build Locally
 
-Requires Windows x64 + Rust 1.80+ + Python 3.11+ + Node.js 20+ + PowerShell 7 (`pwsh`) + NSIS 3.x:
+Requirements: Windows x64, Rust 1.80+, Python 3.11+, Node.js 20+, PowerShell 7 (`pwsh`), NSIS 3.x.
 
 ```powershell
-git clone https://github.com/3347567186/QDisk.git && cd QDisk
+git clone https://github.com/3347567186/QDisk.git
+cd QDisk
 
-# Offline frontend & website selftests (zero bundler)
+# Frontend & website tests
 node src/web/js/ai/md.selftest.mjs
 node src/web/js/ai/pages.selftest.mjs
 node src/web/js/ai/website.selftest.mjs
 
-# Python engine tests (237) & Rust unit tests (62)
+# Python & Rust unit tests
 python -m unittest discover -s src/engine -p "test_*.py" -v
 cargo test --release --manifest-path src/src-tauri/Cargo.toml
 
-# Full test gate + build Installer, Portable ZIP & latest.json
+# Full test gate + build installer, portable ZIP & latest.json
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Bump patch
 ```
 
-#### Four Extension APIs (No Core Edits Needed)
+#### Extension APIs
 
-| Layer | File | Extension API |
+| Layer | File | API |
 |---|---|---|
-| **UI Pages & Hooks** | `src/web/js/app.js` | `App.registerPage(id, { zh, en, icon, mount })` / `App.onHook(event, fn)` |
-| **AI Actions** | `src/web/js/ai/registry.js` | `AIRegistry.register(name, { label, risk, schema, run })` (auto-wired to approval gate) |
-| **Python RPC** | `src/engine/tidy.py` | `tidy.register_engine_method("custom.op", handler, meta={...})` |
-| **Rust Archive Codec** | `src/src-tauri/src/archive/registry.rs` | Implement `ArchiveCodec` trait; auto-exposed via `archive_capabilities` |
+| UI pages & hooks | `src/web/js/app.js` | `App.registerPage(id, { zh, en, icon, mount })` / `App.onHook(event, fn)` |
+| AI actions | `src/web/js/ai/registry.js` | `AIRegistry.register(name, { label, risk, schema, run })` |
+| Python RPC | `src/engine/tidy.py` | `tidy.register_engine_method("custom.op", handler, meta={...})` |
+| Rust archive codec | `src/src-tauri/src/archive/registry.rs` | Implement `ArchiveCodec` trait and register |
 
 </details>
 
 ---
 
-Issues, Discussions & PRs welcome at [GitHub Issues](https://github.com/3347567186/QDisk/issues) · [Discussions](https://github.com/3347567186/QDisk/discussions) · Licensed under **[MIT](LICENSE)**.
+Licensed under [MIT](LICENSE). Issues, Discussions, and PRs are welcome at [GitHub Issues](https://github.com/3347567186/QDisk/issues) and [Discussions](https://github.com/3347567186/QDisk/discussions).
 
 ---
 
-## ☕ Buy the Author a Coffee
+## Support
 
-> Building and maintaining an indie open-source tool takes time and care. If **QDisk** has saved you time or reclaimed disk space, consider buying the author a coffee — every bit of support fuels future updates and polish. Thank you!
+QDisk is free, open-source, and ad-free. If you find it useful, you can buy me a coffee or leave a Star on GitHub.
 
 <div align="center">
   <table>
     <tr>
-      <td align="center" width="260">
-        <img src="website/assets/sponsor/wechat.jpg" width="210" alt="WeChat Pay QR" /><br />
-        <sub><strong>WeChat Pay</strong></sub>
+      <td align="center" width="240">
+        <img src="website/assets/sponsor/wechat.jpg" width="190" alt="WeChat Pay QR" /><br />
+        <sub>WeChat Pay</sub>
       </td>
-      <td align="center" width="260">
-        <img src="website/assets/sponsor/alipay.jpg" width="210" alt="Alipay QR" /><br />
-        <sub><strong>Alipay</strong></sub>
+      <td align="center" width="240">
+        <img src="website/assets/sponsor/alipay.jpg" width="190" alt="Alipay QR" /><br />
+        <sub>Alipay</sub>
       </td>
     </tr>
   </table>
-  <p><sub>Forever free, open-source &amp; ad-free · Giving a ⭐ Star is equally appreciated!</sub></p>
 </div>
