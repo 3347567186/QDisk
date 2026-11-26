@@ -3937,8 +3937,8 @@ html[data-theme="dark"] .ai-page {
   transition: box-shadow .22s var(--ease), border-color .22s var(--ease);
 }
 .dac-surface:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong));
-  box-shadow: 0 6px 22px rgba(0, 0, 0, .08), 0 0 0 3px var(--accent-weak);
+  border-color: var(--line-strong);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .09);
 }
 
 .ai-page .dac-surface {
@@ -3947,8 +3947,8 @@ html[data-theme="dark"] .ai-page {
   box-shadow: var(--shadow-card);
 }
 .ai-page .dac-surface:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--line-strong));
-  box-shadow: 0 6px 22px rgba(0, 0, 0, .08), 0 0 0 3px var(--accent-weak);
+  border-color: var(--line-strong);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .09);
 }
 
 .dac-body {

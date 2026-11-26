@@ -1116,9 +1116,8 @@
         empty(T('还没有扫描结果', 'No preview yet'),
           T('选择文件夹后点「扫描」生成预览，扫描不会改动任何文件',
             'Pick a folder and click Scan to build a preview; nothing is changed')),
-        h('div', { class: 'row' },
-          h('span', { class: 'spacer' }),
-          h('button', { class: 'btn ghost sm', onclick: doBrowse }, T('选择文件夹', 'Choose folder')))
+        h('div', { class: 'row center' },
+          h('button', { class: 'btn tinted sm', onclick: doBrowse }, T('选择文件夹', 'Choose folder')))
       );
     }
 
