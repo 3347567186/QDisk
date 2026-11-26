@@ -263,7 +263,7 @@
 
     const btnBrowse = actBtn('添加文件夹', 'Add folder', 'ghost', 'folder', doBrowse);
     const btnPickFiles = actBtn('添加文件', 'Add files', 'ghost', 'file', doPickFiles);
-    const btnScan = actBtn('扫描', 'Scan', 'primary', 'scan', () => doScan());
+    const btnScan = actBtn('扫描', 'Scan', 'tinted', 'scan', () => doScan());
     const btnOrganize = actBtn('开始整理', 'Start tidying', 'primary', 'play', doOrganize);
     btnOrganize.disabled = true;
 

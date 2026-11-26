@@ -573,4 +573,33 @@ AI 页是唯一一处不跟全站蓝色强调走的地方：它按 Claude 的外
 ### 14.2 全能只读文件预览器（`UI.previewFile` + `.fp-modal`）
 - 统一服务于「整理文件」预览表、「空间工具」大文件排行与「文件夹浏览」；顶部展示格式/编码徽章、体积、时间、模式切换与路径条，正文区按图片/PDF/视频/音频/Office 正文/多编码文本/十六进制适配；关闭时主动暂停并清空 `<video>/<audio>/<iframe>` 资源句柄，避免 Windows 文件锁残留；可执行与脚本文件严格只读不提供直接运行按钮。
 
+---
+
+## 15. Apple Native / macOS Sequoia & Apple Notes 整站重构（1.47.0 起）
+
+为彻底消除早期 Claude 暖米色 + 粗黑药丸按钮 + 白底套白框的视觉杂讯，1.47.0 在**零功能删减、严格遵守 12 页契约与三大标准骨架**前提下，将全站重构为苹果原生软件（Apple Notes / Finder / macOS System Settings / Activity Monitor）设计语言：
+
+### 15.1 三层静谧表面层级（零「白底套白框」）
+| 层级 | 令牌 | 浅色 | 深色 | 用途 |
+|---|---|---|---|---|
+| 一级 · 源列表侧栏 | `--sidebar-bg` | `#f2f2f5` | `#1b1b1e` | 204px 静谧源列表，无多余分隔线 |
+| 二级 · 分组画布 | `--canvas` | `#f5f5f7` | `#141416` | 主区底色，让纸面卡片自然浮起 |
+| 三级 · 纸面卡片 | `--surface` | `#ffffff` | `#222225` | 卡片、工作台、设置组、AI 阅读纸面，配 `--shadow-card` |
+| 凹槽 · 控件底 | `--surface-2` | `#efeff2` | `#2c2c30` | 分段控件轨道、表头、次级面板 |
+| 强调体系 | `--accent` / `--accent-solid` / `--accent-text` | `#007aff` / `#0071e3` / `#0062cc` | `#0a84ff` / `#0071e3` / `#4da3ff` | Apple System Blue（19 组浅/深对比度全部 ≥ 4.5:1 WCAG AA） |
+| 开关开启色 | `--switch-on` | `#34c759` | `#30d158` | 原生 Apple System Settings 绿色开关 |
+
+### 15.2 信息架构与四大功能合集（零页删减）
+保留全部 12 个标准页面路由与生命周期契约，侧栏按用户心智重排为 Apple Source List 四大合集：
+1. **智能副驾（置顶）**：`AI 助手`（轻盈置顶指令项，保留体素头像，去除厚重边框与右箭头）
+2. **文件与空间**：`整理文件` · `空间工具` · `搜索文件` · `压缩包`
+3. **清理与优化**：`清理缓存` · `清理截图` · `应用与自启` · `高级规则`
+4. **迁移与系统**：`数据迁移` · `日志` · `设置`（侧栏底部附浅/深外观一键快切 `#theme-quick-btn`，与设置页配置双向同步）
+
+### 15.3 关键控件与页面形态升级
+- **Apple Notes 三栏全通体验（`ai`）**：`.scroll:has(.ai-page)` 零内边距直通；左栏 `.ai-rail`（236px，`--ai-rail-bg`）去掉多余圆角套盒、列表项平铺流淌，选中态使用 Apple Blue 柔 tint；右栏 `.ai-main` 纯白阅读纸面，底部预留安全留白防止提案卡被输入框遮挡，发送键激活态转为 Apple Blue。
+- **macOS 统一磨砂顶栏与原生控件**：52px 磨砂顶栏（`backdrop-filter: blur(18px) saturate(1.4)` + 发丝底线）；按钮由 `999px` 粗黑药丸回归 `8px` 轻盈触感按钮（新增 `.btn.tinted` 柔蓝辅助按钮用于「整理文件」扫描键，与单一 Apple Blue 主按钮「开始整理」拉开层次）；全站分段控件（`.seg` / `.wb-tabs` / `.arc-tabs` / `.set-seg` / `.upd-seg` / `.shot-kinds` / `.ai-modes`）统一为 macOS Segmented Control；右键菜单与下拉弹层采用 22px 磨砂玻璃（`--glass-bg`）与 Apple Blue 悬停反白高亮。
+- **现代 Web 规范与无障碍**：`index.html` 增补 `<meta name="color-scheme" content="light dark">` 防白闪；全局标准 `scrollbar-color` 配 `@supports not (scrollbar-color: auto)` 兼容降级；内置 `@media (forced-colors: active)` 高对比度模式边界兜底。
+
+
 

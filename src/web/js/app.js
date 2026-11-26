@@ -127,7 +127,7 @@
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) onHidden(); else onShown();
       });
-      UI.onLangChange(() => { buildNav(this); renderChrome(this.current, this.cfg); });
+      UI.onLangChange(() => { buildNav(this); renderChrome(this.current, this.cfg); syncThemeQuickBtn(); });
       // 侧栏折叠按钮
       const toggle = document.getElementById('sidebar-toggle');
       toggle && toggle.addEventListener('click', () => {
@@ -136,6 +136,13 @@
         this.cfg = { ...(this.cfg || {}), sidebar_collapsed: on };
         API.configSet({ sidebar_collapsed: on }).catch(() => {});
       });
+      // 侧栏底部的轻量主题快切（与设置页双向同步）
+      const themeQuickBtn = document.getElementById('theme-quick-btn');
+      themeQuickBtn && themeQuickBtn.addEventListener('click', () => {
+        const next = UI.state.theme === 'dark' ? 'light' : 'dark';
+        this.setTheme(next);
+      });
+      syncThemeQuickBtn();
       wireShortcuts();
     },
     async setTheme(theme) {
@@ -239,9 +246,22 @@
   };
   window.App = App;
 
+  function syncThemeQuickBtn() {
+    const btn = document.getElementById('theme-quick-btn');
+    if (!btn) return;
+    const isDark = UI.state.theme === 'dark';
+    const label = isDark ? UI.T('切换到浅色外观', 'Switch to Light Mode') : UI.T('切换到深色外观', 'Switch to Dark Mode');
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = isDark
+      ? '<svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-15.07 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79Z"/></svg>';
+  }
+
   function applyTheme(theme) {
     document.documentElement.dataset.theme = theme === 'dark' ? 'dark' : 'light';
     UI.state.theme = document.documentElement.dataset.theme;
+    syncThemeQuickBtn();
     /* 原生标题栏跟随应用主题：Windows 默认跟随系统深浅色，会在浅色界面上留一条黑边 */
     try { API.setWindowTheme(UI.state.theme).catch(() => {}); } catch { /* ignore */ }
     /* 只做首帧镜像，配置仍是唯一来源 */
@@ -312,12 +332,12 @@
     });
   }
 
-  /* 侧栏分组：只影响视觉层级，路由、页面与配置完全不变 */
+  /* 侧栏分组（Apple 原生 Source List 四大功能合集）：只影响视觉层级，路由、页面与配置完全不变 */
   const NAV_GROUPS = [
-    { zh: '助手', en: 'Assistant', ids: ['ai'] },
-    { zh: '整理与清理', en: 'Organize', ids: ['organize', 'shots', 'cache', 'tools', 'archive'] },
-    { zh: '查找与规则', en: 'Find', ids: ['search', 'rules'] },
-    { zh: '系统', en: 'System', ids: ['apps', 'migrate', 'log', 'settings'] }
+    { zh: '智能副驾', en: 'Assistant', ids: ['ai'] },
+    { zh: '文件与空间', en: 'Files & Space', ids: ['organize', 'tools', 'search', 'archive'] },
+    { zh: '清理与优化', en: 'Cleanup & Care', ids: ['cache', 'shots', 'apps', 'rules'] },
+    { zh: '迁移与系统', en: 'System', ids: ['migrate', 'log', 'settings'] }
   ];
 
   /* AI 项采用独立指令卡：内嵌 22px 立体头像槽，兼容语言切换时销毁旧循环 */
