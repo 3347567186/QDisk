@@ -3504,6 +3504,20 @@ function findNodes(rootNode, pred, out = []) {
 
 /* ==================== 回归 22：cache.js 清理推荐过滤 0 B 空目录 + 仅系统占用时给绿色成功反馈不误报失败弹窗 ==================== */
 {
+  const txt = (n) => {
+    if (!n) return '';
+    let s = String(n._textContent || '');
+    if (Array.isArray(n.children)) s += n.children.map(txt).join('');
+    return s;
+  };
+  const clickBtn = (btn) => {
+    if (!btn) return;
+    if (btn.listeners && btn.listeners.click && btn.listeners.click.length) {
+      btn.dispatchEvent(new sandbox.Event('click'));
+    } else if (typeof btn.onclick === 'function') {
+      btn.onclick();
+    }
+  };
   const origEngine22 = sandbox.API.engine;
   const origConfirm22 = sandbox.UI.confirm;
   const origToast22 = sandbox.UI.toast;

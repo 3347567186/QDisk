@@ -3697,11 +3697,13 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
             root_key = os.path.normcase(os.path.normpath(os.path.abspath(root)))
         except (OSError, ValueError):
             root_key = ""
+        lp_root = _lp_win(root)
+        is_file_target = os.path.isfile(lp_root)
         is_builtin = bool(
             root_key
             and (
                 root_key in builtin_keys
-                or any(root_key.startswith(bk + os.sep) for bk in builtin_keys)
+                or (is_file_target and any(root_key.startswith(bk + os.sep) for bk in builtin_keys))
             )
         )
         # 仅对非内置路径执行程序安装目录整目录拦截，防止 %TEMP% 因含临时安装包被整目录误杀
@@ -3716,8 +3718,7 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
                     failed.append((root, msg))
                 continue
         protect = protect_global and (not is_builtin)
-        lp_root = _lp_win(root)
-        if os.path.isfile(lp_root):
+        if is_file_target:
             try:
                 sz = os.path.getsize(lp_root)
             except OSError:
