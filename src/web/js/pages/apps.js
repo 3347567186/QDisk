@@ -2256,8 +2256,8 @@
       style: { cursor: 'pointer', userSelect: 'none', fontSize: '11px', padding: '3px 8px' },
       title: T('FPS 悬浮窗：无背景纯数字，可换色 / 换位置 / 自由拖动', 'FPS overlay: pure numbers, switchable color / position / drag')
     });
-    fpsChip.addEventListener('click', (e) => { openFpsMenu(e); });
-    UI.attachMenu(fpsChip, () => fpsMenuItems());
+    fpsChip.addEventListener('click', () => { openFpsPanel(fpsChip); });
+    fpsChip.addEventListener('contextmenu', (e) => { if (e && e.preventDefault) e.preventDefault(); openFpsPanel(fpsChip); });
     updateFpsChip();
     loadFpsOverlay();
 
@@ -2769,40 +2769,73 @@
       } catch (_e) { /* 忽略 */ }
     }
 
-    function fpsMenuItems() {
-      const f = PerfState.fps;
-      const mark = (on) => (on ? '✓ ' : '　');
-      const items = [
-        { label: (f.enabled ? '■ ' : '▶ ') + T(f.enabled ? '关闭 FPS 悬浮窗' : '开启 FPS 悬浮窗', f.enabled ? 'Turn off FPS overlay' : 'Turn on FPS overlay'), action: () => patchFpsOverlay({ enabled: !f.enabled }) },
-        { sep: true },
-        { header: T('位置', 'Position') }
-      ];
-      FPS_POSITIONS.forEach((p) => {
-        items.push({
-          label: mark(f.position === p[0]) + T(p[1], p[2]),
-          action: () => {
-            patchFpsOverlay({ position: p[0], locked: p[0] === 'custom' ? false : f.locked });
-            if (p[0] === 'custom') toast(T('按住屏幕上的数字拖到任意位置，拖好后可在此菜单锁定', 'Drag the number anywhere, then lock it here'), 'ok');
-          }
-        });
-      });
-      if (f.position === 'custom') {
-        items.push({ label: mark(f.locked) + T('锁定位置（鼠标穿透）', 'Lock position (click-through)'), action: () => patchFpsOverlay({ locked: !f.locked }) });
-      }
-      items.push({ sep: true }, { header: T('颜色', 'Color') });
-      FPS_COLORS.forEach((c) => {
-        items.push({ label: mark(String(f.color).toUpperCase() === c[0]) + '● ' + T(c[1], c[2]) + '  ' + c[0], action: () => patchFpsOverlay({ color: c[0] }) });
-      });
-      items.push({ sep: true }, { header: T('字号', 'Size') });
-      FPS_SIZES.forEach((s) => {
-        items.push({ label: mark(Number(f.fontSize) === s[0]) + T(s[1], s[2]) + ` (${s[0]})`, action: () => patchFpsOverlay({ fontSize: s[0] }) });
-      });
-      return items;
-    }
-
-    async function openFpsMenu(evt) {
+    /* 紧凑设置面板：开关 / 位置 / 颜色 / 字号 都在一块小浮层里，改完不关闭 */
+    async function openFpsPanel(anchor) {
       await loadFpsOverlay();
-      UI.menu(evt, fpsMenuItems());
+      closePerfPicker();
+      const host = document.body || document.getElementById('ctx-root');
+      if (!host) return;
+      const el = h('div', {
+        class: 'perf-picker fps-panel',
+        style: {
+          position: 'fixed', zIndex: '3000', width: '216px', padding: '10px', display: 'flex', flexDirection: 'column',
+          gap: '8px', fontSize: '12px', background: 'var(--surface)', border: '1px solid var(--line)',
+          borderRadius: '12px', boxShadow: '0 12px 32px rgba(0,0,0,0.18)', animation: 'perfCardIn .18s ease'
+        }
+      });
+      const chipEl = (label, active, onclick, extra) => h('span', {
+        style: Object.assign({
+          padding: '4px 0', textAlign: 'center', borderRadius: '7px', cursor: 'pointer', userSelect: 'none',
+          border: '1px solid ' + (active ? 'var(--accent, #3b82f6)' : 'var(--line)'),
+          background: active ? 'var(--surface-2)' : 'transparent', color: 'var(--text-1)'
+        }, extra || {}),
+        onclick
+      }, label);
+      const grid = (cols, kids) => h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '5px' } }, ...kids);
+      const act = (patch) => () => { patchFpsOverlay(patch).then(paint); };
+      function paint() {
+        const f = PerfState.fps;
+        el.innerHTML = '';
+        el.appendChild(h('div', { class: 'row', style: { justifyContent: 'space-between', alignItems: 'center' } },
+          h('strong', { style: { fontSize: '12px' } }, T('FPS 悬浮窗', 'FPS overlay')),
+          chipEl(f.enabled ? T('已开启', 'On') : T('已关闭', 'Off'), !!f.enabled, act({ enabled: !f.enabled }), { padding: '3px 12px' })
+        ));
+        el.appendChild(grid(3, FPS_POSITIONS.map((p) => chipEl(T(p[1], p[2]), f.position === p[0], () => {
+          patchFpsOverlay({ position: p[0], locked: p[0] === 'custom' ? false : f.locked }).then(paint);
+        }))));
+        if (f.position === 'custom') {
+          el.appendChild(chipEl(
+            f.locked ? T('已锁定 · 鼠标穿透', 'Locked · click-through') : T('拖动数字定位，点此锁定', 'Drag number, tap to lock'),
+            !!f.locked, act({ locked: !f.locked })
+          ));
+        }
+        el.appendChild(h('div', { class: 'row', style: { justifyContent: 'space-between', padding: '2px 4px' } },
+          ...FPS_COLORS.map((c) => h('span', {
+            title: T(c[1], c[2]),
+            style: {
+              width: '20px', height: '20px', borderRadius: '50%', cursor: 'pointer', background: c[0], boxSizing: 'border-box',
+              border: String(f.color).toUpperCase() === c[0] ? '2px solid var(--text-1)' : '1px solid var(--line)'
+            },
+            onclick: act({ color: c[0] })
+          }))
+        ));
+        el.appendChild(grid(3, FPS_SIZES.map((s) => chipEl(T(s[1], s[2]), Number(f.fontSize) === s[0], act({ fontSize: s[0] })))));
+      }
+      paint();
+      host.appendChild(el);
+      try {
+        const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 40, bottom: 40 };
+        el.style.left = Math.max(8, Math.min((window.innerWidth || 1200) - 224, r.left)) + 'px';
+        el.style.top = (r.bottom + 6) + 'px';
+      } catch (_e) { /* 忽略 */ }
+      const p = {
+        el,
+        onDown: (e) => { if (!el.contains || !el.contains(e.target)) closePerfPicker(); },
+        onKey: (e) => { if (e && e.key === 'Escape') closePerfPicker(); }
+      };
+      PerfState.picker = p;
+      document.addEventListener('mousedown', p.onDown, true);
+      document.addEventListener('keydown', p.onKey, true);
     }
 
     function updateFpsChip() {
