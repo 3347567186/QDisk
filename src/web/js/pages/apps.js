@@ -2696,42 +2696,73 @@
       if (p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el);
     }
 
-    function openPerfPicker(slotIdx, anchor) {
+    function perfChip(label, active, onclick, extra) {
+      return h('span', {
+        style: Object.assign({
+          padding: '5px 4px', textAlign: 'center', borderRadius: '7px', cursor: 'pointer', userSelect: 'none',
+          border: '1px solid ' + (active ? 'var(--accent, #3b82f6)' : 'var(--line)'),
+          background: active ? 'var(--surface-2)' : 'transparent', color: 'var(--text-1)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+        }, extra || {}),
+        onclick
+      }, label);
+    }
+
+    function perfGrid(cols, kids) {
+      return h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '5px' } }, ...kids);
+    }
+
+    /* 紧凑卡片面板：标题点击只显示「指标」；右键(full)再多「图表形态 / FPS / 恢复默认」 */
+    function openPerfPicker(slotIdx, anchor, full, pt) {
       closePerfPicker();
       const host = document.body || document.getElementById('ctx-root');
       if (!host) return;
-      const rows = PERF_METRICS.map((m) => {
-        const shown = PerfState.slots.indexOf(m.id);
-        const cur = shown === slotIdx;
-        return h('div', {
-          class: 'perf-picker-row',
-          style: {
-            display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 10px', borderRadius: '8px',
-            cursor: 'pointer', fontSize: '12px', color: 'var(--text-1)',
-            background: cur ? 'var(--surface-2)' : 'transparent'
-          },
-          onclick: (e) => { if (e && e.stopPropagation) e.stopPropagation(); setPerfSlot(slotIdx, m.id); }
-        },
-          h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: m.colorA, flexShrink: '0' } }),
-          h('span', { style: { flex: '1' } }, T(m.zh, m.en)),
-          h('span', { style: { fontSize: '10px', color: 'var(--text-3)' } },
-            cur ? '✓' : (shown >= 0 ? T('已显示', 'Shown') : ''))
-        );
-      });
       const el = h('div', {
         class: 'perf-picker',
         style: {
-          position: 'fixed', zIndex: '3000', minWidth: '196px', padding: '6px',
-          background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: '12px',
-          boxShadow: '0 12px 32px rgba(0,0,0,0.18)', animation: 'perfCardIn .18s ease'
+          position: 'fixed', zIndex: '3000', width: '232px', padding: '10px', display: 'flex', flexDirection: 'column',
+          gap: '8px', fontSize: '12px', background: 'var(--surface)', border: '1px solid var(--line)',
+          borderRadius: '12px', boxShadow: '0 12px 32px rgba(0,0,0,0.18)', animation: 'perfCardIn .18s ease'
         }
-      }, ...rows);
+      });
+      el.appendChild(perfGrid(2, PERF_METRICS.map((m) => {
+        const shown = PerfState.slots.indexOf(m.id);
+        return perfChip(
+          h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } },
+            h('span', { style: { width: '7px', height: '7px', borderRadius: '50%', background: m.colorA, flexShrink: '0' } }),
+            T(m.zh, m.en)),
+          shown === slotIdx,
+          (e) => { if (e && e.stopPropagation) e.stopPropagation(); setPerfSlot(slotIdx, m.id); },
+          shown >= 0 && shown !== slotIdx ? { opacity: '0.7' } : null
+        );
+      })));
+      if (full) {
+        const f = PerfState.fps || {};
+        el.appendChild(h('div', { style: { height: '1px', background: 'var(--line)' } }));
+        el.appendChild(perfGrid(3, PERF_MODES.map((m) => perfChip(
+          T(PERF_MODE_NAMES[m][0], PERF_MODE_NAMES[m][1]), PerfState.chartMode === m,
+          () => { cyclePerfChartMode(m); closePerfPicker(); }
+        ))));
+        el.appendChild(perfGrid(2, [
+          perfChip(T(f.enabled ? '关闭 FPS 悬浮窗' : '开启 FPS 悬浮窗', f.enabled ? 'FPS overlay off' : 'FPS overlay on'), !!f.enabled,
+            () => { closePerfPicker(); patchFpsOverlay({ enabled: !f.enabled }); }),
+          perfChip(T('恢复默认', 'Reset'), false, () => {
+            closePerfPicker();
+            PerfState.slots = PERF_DEFAULT_SLOTS.slice();
+            savePerfPrefs();
+            PerfState.hoveredCharts.clear();
+            if (PerfState.grid) fillMonitorGrid(PerfState.grid, [0, 1, 2]);
+          })
+        ]));
+      }
       host.appendChild(el);
       try {
-        const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 40, bottom: 40 };
-        const pw = 210;
-        el.style.left = Math.max(8, Math.min((window.innerWidth || 1200) - pw - 8, r.left)) + 'px';
-        el.style.top = (r.bottom + 6) + 'px';
+        const r = pt ? { left: pt.x, bottom: pt.y }
+          : (anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 40, bottom: 40 });
+        const vw = window.innerWidth || 1200;
+        const vh = window.innerHeight || 800;
+        el.style.left = Math.max(8, Math.min(vw - 240, r.left)) + 'px';
+        el.style.top = Math.max(8, Math.min(vh - (full ? 220 : 150), r.bottom + (pt ? 0 : 6))) + 'px';
       } catch (_e) { /* 忽略 */ }
       const p = {
         el,
@@ -2783,15 +2814,8 @@
           borderRadius: '12px', boxShadow: '0 12px 32px rgba(0,0,0,0.18)', animation: 'perfCardIn .18s ease'
         }
       });
-      const chipEl = (label, active, onclick, extra) => h('span', {
-        style: Object.assign({
-          padding: '4px 0', textAlign: 'center', borderRadius: '7px', cursor: 'pointer', userSelect: 'none',
-          border: '1px solid ' + (active ? 'var(--accent, #3b82f6)' : 'var(--line)'),
-          background: active ? 'var(--surface-2)' : 'transparent', color: 'var(--text-1)'
-        }, extra || {}),
-        onclick
-      }, label);
-      const grid = (cols, kids) => h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '5px' } }, ...kids);
+      const chipEl = perfChip;
+      const grid = perfGrid;
       const act = (patch) => () => { patchFpsOverlay(patch).then(paint); };
       function paint() {
         const f = PerfState.fps;
@@ -2864,7 +2888,7 @@
       }, T(mt.zh, mt.en));
       titleEl.addEventListener('click', (e) => {
         if (e && e.stopPropagation) e.stopPropagation();
-        openPerfPicker(slotIdx, titleEl);
+        openPerfPicker(slotIdx, titleEl, false);
       });
 
       const cHeader = h('div', {
@@ -2915,28 +2939,9 @@
         }
       }, cHeader, svgBox, timeAxis);
 
-      UI.attachMenu(cardEl, () => {
-        const f = PerfState.fps || {};
-        const items = [{ header: T('切换指标', 'Metric') }];
-        PERF_METRICS.forEach((m) => {
-          items.push({ label: (PerfState.slots[slotIdx] === m.id ? '✓ ' : '　') + T(m.zh, m.en), action: () => setPerfSlot(slotIdx, m.id) });
-        });
-        items.push({ sep: true }, { header: T('图表形态（全部卡片）', 'Chart style (all cards)') });
-        PERF_MODES.forEach((m) => {
-          items.push({ label: (PerfState.chartMode === m ? '✓ ' : '　') + T(PERF_MODE_NAMES[m][0], PERF_MODE_NAMES[m][1]), action: () => cyclePerfChartMode(m) });
-        });
-        items.push({ sep: true });
-        items.push({ label: T(f.enabled ? '关闭 FPS 悬浮窗' : '开启 FPS 悬浮窗', f.enabled ? 'Turn off FPS overlay' : 'Turn on FPS overlay'), action: () => patchFpsOverlay({ enabled: !f.enabled }) });
-        items.push({
-          label: T('恢复默认三张卡片', 'Reset to default cards'),
-          action: () => {
-            PerfState.slots = PERF_DEFAULT_SLOTS.slice();
-            savePerfPrefs();
-            PerfState.hoveredCharts.clear();
-            if (PerfState.grid) fillMonitorGrid(PerfState.grid, [0, 1, 2]);
-          }
-        });
-        return items;
+      cardEl.addEventListener('contextmenu', (e) => {
+        if (e && e.preventDefault) e.preventDefault();
+        openPerfPicker(slotIdx, cardEl, true, { x: e.clientX || 0, y: e.clientY || 0 });
       });
 
       attachChartCrosshair(cardEl, samples, mt);
