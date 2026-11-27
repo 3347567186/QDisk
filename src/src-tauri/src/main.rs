@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem};
 
 mod archive;
+mod fps_overlay;
 mod updater;
 mod updater_host;
 use tauri::tray::TrayIconBuilder;
@@ -385,6 +386,47 @@ fn config_set(patch: Value) -> Result<Value, String> {
     }
     write_config(&cfg)?;
     Ok(cfg)
+}
+
+fn load_fps_overlay_config() -> fps_overlay::FpsOverlayConfig {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = read_config();
+    cfg.get("fps_overlay")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<fps_overlay::FpsOverlayConfig>(v).ok())
+        .unwrap_or_default()
+}
+
+fn persist_fps_overlay_config(overlay: &fps_overlay::FpsOverlayConfig) {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = read_config();
+    if let (Some(dst), Ok(val)) = (cfg.as_object_mut(), serde_json::to_value(overlay)) {
+        dst.insert("fps_overlay".to_string(), val);
+        let _ = write_config(&cfg);
+    }
+}
+
+#[tauri::command]
+fn fps_overlay_get() -> fps_overlay::FpsOverlayConfig {
+    fps_overlay::get_config()
+}
+
+#[tauri::command]
+fn fps_overlay_set(patch: Value) -> Result<fps_overlay::FpsOverlayConfig, String> {
+    let mut current = serde_json::to_value(fps_overlay::get_config()).map_err(|e| e.to_string())?;
+    if let (Some(dst), Some(src)) = (current.as_object_mut(), patch.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
+    let next: fps_overlay::FpsOverlayConfig =
+        serde_json::from_value(current).map_err(|e| format!("FPS 悬浮窗配置无效：{e}"))?;
+    Ok(fps_overlay::apply_config(next))
+}
+
+#[tauri::command]
+fn fps_overlay_sample() -> fps_overlay::FpsSample {
+    fps_overlay::get_latest_sample()
 }
 
 // ---------------------------------------------------------------- engine
@@ -5356,7 +5398,10 @@ fn main() {
             updater::updater_clear_cache,
             updater::updater_auto_update,
             updater::updater_install,
-            updater::updater_changelog
+            updater::updater_changelog,
+            fps_overlay_get,
+            fps_overlay_set,
+            fps_overlay_sample
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -5423,6 +5468,15 @@ fn main() {
             }
             tray.build(app)?;
             append_log("info", "应用启动");
+            if !auto && !auto_clean {
+                let overlay_cfg = load_fps_overlay_config();
+                fps_overlay::init_with_config(
+                    overlay_cfg,
+                    Arc::new(|c| {
+                        persist_fps_overlay_config(c);
+                    }),
+                );
+            }
 
             if auto {
                 if let Some(w) = app.get_webview_window("main") {
@@ -5511,6 +5565,7 @@ fn main() {
         .expect("error while building tauri application")
         .run(|handle, event| {
             if let tauri::RunEvent::Exit = event {
+                fps_overlay::shutdown();
                 handle.state::<archive::ArchiveCtx>().clear_undo();
                 if let Ok(mut guard) = handle.state::<AppState>().engine.lock() {
                     if let Some(mut old) = guard.take() {

@@ -3535,6 +3535,21 @@ class TestSystemPerformance(EngineCase):
         self.assertGreaterEqual(cpu["percent"], 0.0)
         self.assertGreaterEqual(cpu["cores"], 1)
 
+        self.assertIn("gpu", r)
+        self.assertIn("commit", r)
+        self.assertIn("system", r)
+        self.assertIn("display", r)
+        self.assertGreaterEqual(r["gpu"]["percent"], 0.0)
+        self.assertLessEqual(r["gpu"]["percent"], 100.0)
+        self.assertGreaterEqual(r["gpu"]["vram_bytes"], 0)
+        self.assertGreaterEqual(r["commit"]["limit"], 0)
+        self.assertGreaterEqual(r["commit"]["percent"], 0.0)
+        self.assertGreater(r["system"]["processes"], 0)
+        self.assertGreater(r["system"]["threads"], 0)
+        self.assertGreater(r["system"]["handles"], 0)
+        self.assertGreaterEqual(r["display"]["fps"], 0)
+        self.assertGreaterEqual(r["display"]["refresh_hz"], 1)
+
     def test_startup_hklm_admin_error_or_success(self):
         r = self.rpc("startup.delete", {
             "name": "non_existent_mock_app_123",

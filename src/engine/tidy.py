@@ -10029,6 +10029,248 @@ def _read_physical_disk_pdh():
             return None
 
 
+_SYS_GPU_PDH_LOCK = threading.Lock()
+_SYS_GPU_PDH_STATE = {
+    "init": False, "ok": False, "pdh": None, "query": None,
+    "h_3d": None, "h_vram": None, "h_shared": None
+}
+_SYS_DWM_LOCK = threading.Lock()
+_SYS_DWM_STATE = {"prev_t": 0.0, "prev_frame": 0, "smoothed": 0.0, "has_smoothed": False, "hz": 60}
+
+if os.name == "nt":
+    class _PDH_FMT_ITEM_W(ctypes.Structure):
+        _fields_ = [("szName", wintypes.LPWSTR), ("FmtValue", _PDH_FMT_VAL)]
+
+    class _PERFORMANCE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("CommitTotal", ctypes.c_size_t),
+            ("CommitLimit", ctypes.c_size_t),
+            ("CommitPeak", ctypes.c_size_t),
+            ("PhysicalTotal", ctypes.c_size_t),
+            ("PhysicalAvailable", ctypes.c_size_t),
+            ("SystemCache", ctypes.c_size_t),
+            ("KernelTotal", ctypes.c_size_t),
+            ("KernelPaged", ctypes.c_size_t),
+            ("KernelNonpaged", ctypes.c_size_t),
+            ("PageSize", ctypes.c_size_t),
+            ("HandleCount", wintypes.DWORD),
+            ("ProcessCount", wintypes.DWORD),
+            ("ThreadCount", wintypes.DWORD),
+        ]
+
+    class _DWM_UNSIGNED_RATIO(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [("uiNumerator", ctypes.c_uint32), ("uiDenominator", ctypes.c_uint32)]
+
+    class _DWM_TIMING_INFO(ctypes.Structure):
+        _pack_ = 1
+        _fields_ = [
+            ("cbSize", ctypes.c_uint32),
+            ("rateRefresh", _DWM_UNSIGNED_RATIO),
+            ("qpcRefreshPeriod", ctypes.c_uint64),
+            ("rateCompose", _DWM_UNSIGNED_RATIO),
+            ("qpcVBlank", ctypes.c_uint64),
+            ("cRefresh", ctypes.c_uint64),
+            ("cDXRefresh", ctypes.c_uint32),
+            ("qpcCompose", ctypes.c_uint64),
+            ("cFrame", ctypes.c_uint64),
+            ("cDXPresent", ctypes.c_uint32),
+            ("cRefreshFrame", ctypes.c_uint64),
+            ("cFrameSubmitted", ctypes.c_uint64),
+            ("cDXPresentSubmitted", ctypes.c_uint32),
+            ("cFrameConfirmed", ctypes.c_uint64),
+            ("cDXPresentConfirmed", ctypes.c_uint32),
+            ("cRefreshConfirmed", ctypes.c_uint64),
+            ("cDXRefreshConfirmed", ctypes.c_uint32),
+            ("cFramesLate", ctypes.c_uint64),
+            ("cFramesOutstanding", ctypes.c_uint32),
+            ("cFrameDisplayed", ctypes.c_uint64),
+            ("qpcFrameDisplayed", ctypes.c_uint64),
+            ("cRefreshFrameDisplayed", ctypes.c_uint64),
+            ("cFrameComplete", ctypes.c_uint64),
+            ("qpcFrameComplete", ctypes.c_uint64),
+            ("cFramePending", ctypes.c_uint64),
+            ("qpcFramePending", ctypes.c_uint64),
+            ("cFramesDisplayed", ctypes.c_uint64),
+            ("cFramesComplete", ctypes.c_uint64),
+            ("cFramesPending", ctypes.c_uint64),
+            ("cFramesAvailable", ctypes.c_uint64),
+            ("cFramesDropped", ctypes.c_uint64),
+            ("cFramesMissed", ctypes.c_uint64),
+            ("cRefreshNextDisplayed", ctypes.c_uint64),
+            ("cRefreshNextPresented", ctypes.c_uint64),
+            ("cRefreshesDisplayed", ctypes.c_uint64),
+            ("cRefreshesPresented", ctypes.c_uint64),
+            ("cRefreshStarted", ctypes.c_uint64),
+            ("cPixelsReceived", ctypes.c_uint64),
+            ("cPixelsDrawn", ctypes.c_uint64),
+            ("cBuffersEmpty", ctypes.c_uint64),
+        ]
+
+
+def _read_gpu_pdh():
+    """通过 Win32 PDH 采集真实 GPU 3D 引擎负载与专用/共享显存（无需管理员权限）。"""
+    fallback = {"available": False, "percent": 0.0, "vram_bytes": 0, "vram_mb": 0.0, "shared_bytes": 0}
+    if os.name != "nt" or _PDH_FMT_VAL is None:
+        return fallback
+
+    with _SYS_GPU_PDH_LOCK:
+        st = _SYS_GPU_PDH_STATE
+        if not st["init"]:
+            st["init"] = True
+            try:
+                pdh = ctypes.WinDLL("pdh")
+                pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, ctypes.c_size_t, ctypes.POINTER(wintypes.HANDLE)]
+                pdh.PdhOpenQueryW.restype = wintypes.LONG
+                pdh.PdhAddEnglishCounterW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, ctypes.c_size_t, ctypes.POINTER(wintypes.HANDLE)]
+                pdh.PdhAddEnglishCounterW.restype = wintypes.LONG
+                pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
+                pdh.PdhCollectQueryData.restype = wintypes.LONG
+                pdh.PdhGetFormattedCounterArrayW.argtypes = [
+                    wintypes.HANDLE, wintypes.DWORD,
+                    ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p
+                ]
+                pdh.PdhGetFormattedCounterArrayW.restype = wintypes.LONG
+                h_q = wintypes.HANDLE()
+                h_3d = wintypes.HANDLE()
+                h_vram = wintypes.HANDLE()
+                h_shared = wintypes.HANDLE()
+                if pdh.PdhOpenQueryW(None, 0, ctypes.byref(h_q)) == 0:
+                    ok_3d = pdh.PdhAddEnglishCounterW(h_q, r"\GPU Engine(*engtype_3D)\Utilization Percentage", 0, ctypes.byref(h_3d)) == 0
+                    ok_vram = pdh.PdhAddEnglishCounterW(h_q, r"\GPU Adapter Memory(*)\Dedicated Usage", 0, ctypes.byref(h_vram)) == 0
+                    ok_shared = pdh.PdhAddEnglishCounterW(h_q, r"\GPU Adapter Memory(*)\Shared Usage", 0, ctypes.byref(h_shared)) == 0
+                    if ok_3d or ok_vram:
+                        pdh.PdhCollectQueryData(h_q)
+                        st.update({
+                            "ok": True,
+                            "pdh": pdh,
+                            "query": h_q,
+                            "h_3d": h_3d if ok_3d else None,
+                            "h_vram": h_vram if ok_vram else None,
+                            "h_shared": h_shared if ok_shared else None,
+                        })
+            except Exception:
+                st["ok"] = False
+
+        if not st["ok"]:
+            return fallback
+
+        def _sum_array(hc):
+            if not hc:
+                return 0.0
+            pdh = st["pdh"]
+            sz = wintypes.DWORD(0)
+            cnt = wintypes.DWORD(0)
+            PDH_FMT_DOUBLE = 0x00000200
+            pdh.PdhGetFormattedCounterArrayW(hc, PDH_FMT_DOUBLE, ctypes.byref(sz), ctypes.byref(cnt), None)
+            if sz.value == 0:
+                return 0.0
+            buf = (ctypes.c_byte * sz.value)()
+            if pdh.PdhGetFormattedCounterArrayW(hc, PDH_FMT_DOUBLE, ctypes.byref(sz), ctypes.byref(cnt), ctypes.byref(buf)) != 0:
+                return 0.0
+            arr = ctypes.cast(buf, ctypes.POINTER(_PDH_FMT_ITEM_W))
+            total = 0.0
+            for i in range(cnt.value):
+                fv = arr[i].FmtValue
+                if fv.CStatus in (0, 1) and fv.doubleValue > 0:
+                    total += fv.doubleValue
+            return total
+
+        try:
+            if st["pdh"].PdhCollectQueryData(st["query"]) != 0:
+                return fallback
+            u3d = min(100.0, max(0.0, _sum_array(st["h_3d"])))
+            vram_b = max(0, int(_sum_array(st["h_vram"])))
+            shared_b = max(0, int(_sum_array(st["h_shared"])))
+            return {
+                "available": True,
+                "percent": round(u3d, 1),
+                "vram_bytes": vram_b,
+                "vram_mb": round(vram_b / (1024 * 1024), 1),
+                "shared_bytes": shared_b,
+            }
+        except Exception:
+            return fallback
+
+
+def _read_perf_info():
+    """通过 psapi.GetPerformanceInfo 采集内存提交、系统缓存、内核占用与进程/线程/句柄计数。"""
+    commit = {"used": 0, "limit": 0, "percent": 0.0, "cache": 0, "kernel": 0}
+    sys_info = {"processes": 0, "threads": 0, "handles": 0}
+    if os.name != "nt":
+        return commit, sys_info
+    try:
+        psapi = ctypes.WinDLL("psapi")
+        psapi.GetPerformanceInfo.argtypes = [ctypes.POINTER(_PERFORMANCE_INFORMATION), wintypes.DWORD]
+        psapi.GetPerformanceInfo.restype = wintypes.BOOL
+        pi = _PERFORMANCE_INFORMATION()
+        pi.cb = ctypes.sizeof(_PERFORMANCE_INFORMATION)
+        if psapi.GetPerformanceInfo(ctypes.byref(pi), pi.cb):
+            ps = int(pi.PageSize) or 4096
+            c_used = int(pi.CommitTotal) * ps
+            c_limit = int(pi.CommitLimit) * ps
+            commit = {
+                "used": c_used,
+                "limit": c_limit,
+                "percent": round(c_used / c_limit * 100.0, 1) if c_limit > 0 else 0.0,
+                "cache": int(pi.SystemCache) * ps,
+                "kernel": int(pi.KernelTotal) * ps,
+            }
+            sys_info = {
+                "processes": int(pi.ProcessCount),
+                "threads": int(pi.ThreadCount),
+                "handles": int(pi.HandleCount),
+            }
+    except Exception:
+        pass
+    return commit, sys_info
+
+
+def _read_dwm_display_fps():
+    """通过 dwmapi.DwmGetCompositionTimingInfo 采集实时桌面/合成帧率与刷新率。"""
+    if os.name != "nt":
+        return {"fps": 0, "refresh_hz": 60, "frame_ms": 0.0}
+    try:
+        dwm = ctypes.WinDLL("dwmapi")
+        info = _DWM_TIMING_INFO()
+        info.cbSize = ctypes.sizeof(_DWM_TIMING_INFO)
+        if dwm.DwmGetCompositionTimingInfo(None, ctypes.byref(info)) != 0:
+            return {"fps": 0, "refresh_hz": 60, "frame_ms": 0.0}
+        num = int(info.rateRefresh.uiNumerator)
+        den = int(info.rateRefresh.uiDenominator)
+        hz = int(round(num / den)) if den > 0 and num > 0 else 60
+        hz = max(1, min(1000, hz))
+        now = time.perf_counter()
+        frame = int(info.cFrame)
+        with _SYS_DWM_LOCK:
+            st = _SYS_DWM_STATE
+            st["hz"] = hz
+            prev_t = st["prev_t"]
+            prev_f = st["prev_frame"]
+            st["prev_t"] = now
+            st["prev_frame"] = frame
+            if prev_t <= 0.0 or frame < prev_f or (now - prev_t) > 10.0:
+                st["has_smoothed"] = False
+                return {"fps": 0, "refresh_hz": hz, "frame_ms": 0.0}
+            dt = now - prev_t
+            if dt < 0.05:
+                fps_val = st["smoothed"] if st["has_smoothed"] else 0.0
+            else:
+                raw = max(0.0, min(999.0, (frame - prev_f) / dt))
+                if not st["has_smoothed"]:
+                    st["smoothed"] = raw
+                    st["has_smoothed"] = True
+                else:
+                    st["smoothed"] = st["smoothed"] * 0.4 + raw * 0.6
+                fps_val = st["smoothed"]
+            fps_int = int(round(max(0.0, min(999.0, fps_val))))
+            frame_ms = round(1000.0 / fps_val, 1) if fps_val >= 0.5 else 0.0
+            return {"fps": fps_int, "refresh_hz": hz, "frame_ms": frame_ms}
+    except Exception:
+        return {"fps": 0, "refresh_hz": 60, "frame_ms": 0.0}
+
+
 def _engine_system_performance(params=None):
     """system.performance：高能效精准快照本地磁盘容量、真实物理磁盘 I/O、去重物理网卡吞吐、内存与 CPU 负载。"""
     import shutil
@@ -10304,11 +10546,18 @@ def _engine_system_performance(params=None):
 
         _SYS_PERF_PREV[0] = (now_times[0], now_times[1], now_times[2], now_times[3], disk_r, disk_w, net_in, net_out, disk_mode, net_luids)
         cpu_cores = os.cpu_count() or 1
+        gpu_info = _read_gpu_pdh()
+        commit_info, sys_info = _read_perf_info()
+        display_info = _read_dwm_display_fps()
     else:
         mem_total = mem_avail = mem_used = mem_load = 0
         cpu_pct = 0.0
         cpu_cores = 1
         disk_r_bps = disk_w_bps = net_in_bps = net_out_bps = 0
+        gpu_info = {"available": False, "percent": 0.0, "vram_bytes": 0, "vram_mb": 0.0, "shared_bytes": 0}
+        commit_info = {"used": 0, "limit": 0, "percent": 0.0, "cache": 0, "kernel": 0}
+        sys_info = {"processes": 0, "threads": 0, "handles": 0}
+        display_info = {"fps": 0, "refresh_hz": 60, "frame_ms": 0.0}
 
     return {
         "timestamp": int(time.time() * 1000),
@@ -10338,7 +10587,11 @@ def _engine_system_performance(params=None):
         "cpu": {
             "percent": cpu_pct,
             "cores": cpu_cores
-        }
+        },
+        "gpu": gpu_info,
+        "commit": commit_info,
+        "system": sys_info,
+        "display": display_info
     }
 
 

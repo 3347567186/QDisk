@@ -2099,9 +2099,122 @@
       return T('负载平稳', 'Idle / Smooth');
     }
 
+    /* ---------- 监测卡片指标库（3 个卡槽可在 7 种指标间无按钮切换） ---------- */
+    const PERF_INTERVAL_MS = 1000;
+    const PERF_MAX_SAMPLES = 48;
+    const PERF_LS_SLOTS = 'qdisk.perf.slots';
+    const PERF_LS_MODE = 'qdisk.perf.chartMode';
+    const PERF_DEFAULT_SLOTS = ['cpu_ram', 'disk_io', 'net_io'];
+    const PERF_MODES = ['smooth', 'sharp', 'bars'];
+    const PERF_MODE_NAMES = {
+      smooth: ['圆润曲线', 'Smooth curve'],
+      sharp: ['精准折线', 'Sharp line'],
+      bars: ['脉冲柱', 'Pulse bars']
+    };
+    const FPS_COLORS = [
+      ['#34D399', '翠绿', 'Green'], ['#FACC15', '明黄', 'Yellow'], ['#FFFFFF', '纯白', 'White'],
+      ['#38BDF8', '天蓝', 'Blue'], ['#FB7185', '珊瑚红', 'Coral'], ['#C084FC', '紫罗兰', 'Purple']
+    ];
+    const FPS_POSITIONS = [
+      ['top-left', '左上', 'Top left'], ['top-center', '中上', 'Top center'], ['top-right', '右上', 'Top right'],
+      ['bottom-left', '左下', 'Bottom left'], ['bottom-right', '右下', 'Bottom right'],
+      ['custom', '自定义拖动', 'Custom (drag)']
+    ];
+    const FPS_SIZES = [[24, '小', 'S'], [32, '中', 'M'], [44, '大', 'L']];
+
+    const PERF_METRICS = [
+      {
+        id: 'cpu_ram', cid: 'cpu-ram', grad: 'gradCpuRam', zh: '计算与内存', en: 'Compute & RAM',
+        legA: ['内存', 'RAM'], legB: ['CPU', 'CPU'], colorA: 'var(--chart-1)', colorB: 'var(--chart-2)',
+        keyA: 'memPct', keyB: 'cpuPct', max: 100,
+        fmt: (s) => T(`内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`, `RAM ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`),
+        compact: (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`
+      },
+      {
+        id: 'disk_io', cid: 'disk', grad: 'gradDiskIO', zh: '磁盘 I/O', en: 'Disk I/O',
+        legA: ['读', 'Read'], legB: ['写', 'Write'], colorA: '#38bdf8', colorB: '#f43f5e',
+        keyA: 'diskR', keyB: 'diskW', max: 0,
+        fmt: (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M · W ${(s.diskW || 0).toFixed(1)}M`),
+        compact: (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M / W ${(s.diskW || 0).toFixed(1)}M`)
+      },
+      {
+        id: 'net_io', cid: 'net', grad: 'gradNetIO', zh: '网络吞吐', en: 'Network',
+        legA: ['下行', 'Down'], legB: ['上行', 'Up'], colorA: '#10b981', colorB: '#a855f7',
+        keyA: 'netIn', keyB: 'netOut', max: 0,
+        fmt: (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
+        compact: (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`
+      },
+      {
+        id: 'gpu_vram', cid: 'gpu', grad: 'gradGpu', zh: 'GPU 与显存', en: 'GPU & VRAM',
+        legA: ['GPU', 'GPU'], legB: ['显存', 'VRAM'], colorA: '#f59e0b', colorB: '#6366f1',
+        keyA: 'gpuPct', keyB: 'vramRel', max: 100,
+        fmt: (s) => T(`GPU ${(s.gpuPct || 0).toFixed(0)}% · 显存 ${((s.vramMB || 0) / 1024).toFixed(1)}G`, `GPU ${(s.gpuPct || 0).toFixed(0)}% · VRAM ${((s.vramMB || 0) / 1024).toFixed(1)}G`),
+        compact: (s) => `GPU ${(s.gpuPct || 0).toFixed(0)}% / ${((s.vramMB || 0) / 1024).toFixed(1)}G`
+      },
+      {
+        id: 'commit_cache', cid: 'commit', grad: 'gradCommit', zh: '提交与缓存', en: 'Commit & Cache',
+        legA: ['提交', 'Commit'], legB: ['缓存', 'Cache'], colorA: '#14b8a6', colorB: '#ec4899',
+        keyA: 'commitPct', keyB: 'cacheRel', max: 100,
+        fmt: (s) => T(`提交 ${(s.commitPct || 0).toFixed(0)}% · 缓存 ${(s.cacheGB || 0).toFixed(1)}G`, `Commit ${(s.commitPct || 0).toFixed(0)}% · Cache ${(s.cacheGB || 0).toFixed(1)}G`),
+        compact: (s) => `${(s.commitPct || 0).toFixed(0)}% / ${(s.cacheGB || 0).toFixed(1)}G`
+      },
+      {
+        id: 'sys_load', cid: 'sys', grad: 'gradSys', zh: '线程与句柄', en: 'Threads & Handles',
+        legA: ['线程', 'Threads'], legB: ['句柄', 'Handles'], colorA: '#0ea5e9', colorB: '#f97316',
+        keyA: 'threadsScaled', keyB: 'handlesScaled', max: 0,
+        fmt: (s) => T(`线程 ${s.threads || 0} · 句柄 ${((s.handles || 0) / 1000).toFixed(0)}k`, `Threads ${s.threads || 0} · Handles ${((s.handles || 0) / 1000).toFixed(0)}k`),
+        compact: (s) => `${s.threads || 0} / ${((s.handles || 0) / 1000).toFixed(0)}k`
+      },
+      {
+        id: 'fps_frame', cid: 'fps', grad: 'gradFps', zh: '实时帧率', en: 'Live FPS',
+        legA: ['FPS', 'FPS'], legB: ['刷新率', 'Refresh'], colorA: '#22c55e', colorB: '#94a3b8',
+        keyA: 'fps', keyB: 'hz', max: 0,
+        fmt: (s) => `FPS ${s.fps || 0} · ${(s.frameMs || 0).toFixed(1)}ms`,
+        compact: (s) => `${s.fps || 0}fps / ${s.hz || 0}Hz`
+      }
+    ];
+
+    function perfMetric(id) {
+      for (let i = 0; i < PERF_METRICS.length; i++) if (PERF_METRICS[i].id === id) return PERF_METRICS[i];
+      return PERF_METRICS[0];
+    }
+
+    function loadPerfPrefs() {
+      let slots = PERF_DEFAULT_SLOTS.slice();
+      let mode = 'smooth';
+      try {
+        const raw = localStorage.getItem(PERF_LS_SLOTS);
+        const arr = raw ? JSON.parse(raw) : null;
+        if (Array.isArray(arr) && arr.length === 3 && new Set(arr).size === 3 &&
+          arr.every((id) => PERF_METRICS.some((m) => m.id === id))) {
+          slots = arr;
+        }
+        const m = localStorage.getItem(PERF_LS_MODE);
+        if (PERF_MODES.indexOf(m) >= 0) mode = m;
+      } catch (_e) { /* 无本地存储时用默认值 */ }
+      return slots.length ? { slots, chartMode: mode } : { slots: PERF_DEFAULT_SLOTS.slice(), chartMode: mode };
+    }
+
+    function savePerfPrefs() {
+      try {
+        localStorage.setItem(PERF_LS_SLOTS, JSON.stringify(PerfState.slots));
+        localStorage.setItem(PERF_LS_MODE, PerfState.chartMode);
+      } catch (_e) { /* 忽略 */ }
+    }
+
+    Object.assign(PerfState, loadPerfPrefs(), {
+      picker: null,
+      wheelTs: 0,
+      flashUntil: 0,
+      flashTimer: null,
+      grid: null,
+      vramPeak: 0,
+      fps: { enabled: false, color: '#34D399', position: 'top-left', locked: false, fontSize: 32 }
+    });
+
     function computeTimeAxisLabels(count) {
       if (!count || count <= 1) return ['', '', '', T('实时', 'Live')];
-      const totalSec = Math.max(3, Math.round((count - 1) * 1.5));
+      const totalSec = Math.max(3, Math.round((count - 1) * PERF_INTERVAL_MS / 1000));
       const s1 = '-' + totalSec + 's';
       const s2 = '-' + Math.max(2, Math.round(totalSec * 2 / 3)) + 's';
       const s3 = '-' + Math.max(1, Math.round(totalSec / 3)) + 's';
@@ -2112,7 +2225,7 @@
       class: 'chip ok sm',
       style: { cursor: 'pointer', userSelect: 'none', fontSize: '11px', padding: '3px 8px' },
       title: T('点击暂停/恢复实时采样', 'Click to pause/resume live sampling')
-    }, icon('activity', 12), h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (1.5s)', 'Live (1.5s)')));
+    }, icon('activity', 12), h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (1.0s)', 'Live (1.0s)')));
 
     livePerfBadge.onclick = () => {
       PerfState.isLive = !PerfState.isLive;
@@ -2129,7 +2242,7 @@
         livePerfBadge.className = 'chip ok sm';
         livePerfBadge.innerHTML = '';
         livePerfBadge.appendChild(icon('activity', 12));
-        livePerfBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (1.5s)', 'Live (1.5s)')));
+        livePerfBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('动态采样中 (1.0s)', 'Live (1.0s)')));
       } else {
         livePerfBadge.className = 'chip neutral sm';
         livePerfBadge.innerHTML = '';
@@ -2137,6 +2250,16 @@
         livePerfBadge.appendChild(h('span', { style: { marginLeft: '4px' } }, T('已暂停采样', 'Paused')));
       }
     }
+
+    const fpsChip = h('span', {
+      class: 'chip neutral sm',
+      style: { cursor: 'pointer', userSelect: 'none', fontSize: '11px', padding: '3px 8px' },
+      title: T('FPS 悬浮窗：无背景纯数字，可换色 / 换位置 / 自由拖动', 'FPS overlay: pure numbers, switchable color / position / drag')
+    });
+    fpsChip.addEventListener('click', (e) => { openFpsMenu(e); });
+    UI.attachMenu(fpsChip, () => fpsMenuItems());
+    updateFpsChip();
+    loadFpsOverlay();
 
     const btnPerfRefresh = btn('刷新快照', 'Refresh Snapshot', 'ghost sm', 'refresh', () => {
       fetchPerfSample(true);
@@ -2148,6 +2271,7 @@
       h('div', { class: 'card-title' },
         h('h2', null, T('系统资源与存储概览', 'System Resources & Storage')),
         h('span', { class: 'spacer' }),
+        fpsChip,
         livePerfBadge,
         btnPerfRefresh
       ),
@@ -2181,6 +2305,14 @@
         const netIn_KB = Number(((data.network_io && data.network_io.in_bps) || 0) / 1024).toFixed(1);
         const netOut_KB = Number(((data.network_io && data.network_io.out_bps) || 0) / 1024).toFixed(1);
 
+        const vramMB = Number(data.gpu && data.gpu.vram_mb) || 0;
+        PerfState.vramPeak = Math.max(PerfState.vramPeak || 0, vramMB);
+        const vramRel = Math.min(100, vramMB / Math.max(2048, PerfState.vramPeak * 1.15) * 100);
+        const cacheBytes = Number(data.commit && data.commit.cache) || 0;
+        const cacheGB = cacheBytes / 1073741824;
+        const cacheRel = Math.min(100, cacheBytes / Math.max(1, Number(data.memory && data.memory.total) || 1) * 100);
+        const threads = Number(data.system && data.system.threads) || 0;
+        const handles = Number(data.system && data.system.handles) || 0;
         PerfState.samples.push({
           time: timeStr,
           memPct,
@@ -2189,9 +2321,22 @@
           diskW: parseFloat(diskW_MB),
           netIn: parseFloat(netIn_KB),
           netOut: parseFloat(netOut_KB),
+          gpuPct: Number(data.gpu && data.gpu.percent) || 0,
+          vramMB,
+          vramRel,
+          commitPct: Number(data.commit && data.commit.percent) || 0,
+          cacheGB,
+          cacheRel,
+          threads,
+          handles,
+          threadsScaled: threads / 100,
+          handlesScaled: handles / 2000,
+          fps: Number(data.display && data.display.fps) || 0,
+          hz: Number(data.display && data.display.refresh_hz) || 0,
+          frameMs: Number(data.display && data.display.frame_ms) || 0,
           timestamp: Date.now()
         });
-        if (PerfState.samples.length > 30) {
+        if (PerfState.samples.length > PERF_MAX_SAMPLES) {
           PerfState.samples.shift();
         }
         GlobalAppsCache.perfSamples = PerfState.samples.slice();
@@ -2223,7 +2368,7 @@
       if (!isMounted || PerfState.liveTimer) return;
       PerfState.isLive = true;
       fetchPerfSample(true);
-      PerfState.liveTimer = setInterval(() => fetchPerfSample(false), 1500);
+      PerfState.liveTimer = setInterval(() => fetchPerfSample(false), PERF_INTERVAL_MS);
       updateLiveBadge();
     }
 
@@ -2248,14 +2393,62 @@
     }
     document.addEventListener('visibilitychange', onVisChange);
 
-    // 渲染通用单张交互式 SVG 速率/负载折线图
-    function buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, maxValFixed, gradId) {
+    /* Fritsch–Carlson 单调三次 Hermite 样条：圆润流畅且在 0% / 峰值处零过冲 */
+    function perfSplinePath(pts) {
+      const n = pts.length;
+      const f = (v) => v.toFixed(1);
+      if (n === 0) return '';
+      if (n === 1) return `M ${f(pts[0].x)},${f(pts[0].y)}`;
+      const dx = [];
+      const m = [];
+      for (let i = 0; i < n - 1; i++) {
+        dx[i] = (pts[i + 1].x - pts[i].x) || 1e-6;
+        m[i] = (pts[i + 1].y - pts[i].y) / dx[i];
+      }
+      const t = new Array(n);
+      t[0] = m[0];
+      t[n - 1] = m[n - 2];
+      for (let i = 1; i < n - 1; i++) {
+        t[i] = (m[i - 1] * m[i] <= 0) ? 0 : (m[i - 1] + m[i]) / 2;
+      }
+      for (let i = 0; i < n - 1; i++) {
+        if (m[i] === 0) { t[i] = 0; t[i + 1] = 0; continue; }
+        const a = t[i] / m[i];
+        const b = t[i + 1] / m[i];
+        const s = a * a + b * b;
+        if (s > 9) {
+          const tau = 3 / Math.sqrt(s);
+          t[i] = tau * a * m[i];
+          t[i + 1] = tau * b * m[i];
+        }
+      }
+      let d = `M ${f(pts[0].x)},${f(pts[0].y)}`;
+      for (let i = 0; i < n - 1; i++) {
+        const h3 = dx[i] / 3;
+        d += ` C ${f(pts[i].x + h3)},${f(pts[i].y + t[i] * h3)} ${f(pts[i + 1].x - h3)},${f(pts[i + 1].y - t[i + 1] * h3)} ${f(pts[i + 1].x)},${f(pts[i + 1].y)}`;
+      }
+      return d;
+    }
+
+    function perfChartMax(samples, keyA, keyB, maxFixed) {
+      if (maxFixed) return maxFixed;
+      let maxVal = 1.0;
+      samples.forEach((s) => {
+        if (s[keyA] > maxVal) maxVal = s[keyA];
+        if (s[keyB] > maxVal) maxVal = s[keyB];
+      });
+      return Math.max(1.0, maxVal * 1.25);
+    }
+
+    // 渲染通用单张交互式 SVG 速率/负载图（圆润曲线 / 精准折线 / 脉冲柱 三种形态）
+    function buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, maxValFixed, gradId, mode) {
       const W = 360;
       const H = 76;
       const padTop = 8;
       const padBottom = 14;
       const plotH = H - padTop - padBottom;
       const count = samples.length;
+      mode = PERF_MODES.indexOf(mode) >= 0 ? mode : 'smooth';
 
       if (count === 0) {
         return `
@@ -2266,55 +2459,72 @@
         `;
       }
 
-      let maxVal = maxValFixed || 1.0;
-      if (!maxValFixed) {
-        samples.forEach((s) => {
-          if (s[keyA] > maxVal) maxVal = s[keyA];
-          if (s[keyB] > maxVal) maxVal = s[keyB];
-        });
-        maxVal = Math.max(1.0, maxVal * 1.25);
-      }
-
-      const getX = (i) => {
-        if (count <= 1) return W - 10;
-        return (i / (count - 1)) * (W - 20) + 10;
-      };
+      const maxVal = perfChartMax(samples, keyA, keyB, maxValFixed);
+      const getX = (i) => (count <= 1 ? W - 10 : (i / (count - 1)) * (W - 20) + 10);
       const getY = (val) => padTop + (1.0 - Math.min(maxVal, Math.max(0, val || 0)) / maxVal) * plotH;
-
-      const ptsA = samples.map((s, i) => `${getX(i).toFixed(1)},${getY(s[keyA]).toFixed(1)}`);
-      const ptsB = samples.map((s, i) => `${getX(i).toFixed(1)},${getY(s[keyB]).toFixed(1)}`);
-
+      const baseH = (padTop + plotH).toFixed(1);
       const firstX = getX(0).toFixed(1);
       const lastX = getX(count - 1).toFixed(1);
-      const baseH = (padTop + plotH).toFixed(1);
 
-      const lineA = `M ${ptsA.join(' L ')}`;
-      const areaA = count > 1 ? `M ${firstX},${baseH} L ${ptsA.join(' L ')} L ${lastX},${baseH} Z` : '';
-      const lineB = `M ${ptsB.join(' L ')}`;
+      const ptsA = samples.map((s, i) => ({ x: getX(i), y: getY(s[keyA]) }));
+      const ptsB = samples.map((s, i) => ({ x: getX(i), y: getY(s[keyB]) }));
+
+      let body = '';
+      if (mode === 'bars') {
+        const slot = (W - 20) / Math.max(count, 1);
+        const bw = Math.max(1.4, Math.min(5.5, slot * 0.34));
+        const rect = (cx, off, v, color, op) => {
+          const y = getY(v);
+          const hh = Math.max(v > 0 ? 1 : 0, padTop + plotH - y);
+          return `<rect x="${(cx + off).toFixed(1)}" y="${(padTop + plotH - hh).toFixed(1)}" width="${bw.toFixed(1)}" height="${hh.toFixed(1)}" rx="${(bw / 2).toFixed(1)}" fill="${color}" opacity="${op}" />`;
+        };
+        samples.forEach((s, i) => {
+          const cx = getX(i);
+          body += rect(cx, -bw - 0.5, s[keyA], colorA, 0.92);
+          body += rect(cx, 0.5, s[keyB], colorB, 0.85);
+        });
+      } else {
+        const build = (pts) => (mode === 'smooth'
+          ? perfSplinePath(pts)
+          : `M ${pts.map((p) => p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' L ')}`);
+        const lineA = build(ptsA);
+        const lineB = build(ptsB);
+        const joinAttr = mode === 'smooth' ? 'round' : 'miter';
+        if (count > 1) {
+          body += `<path d="${lineA} L ${lastX},${baseH} L ${firstX},${baseH} Z" fill="url(#${gradId})" />`;
+          body += `<path d="${lineB} L ${lastX},${baseH} L ${firstX},${baseH} Z" fill="url(#${gradId}B)" />`;
+          body += `<path d="${lineA}" fill="none" stroke="${colorA}" stroke-width="2" stroke-linecap="round" stroke-linejoin="${joinAttr}" />`;
+          body += `<path d="${lineB}" fill="none" stroke="${colorB}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="${joinAttr}" opacity="0.95" />`;
+        }
+      }
 
       const latest = samples[count - 1];
       const curX = getX(count - 1).toFixed(1);
       const curYA = getY(latest[keyA]).toFixed(1);
       const curYB = getY(latest[keyB]).toFixed(1);
+      const dots = mode === 'bars' ? '' : `
+          <circle cx="${curX}" cy="${curYA}" r="3" fill="${colorA}" stroke="var(--surface)" stroke-width="1.5" />
+          <circle cx="${curX}" cy="${curYB}" r="3" fill="${colorB}" stroke="var(--surface)" stroke-width="1.5" />`;
+      const flash = Date.now() < PerfState.flashUntil
+        ? `<text x="${W - 6}" y="${padTop + 6}" text-anchor="end" font-size="10" fill="var(--text-3)">${T(PERF_MODE_NAMES[mode][0], PERF_MODE_NAMES[mode][1])}</text>`
+        : '';
 
       return `
         <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="display: block; overflow: visible;">
           <defs>
             <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="${colorA}" stop-opacity="0.22" />
+              <stop offset="0%" stop-color="${colorA}" stop-opacity="0.24" />
               <stop offset="100%" stop-color="${colorA}" stop-opacity="0.0" />
+            </linearGradient>
+            <linearGradient id="${gradId}B" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${colorB}" stop-opacity="0.12" />
+              <stop offset="100%" stop-color="${colorB}" stop-opacity="0.0" />
             </linearGradient>
           </defs>
           <line x1="0" y1="${padTop}" x2="${W}" y2="${padTop}" stroke="var(--line)" stroke-dasharray="3 3" opacity="0.4" />
           <line x1="0" y1="${padTop + plotH * 0.5}" x2="${W}" y2="${padTop + plotH * 0.5}" stroke="var(--line)" stroke-dasharray="3 3" opacity="0.4" />
           <line x1="0" y1="${baseH}" x2="${W}" y2="${baseH}" stroke="var(--line)" opacity="0.8" />
-
-          ${areaA ? `<path d="${areaA}" fill="url(#${gradId})" />` : ''}
-          ${count > 1 ? `<path d="${lineA}" fill="none" stroke="${colorA}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />` : ''}
-          ${count > 1 ? `<path d="${lineB}" fill="none" stroke="${colorB}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" />` : ''}
-
-          <circle cx="${curX}" cy="${curYA}" r="3" fill="${colorA}" stroke="var(--surface)" stroke-width="1.5" />
-          <circle cx="${curX}" cy="${curYB}" r="3" fill="${colorB}" stroke="var(--surface)" stroke-width="1.5" />
+          ${body}${dots}${flash}
 
           <!-- 交互悬停辅助标线、数据光点及浮动数据胶囊 -->
           <g class="chart-crosshair" style="display:none; pointer-events:none;">
@@ -2331,11 +2541,15 @@
     }
 
     // 绑定交互：鼠标滑过时动态展示光标、高亮样本点与悬浮数值（悬停期间防实时轮询打断）
-    function attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt) {
+    function attachChartCrosshair(cardEl, samples, mt) {
       const svg = cardEl.querySelector('svg');
       const crosshair = cardEl.querySelector('.chart-crosshair');
       const valEl = cardEl.querySelector('.chart-cur-val');
       if (!svg || !crosshair || !samples || !samples.length) return;
+      const keyA = mt.keyA;
+      const keyB = mt.keyB;
+      const defaultFmt = mt.fmt;
+      const compactFmt = mt.compact;
 
       const line = crosshair.querySelector('.crosshair-line');
       const dotA = crosshair.querySelector('.crosshair-dot-a');
@@ -2350,15 +2564,7 @@
       const padBottom = 14;
       const plotH = H - padTop - padBottom;
       const count = samples.length;
-
-      let maxVal = unit === '%' ? 100 : 1.0;
-      if (unit !== '%') {
-        samples.forEach((s) => {
-          if (s[keyA] > maxVal) maxVal = s[keyA];
-          if (s[keyB] > maxVal) maxVal = s[keyB];
-        });
-        maxVal = Math.max(1.0, maxVal * 1.25);
-      }
+      const maxVal = perfChartMax(samples, keyA, keyB, mt.max);
 
       const getX = (i) => (count <= 1 ? W - 10 : (i / (count - 1)) * (W - 20) + 10);
       const getY = (val) => padTop + (1.0 - Math.min(maxVal, Math.max(0, val || 0)) / maxVal) * plotH;
@@ -2416,18 +2622,301 @@
       cardEl.onmouseleave = onLeave;
     }
 
-    function updateChartCardLive(cardEl, samples, keyA, keyB, colorA, colorB, maxFixed, gradId, unit, defaultFmt, compactFmt) {
+    function updateChartCardLive(cardEl, samples, mt, force) {
       if (!cardEl) return;
-      if (isChartHovered(cardEl.id)) return;
-      const latest = samples.length ? samples[samples.length - 1] : { memPct: 0, cpuPct: 0, diskR: 0, diskW: 0, netIn: 0, netOut: 0 };
+      if (!force && isChartHovered(cardEl.id)) return;
+      const latest = samples.length ? samples[samples.length - 1] : {};
       const valEl = cardEl.querySelector('.chart-cur-val');
-      if (valEl) valEl.textContent = defaultFmt(latest);
+      if (valEl) valEl.textContent = mt.fmt(latest);
       const svgBox = cardEl.querySelector('.chart-svg-box');
-      if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, maxFixed, gradId);
+      if (svgBox) svgBox.innerHTML = buildInteractiveRateSvg(samples, mt.keyA, mt.keyB, mt.colorA, mt.colorB, mt.max, mt.grad, PerfState.chartMode);
       const axisSpans = cardEl.querySelectorAll('.chart-time-axis span');
       const labels = computeTimeAxisLabels(samples.length);
       axisSpans.forEach((sp, idx) => { sp.textContent = labels[idx] || ''; });
-      attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt);
+      attachChartCrosshair(cardEl, samples, mt);
+    }
+
+    /* ---------- 无按钮交互：滚轮 / 点标题 / 右键 ---------- */
+    function refreshAllCharts() {
+      if (!PerfState.grid) return;
+      PerfState.hoveredCharts.clear();
+      PerfState.slots.forEach((id) => {
+        const mt = perfMetric(id);
+        updateChartCardLive(PerfState.grid.querySelector('#fp-chart-card-' + mt.cid), PerfState.samples, mt, true);
+      });
+    }
+
+    function cyclePerfChartMode(target) {
+      const next = PERF_MODES.indexOf(target) >= 0
+        ? target
+        : PERF_MODES[(PERF_MODES.indexOf(PerfState.chartMode) + 1) % PERF_MODES.length];
+      PerfState.chartMode = next;
+      savePerfPrefs();
+      PerfState.flashUntil = Date.now() + 1400;
+      refreshAllCharts();
+      if (PerfState.flashTimer) clearTimeout(PerfState.flashTimer);
+      PerfState.flashTimer = setTimeout(() => {
+        PerfState.flashTimer = null;
+        if (isMounted && currentTab === 'footprint') refreshAllCharts();
+      }, 1500);
+    }
+
+    function setPerfSlot(i, id) {
+      const cur = PerfState.slots.slice();
+      const j = cur.indexOf(id);
+      if (j === i) return;
+      const changed = [i];
+      if (j >= 0) { cur[j] = cur[i]; changed.push(j); }
+      cur[i] = id;
+      PerfState.slots = cur;
+      savePerfPrefs();
+      closePerfPicker();
+      PerfState.hoveredCharts.clear();
+      if (PerfState.grid) fillMonitorGrid(PerfState.grid, changed);
+    }
+
+    function shiftPerfSlot(i, dir) {
+      const order = PERF_METRICS.map((m) => m.id);
+      let pos = order.indexOf(PerfState.slots[i]);
+      for (let k = 0; k < order.length; k++) {
+        pos = (pos + dir + order.length) % order.length;
+        const cand = order[pos];
+        if (PerfState.slots.indexOf(cand) < 0) { setPerfSlot(i, cand); return; }
+      }
+    }
+
+    function closePerfPicker() {
+      const p = PerfState.picker;
+      if (!p) return;
+      PerfState.picker = null;
+      try {
+        document.removeEventListener('mousedown', p.onDown, true);
+        document.removeEventListener('keydown', p.onKey, true);
+      } catch (_e) { /* 忽略 */ }
+      if (p.el && p.el.parentNode) p.el.parentNode.removeChild(p.el);
+    }
+
+    function openPerfPicker(slotIdx, anchor) {
+      closePerfPicker();
+      const host = document.body || document.getElementById('ctx-root');
+      if (!host) return;
+      const rows = PERF_METRICS.map((m) => {
+        const shown = PerfState.slots.indexOf(m.id);
+        const cur = shown === slotIdx;
+        return h('div', {
+          class: 'perf-picker-row',
+          style: {
+            display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 10px', borderRadius: '8px',
+            cursor: 'pointer', fontSize: '12px', color: 'var(--text-1)',
+            background: cur ? 'var(--surface-2)' : 'transparent'
+          },
+          onclick: (e) => { if (e && e.stopPropagation) e.stopPropagation(); setPerfSlot(slotIdx, m.id); }
+        },
+          h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: m.colorA, flexShrink: '0' } }),
+          h('span', { style: { flex: '1' } }, T(m.zh, m.en)),
+          h('span', { style: { fontSize: '10px', color: 'var(--text-3)' } },
+            cur ? '✓' : (shown >= 0 ? T('已显示', 'Shown') : ''))
+        );
+      });
+      const el = h('div', {
+        class: 'perf-picker',
+        style: {
+          position: 'fixed', zIndex: '3000', minWidth: '196px', padding: '6px',
+          background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: '12px',
+          boxShadow: '0 12px 32px rgba(0,0,0,0.18)', animation: 'perfCardIn .18s ease'
+        }
+      }, ...rows);
+      host.appendChild(el);
+      try {
+        const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: 40, bottom: 40 };
+        const pw = 210;
+        el.style.left = Math.max(8, Math.min((window.innerWidth || 1200) - pw - 8, r.left)) + 'px';
+        el.style.top = (r.bottom + 6) + 'px';
+      } catch (_e) { /* 忽略 */ }
+      const p = {
+        el,
+        onDown: (e) => { if (!el.contains || !el.contains(e.target)) closePerfPicker(); },
+        onKey: (e) => { if (e && e.key === 'Escape') closePerfPicker(); }
+      };
+      PerfState.picker = p;
+      document.addEventListener('mousedown', p.onDown, true);
+      document.addEventListener('keydown', p.onKey, true);
+    }
+
+    /* ---------- FPS 悬浮窗（零背景纯数字，由原生 Win32 分层窗口渲染） ---------- */
+    async function patchFpsOverlay(patch) {
+      if (typeof API.fpsOverlaySet !== 'function') {
+        toast(T('当前环境不支持 FPS 悬浮窗', 'FPS overlay is not available here'), 'error');
+        return;
+      }
+      try {
+        const next = await API.fpsOverlaySet(patch);
+        if (next) PerfState.fps = Object.assign({}, PerfState.fps, next);
+        updateFpsChip();
+      } catch (err) {
+        toast(errText(err), 'error');
+      }
+    }
+
+    async function loadFpsOverlay() {
+      if (typeof API.fpsOverlayGet !== 'function') return;
+      try {
+        const c = await API.fpsOverlayGet();
+        if (c && isMounted) {
+          PerfState.fps = Object.assign({}, PerfState.fps, c);
+          updateFpsChip();
+        }
+      } catch (_e) { /* 忽略 */ }
+    }
+
+    function fpsMenuItems() {
+      const f = PerfState.fps;
+      const mark = (on) => (on ? '✓ ' : '　');
+      const items = [
+        { label: (f.enabled ? '■ ' : '▶ ') + T(f.enabled ? '关闭 FPS 悬浮窗' : '开启 FPS 悬浮窗', f.enabled ? 'Turn off FPS overlay' : 'Turn on FPS overlay'), action: () => patchFpsOverlay({ enabled: !f.enabled }) },
+        { sep: true },
+        { header: T('位置', 'Position') }
+      ];
+      FPS_POSITIONS.forEach((p) => {
+        items.push({
+          label: mark(f.position === p[0]) + T(p[1], p[2]),
+          action: () => {
+            patchFpsOverlay({ position: p[0], locked: p[0] === 'custom' ? false : f.locked });
+            if (p[0] === 'custom') toast(T('按住屏幕上的数字拖到任意位置，拖好后可在此菜单锁定', 'Drag the number anywhere, then lock it here'), 'ok');
+          }
+        });
+      });
+      if (f.position === 'custom') {
+        items.push({ label: mark(f.locked) + T('锁定位置（鼠标穿透）', 'Lock position (click-through)'), action: () => patchFpsOverlay({ locked: !f.locked }) });
+      }
+      items.push({ sep: true }, { header: T('颜色', 'Color') });
+      FPS_COLORS.forEach((c) => {
+        items.push({ label: mark(String(f.color).toUpperCase() === c[0]) + '● ' + T(c[1], c[2]) + '  ' + c[0], action: () => patchFpsOverlay({ color: c[0] }) });
+      });
+      items.push({ sep: true }, { header: T('字号', 'Size') });
+      FPS_SIZES.forEach((s) => {
+        items.push({ label: mark(Number(f.fontSize) === s[0]) + T(s[1], s[2]) + ` (${s[0]})`, action: () => patchFpsOverlay({ fontSize: s[0] }) });
+      });
+      return items;
+    }
+
+    async function openFpsMenu(evt) {
+      await loadFpsOverlay();
+      UI.menu(evt, fpsMenuItems());
+    }
+
+    function updateFpsChip() {
+      if (typeof fpsChip === 'undefined' || !fpsChip) return;
+      const on = !!(PerfState.fps && PerfState.fps.enabled);
+      fpsChip.className = on ? 'chip ok sm' : 'chip neutral sm';
+      fpsChip.innerHTML = '';
+      fpsChip.appendChild(icon('zap', 12));
+      fpsChip.appendChild(h('span', { style: { marginLeft: '4px' } }, T(on ? 'FPS 悬浮窗 · 开' : 'FPS 悬浮窗', on ? 'FPS overlay · on' : 'FPS overlay')));
+    }
+
+    /* ---------- 监测卡片（3 个卡槽，布局与原先完全一致） ---------- */
+    function createMonitorCard(slotIdx) {
+      const mt = perfMetric(PerfState.slots[slotIdx]);
+      const samples = PerfState.samples;
+      const latest = samples.length ? samples[samples.length - 1] : {};
+      const nowrap = { whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' };
+      const legend = (color, text) => h('span', { class: 'row', style: Object.assign({ alignItems: 'center', gap: '3px' }, nowrap) },
+        h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: color, flexShrink: '0' } }),
+        h('span', { style: Object.assign({ color: 'var(--text-3)' }, nowrap) }, text)
+      );
+
+      const titleEl = h('strong', {
+        style: Object.assign({ fontSize: '12px', color: 'var(--text-1)', cursor: 'pointer', userSelect: 'none' }, nowrap),
+        title: T('点击选择指标 · 滚轮快速切换 · 右键更多', 'Click to pick · wheel to switch · right-click for more')
+      }, T(mt.zh, mt.en));
+      titleEl.addEventListener('click', (e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
+        openPerfPicker(slotIdx, titleEl);
+      });
+
+      const cHeader = h('div', {
+        class: 'row',
+        style: {
+          justifyContent: 'space-between', alignItems: 'center', height: '24px', minHeight: '24px', maxHeight: '24px',
+          lineHeight: '24px', overflow: 'hidden', whiteSpace: 'nowrap', flexWrap: 'nowrap', marginBottom: '6px'
+        }
+      },
+        h('div', { class: 'row', style: Object.assign({ alignItems: 'center', gap: '6px', minWidth: '0' }, nowrap) },
+          titleEl,
+          h('div', { class: 'row', style: Object.assign({ gap: '6px', fontSize: '10px' }, nowrap) },
+            legend(mt.colorA, T(mt.legA[0], mt.legA[1])),
+            legend(mt.colorB, T(mt.legB[0], mt.legB[1]))
+          )
+        ),
+        h('span', {
+          class: 'chart-cur-val mono',
+          style: { fontSize: '11px', color: 'var(--text-2)', whiteSpace: 'nowrap', flexShrink: '0', overflow: 'hidden', textOverflow: 'ellipsis', textAlign: 'right', wordBreak: 'keep-all' }
+        }, mt.fmt(latest))
+      );
+      cHeader.addEventListener('wheel', (e) => {
+        if (e && e.preventDefault) e.preventDefault();
+        const now = Date.now();
+        if (now - PerfState.wheelTs < 180) return;
+        PerfState.wheelTs = now;
+        shiftPerfSlot(slotIdx, (e && e.deltaY < 0) ? -1 : 1);
+      }, { passive: false });
+
+      const svgBox = h('div', {
+        class: 'chart-svg-box',
+        style: { width: '100%', height: '76px', cursor: 'pointer' },
+        title: T('点击切换图表形态', 'Click to switch chart style')
+      });
+      svgBox.innerHTML = buildInteractiveRateSvg(samples, mt.keyA, mt.keyB, mt.colorA, mt.colorB, mt.max, mt.grad, PerfState.chartMode);
+      svgBox.addEventListener('click', () => cyclePerfChartMode());
+
+      const axisLabels = computeTimeAxisLabels(samples.length);
+      const timeAxis = h('div', { class: 'row chart-time-axis', style: { justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-3)', marginTop: '2px' } },
+        h('span', null, axisLabels[0]), h('span', null, axisLabels[1]), h('span', null, axisLabels[2]), h('span', null, axisLabels[3])
+      );
+
+      const cardEl = h('div', {
+        id: 'fp-chart-card-' + mt.cid,
+        style: {
+          padding: '10px 14px', background: 'var(--surface-2)', border: '1px solid var(--line)',
+          borderRadius: 'var(--radius)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between'
+        }
+      }, cHeader, svgBox, timeAxis);
+
+      UI.attachMenu(cardEl, () => {
+        const f = PerfState.fps || {};
+        const items = [{ header: T('切换指标', 'Metric') }];
+        PERF_METRICS.forEach((m) => {
+          items.push({ label: (PerfState.slots[slotIdx] === m.id ? '✓ ' : '　') + T(m.zh, m.en), action: () => setPerfSlot(slotIdx, m.id) });
+        });
+        items.push({ sep: true }, { header: T('图表形态（全部卡片）', 'Chart style (all cards)') });
+        PERF_MODES.forEach((m) => {
+          items.push({ label: (PerfState.chartMode === m ? '✓ ' : '　') + T(PERF_MODE_NAMES[m][0], PERF_MODE_NAMES[m][1]), action: () => cyclePerfChartMode(m) });
+        });
+        items.push({ sep: true });
+        items.push({ label: T(f.enabled ? '关闭 FPS 悬浮窗' : '开启 FPS 悬浮窗', f.enabled ? 'Turn off FPS overlay' : 'Turn on FPS overlay'), action: () => patchFpsOverlay({ enabled: !f.enabled }) });
+        items.push({
+          label: T('恢复默认三张卡片', 'Reset to default cards'),
+          action: () => {
+            PerfState.slots = PERF_DEFAULT_SLOTS.slice();
+            savePerfPrefs();
+            PerfState.hoveredCharts.clear();
+            if (PerfState.grid) fillMonitorGrid(PerfState.grid, [0, 1, 2]);
+          }
+        });
+        return items;
+      });
+
+      attachChartCrosshair(cardEl, samples, mt);
+      return cardEl;
+    }
+
+    function fillMonitorGrid(grid, animateIdx) {
+      grid.innerHTML = '';
+      PerfState.slots.forEach((_id, i) => {
+        const c = createMonitorCard(i);
+        if (animateIdx && animateIdx.indexOf(i) >= 0) c.style.animation = 'perfCardIn .28s ease';
+        grid.appendChild(c);
+      });
     }
 
     function updateFootprintLiveView() {
@@ -2498,25 +2987,11 @@
         if (bFree) bFree.style.width = pctFree + '%';
       });
 
-      // 实时更新 3 张动态图表与右上角实时读数
-      updateChartCardLive(
-        container.querySelector('#fp-chart-card-cpu-ram'),
-        samples, 'memPct', 'cpuPct', 'var(--chart-1)', 'var(--chart-2)', 100, 'gradCpuRam', '%',
-        (s) => T(`内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`, `RAM ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`),
-        (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`
-      );
-      updateChartCardLive(
-        container.querySelector('#fp-chart-card-disk'),
-        samples, 'diskR', 'diskW', '#38bdf8', '#f43f5e', 0, 'gradDiskIO', 'MB/s',
-        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M · W ${(s.diskW || 0).toFixed(1)}M`),
-        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M / W ${(s.diskW || 0).toFixed(1)}M`)
-      );
-      updateChartCardLive(
-        container.querySelector('#fp-chart-card-net'),
-        samples, 'netIn', 'netOut', '#10b981', '#a855f7', 0, 'gradNetIO', 'KB/s',
-        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
-        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`
-      );
+      // 实时更新 3 个卡槽的动态图表与右上角实时读数
+      PerfState.slots.forEach((id) => {
+        const mt = perfMetric(id);
+        updateChartCardLive(container.querySelector('#fp-chart-card-' + mt.cid), samples, mt);
+      });
     }
 
     function renderFootprint() {
@@ -2668,117 +3143,8 @@
         }
       });
 
-      function createMonitorCard(id, title, legA, legB, colorA, colorB, keyA, keyB, unit, defaultFmt, compactFmt, gradId) {
-        const samples = PerfState.samples;
-        const latest = samples.length ? samples[samples.length - 1] : { memPct: 0, cpuPct: 0, diskR: 0, diskW: 0, netIn: 0, netOut: 0 };
-
-        const cHeader = h('div', {
-          class: 'row',
-          style: {
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            height: '24px',
-            minHeight: '24px',
-            maxHeight: '24px',
-            lineHeight: '24px',
-            overflow: 'hidden',
-            whiteSpace: 'nowrap',
-            flexWrap: 'nowrap',
-            marginBottom: '6px'
-          }
-        },
-          h('div', { class: 'row', style: { alignItems: 'center', gap: '6px', minWidth: '0', flexShrink: '0', whiteSpace: 'nowrap' } },
-            h('strong', { style: { fontSize: '12px', color: 'var(--text-1)', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } }, title),
-            h('div', { class: 'row', style: { gap: '6px', fontSize: '10px', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } },
-              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } },
-                h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorA, flexShrink: '0' } }),
-                h('span', { style: { color: 'var(--text-3)', whiteSpace: 'nowrap', wordBreak: 'keep-all' } }, legA)
-              ),
-              h('span', { class: 'row', style: { alignItems: 'center', gap: '3px', whiteSpace: 'nowrap', flexShrink: '0', wordBreak: 'keep-all' } },
-                h('span', { style: { width: '6px', height: '6px', borderRadius: '50%', background: colorB, flexShrink: '0' } }),
-                h('span', { style: { color: 'var(--text-3)', whiteSpace: 'nowrap', wordBreak: 'keep-all' } }, legB)
-              )
-            )
-          ),
-          h('span', {
-            class: 'chart-cur-val mono',
-            style: {
-              fontSize: '11px',
-              color: 'var(--text-2)',
-              whiteSpace: 'nowrap',
-              flexShrink: '0',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              textAlign: 'right',
-              wordBreak: 'keep-all'
-            }
-          }, defaultFmt(latest))
-        );
-
-        const svgBox = h('div', { class: 'chart-svg-box', style: { width: '100%', height: '76px' } });
-        svgBox.innerHTML = buildInteractiveRateSvg(samples, keyA, keyB, colorA, colorB, unit === '%' ? 100 : 0, gradId);
-
-        const axisLabels = computeTimeAxisLabels(samples.length);
-        const timeAxis = h('div', { class: 'row chart-time-axis', style: { justifyContent: 'space-between', fontSize: '10px', color: 'var(--text-3)', marginTop: '2px' } },
-          h('span', null, axisLabels[0]),
-          h('span', null, axisLabels[1]),
-          h('span', null, axisLabels[2]),
-          h('span', null, axisLabels[3])
-        );
-
-        const cardEl = h('div', {
-          id,
-          style: {
-            padding: '10px 14px',
-            background: 'var(--surface-2)',
-            border: '1px solid var(--line)',
-            borderRadius: 'var(--radius)',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between'
-          }
-        }, cHeader, svgBox, timeAxis);
-
-        attachChartCrosshair(cardEl, samples, keyA, keyB, unit, defaultFmt, compactFmt);
-        return cardEl;
-      }
-
-      const cardCpuRam = createMonitorCard(
-        'fp-chart-card-cpu-ram',
-        T('计算与内存', 'Compute & RAM'),
-        T('内存', 'RAM'), 'CPU',
-        'var(--chart-1)', 'var(--chart-2)',
-        'memPct', 'cpuPct', '%',
-        (s) => T(`内存 ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`, `RAM ${s.memPct || 0}% · CPU ${s.cpuPct || 0}%`),
-        (s) => `RAM ${s.memPct || 0}% / CPU ${s.cpuPct || 0}%`,
-        'gradCpuRam'
-      );
-
-      const cardDiskIO = createMonitorCard(
-        'fp-chart-card-disk',
-        T('磁盘 I/O', 'Disk I/O'),
-        T('读', 'Read'), T('写', 'Write'),
-        '#38bdf8', '#f43f5e',
-        'diskR', 'diskW', 'MB/s',
-        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M · 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M · W ${(s.diskW || 0).toFixed(1)}M`),
-        (s) => T(`读 ${(s.diskR || 0).toFixed(1)}M / 写 ${(s.diskW || 0).toFixed(1)}M`, `R ${(s.diskR || 0).toFixed(1)}M / W ${(s.diskW || 0).toFixed(1)}M`),
-        'gradDiskIO'
-      );
-
-      const cardNetIO = createMonitorCard(
-        'fp-chart-card-net',
-        T('网络吞吐', 'Network'),
-        T('下行', 'Down'), T('上行', 'Up'),
-        '#10b981', '#a855f7',
-        'netIn', 'netOut', 'KB/s',
-        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K · ↑ ${(s.netOut || 0).toFixed(0)}K`,
-        (s) => `↓ ${(s.netIn || 0).toFixed(0)}K / ↑ ${(s.netOut || 0).toFixed(0)}K`,
-        'gradNetIO'
-      );
-
-      monitorGrid.appendChild(cardCpuRam);
-      monitorGrid.appendChild(cardDiskIO);
-      monitorGrid.appendChild(cardNetIO);
+      PerfState.grid = monitorGrid;
+      fillMonitorGrid(monitorGrid);
       container.appendChild(monitorGrid);
 
       /* ================= SECTION 3: 磁盘分区水位透视 ================= */
@@ -4479,6 +4845,9 @@
       PerfState.isLive = false;
       PerfState.hoveredCharts.clear();
       stopLiveMonitoring();
+      closePerfPicker();
+      if (PerfState.flashTimer) { clearTimeout(PerfState.flashTimer); PerfState.flashTimer = null; }
+      PerfState.grid = null;
       ProcState.isLive = false;
       stopProcLiveMonitoring();
       document.removeEventListener('visibilitychange', onVisChange);

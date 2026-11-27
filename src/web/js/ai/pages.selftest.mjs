@@ -3041,6 +3041,53 @@ function findNodes(rootNode, pred, out = []) {
     process.exit(1);
   }
 
+  // 18i. 监测卡片：默认圆润样条曲线；点击图表循环形态；滚轮切换卡槽指标（无按钮）；卸载后无残留选择器
+  {
+    const getBox = (host, cid) => {
+      const c = findNodes(host, (n) => n.id === 'fp-chart-card-' + cid)[0];
+      return c && findNodes(c, (n) => n.classList && n.classList.contains('chart-svg-box'))[0];
+    };
+    const cpuBox = getBox(appsHost18b, 'cpu-ram');
+    if (!cpuBox || !String(cpuBox.innerHTML).includes(' C ')) {
+      console.error('[红队回归 18i] 默认形态应为圆润样条曲线（含三次贝塞尔 C 命令）');
+      process.exit(1);
+    }
+    const fireClick = (n) => {
+      if (n.listeners && n.listeners.click && n.listeners.click.length) n.dispatchEvent(new sandbox.Event('click'));
+      else if (typeof n.onclick === 'function') n.onclick();
+    };
+    fireClick(cpuBox);
+    if (String(getBox(appsHost18b, 'cpu-ram').innerHTML).includes(' C ')) {
+      console.error('[红队回归 18i] 点击图表后应切到精准折线');
+      process.exit(1);
+    }
+    fireClick(getBox(appsHost18b, 'cpu-ram'));
+    if (!String(getBox(appsHost18b, 'cpu-ram').innerHTML).includes('<rect')) {
+      console.error('[红队回归 18i] 再次点击应切到脉冲柱');
+      process.exit(1);
+    }
+    fireClick(getBox(appsHost18b, 'cpu-ram'));
+    const cpuCardW = findNodes(appsHost18b, (n) => n.id === 'fp-chart-card-cpu-ram')[0];
+    const headerW = findNodes(cpuCardW, (n) => n.listeners && n.listeners.wheel && n.listeners.wheel.length)[0];
+    if (!headerW) {
+      console.error('[红队回归 18i] 卡片标题栏缺少滚轮切换监听');
+      process.exit(1);
+    }
+    headerW.dispatchEvent(new sandbox.Event('wheel'));
+    if (!findNodes(appsHost18b, (n) => n.id === 'fp-chart-card-gpu')[0] ||
+      findNodes(appsHost18b, (n) => n.id === 'fp-chart-card-cpu-ram')[0]) {
+      console.error('[红队回归 18i] 滚轮应将第 1 卡槽切到 GPU 与显存');
+      process.exit(1);
+    }
+    const stored = JSON.parse(sandbox.localStorage.getItem('qdisk.perf.slots') || '[]');
+    if (stored[0] !== 'gpu_vram' || stored.length !== 3) {
+      console.error('[红队回归 18i] 卡槽选择未持久化: ' + JSON.stringify(stored));
+      process.exit(1);
+    }
+    sandbox.localStorage.setItem('qdisk.perf.slots', JSON.stringify(['cpu_ram', 'disk_io', 'net_io']));
+    sandbox.localStorage.setItem('qdisk.perf.chartMode', 'smooth');
+  }
+
   umApps18b();
   sandbox.UI.closeModals();
   delete sandbox.document._byId['toasts'];

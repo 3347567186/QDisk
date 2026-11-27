@@ -116,6 +116,10 @@
     }),
     updaterInstall: (silent) => invoke('updater_install', { silent: !!silent }),
     updaterChangelog: (includeRemote) => invoke('updater_changelog', { includeRemote: !!includeRemote }),
+    /* 零背景纯数字 FPS 桌面悬浮窗 */
+    fpsOverlayGet: () => invoke('fps_overlay_get'),
+    fpsOverlaySet: (patch) => invoke('fps_overlay_set', { patch: patch || {} }),
+    fpsOverlaySample: () => invoke('fps_overlay_sample'),
   logRead: (path, maxBytes) => invoke('log_read', { path, maxBytes: maxBytes || null }),
     logClear: () => invoke('log_clear'),
     logLine: (level, msg) => invoke('log_line', { level, msg }),

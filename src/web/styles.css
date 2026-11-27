@@ -6663,3 +6663,5 @@ dialog.cl-dialog.cl-dialog-fallback {
   .org-view-btn, .tool-view-btn, .upd-seg-btn, .upd-check-btn, .upd-notes-btn, .cl-sync-btn, .cl-close-x, .cl-ok-btn, .ix-drive-row,
   .set-seg-btn, .set-outline-btn, .set-text-btn, .set-switch-track, .set-switch-track::after, .set-more-sum, .set-more-sum::before { transition: none; animation: none; }
 }
+
+@keyframes perfCardIn { from { opacity: 0; transform: translateY(4px) scale(.985); } to { opacity: 1; transform: none; } }
