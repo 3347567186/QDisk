@@ -1490,7 +1490,7 @@ function findNodes(rootNode, pred, out = []) {
     currentVersion: '1.43.13',
     installKind: 'portable',
     busy: false,
-    releasesPage: 'https://github.com/3347567186/QDisk/releases',
+    releasesPage: 'https://github.com/Bireo/QDisk/releases',
     config: {
       channel: 'stable',
       autoCheck: true,
@@ -1518,11 +1518,11 @@ function findNodes(rootNode, pred, out = []) {
     channel: 'stable',
     pubDate: '2026-11-23',
     notes: '红队验证版本更新说明',
-    downloadUrl: 'https://github.com/3347567186/QDisk/releases/download/v9.9.9/app.zip',
+    downloadUrl: 'https://github.com/Bireo/QDisk/releases/download/v9.9.9/app.zip',
     fileName: '整理助手_9.9.9_便携版.zip',
     size: 25 * 1024 * 1024,
     sha256: fakeSha,
-    manifestUrl: 'https://github.com/3347567186/QDisk/releases/latest/download/latest.json',
+    manifestUrl: 'https://github.com/Bireo/QDisk/releases/latest/download/latest.json',
     staged: null
   });
   sandbox.API.updaterDownload = () => new Promise((res, rej) => {
@@ -2652,7 +2652,7 @@ function findNodes(rootNode, pred, out = []) {
     currentVersion: '1.46.0',
     installKind: 'installer',
     busy: false,
-    releasesPage: 'https://github.com/3347567186/QDisk/releases',
+    releasesPage: 'https://github.com/Bireo/QDisk/releases',
     config: { channel: 'stable', autoCheck: true, ignoredVersion: '', lastCheckAt: '04:25:23' },
     updatesDir: 'D:\\data\\updates',
     cacheBytes: 0,
@@ -2666,11 +2666,11 @@ function findNodes(rootNode, pred, out = []) {
       total: 3,
       remoteSynced: !!includeRemote,
       remoteError: '',
-      releasesPage: 'https://github.com/3347567186/QDisk/releases',
+      releasesPage: 'https://github.com/Bireo/QDisk/releases',
       entries: [
-        { id: '1.46.0', version: '1.46.0', kind: 'minor', title: '全能文件预览与一键全盘索引', summary: '全能文件预览', body: '### 新功能\n- 完整更新内容弹窗', date: '2026-11-24', isCurrent: true, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.46.0' },
-        { id: '1.45.0', version: '1.45.0', kind: 'minor', title: '软件内优先打开重构', summary: '软件内优先打开', body: '### 历史版本内容\n- 真实磁盘探测', date: '2026-11-24', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.45.0' },
-        { id: '1.44.1', version: '1.44.1', kind: 'patch', title: '极简更新卡片', summary: '极简更新卡片', body: '### 修复\n- 极简更新体验', date: '2026-11-23', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/3347567186/QDisk/releases/tag/v1.44.1' }
+        { id: '1.46.0', version: '1.46.0', kind: 'minor', title: '全能文件预览与一键全盘索引', summary: '全能文件预览', body: '### 新功能\n- 完整更新内容弹窗', date: '2026-11-24', isCurrent: true, isPrerelease: false, source: 'local', url: 'https://github.com/Bireo/QDisk/releases/tag/v1.46.0' },
+        { id: '1.45.0', version: '1.45.0', kind: 'minor', title: '软件内优先打开重构', summary: '软件内优先打开', body: '### 历史版本内容\n- 真实磁盘探测', date: '2026-11-24', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/Bireo/QDisk/releases/tag/v1.45.0' },
+        { id: '1.44.1', version: '1.44.1', kind: 'patch', title: '极简更新卡片', summary: '极简更新卡片', body: '### 修复\n- 极简更新体验', date: '2026-11-23', isCurrent: false, isPrerelease: false, source: 'local', url: 'https://github.com/Bireo/QDisk/releases/tag/v1.44.1' }
       ]
     };
   };

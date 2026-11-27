@@ -25,21 +25,21 @@ const MAX_REDIRECTS: usize = 5;
 
 /// 官方内置 GitHub Releases 更新源（无需用户在设置中手动填写任何网址）。
 pub const OFFICIAL_FEED_URL: &str =
-    "https://github.com/3347567186/QDisk/releases/latest/download/latest.json";
+    "https://github.com/Bireo/QDisk/releases/latest/download/latest.json";
 pub const OFFICIAL_LATEST_REDIRECT_URL: &str =
-    "https://github.com/3347567186/QDisk/releases/latest";
+    "https://github.com/Bireo/QDisk/releases/latest";
 pub const OFFICIAL_API_LATEST_URL: &str =
-    "https://api.github.com/repos/3347567186/QDisk/releases/latest";
+    "https://api.github.com/repos/Bireo/QDisk/releases/latest";
 pub const OFFICIAL_API_RELEASES_URL: &str =
-    "https://api.github.com/repos/3347567186/QDisk/releases?per_page=8";
+    "https://api.github.com/repos/Bireo/QDisk/releases?per_page=8";
 /// 零 API 限流官方发布 Atom 订阅源（覆盖正式版与 Beta 预发布版，规避未登录 `api.github.com` 403 限流）。
 pub const OFFICIAL_RELEASES_ATOM_URL: &str =
-    "https://github.com/3347567186/QDisk/releases.atom";
+    "https://github.com/Bireo/QDisk/releases.atom";
 pub const OFFICIAL_RELEASES_PAGE: &str =
-    "https://github.com/3347567186/QDisk/releases";
+    "https://github.com/Bireo/QDisk/releases";
 /// 远端历史版本日志（按需同步，带 20 条上限与独立超时）。
 pub const OFFICIAL_API_CHANGELOG_URL: &str =
-    "https://api.github.com/repos/3347567186/QDisk/releases?per_page=20";
+    "https://api.github.com/repos/Bireo/QDisk/releases?per_page=20";
 
 /// 编译期内嵌完整变更记录，确保安装版与便携版在完全离线状态下也能秒开全部历史版本日志。
 const EMBEDDED_CHANGELOG_MD: &str = include_str!("../../../docs/01-当前版/变更记录.md");
@@ -430,14 +430,14 @@ pub fn validate_update_url(url: &str, origin_is_remote_https: bool) -> Result<(b
     if host.eq_ignore_ascii_case("github.com")
         && !path
             .to_ascii_lowercase()
-            .starts_with("/3347567186/qdisk/")
+            .starts_with("/bireo/qdisk/")
     {
         bail!("安全拦截：拒绝从非官方仓库路径下载更新（{path}）");
     }
     if host.eq_ignore_ascii_case("api.github.com")
         && !path
             .to_ascii_lowercase()
-            .starts_with("/repos/3347567186/qdisk/")
+            .starts_with("/repos/bireo/qdisk/")
     {
         bail!("安全拦截：拒绝访问非官方仓库 API（{path}）");
     }
@@ -515,8 +515,8 @@ pub fn extract_tag_from_release_location(loc: &str) -> Option<String> {
 /// 仅解析每个 `<entry>` 头部（截断 `<content>` / `<summary>` 正文）中的 `<link ... href="...">`，
 /// 且强制校验精确仓库前缀，杜绝更新说明正文中的第三方链接或畸形标签劫持更新源。
 pub fn extract_release_tags_from_atom(xml: &str) -> Vec<String> {
-    const ABS_PREFIX: &str = "https://github.com/3347567186/QDisk/releases/tag/";
-    const REL_PREFIX: &str = "/3347567186/QDisk/releases/tag/";
+    const ABS_PREFIX: &str = "https://github.com/Bireo/QDisk/releases/tag/";
+    const REL_PREFIX: &str = "/Bireo/QDisk/releases/tag/";
     let mut parsed: Vec<(SemVer, String)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -2334,7 +2334,7 @@ where
         on_stage("正在查询官方预发布订阅源 (1/3)…", 25);
         match fetch_beta_manifest_via_atom(
             OFFICIAL_RELEASES_ATOM_URL,
-            "https://github.com/3347567186/QDisk/releases/download",
+            "https://github.com/Bireo/QDisk/releases/download",
         ) {
             Ok(AtomBetaFetch::Primary(m)) => return Ok(m),
             Ok(AtomBetaFetch::FallbackOnly(m)) => {
@@ -2398,7 +2398,7 @@ where
             on_stage("主源响应异常，正在通过标签直链重试 (2/3)…", 55);
             match probe_latest_tag_via_redirect(8_000).and_then(|tag| {
                 let direct_url = format!(
-                    "https://github.com/3347567186/QDisk/releases/download/{tag}/latest.json"
+                    "https://github.com/Bireo/QDisk/releases/download/{tag}/latest.json"
                 );
                 fetch_and_parse_manifest(&direct_url)
             }) {
@@ -3389,8 +3389,8 @@ fn normalize_remote_changelog_title(raw_name: &str, ver: &str) -> String {
 
 /// 从 GitHub `releases.atom` 零限流订阅源解析结构化更新日志（自动忽略 `build-*` 等非 SemVer 标签并拦截正文伪造链接）。
 pub fn parse_atom_changelog_entries(xml: &str, current_version: &str) -> Vec<ChangelogEntry> {
-    const ABS_PREFIX: &str = "https://github.com/3347567186/QDisk/releases/tag/";
-    const REL_PREFIX: &str = "/3347567186/QDisk/releases/tag/";
+    const ABS_PREFIX: &str = "https://github.com/Bireo/QDisk/releases/tag/";
+    const REL_PREFIX: &str = "/Bireo/QDisk/releases/tag/";
     let mut parsed: Vec<(SemVer, ChangelogEntry)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -3544,7 +3544,7 @@ fn parse_github_changelog_json(bytes: &[u8], current_version: &str) -> Result<Ve
         let url = item
             .get("html_url")
             .and_then(|v| v.as_str())
-            .filter(|u| u.starts_with("https://github.com/3347567186/QDisk/"))
+            .filter(|u| u.starts_with("https://github.com/Bireo/QDisk/"))
             .map(|u| u.to_string())
             .unwrap_or_else(|| format!("{OFFICIAL_RELEASES_PAGE}/tag/v{ver}"));
         let kind = infer_release_kind(&ver, "");
@@ -3785,8 +3785,8 @@ mod tests {
         assert!(validate_update_url("https://fakegithub.com/latest.json", false).is_err());
         assert!(validate_update_url("https://github.com/attacker/malware/releases/download/v1/a.exe", false).is_err());
         assert!(validate_update_url("https://api.github.com/repos/attacker/malware/releases/latest", false).is_err());
-        assert!(validate_update_url("https://github.com/3347567186/TidyAssistant/releases/latest/download/latest.json", false).is_err());
-        assert!(validate_update_url("http://github.com/3347567186/QDisk/releases/latest/download/latest.json", false).is_err());
+        assert!(validate_update_url("https://github.com/Bireo/TidyAssistant/releases/latest/download/latest.json", false).is_err());
+        assert!(validate_update_url("http://github.com/Bireo/QDisk/releases/latest/download/latest.json", false).is_err());
         assert!(validate_update_url("https://user:pass@github.com/latest.json", false).is_err());
         assert!(validate_update_url("https://github.com/a\r\nX: 1", false).is_err());
         // 远端 HTTPS 禁止重定向到 HTTP 或本机回环（防 SSRF + 降级攻击）
@@ -3795,8 +3795,8 @@ mod tests {
         assert!(validate_update_url("https://release-assets.githubusercontent.com/a.exe", true).is_ok());
 
         assert_eq!(
-            resolve_asset_url("https://github.com/3347567186/QDisk/releases/latest/download/latest.json", "QDisk_1.0_x64-setup.exe").unwrap(),
-            "https://github.com/3347567186/QDisk/releases/latest/download/QDisk_1.0_x64-setup.exe"
+            resolve_asset_url("https://github.com/Bireo/QDisk/releases/latest/download/latest.json", "QDisk_1.0_x64-setup.exe").unwrap(),
+            "https://github.com/Bireo/QDisk/releases/latest/download/QDisk_1.0_x64-setup.exe"
         );
     }
 
@@ -4007,19 +4007,19 @@ mod tests {
     #[test]
     fn release_redirect_tag_extraction_and_error_diagnostics() {
         assert_eq!(
-            extract_tag_from_release_location("https://github.com/3347567186/QDisk/releases/tag/v1.43.18"),
+            extract_tag_from_release_location("https://github.com/Bireo/QDisk/releases/tag/v1.43.18"),
             Some("v1.43.18".into())
         );
         assert_eq!(
-            extract_tag_from_release_location("/3347567186/QDisk/releases/tag/v1.44.0-beta.1?foo=1"),
+            extract_tag_from_release_location("/Bireo/QDisk/releases/tag/v1.44.0-beta.1?foo=1"),
             Some("v1.44.0-beta.1".into())
         );
         assert_eq!(
-            extract_tag_from_release_location("https://github.com/3347567186/QDisk/releases/tag/../../evil"),
+            extract_tag_from_release_location("https://github.com/Bireo/QDisk/releases/tag/../../evil"),
             None
         );
         assert_eq!(
-            extract_tag_from_release_location("https://github.com/3347567186/QDisk/releases"),
+            extract_tag_from_release_location("https://github.com/Bireo/QDisk/releases"),
             None
         );
         assert!(describe_winhttp_error(12007).contains("DNS"));
@@ -4083,7 +4083,7 @@ mod tests {
                 is_current: false,
                 is_prerelease: false,
                 source: "remote".into(),
-                url: "https://github.com/3347567186/QDisk/releases/tag/v9.9.9".into(),
+                url: "https://github.com/Bireo/QDisk/releases/tag/v9.9.9".into(),
             },
             ChangelogEntry {
                 id: "1.45.0".into(),
@@ -4096,7 +4096,7 @@ mod tests {
                 is_current: true,
                 is_prerelease: false,
                 source: "remote".into(),
-                url: "https://github.com/3347567186/QDisk/releases/tag/v1.45.0".into(),
+                url: "https://github.com/Bireo/QDisk/releases/tag/v1.45.0".into(),
             },
         ];
         let merged = merge_local_and_remote_changelogs(entries, remote);
@@ -4117,7 +4117,7 @@ mod tests {
             is_current: false,
             is_prerelease: false,
             source: "remote".into(),
-            url: "https://github.com/3347567186/QDisk/releases/tag/v1.44.5".into(),
+            url: "https://github.com/Bireo/QDisk/releases/tag/v1.44.5".into(),
         }];
         assert!(!older_remote[0].title.contains("白林"));
         assert!(!older_remote[0].title.contains("3347567186@qq.com"));
@@ -4137,31 +4137,31 @@ mod tests {
 
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
-  <link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v99.0.0"/>
-  <entry_meta><link href="https://github.com/3347567186/QDisk/releases/tag/v88.0.0"/></entry_meta>
+  <link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/v99.0.0"/>
+  <entry_meta><link href="https://github.com/Bireo/QDisk/releases/tag/v88.0.0"/></entry_meta>
   <entry>
-    <link rel="alternate" data-href="https://github.com/3347567186/QDisk/releases/tag/v77.0.0" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.8"/>
+    <link rel="alternate" data-href="https://github.com/Bireo/QDisk/releases/tag/v77.0.0" href="https://github.com/Bireo/QDisk/releases/tag/v1.46.8"/>
     <title>Hotfix 1.46.8</title>
-    <content type="html"><link href="https://github.com/3347567186/QDisk/releases/tag/v9.9.9"/></content>
+    <content type="html"><link href="https://github.com/Bireo/QDisk/releases/tag/v9.9.9"/></content>
   </entry>
   <entry>
-    <link href='https://github.com/3347567186/QDisk/releases/tag/v1.47.0-beta.1' rel='alternate'/>
-    <summary><link href="https://github.com/3347567186/QDisk/releases/tag/v9.8.8"/></summary>
+    <link href='https://github.com/Bireo/QDisk/releases/tag/v1.47.0-beta.1' rel='alternate'/>
+    <summary><link href="https://github.com/Bireo/QDisk/releases/tag/v9.8.8"/></summary>
   </entry>
   <entry>
-    <link rel="alternate" href="https://evil.com/3347567186/QDisk/releases/tag/v50.0.0"/>
+    <link rel="alternate" href="https://evil.com/Bireo/QDisk/releases/tag/v50.0.0"/>
   </entry>
   <entry>
     <link rel="alternate" href="https://github.com/attacker/QDisk/releases/tag/v40.0.0"/>
   </entry>
   <entry>
-    <link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/build-1.46.9"/>
+    <link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/build-1.46.9"/>
   </entry>
   <entry>
-    <link rel="alternate" href="/3347567186/QDisk/releases/tag/v1.46.7-beta.2"/>
+    <link rel="alternate" href="/Bireo/QDisk/releases/tag/v1.46.7-beta.2"/>
   </entry>
   <entry>
-    <link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/../../evil"/>
+    <link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/../../evil"/>
   </entry>
 </feed>"#;
 
@@ -4182,16 +4182,16 @@ mod tests {
 
         let atom_fallback_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
-  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.48.0-beta.2"/></entry>
-  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.48.0-beta.1"/></entry>
-  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.47.0-beta.1"/></entry>
+  <entry><link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/v1.48.0-beta.2"/></entry>
+  <entry><link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/v1.48.0-beta.1"/></entry>
+  <entry><link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/v1.47.0-beta.1"/></entry>
 </feed>"#
             .to_string();
 
         let atom_primary_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
-  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.49.0-beta.1"/></entry>
-  <entry><link rel="alternate" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.2"/></entry>
+  <entry><link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/v1.49.0-beta.1"/></entry>
+  <entry><link rel="alternate" href="https://github.com/Bireo/QDisk/releases/tag/v1.46.2"/></entry>
 </feed>"#
             .to_string();
 
@@ -4286,7 +4286,7 @@ mod tests {
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
     <updated>2026-11-24T12:58:44Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.8"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Bireo/QDisk/releases/tag/v1.46.8"/>
     <title>轻盘 QDisk v1.46.8 — 更新源加固</title>
     <content type="html">&lt;h2&gt;本版亮点&lt;/h2&gt;
 &lt;ol&gt;
@@ -4296,23 +4296,23 @@ mod tests {
 &lt;/li&gt;
 &lt;/ol&gt;
 &lt;p&gt;开发者 3347567186@qq.com 隐私行必须剔除&lt;/p&gt;
-&lt;link href="https://github.com/3347567186/QDisk/releases/tag/v9.9.9"/&gt;</content>
+&lt;link href="https://github.com/Bireo/QDisk/releases/tag/v9.9.9"/&gt;</content>
   </entry>
   <entry>
     <updated>2026-11-24T12:21:47Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.7-beta.1"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Bireo/QDisk/releases/tag/v1.46.7-beta.1"/>
     <title>QDisk v1.46.7-beta.1</title>
     <content type="html">&lt;p&gt;预发布验证&lt;/p&gt;</content>
   </entry>
   <entry>
     <updated>2026-11-24T12:49:01Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/build-1.46.8"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Bireo/QDisk/releases/tag/build-1.46.8"/>
     <title>build-1.46.8</title>
     <content type="html">&lt;p&gt;pre-build 1.46.8 (full)&lt;/p&gt;</content>
   </entry>
   <entry>
     <updated>2026-11-24T13:00:00Z</updated>
-    <link rel="alternate" type="text/html" href="https://evil.com/3347567186/QDisk/releases/tag/v99.0.0"/>
+    <link rel="alternate" type="text/html" href="https://evil.com/Bireo/QDisk/releases/tag/v99.0.0"/>
     <title>Evil v99.0.0</title>
     <content type="html">&lt;p&gt;spoof&lt;/p&gt;</content>
   </entry>
@@ -4327,7 +4327,7 @@ mod tests {
         assert_eq!(list[0].title, "更新源加固");
         assert_eq!(
             list[0].url,
-            "https://github.com/3347567186/QDisk/releases/tag/v1.46.8"
+            "https://github.com/Bireo/QDisk/releases/tag/v1.46.8"
         );
         assert!(list[0].body.contains("## 本版亮点"));
         assert!(list[0].body.contains("- **测试版更新 & 零限流**"));
@@ -4353,7 +4353,7 @@ mod tests {
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
     <updated>2026-11-24T13:52:12Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/v1.46.9"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Bireo/QDisk/releases/tag/v1.46.9"/>
     <title>轻盘 QDisk v1.46.9 — 整理预设修复</title>
     <content type="html">&lt;p&gt;修复整理文件预设高亮&lt;/p&gt;</content>
   </entry>
@@ -4363,12 +4363,12 @@ mod tests {
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
     <updated>2026-11-24T13:52:12Z</updated>
-    <link rel="alternate" type="text/html" href="https://github.com/3347567186/QDisk/releases/tag/build-1.46.9"/>
+    <link rel="alternate" type="text/html" href="https://github.com/Bireo/QDisk/releases/tag/build-1.46.9"/>
     <title>build-1.46.9</title>
   </entry>
 </feed>"#
             .to_string();
-        let api_ok = r#"[{"tag_name":"v1.46.9","name":"轻盘 QDisk v1.46.9","draft":false,"prerelease":false,"published_at":"2026-11-24T13:52:12Z","body":"API 回退日志","html_url":"https://github.com/3347567186/QDisk/releases/tag/v1.46.9"}]"#
+        let api_ok = r#"[{"tag_name":"v1.46.9","name":"轻盘 QDisk v1.46.9","draft":false,"prerelease":false,"published_at":"2026-11-24T13:52:12Z","body":"API 回退日志","html_url":"https://github.com/Bireo/QDisk/releases/tag/v1.46.9"}]"#
             .to_string();
 
         let srv = std::thread::spawn(move || {

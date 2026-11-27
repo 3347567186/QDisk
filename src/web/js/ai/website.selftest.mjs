@@ -182,7 +182,7 @@ for (const m of html.matchAll(/<([a-zA-Z0-9]+)\b([^>]*)>/g)) {
   const attrs = parseAttrs(m[2]);
   const el = new MiniEl(tag, attrs);
   if (tag === 'code' && attrs.id === 'dev-cmd-text') {
-    el.textContent = 'git clone https://github.com/3347567186/QDisk.git && cd QDisk';
+    el.textContent = 'git clone https://github.com/Bireo/QDisk.git && cd QDisk';
   }
   allEls.push(el);
   if (attrs.id) byId.set(attrs.id, el);

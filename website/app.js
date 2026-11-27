@@ -4,12 +4,12 @@
    - Accessible keyboard-navigable showcase tabs
    - Interactive ZIP Create / Extract benchmark dataset toggle
    - Bidirectional scroll animation fallback ONLY when CSS Scroll-Driven Animations are unsupported
-   - Live release metadata hydration from https://github.com/3347567186/QDisk */
+   - Live release metadata hydration from https://github.com/Bireo/QDisk */
 
 (function () {
   'use strict';
 
-  const REPO_SLUG = '3347567186/QDisk';
+  const REPO_SLUG = 'Bireo/QDisk';
   const STORAGE_SCHEME = 'qdisk-site-scheme';
   const STORAGE_LANG = 'qdisk-site-lang';
   const SAME_ORIGIN_MANIFEST = './latest.json';

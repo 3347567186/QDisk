@@ -6,8 +6,8 @@
 
 Windows 桌面文件整理、磁盘清理与压缩包管理工具。纯本地运行、无广告、MIT 开源，修改文件前先预览，支持撤销。
 
-[![Official Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-Live%20Site-d44b24?style=flat-square)](https://3347567186.github.io/QDisk/)
-[![Latest Release](https://img.shields.io/github/v/release/3347567186/QDisk?style=flat-square&color=2ea043&label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/3347567186/QDisk/releases/latest)
+[![Official Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-Live%20Site-d44b24?style=flat-square)](https://bireo.github.io/QDisk/)
+[![Latest Release](https://img.shields.io/github/v/release/Bireo/QDisk?style=flat-square&color=2ea043&label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC)](https://github.com/Bireo/QDisk/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6?style=flat-square)](#下载与安装)
 
@@ -15,7 +15,7 @@ Windows 桌面文件整理、磁盘清理与压缩包管理工具。纯本地运
 
 <br />
 
-<a href="https://3347567186.github.io/QDisk/">
+<a href="https://bireo.github.io/QDisk/">
   <img src="docs/assets/social-preview.png" alt="轻盘 QDisk 界面预览" width="100%" />
 </a>
 
@@ -27,13 +27,13 @@ Windows 桌面文件整理、磁盘清理与压缩包管理工具。纯本地运
 
 https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
 
-<p align="center"><sub>1080p 实机录屏（含浅色 / 深色主题），也可在 <a href="https://3347567186.github.io/QDisk/#film">官网按章节查看</a> 或下载 <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 原片 (8.5 MB)</a></sub></p>
+<p align="center"><sub>1080p 实机录屏（含浅色 / 深色主题），也可在 <a href="https://bireo.github.io/QDisk/#film">官网按章节查看</a> 或下载 <a href="https://github.com/Bireo/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 原片 (8.5 MB)</a></sub></p>
 
 ---
 
 ## 主要功能
 
-完整界面大图与交互演示可查看 [官网](https://3347567186.github.io/QDisk/)，下面是几个常用场景的实际界面。
+完整界面大图与交互演示可查看 [官网](https://bireo.github.io/QDisk/)，下面是几个常用场景的实际界面。
 
 ### 1. 文件整理（先预演，可撤销）
 
@@ -75,14 +75,14 @@ https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
 
 支持 **Windows 10 / 11 (x64)**。
 
-- **官网**：https://3347567186.github.io/QDisk/
-- **安装版（约 20.7 MB）**：在 [GitHub Releases](https://github.com/3347567186/QDisk/releases/latest) 下载 `QDisk_*_x64-setup.exe`
+- **官网**：https://bireo.github.io/QDisk/
+- **安装版（约 20.7 MB）**：在 [GitHub Releases](https://github.com/Bireo/QDisk/releases/latest) 下载 `QDisk_*_x64-setup.exe`
 - **便携版（约 25.1 MB）**：在同一页面下载 `QDisk_*_x64-portable.zip`，解压后双击 `tidy-assistant.exe` 运行
 - **校验与更新**：每个版本附带 `SHA256SUMS.txt`；软件内置基于 GitHub Releases 的自动更新，安装前核验 SHA-256，便携版替换失败会自动回滚。
 
 配置文件、自定义规则和撤销记录独立存放在 `%LOCALAPPDATA%\整理助手数据`，重装或升级不会覆盖个人数据。
 
-如果有遇到误判或希望加入保护白名单的目录，欢迎在 [Discussions](https://github.com/3347567186/QDisk/discussions) 或 [Issues](https://github.com/3347567186/QDisk/issues) 反馈。
+如果有遇到误判或希望加入保护白名单的目录，欢迎在 [Discussions](https://github.com/Bireo/QDisk/discussions) 或 [Issues](https://github.com/Bireo/QDisk/issues) 反馈。
 
 ---
 
@@ -130,7 +130,7 @@ https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
 环境要求：Windows x64、Rust 1.80+、Python 3.11+、Node.js 20+、PowerShell 7 (`pwsh`)、NSIS 3.x。
 
 ```powershell
-git clone https://github.com/3347567186/QDisk.git
+git clone https://github.com/Bireo/QDisk.git
 cd QDisk
 
 # 前端与官网自测
@@ -161,7 +161,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Bump patch
 
 ---
 
-本项目基于 [MIT License](LICENSE) 开源。欢迎提交 [Issue](https://github.com/3347567186/QDisk/issues)、[Discussions](https://github.com/3347567186/QDisk/discussions) 或 PR。
+本项目基于 [MIT License](LICENSE) 开源。欢迎提交 [Issue](https://github.com/Bireo/QDisk/issues)、[Discussions](https://github.com/Bireo/QDisk/discussions) 或 PR。
 
 ---
 

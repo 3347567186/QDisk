@@ -7,21 +7,21 @@
   "notes": "## 1.46.0（minor）—— 根治旧目录自动打开、全能只读文件内容预览、双栏历史更新日志弹窗与一键全盘主要磁盘索引\n\n### 一、彻底修复整理页旧目录胶囊关不掉与空间工具自动打开旧目录\n- 移除整理页来源胶囊（`×`）或「清空来源」时同步清零/更新持久化的 `last_folder` / `lastFolder`，并立即清理已移除来源的残留预览项。\n- 整理页挂载恢复上次目录前先经 Rust `inspect_local_path` 真实核验路径存在且可读，自动清理失效路径并防异步竞态覆写；「空间工具」彻底停止在打开时自动加载旧目录。\n\n### 二、整理文件 & 空间工具全能只读文件内容预览\n- 新增 Rust 原生 `file_preview` 只读预览引擎（零新增依赖），支持图片（含 SVG 安全隔离与同目录相册翻页）、PDF、音视频、Office OOXML（`.docx` / `.xlsx` / `.pptx` 带防 Zip Bomb 限额提取）、全编码文本（UTF-8 / UTF-16 / Windows GBK CP936 开头对齐无乱码）、压缩包直达与二进制魔数 + 十六进制嗅探；脚本与可执行文件严格只读不运行。\n- 全面接入「整理文件」预览表、「空间工具 → 大文件排行」及「文件夹浏览」（双击、行内按钮、右键与聚焦栏均可一键查看内容）；关闭弹窗主动释放 `<video>/<audio>/<iframe>` 资源句柄，杜绝 Windows 文件锁残留。\n\n### 三、版本与在线更新：独立双栏历史更新日志弹窗\n- 「设置 → 版本与在线更新」底栏常驻「查看更新日志」按钮，随时独立弹窗查阅当前及全部历史版本（无需等待检测到新版本）。\n- 弹窗采用原生 `<dialog>` 居中双栏布局：左侧 244px 版本时间轴支持关键词搜索、分类筛选与方向键切换，右侧展示富文本排版正文、一键复制、快捷翻版与新版升级操作条，并支持按需同步远端 GitHub Releases。\n\n### 四、搜索索引：新增「一键建立索引」（默认识别并覆盖本机主要盘）\n- 新增 Win32 动态主要固定盘识别（`C:\\`、`D:\\`、`E:\\` …），自动跳过移动 U 盘、光驱、网络盘、`subst` 虚拟盘与恢复分区，并支持逐盘智能复用已健康建库磁盘。\n- 搜索页主卡片与「管理索引 / 索引列表」弹窗均新增常驻「一键建立索引」主按钮，零索引空列表亦可直接一键识别确认并覆盖全盘。",
   "installer": {
     "file": "QDisk_1.46.0_x64-setup.exe",
-    "url": "https://github.com/3347567186/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-setup.exe",
+    "url": "https://github.com/Bireo/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-setup.exe",
     "size": 21978699,
     "sha256": "a483a61ec512b257a173b50155dfea77715dc666fa545cefbbb63ee08de1c7a1"
   },
   "platforms": {
     "windows-x86_64": {
       "file": "QDisk_1.46.0_x64-setup.exe",
-      "url": "https://github.com/3347567186/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-setup.exe",
+      "url": "https://github.com/Bireo/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-setup.exe",
       "size": 21978699,
       "sha256": "a483a61ec512b257a173b50155dfea77715dc666fa545cefbbb63ee08de1c7a1"
     }
   },
   "portable": {
     "file": "QDisk_1.46.0_x64-portable.zip",
-    "url": "https://github.com/3347567186/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-portable.zip",
+    "url": "https://github.com/Bireo/QDisk/releases/download/v1.46.0/QDisk_1.46.0_x64-portable.zip",
     "size": 26710337,
     "sha256": "aa975e41f5ff69c3c85e3f1a27244d6aa9072f6dbbef18d6df8d5735f3d78ce1"
   }

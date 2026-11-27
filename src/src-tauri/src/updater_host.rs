@@ -1340,7 +1340,7 @@ mod tests {
             current_version: "1.47.5".into(),
             target_version: "1.48.0".into(),
             package_kind: "installer".into(),
-            download_url: "https://github.com/3347567186/QDisk/releases/download/v1.48.0/QDisk_1.48.0_x64-setup.exe".into(),
+            download_url: "https://github.com/Bireo/QDisk/releases/download/v1.48.0/QDisk_1.48.0_x64-setup.exe".into(),
             sha256: "b".repeat(64),
             size: 4096,
             file_name: "QDisk_1.48.0_x64-setup.exe".into(),

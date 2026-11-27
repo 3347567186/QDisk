@@ -2178,7 +2178,7 @@
         );
         state.updCheckDom = { wrap: chkWrap, fill: chkFill, text: chkText, pct: chkPct };
 
-        const releasesPage = (st && st.releasesPage) || 'https://github.com/3347567186/QDisk/releases';
+        const releasesPage = (st && st.releasesPage) || 'https://github.com/Bireo/QDisk/releases';
 
         function fmtReleaseDate(raw) {
           if (!raw) return '';

@@ -6,8 +6,8 @@
 
 A local-only Windows desktop utility for folder organization, cache cleanup, and archive management. Open source (MIT), no ads, dry-run preview before changes, and one-click undo.
 
-[![Official Website](https://img.shields.io/badge/Website-Live%20Site-d44b24?style=flat-square)](https://3347567186.github.io/QDisk/?lang=en)
-[![Latest Release](https://img.shields.io/github/v/release/3347567186/QDisk?style=flat-square&color=2ea043&label=Latest)](https://github.com/3347567186/QDisk/releases/latest)
+[![Official Website](https://img.shields.io/badge/Website-Live%20Site-d44b24?style=flat-square)](https://bireo.github.io/QDisk/?lang=en)
+[![Latest Release](https://img.shields.io/github/v/release/Bireo/QDisk?style=flat-square&color=2ea043&label=Latest)](https://github.com/Bireo/QDisk/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Windows-10%2F11%20x64-0078D6?style=flat-square)](#download--install)
 
@@ -15,7 +15,7 @@ A local-only Windows desktop utility for folder organization, cache cleanup, and
 
 <br />
 
-<a href="https://3347567186.github.io/QDisk/?lang=en">
+<a href="https://bireo.github.io/QDisk/?lang=en">
   <img src="docs/assets/social-preview.png" alt="QDisk Preview" width="100%" />
 </a>
 
@@ -27,13 +27,13 @@ A local-only Windows desktop utility for folder organization, cache cleanup, and
 
 https://github.com/user-attachments/assets/5f6b97b1-588c-4c9b-a246-e84c9946924a
 
-<p align="center"><sub>1080p Windows UI capture (Light &amp; Dark themes). Also available with chapter markers on the <a href="https://3347567186.github.io/QDisk/?lang=en#film">website</a> or as a direct <a href="https://github.com/3347567186/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 download (8.5 MB)</a>.</sub></p>
+<p align="center"><sub>1080p Windows UI capture (Light &amp; Dark themes). Also available with chapter markers on the <a href="https://bireo.github.io/QDisk/?lang=en#film">website</a> or as a direct <a href="https://github.com/Bireo/QDisk/releases/download/v1.46.2/qdisk-promo.mp4">MP4 download (8.5 MB)</a>.</sub></p>
 
 ---
 
 ## What It Does
 
-You can browse full-size screenshots on the [website](https://3347567186.github.io/QDisk/?lang=en). Here is a quick overview of the main modules.
+You can browse full-size screenshots on the [website](https://bireo.github.io/QDisk/?lang=en). Here is a quick overview of the main modules.
 
 ### 1. Folder Organization with Dry-Run and Undo
 
@@ -75,14 +75,14 @@ Includes 4 CPU/IO concurrency presets and real chunk-level Pause/Cancel for larg
 
 Requires **Windows 10 / 11 (x64)**.
 
-- **Website**: https://3347567186.github.io/QDisk/?lang=en
-- **Installer (~20.7 MB)**: Download `QDisk_*_x64-setup.exe` from [GitHub Releases](https://github.com/3347567186/QDisk/releases/latest)
+- **Website**: https://bireo.github.io/QDisk/?lang=en
+- **Installer (~20.7 MB)**: Download `QDisk_*_x64-setup.exe` from [GitHub Releases](https://github.com/Bireo/QDisk/releases/latest)
 - **Portable ZIP (~25.1 MB)**: Download `QDisk_*_x64-portable.zip` from the same page, extract, and run `tidy-assistant.exe`
 - **Checksums & Updates**: Every release includes `SHA256SUMS.txt`. The built-in updater checks GitHub Releases, verifies SHA-256 before applying updates, and rolls back automatically if a portable swap fails.
 
 Settings, rules, and undo journals are stored separately in `%LOCALAPPDATA%\整理助手数据` so upgrades and reinstalls preserve your data.
 
-If there is a directory or file pattern you want added to the built-in protection list, feel free to open a thread in [Discussions](https://github.com/3347567186/QDisk/discussions) or [Issues](https://github.com/3347567186/QDisk/issues).
+If there is a directory or file pattern you want added to the built-in protection list, feel free to open a thread in [Discussions](https://github.com/Bireo/QDisk/discussions) or [Issues](https://github.com/Bireo/QDisk/issues).
 
 ---
 
@@ -130,7 +130,7 @@ Test machine: AMD Ryzen 9 5900HX (8C/16T), Windows 11 x64, NVMe SSD.
 Requirements: Windows x64, Rust 1.80+, Python 3.11+, Node.js 20+, PowerShell 7 (`pwsh`), NSIS 3.x.
 
 ```powershell
-git clone https://github.com/3347567186/QDisk.git
+git clone https://github.com/Bireo/QDisk.git
 cd QDisk
 
 # Frontend & website tests
@@ -159,7 +159,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Bump patch
 
 ---
 
-Licensed under [MIT](LICENSE). Issues, Discussions, and PRs are welcome at [GitHub Issues](https://github.com/3347567186/QDisk/issues) and [Discussions](https://github.com/3347567186/QDisk/discussions).
+Licensed under [MIT](LICENSE). Issues, Discussions, and PRs are welcome at [GitHub Issues](https://github.com/Bireo/QDisk/issues) and [Discussions](https://github.com/Bireo/QDisk/discussions).
 
 ---
 
