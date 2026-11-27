@@ -3519,15 +3519,9 @@ function findNodes(rootNode, pred, out = []) {
     }
   };
   const origEngine22 = sandbox.API.engine;
-  const origConfirm22 = sandbox.UI.confirm;
-  const origToast22 = sandbox.UI.toast;
   let cleanedPathsArg = null;
-  let lastToastMsg = '';
-  let lastToastKind = '';
   let listCall = 0;
 
-  sandbox.UI.confirm = async () => true;
-  sandbox.UI.toast = (msg, kind) => { lastToastMsg = String(msg || ''); lastToastKind = String(kind || ''); };
   sandbox.API.engine = async (method, params) => {
     if (method === 'cache.list') {
       listCall += 1;
@@ -3587,7 +3581,6 @@ function findNodes(rootNode, pred, out = []) {
 
   const cacheHost = new FakeElement('div');
   const umCache = await sandbox.Pages.cache.mount(cacheHost);
-  // 若有前序缓存命中，强制触发一次刷新拿到本回归 mock 数据
   const reloadBtn22 = findNodes(cacheHost, (n) => n.tagName === 'BUTTON' && txt(n).includes('重新读取'))[0];
   clickBtn(reloadBtn22);
   await new Promise((r) => setTimeout(r, 30));
@@ -3597,24 +3590,35 @@ function findNodes(rootNode, pred, out = []) {
     console.error(`[回归 22] 清理推荐按钮未展示安全级可清理体积: ${txt(recBtn22)}`);
     process.exit(1);
   }
-  const modalRoot22 = sandbox.document.getElementById('modal-root');
-  const beforeModals22 = modalRoot22.children.length;
+  const modalRoot22 = sandbox.document._byId['modal-root'];
+  const prevToasts22 = sandbox.document._byId['toasts'];
+  const toastsBox22 = new FakeElement('div');
+  sandbox.document._byId['toasts'] = toastsBox22;
   clickBtn(recBtn22);
-  await new Promise((r) => setTimeout(r, 40));
+  await new Promise((r) => setTimeout(r, 20));
+  const confirmText22 = txt(modalRoot22);
+  if (!confirmText22.includes('安全级推荐缓存') || !confirmText22.includes('谨慎/高级缓存需手动勾选')) {
+    console.error(`[回归 22] 清理推荐确认弹窗未清晰说明范围: ${confirmText22}`);
+    process.exit(1);
+  }
+  const okBtn22 = findNodes(modalRoot22, (n) => n.tagName === 'BUTTON' && txt(n) === '清理').pop();
+  clickBtn(okBtn22);
+  await new Promise((r) => setTimeout(r, 320));
 
   if (!Array.isArray(cleanedPathsArg) || cleanedPathsArg.length !== 1 || cleanedPathsArg[0] !== 'C:\\Temp') {
     console.error(`[回归 22] 清理推荐未过滤 0 B 空目录: ${JSON.stringify(cleanedPathsArg)}`);
     process.exit(1);
   }
-  if (lastToastKind !== 'ok' || !lastToastMsg.includes('已清理') || modalRoot22.children.length !== beforeModals22) {
-    console.error(`[回归 22] 仅剩运行中系统占用文件时误弹失败框或缺少成功提示: kind=${lastToastKind}, msg=${lastToastMsg}, modals=${modalRoot22.children.length - beforeModals22}`);
+  const toastText22 = txt(toastsBox22);
+  const openFailModal22 = findNodes(modalRoot22, (n) => n.tagName === 'H3' && txt(n).includes('没有清理成功'));
+  if (!toastText22.includes('已清理') || openFailModal22.length > 0) {
+    console.error(`[回归 22] 仅剩运行中系统占用文件时误弹失败框或缺少成功提示: toast=${toastText22}, failModals=${openFailModal22.length}`);
     process.exit(1);
   }
 
   umCache();
+  sandbox.document._byId['toasts'] = prevToasts22;
   sandbox.API.engine = origEngine22;
-  sandbox.UI.confirm = origConfirm22;
-  sandbox.UI.toast = origToast22;
 }
 
 console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含后台进程真实关闭核验、开机自启排雷、资源概览实时监控与全站红队回归）`);
