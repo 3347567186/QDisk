@@ -1254,22 +1254,28 @@ pub fn run_updater_host_app(cli: UpdaterHostCli) {
             Some(j) => j,
             None => return,
         },
-        UpdaterHostCli::Preview { theme, lang } => UpdateJob {
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
-            target_version: "1.48.0".to_string(),
-            package_kind: "installer".to_string(),
-            download_url: String::new(),
-            sha256: "0".repeat(64),
-            size: 38_600_000,
-            file_name: "QDisk_1.48.0_x64-setup.exe".to_string(),
-            staged_path: None,
-            app_dir: String::new(),
-            app_exe: String::new(),
-            main_pid: 0,
-            theme,
-            lang,
-            preview: true,
-        },
+        UpdaterHostCli::Preview { theme, lang } => {
+            let cur = env!("CARGO_PKG_VERSION").to_string();
+            let next_ver = SemVer::parse(&cur)
+                .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch + 1))
+                .unwrap_or_else(|_| "9.9.9".to_string());
+            UpdateJob {
+                current_version: cur,
+                target_version: next_ver.clone(),
+                package_kind: "installer".to_string(),
+                download_url: String::new(),
+                sha256: "0".repeat(64),
+                size: 38_600_000,
+                file_name: format!("QDisk_{next_ver}_x64-setup.exe"),
+                staged_path: None,
+                app_dir: String::new(),
+                app_exe: String::new(),
+                main_pid: 0,
+                theme,
+                lang,
+                preview: true,
+            }
+        }
     };
 
     let win_title = if is_en(&job) {
@@ -1291,8 +1297,8 @@ pub fn run_updater_host_app(cli: UpdaterHostCli) {
         win.label = "updater".into();
         win.title = win_title.into();
         win.url = tauri::WebviewUrl::App("updater.html".into());
-        win.width = 400.0;
-        win.height = 296.0;
+        win.width = 404.0;
+        win.height = 328.0;
         win.min_width = None;
         win.min_height = None;
         win.resizable = false;
