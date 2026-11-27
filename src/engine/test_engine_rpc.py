@@ -1604,6 +1604,20 @@ class TestShots(EngineCase):
         self.assertFalse(r["ok"], r)
         self.assertIn("paths", r["error"])
 
+    def test_clean_batch_moves_multiple_and_readonly_images(self):
+        import stat as _stat
+        folder = self.new_folder()
+        shots = [_make_file(folder, "屏幕截图 batch_%02d.png" % i, size=512)
+                 for i in range(6)]
+        # 把其中一张设为只读，验证批量移入回收站能清只读后成功移除
+        os.chmod(shots[2], _stat.S_IREAD)
+        res = self.rpc_ok("shots.clean", {"paths": shots, "confirm": True})
+        self.assertEqual(res["deleted"], 6, res)
+        self.assertEqual(res["failed"], [], res)
+        self.assertEqual(res["freed"], 6 * 512, res)
+        for p in shots:
+            self.assertFalse(os.path.exists(p), p)
+
 
 class TestCache(EngineCase):
     def test_list_structure(self):
@@ -1680,6 +1694,27 @@ class TestCache(EngineCase):
         r = self.rpc("cache.clean", {})
         self.assertFalse(r["ok"], r)
         self.assertIn("paths", r["error"])
+
+    def test_clean_builtin_temp_not_blocked_by_exe_and_dll(self):
+        """内置 %TEMP% 里出现临时安装包 .exe + .dll/.dat 时，不得被程序目录保护整目录误拒。"""
+        import stat as _stat
+        temp_dir = os.path.join(self.root, "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        for name in ("setup.exe", "a.dll", "b.dll", "c.dat", "d.tmp"):
+            with open(os.path.join(temp_dir, name), "wb") as f:
+                f.write(b"z" * 100)
+        sub = os.path.join(temp_dir, "ro_sub")
+        os.makedirs(sub, exist_ok=True)
+        ro_file = os.path.join(sub, "ro.tmp")
+        with open(ro_file, "wb") as f:
+            f.write(b"r" * 50)
+        os.chmod(ro_file, _stat.S_IREAD)
+        res = self.rpc_ok("cache.clean", {"paths": [temp_dir], "confirm": True})
+        self.assertEqual(res["failed"], [], res)
+        self.assertEqual(res["skipped"], 0, res)
+        self.assertEqual(res["cleaned"], 6, res)
+        self.assertEqual(res["freed"], 550, res)
+        self.assertEqual(os.listdir(temp_dir), [])
 
 
 class TestCacheCustom(EngineCase):

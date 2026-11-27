@@ -92,6 +92,7 @@
         kind: GlobalShotsCache.kind || 'all'
       };
       const sizeMap = new Map();   // path -> size，供选中统计 / 菜单用
+      S.items.forEach((it) => sizeMap.set(it.path, Number(it.size) || 0));
 
       /* ---------- 顶部：条件 + 操作 + 统计 ---------- */
       const daysInput = h('input', {
@@ -387,19 +388,35 @@
         return arr;
       }
 
-      /* 缩略图：加载失败换成矢量占位块，保持行高不跳 */
+      /* 缩略图：加载失败换成矢量占位块，保持行高不跳；视频/相机文件未缓存时按当前页可见项懒生成 */
       function thumbNode(it) {
-        const src = it.thumb ? fileSrc(it.thumb) : (it.kind === 'video' || isVideoPath(it.path) ? '' : fileSrc(it.path));
+        const isVid = it.kind === 'video' || isVideoPath(it.path);
+        const src = it.thumb ? fileSrc(it.thumb) : (isVid ? '' : fileSrc(it.path));
         const ph = () => {
           const box = h('div', {
             style: {
               height: '96px', display: 'grid', placeItems: 'center',
               color: 'var(--text-3)', background: 'var(--bg-subtle)'
             }
-          }, icon(isVideoPath(it.path) ? 'play' : 'image', 26));
+          }, icon(isVid ? 'play' : 'image', 26));
           return box;
         };
-        if (!src) return ph();
+        if (!src) {
+          const box = ph();
+          if (isVid && !it._thumbTried) {
+            it._thumbTried = true;
+            API.engine('shots.thumb', { path: it.path, size: 256 }).then((r) => {
+              if (shotsUnmounted || !box.isConnected) return;
+              if (r && r.path) {
+                it.thumb = r.path;
+                const lazyImg = h('img', { alt: '', src: fileSrc(r.path), loading: 'lazy', decoding: 'async' });
+                lazyImg.addEventListener('error', () => { if (lazyImg.isConnected) lazyImg.replaceWith(ph()); });
+                box.replaceWith(lazyImg);
+              }
+            }).catch(() => {});
+          }
+          return box;
+        }
         const img = h('img', { alt: '', src, loading: 'lazy', decoding: 'async' });
         img.addEventListener('error', async () => {
           // 扩展名与真实内容不符（相机格式改名成 .jpg 等）时，退回系统缩略图
@@ -407,7 +424,8 @@
           it._thumbTried = true;
           try {
             const r = await API.engine('shots.thumb', { path: it.path, size: 256 });
-            if (r && r.path) { img.src = fileSrc(r.path); return; }
+            if (shotsUnmounted || !img.isConnected) return;
+            if (r && r.path) { it.thumb = r.path; img.src = fileSrc(r.path); return; }
           } catch { /* ignore */ }
           img.replaceWith(ph());
         });
@@ -1249,21 +1267,23 @@
         if (res.error) { toast(res.error, 'error'); return false; }
 
         const failed = Array.isArray(res.failed) ? res.failed : [];
-        const failedSet = new Set(failed.map((f) => f && f.path).filter(Boolean));
-        const doneSet = new Set(paths.filter((p) => !failedSet.has(p)));
+        const failedLower = new Set(failed.map((f) => f && f.path ? String(f.path).toLowerCase() : '').filter(Boolean));
+        const donePaths = paths.filter((p) => !failedLower.has(String(p || '').toLowerCase()));
+        const doneLower = new Set(donePaths.map((p) => String(p || '').toLowerCase()));
 
-        // 成功的从本地数据里剔除，避免再扫一次
-        S.items = S.items.filter((it) => !doneSet.has(it.path));
-        doneSet.forEach((p) => S.selected.delete(p));
+        // 成功的从本地数据与全局缓存里同步剔除，切页回来不会把已删图片还原出来
+        S.items = S.items.filter((it) => !doneLower.has(String(it.path || '').toLowerCase()));
+        GlobalShotsCache.items = S.items.slice();
+        donePaths.forEach((p) => { S.selected.delete(p); sizeMap.delete(p); });
 
         if (failed.length) showFailures(failed);
 
         const freed = Number(res.freed);
         toast(T(
-          '已移入回收站 ' + fmtCount(doneSet.size) + ' 张' +
+          '已移入回收站 ' + fmtCount(donePaths.length) + ' 张' +
             (isFinite(freed) && freed > 0 ? '，释放 ' + fmtBytes(freed) : '') +
             (failed.length ? '，' + fmtCount(failed.length) + ' 张失败' : ''),
-          'Moved ' + fmtCount(doneSet.size) + ' files to the recycle bin' +
+          'Moved ' + fmtCount(donePaths.length) + ' files to the recycle bin' +
             (isFinite(freed) && freed > 0 ? ', freed ' + fmtBytes(freed) : '') +
             (failed.length ? ', ' + fmtCount(failed.length) + ' failed' : '')
         ), failed.length ? 'warn' : 'ok');

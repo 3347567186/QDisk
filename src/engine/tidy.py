@@ -2486,9 +2486,57 @@ def _movefile_reboot(path):
         return False
 
 
-def _recycle_native(path):
-    """用 Windows 自带的 SHFileOperationW 把单个路径丢进回收站（不依赖第三方包）。"""
-    import ctypes
+def _win_short_path(path):
+    """把超长路径转成 Windows 8.3 短路径（供不支持 \\\\?\\ 的旧 Shell API 使用）。"""
+    if os.name != "nt" or not path:
+        return path
+    s = str(path)
+    if len(s) < 248 and not s.startswith("\\\\?\\"):
+        return s
+    try:
+        lp = _lp_win(s)
+        buf = ctypes.create_unicode_buffer(1024)
+        n = ctypes.windll.kernel32.GetShortPathNameW(lp, buf, len(buf))
+        if 0 < n < len(buf):
+            res = buf.value
+            if res.startswith("\\\\?\\UNC\\"):
+                res = "\\\\" + res[8:]
+            elif res.startswith("\\\\?\\"):
+                res = res[4:]
+            return res
+    except Exception:
+        pass
+    if s.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + s[8:]
+    if s.startswith("\\\\?\\"):
+        return s[4:]
+    return s
+
+
+def _shfileop_reason(rc):
+    """把 SHFileOperationW 返回码翻译为可读中文说明。"""
+    table = {
+        2: "文件或路径不存在",
+        3: "路径不存在",
+        5: "拒绝访问（权限不够或只读）",
+        32: "文件正被其他程序占用",
+        33: "文件被锁定",
+        112: "目标磁盘或回收站空间不足",
+        114: "路径过长或无效",
+        120: "拒绝访问（需要管理员权限或文件受保护，0x78）",
+        122: "目标路径或文件名过长（0x7A）",
+        124: "路径无效或超过 260 字符限制（0x7C）",
+        128: "无法移入回收站（0x80）",
+        133: "路径无效（0x85）",
+        206: "路径太长（WinError 206）",
+        1026: "文件不存在或路径无效（0x402）",
+        1223: "操作被系统取消或中止",
+    }
+    return table.get(int(rc), "移入回收站失败（错误码 %s / 0x%X）" % (rc, int(rc) & 0xFFFF))
+
+
+def _shfileop_delete(paths):
+    """调用一次 Windows SHFileOperationW，支持单路径或批量路径（\\0 分隔 + \\0\\0 结尾）。"""
     from ctypes import wintypes
 
     class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -2504,36 +2552,123 @@ def _recycle_native(path):
         ]
 
     FO_DELETE = 3
-    flags = 0x0040 | 0x0010 | 0x0004 | 0x0400  # ALLOWUNDO | NOCONFIRMATION | SILENT | NOERRORUI
-    raw = str(path)
-    buf = ctypes.create_unicode_buffer(raw + "\0", len(raw) + 2)
-    op = SHFILEOPSTRUCTW(None, FO_DELETE, ctypes.cast(buf, wintypes.LPCWSTR), None, flags, False, None, None)
+    # ALLOWUNDO | NOCONFIRMATION | SILENT | NOERRORUI
+    flags = 0x0040 | 0x0010 | 0x0004 | 0x0400
+    shell_paths = [_win_short_path(p) for p in paths]
+    raw = "\0".join(shell_paths) + "\0\0"
+    buf = ctypes.create_unicode_buffer(raw, len(raw))
+    op = SHFILEOPSTRUCTW(
+        None, FO_DELETE, ctypes.cast(buf, wintypes.LPCWSTR), None,
+        flags, False, None, None)
     rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    return int(rc), bool(op.fAnyOperationsAborted)
+
+
+def _recycle_native(path):
+    """用 Windows 自带的 SHFileOperationW 把单个路径丢进回收站（不依赖第三方包）。"""
+    rc, aborted = _shfileop_delete([path])
     if rc != 0:
-        raise OSError(rc, "SHFileOperationW failed")
-    if op.fAnyOperationsAborted:
-        raise OSError(0, "aborted")
+        raise OSError(rc, _shfileop_reason(rc))
+    if aborted:
+        raise OSError(1223, "操作被系统取消或中止")
+
+
+def _recycle_one_retry(path, send2trash=None):
+    """单路径移入回收站；遇到只读等可恢复失败时清只读属性再重试一次。"""
+    try:
+        if send2trash:
+            send2trash(path)
+        else:
+            _recycle_native(path)
+        return True, ""
+    except Exception as ex1:
+        if not os.path.lexists(_lp_win(path)):
+            return True, ""
+        # 尝试清除只读/隐藏/系统属性后重试一次
+        if _clear_readonly(path):
+            try:
+                if send2trash:
+                    send2trash(path)
+                else:
+                    _recycle_native(path)
+                return True, ""
+            except Exception as ex2:
+                if not os.path.lexists(_lp_win(path)):
+                    return True, ""
+                return False, str(ex2)
+        return False, str(ex1)
 
 
 def trash_delete(paths):
-    """移到回收站，可还原。优先 send2trash，缺失时用系统 SHFileOperationW。"""
+    """移到回收站，可还原。Windows 批量调用 SHFileOperationW，比逐个调快 5~20 倍。"""
     ok, fail = [], []
+    if not paths:
+        return ok, fail
+
+    # 删除前先记录哪些是目录，供 index_touch 精确决定是否需要摘子树（普通文件绝不扫 dirs 表）
+    dir_keys = set()
+    live_paths = []
+    for p in paths:
+        lp = _lp_win(p)
+        if not os.path.lexists(lp):
+            fail.append((p, "文件或路径不存在"))
+            continue
+        try:
+            if os.path.isdir(lp) and not _is_reparse_point(lp):
+                dir_keys.add(os.path.normcase(os.path.abspath(p)))
+        except OSError:
+            pass
+        live_paths.append(p)
+
     try:
         from send2trash import send2trash
     except Exception:
         send2trash = None
-    for p in paths:
-        try:
-            if send2trash:
-                send2trash(p)
+
+    if os.name == "nt" and not send2trash and len(live_paths) > 1:
+        # 分批批量移入回收站：每批 128 个，单次 Shell 初始化 + 单次通知
+        chunk_size = 128
+        for idx in range(0, len(live_paths), chunk_size):
+            chunk = live_paths[idx:idx + chunk_size]
+            try:
+                rc, aborted = _shfileop_delete(chunk)
+            except Exception:
+                rc, aborted = -1, True
+            if rc == 0 and not aborted:
+                survivors = [p for p in chunk if os.path.lexists(_lp_win(p))]
+                if not survivors:
+                    ok.extend(chunk)
+                    continue
+                survivor_set = {os.path.normcase(os.path.abspath(p)) for p in survivors}
+                for p in chunk:
+                    if os.path.normcase(os.path.abspath(p)) not in survivor_set:
+                        ok.append(p)
+                retry_list = survivors
             else:
-                _recycle_native(p)
-            ok.append(p)
-        except Exception as ex:
-            fail.append((p, str(ex)))
+                retry_list = []
+                for p in chunk:
+                    if not os.path.lexists(_lp_win(p)):
+                        ok.append(p)
+                    else:
+                        retry_list.append(p)
+            for p in retry_list:
+                done, why = _recycle_one_retry(p, send2trash=None)
+                if done:
+                    ok.append(p)
+                else:
+                    fail.append((p, why))
+    else:
+        for p in live_paths:
+            done, why = _recycle_one_retry(p, send2trash=send2trash)
+            if done:
+                ok.append(p)
+            else:
+                fail.append((p, why))
+
     # 进了回收站的内容对「占多少空间」已经不算了，索引要同步摘掉
     if ok:
-        index_touch(ok)
+        ok_dirs = [p for p in ok if os.path.normcase(os.path.abspath(p)) in dir_keys]
+        index_touch(ok, dropped_dirs=ok_dirs)
     return ok, fail
 
 
@@ -2542,7 +2677,7 @@ def hard_delete(paths):
 
     返回 (已删除, 失败列表, 已登记重启删除)。
     """
-    ok, fail, pending = [], [], []
+    ok, fail, pending, ok_dirs = [], [], [], []
     for p in paths:
         if not os.path.lexists(p):
             ok.append(p)
@@ -2572,6 +2707,7 @@ def hard_delete(paths):
         try:
             if is_dir:
                 _safe_rmtree(p)
+                ok_dirs.append(p)
             else:
                 os.chmod(p, stat.S_IWRITE)
                 os.remove(p)
@@ -2613,9 +2749,9 @@ def hard_delete(paths):
         else:
             fail.append((p, str(err)))
     if ok:
-        index_touch(ok)
+        index_touch(ok, dropped_dirs=ok_dirs)
     if pending:
-        index_touch(pending)
+        index_touch(pending, dropped_dirs=[])
     return ok, fail, pending
 
 
@@ -3192,6 +3328,20 @@ CACHE_FORBIDDEN = [
 ]
 
 
+def _is_known_docs_cache_path(norm_path):
+    """Documents 下仅对内置 CACHE_ITEMS 明确登记的微信/QQ 纯缓存子目录放行。"""
+    p = norm_path.rstrip("\\/")
+    # WeChat Files\<account>\FileStorage\Cache 或 CustomEmotion
+    if "\\documents\\wechat files\\" in p and (
+            p.endswith("\\filestorage\\cache")
+            or p.endswith("\\filestorage\\customemotion")):
+        return True
+    # Tencent Files\<account>\FileRecv\Cache
+    if "\\documents\\tencent files\\" in p and p.endswith("\\filerecv\\cache"):
+        return True
+    return False
+
+
 def cache_path_forbidden(path):
     """判断这个路径是否属于绝对禁碰区。返回 (是否禁止, 原因)。"""
     p = os.path.normcase(os.path.normpath(os.path.abspath(path)))
@@ -3204,7 +3354,9 @@ def cache_path_forbidden(path):
                 "onedrive", ".ssh", ".git", "appdata\\roaming\\microsoft\\crypto"):
         full = os.path.join(home, sub)
         if p == full or p.startswith(full + os.sep):
-            # 例外：明确列在 CACHE_ITEMS 里的缓存子目录
+            # 例外：明确列在 CACHE_ITEMS 里的微信/QQ 纯缓存子目录
+            if sub == "documents" and _is_known_docs_cache_path(p):
+                return False, ""
             return True, "个人文件目录"
     return False, ""
 
@@ -3349,12 +3501,26 @@ def _fail_reason(ex):
 
 
 def _clear_readonly(path):
-    """去掉只读属性。返回是否真的改过。"""
+    """去掉只读/隐藏/系统属性（支持超长路径）。返回是否真的改过。"""
+    lp = _lp_win(path)
+    if os.name == "nt":
+        try:
+            k32 = ctypes.windll.kernel32
+            attrs = k32.GetFileAttributesW(lp)
+            # INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF; READONLY(0x1)|HIDDEN(0x2)|SYSTEM(0x4)
+            if attrs != 0xFFFFFFFF and (attrs & 0x7):
+                new_attrs = attrs & ~0x7
+                if new_attrs == 0:
+                    new_attrs = 0x80  # FILE_ATTRIBUTE_NORMAL
+                if k32.SetFileAttributesW(lp, new_attrs):
+                    return True
+        except Exception:
+            pass
     try:
         import stat as _stat
-        mode = os.stat(path).st_mode
+        mode = os.stat(lp).st_mode
         if not mode & _stat.S_IWRITE:
-            os.chmod(path, mode | _stat.S_IWRITE)
+            os.chmod(lp, mode | _stat.S_IWRITE)
             return True
     except OSError:
         pass
@@ -3362,73 +3528,136 @@ def _clear_readonly(path):
 
 
 def _remove_file_stubborn(p):
-    """删单个文件；只读就先去掉只读再试一次。返回 (成功, 原因)。"""
+    """删单个文件（支持超长路径）；只读/隐藏/系统属性先清除再试一次。返回 (成功, 原因)。"""
+    lp = _lp_win(p)
     try:
-        os.remove(p)
+        os.remove(lp)
         return True, ""
     except OSError as ex1:
         if _clear_readonly(p):
             try:
-                os.remove(p)
+                os.remove(lp)
                 return True, ""
             except OSError as ex2:
                 return False, _fail_reason(ex2)
         return False, _fail_reason(ex1)
 
 
-def _rm_tree_reported(p):
-    """整棵删目录（防 NTFS Junction 穿透）；失败时逐个文件再试，回报到底哪几个删不掉、为什么。
-
-    返回 [(路径, 原因)]，空列表表示删干净了。
-    """
-    if not os.path.lexists(p):
-        return []
-    if _is_reparse_point(p):
-        try:
-            _unlink_reparse_only(p)
-            return []
-        except OSError as ex:
-            return [(p, _fail_reason(ex))]
-    if not os.path.isdir(p):
-        return []
+def _rmdir_stubborn(p):
+    """删单个空目录（支持超长路径）；遇到只读目录清属性后再试一次。"""
+    lp = _lp_win(p)
     try:
-        _safe_rmtree(p)
-        return []
+        os.rmdir(lp)
+        return True
     except OSError:
-        pass
+        if _clear_readonly(p):
+            try:
+                os.rmdir(lp)
+                return True
+            except OSError:
+                return False
+        return False
+
+
+def _strip_lp_prefix(p):
+    if os.name == "nt" and isinstance(p, str):
+        if p.startswith("\\\\?\\UNC\\"):
+            return "\\\\" + p[8:]
+        if p.startswith("\\\\?\\"):
+            return p[4:]
+    return p
+
+
+def _rm_tree_stats(p):
+    """单遍自底向上安全删目录（防 NTFS Junction 穿透 + 支持超长路径 + 不遇单个占用文件就重头重扫）。
+
+    返回 (已删文件数, 实际释放字节数, [(卡住路径, 原因)])。
+    """
+    lp_root = _lp_win(p)
+    if not os.path.lexists(lp_root):
+        return 0, 0, []
+    if _is_reparse_point(lp_root):
+        try:
+            _unlink_reparse_only(lp_root)
+            return 1, 0, []
+        except OSError as ex:
+            return 0, 0, [(_strip_lp_prefix(p), _fail_reason(ex))]
+    if not os.path.isdir(lp_root):
+        try:
+            sz = os.stat(lp_root).st_size
+        except OSError:
+            sz = 0
+        ok, why = _remove_file_stubborn(lp_root)
+        return (1, sz, []) if ok else (0, 0, [(_strip_lp_prefix(p), why)])
+
+    removed = 0
+    freed = 0
     stuck = []
 
-    def _walk_delete(cur):
+    def _walk(cur_lp):
+        nonlocal removed, freed
         try:
-            with os.scandir(cur) as it:
+            with os.scandir(cur_lp) as it:
                 entries = list(it)
         except OSError as ex:
-            stuck.append((cur, _fail_reason(ex)))
+            stuck.append((_strip_lp_prefix(cur_lp), _fail_reason(ex)))
             return
         for e in entries:
             ep = e.path
-            if _is_reparse_point(ep):
+            ep_lp = _lp_win(ep)
+            try:
+                st = e.stat(follow_symlinks=False)
+                is_link = bool(
+                    stat.S_ISLNK(st.st_mode)
+                    or (getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT)
+                )
+                is_dir = stat.S_ISDIR(st.st_mode)
+                sz = 0 if is_dir else int(st.st_size or 0)
+            except OSError:
+                is_link = _is_reparse_point(ep_lp)
+                is_dir = (not is_link) and os.path.isdir(ep_lp)
+                sz = 0
+            if is_link:
                 try:
-                    _unlink_reparse_only(ep)
+                    _unlink_reparse_only(ep_lp)
+                    removed += 1
                 except OSError as ex:
-                    stuck.append((ep, _fail_reason(ex)))
-            elif e.is_dir(follow_symlinks=False):
-                _walk_delete(ep)
-                try:
-                    os.rmdir(ep)
-                except OSError:
-                    pass
+                    stuck.append((_strip_lp_prefix(ep), _fail_reason(ex)))
+            elif is_dir:
+                _walk(ep_lp)
+                _rmdir_stubborn(ep_lp)
             else:
-                ok, why = _remove_file_stubborn(ep)
-                if not ok:
-                    stuck.append((ep, why))
+                ok, why = _remove_file_stubborn(ep_lp)
+                if ok:
+                    removed += 1
+                    freed += sz
+                else:
+                    stuck.append((_strip_lp_prefix(ep), why))
 
-    _walk_delete(p)
-    try:
-        os.rmdir(p)
-    except OSError:
-        pass
+    _walk(lp_root)
+    _rmdir_stubborn(lp_root)
+    return removed, freed, stuck
+
+
+def _rm_tree_reported(p):
+    """整棵删目录（防 NTFS Junction 穿透）；返回 [(路径, 原因)]，空列表表示删干净了。"""
+    _removed, _freed, stuck = _rm_tree_stats(p)
     return stuck
+
+
+def _builtin_cache_root_keys():
+    """展开内置 CACHE_ITEMS 的真实路径集合（normcase），用于区分内置缓存目录与自定义目录。"""
+    keys = set()
+    for it in CACHE_ITEMS:
+        if it.get("kind") == "recycle":
+            continue
+        for pat in (it.get("paths") or []):
+            for p in _expand_cache_paths(pat):
+                try:
+                    keys.add(os.path.normcase(os.path.normpath(os.path.abspath(p))))
+                except (OSError, ValueError):
+                    continue
+    return keys
 
 
 def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
@@ -3437,14 +3666,18 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
     返回 (删除数, 失败列表, 释放字节)。失败列表每项是 (路径, 原因)，
     原因带 WinError 码；目录整棵删不掉时按「具体卡住的文件」逐条记。
 
-    rules 不为空时启用程序目录保护：盘符根目录直接拒绝，程序安装目录
-    整棵跳过，可执行文件/程序文件按扩展名保留，跳过的记进 skipped。
+    rules 不为空时启用程序目录保护：盘符根目录直接拒绝；对非内置自定义目录，
+    程序安装目录整棵跳过、可执行文件/程序文件按扩展名保留，跳过的记进 skipped；
+    对内置 CACHE_ITEMS 明确登记的纯缓存目录（如 %TEMP%、浏览器 Cache 等），
+    不因里面存在临时安装包/缓存 .db 而整目录误拒。
     """
     removed, failed, freed = 0, [], 0
     gone = []                    # 真删掉的路径，最后一次性写回索引
+    gone_dirs = []               # 真删掉的目录，仅这些需要从 dirs 表摘子树
     rules = rules or app_guard_rules()
-    protect = bool(rules and rules.cache_skip_apps)
+    protect_global = bool(rules and rules.cache_skip_apps)
     keep_exts = rules.cache_keep_exts if rules else set()
+    builtin_keys = _builtin_cache_root_keys()
     _total = len(real_paths) or 1
     for _i, root in enumerate(real_paths, 1):
         if progress:
@@ -3460,36 +3693,60 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
         if rules and rules.cache_forbid_roots and is_drive_root(root):
             failed.append((root, "已拒绝：盘符根目录不能作为缓存目录"))
             continue
-        if rules and rules.cache_forbid_apps and looks_like_app_dir(root, rules)[0]:
-            # 兜底：设置里可能还留着旧版本加进来的程序目录
-            msg = "已拒绝：这是程序安装目录（%s）" % "；".join(
-                looks_like_app_dir(root, rules)[1][:1])
-            if skipped is not None:
-                skipped.append((root, msg))
-            else:
-                failed.append((root, msg))
-            continue
-        if os.path.isfile(root):
+        try:
+            root_key = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+        except (OSError, ValueError):
+            root_key = ""
+        is_builtin = root_key in builtin_keys
+        # 仅对非内置路径执行程序安装目录整目录拦截，防止 %TEMP% 因含临时安装包被整目录误杀
+        if not is_builtin and rules and rules.cache_forbid_apps:
+            hit_app, ev_app = looks_like_app_dir(root, rules)
+            if hit_app:
+                # 兜底：设置里可能还留着旧版本加进来的程序目录
+                msg = "已拒绝：这是程序安装目录（%s）" % "；".join(ev_app[:1])
+                if skipped is not None:
+                    skipped.append((root, msg))
+                else:
+                    failed.append((root, msg))
+                continue
+        protect = protect_global and (not is_builtin)
+        lp_root = _lp_win(root)
+        if os.path.isfile(lp_root):
             try:
-                sz = os.path.getsize(root)
+                sz = os.path.getsize(lp_root)
             except OSError:
                 sz = 0
-            ok, why = _remove_file_stubborn(root)
+            ok, why = _remove_file_stubborn(lp_root)
             if ok:
                 removed += 1
                 freed += sz
+                gone.append(root)
             else:
                 failed.append((root, why))
             continue
         try:
-            with os.scandir(root) as it:
-                entries = [e.path for e in it]
+            with os.scandir(lp_root) as it:
+                entries = list(it)
         except OSError as ex:
             failed.append((root, _fail_reason(ex)))
             continue
-        for p in entries:
-            if protect and not os.path.islink(p):
-                if os.path.isdir(p):
+        for e in entries:
+            p = _strip_lp_prefix(e.path)
+            ep_lp = _lp_win(p)
+            try:
+                st = e.stat(follow_symlinks=False)
+                is_link = bool(
+                    stat.S_ISLNK(st.st_mode)
+                    or (getattr(st, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT)
+                )
+                is_dir = stat.S_ISDIR(st.st_mode)
+                sz = 0 if is_dir else int(st.st_size or 0)
+            except OSError:
+                is_link = _is_reparse_point(ep_lp)
+                is_dir = (not is_link) and os.path.isdir(ep_lp)
+                sz = 0
+            if protect and not is_link:
+                if is_dir:
                     h_app, ev_app = looks_like_app_dir(p, rules)
                     if h_app:
                         if skipped is not None:
@@ -3499,27 +3756,26 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
                     if skipped is not None:
                         skipped.append((p, "可执行/程序文件，保留"))
                     continue
-            if os.path.isdir(p) and not os.path.islink(p):
-                s, c = _tree_size(p)
-                stuck = _rm_tree_reported(p)
-                if not stuck:
-                    removed += c
-                    freed += s
+            if is_link:
+                try:
+                    _unlink_reparse_only(ep_lp)
+                    removed += 1
                     gone.append(p)
-                    continue
+                except OSError as ex:
+                    failed.append((p, _fail_reason(ex)))
+                continue
+            if is_dir:
+                c_rm, s_rm, stuck = _rm_tree_stats(p)
+                removed += c_rm
+                freed += s_rm
                 for fp, why in stuck:
                     failed.append((fp, why))
-                # 部分删掉了：用「原体积减剩余」估算真实释放量
-                s2, c2 = _tree_size(p)
-                removed += max(0, c - c2)
-                freed += max(0, s - s2)
-                gone.append(p)
+                if c_rm > 0 or not os.path.lexists(ep_lp):
+                    gone.append(p)
+                    if not os.path.lexists(ep_lp):
+                        gone_dirs.append(p)
                 continue
-            try:
-                sz = os.path.getsize(p)
-            except OSError:
-                sz = 0
-            ok, why = _remove_file_stubborn(p)
+            ok, why = _remove_file_stubborn(ep_lp)
             if ok:
                 removed += 1
                 freed += sz
@@ -3529,7 +3785,7 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
     # 清缓存是最典型的「软件自己腾了空间」：不清索引，用户清完再问
     # 「什么最占空间」，看到的还是清之前那份账
     if gone:
-        index_touch(gone)
+        index_touch(gone, dropped_dirs=gone_dirs)
     return removed, failed, freed
 
 
@@ -3682,13 +3938,13 @@ _index_last_run = {}
 _IX_LOCK = threading.RLock()
 
 
-def _index_open(path):
+def _index_open(path, timeout=2.0):
     """打开索引库并套上 pragma；库不存在或打不开返回 None。"""
     import sqlite3
     if not os.path.isfile(path):
         return None
     try:
-        db = sqlite3.connect(path)
+        db = sqlite3.connect(path, timeout=timeout)
     except sqlite3.DatabaseError:
         return None
     for p in _INDEX_PRAGMAS:
@@ -4085,13 +4341,26 @@ def _ix_scan_direct(folder):
     return files, dir_mtime
 
 
-def _ix_refresh_dir(db, folder):
+_UNSET_EXISTING = object()
+
+
+def _ix_delete_dir_row(db, did, f0, n):
+    """按 rowid 区间 O(log N) 删除单个目录的文件块与 dirs 行，绝不做 files 全表扫。"""
+    if f0 and n:
+        db.execute("DELETE FROM files WHERE rowid BETWEEN ? AND ?",
+                   (int(f0), int(f0) + int(n) - 1))
+    db.execute("DELETE FROM dirs WHERE id = ?", (int(did),))
+
+
+def _ix_refresh_dir(db, folder, existing=_UNSET_EXISTING, next_rowid_box=None):
     """把一个目录在索引里的记录换成当前磁盘事实。返回 True 表示改到了。
 
     目录还没进过索引（整理时刚建出来的分类夹就是这种）就补一行；已经有行就
     把它的文件块整体换掉。补新行时 f0 取「当前最大 rowid + 1」，保证
     dirs.f0/n 指向的区间仍然连续 —— _ix_query_one 的第二个分支靠这个区间
     直接取文件，区间断了就查不到整个目录。
+
+    existing 可由批量预加载传入 (did, f0, n) 或 None，避免重复全表扫 dirs。
     """
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
@@ -4103,29 +4372,37 @@ def _ix_refresh_dir(db, folder):
     size_sum = sum(sz for _n, sz, _m in files)
     now = time.time()
 
-    row = db.execute("SELECT id FROM dirs WHERE path = ?", (folder,)).fetchone()
-    if row is None:
-        nxt = (db.execute(
+    if existing is _UNSET_EXISTING:
+        row = db.execute("SELECT id, f0, n FROM dirs WHERE path = ?", (folder,)).fetchone()
+    else:
+        row = existing
+
+    def _alloc_f0(count):
+        if next_rowid_box is not None:
+            if next_rowid_box[0] is None:
+                next_rowid_box[0] = (db.execute(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] or 0) + 1
+            f0_val = next_rowid_box[0]
+            next_rowid_box[0] = f0_val + count
+            return f0_val
+        return (db.execute(
             "SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] or 0) + 1
+
+    if row is None:
+        nxt = _alloc_f0(len(files))
         did = db.execute(
             "INSERT INTO dirs(path, mtime, scanned_at, fresh, f0, n, size_sum, n_files)"
             " VALUES(?,?,?,1,?,?,?,?)",
             (folder, dir_mtime, now, nxt, len(files), size_sum,
              len(files))).lastrowid
     else:
-        did = row[0]
+        did, old_f0, old_n = row[0], row[1], row[2]
         # 删旧文件块必须走 rowid 区间，不能 `DELETE ... WHERE dir_id = ?`：
-        # files 表上**故意没有** dir_id 索引（见建表处注释，一个目录的文件
-        # 是连续插入的，dirs.f0/n 记着这段行号区间），所以按 dir_id 删就是
-        # 全表扫。实测 E:\下载 216 个目录、82 万行的库，逐目录全表扫要 8,409
-        # 毫秒；换成 rowid 区间后是个位数毫秒。
-        blk = db.execute(
-            "SELECT f0, n FROM dirs WHERE id = ?", (did,)).fetchone()
-        if blk and blk[1]:
+        # files 表上**故意没有** dir_id 索引，按 dir_id 删会触发全表扫。
+        if old_f0 and old_n:
             db.execute("DELETE FROM files WHERE rowid BETWEEN ? AND ?",
-                       (int(blk[0]), int(blk[0]) + int(blk[1]) - 1))
-        nxt = (db.execute(
-            "SELECT COALESCE(MAX(rowid), 0) FROM files").fetchone()[0] or 0) + 1
+                       (int(old_f0), int(old_f0) + int(old_n) - 1))
+        nxt = _alloc_f0(len(files))
         db.execute(
             "UPDATE dirs SET mtime=?, scanned_at=?, f0=?, n=?, size_sum=?,"
             " n_files=? WHERE id=?",
@@ -4138,45 +4415,55 @@ def _ix_refresh_dir(db, folder):
 
 
 def _ix_drop_subtree(db, folder):
-    """目录被删掉之后，把它和它下面所有目录的索引行一起清掉。
-
-    不清理的话，删掉一整棵目录树之后，「什么最占空间」还会继续报这棵树，
-    用户点进去发现路径不存在 —— 这比没有答案更糟。
-    """
+    """目录被删掉之后，把它和它下面所有目录的索引行一起清掉（走 rowid 区间，不做 files 全表扫）。"""
     folder = os.path.abspath(folder)
     prefix = folder.rstrip("\\/") + os.sep
     rows = db.execute(
-        "SELECT id FROM dirs WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+        "SELECT id, f0, n FROM dirs WHERE path = ? OR path LIKE ? ESCAPE '\\'",
         (folder, _like_literal(prefix) + "%")).fetchall()
-    for (did,) in rows:
-        db.execute("DELETE FROM files WHERE dir_id = ?", (did,))
-        db.execute("DELETE FROM dirs WHERE id = ?", (did,))
+    for did, f0, n in rows:
+        _ix_delete_dir_row(db, did, f0, n)
     return len(rows)
 
 
-def _ix_refresh_subtree(db, folder):
+def _ix_refresh_subtree(db, folder, max_dirs=None, max_seconds=None):
     """把一个已经在索引里的目录子树，按磁盘现值重扫一遍（不新增索引根）。
 
-    为什么要单独有这么一个函数，而不是直接 build_index(roots=[folder])：
-    build_index 的 roots 分支会先 index_add(folder) 把它**登记成一个新的
-    索引根**。对「整盘 D:\\ 已索引」的用户，刷新 D:\\下载 时那样一来索引
-    清单里就多了一条 D:\\下载 —— 范围被悄悄改了，占用排行也跟着变，而
-    用户从没同意过。保鲜必须只改库里的行，不改清单。
-
-    做法：整棵走一遍（热目录都很小，实测 D:\\下载 6 个目录 30 个文件
-    22 毫秒、E:\\下载 216 个目录 2741 个文件 34 毫秒），把扫到的目录逐个
-    upsert；再把库里「在 folder 这个前缀下、但磁盘上已经没有」的目录行清掉
-    —— 只做前一半的话，删掉的文件夹会永远留在排行里。
-
+    先一次性加载该子树在 dirs 表里的既有行（避免每个子目录全表扫 dirs），
+    再走磁盘刷新；删除消失的目录行时严格走 rowid 区间（绝不做 files 全表扫）。
     返回 (目录数, 文件数)。
     """
     folder = os.path.abspath(str(folder or ""))
     if not folder or not os.path.isdir(folder):
         return 0, 0
     prefix = folder.rstrip("\\/") + os.sep
+    # 一次性查出该前缀下所有既有 dirs 行（id, path, f0, n）
+    try:
+        old_rows = db.execute(
+            "SELECT id, path, f0, n FROM dirs WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            (folder, _like_literal(prefix) + "%")).fetchall()
+    except Exception:
+        old_rows = []
+    existing_map = {}
+    for did, p, f0, n in old_rows:
+        try:
+            existing_map[os.path.normcase(os.path.abspath(p))] = (did, f0, n)
+        except (OSError, ValueError):
+            continue
+
+    next_rowid_box = [None]
     seen_dirs = []
     stack = [folder]
+    truncated = False
+    started = time.perf_counter() if max_seconds is not None else 0.0
     while stack:
+        if max_dirs is not None and len(seen_dirs) >= max_dirs:
+            truncated = True
+            break
+        if max_seconds is not None and (len(seen_dirs) & 31) == 0:
+            if (time.perf_counter() - started) >= max_seconds:
+                truncated = True
+                break
         cur = stack.pop()
         try:
             with os.scandir(cur) as it:
@@ -4186,7 +4473,12 @@ def _ix_refresh_subtree(db, folder):
             continue
         seen_dirs.append(cur)
         try:
-            _ix_refresh_dir(db, cur)
+            cur_key = os.path.normcase(os.path.abspath(cur))
+            _ix_refresh_dir(
+                db, cur,
+                existing=existing_map.get(cur_key),
+                next_rowid_box=next_rowid_box,
+            )
         except Exception:
             pass
         for e in entries:
@@ -4200,22 +4492,16 @@ def _ix_refresh_subtree(db, folder):
             except OSError:
                 continue
             stack.append(e.path)
-    # 清掉磁盘上已经不存在的旧目录行
-    try:
-        rows = db.execute(
-            "SELECT path FROM dirs WHERE path = ? OR path LIKE ? ESCAPE '\\'",
-            (folder, _like_literal(prefix) + "%")).fetchall()
-    except Exception:
-        rows = []
-    seen_keys = {os.path.normcase(p) for p in seen_dirs}
-    for (path,) in rows:
-        if os.path.normcase(path) not in seen_keys:
-            try:
-                db.execute("DELETE FROM files WHERE dir_id IN"
-                           " (SELECT id FROM dirs WHERE path = ?)", (path,))
-                db.execute("DELETE FROM dirs WHERE path = ?", (path,))
-            except Exception:
-                continue
+
+    # 仅在完整遍历完子树时清掉磁盘上已经不存在的旧目录行，且走 rowid 区间删除
+    if not truncated and existing_map:
+        seen_keys = {os.path.normcase(os.path.abspath(p)) for p in seen_dirs}
+        for key, (did, f0, n) in existing_map.items():
+            if key not in seen_keys:
+                try:
+                    _ix_delete_dir_row(db, did, f0, n)
+                except Exception:
+                    continue
     total = 0
     try:
         total = int(db.execute(
@@ -4329,8 +4615,11 @@ def _ix_find_dirty_subtrees(db, root, skip_norm=None, max_dirs=25):
             dirty.append((mt, ap))
 
     dirty.sort(key=lambda x: x[0], reverse=True)
+    budget_started = time.perf_counter()
     for _mt, ap in dirty[:max(1, int(max_dirs or 25))]:
-        d, _f = _ix_refresh_subtree(db, ap)
+        if (time.perf_counter() - budget_started) >= 4.0:
+            break
+        d, _f = _ix_refresh_subtree(db, ap, max_dirs=1500, max_seconds=1.5)
         touched_dirs += d
 
     total_files = 0
@@ -4414,23 +4703,42 @@ def _ix_prune_orphan_files(dry_run=False):
 _IX_TOUCH_MAX_DIRS = 4000
 
 
-def index_touch(paths):
+def _ix_prune_prefixes(paths):
+    """把目录集合去重并折叠冗余子路径（父目录已在集合里时去掉子目录）。"""
+    items = []
+    seen = set()
+    for p in paths:
+        try:
+            ap = os.path.abspath(p)
+            k = os.path.normcase(ap).rstrip("\\/")
+        except (OSError, ValueError):
+            continue
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        items.append((len(k), k, ap))
+    items.sort(key=lambda x: x[0])
+    out_keys = []
+    out_paths = []
+    for _ln, k, ap in items:
+        if any(k == pk or k.startswith(pk + os.sep) for pk in out_keys):
+            continue
+        out_keys.append(k)
+        out_paths.append(ap)
+    return out_keys, out_paths
+
+
+def index_touch(paths, dropped_dirs=None):
     """Tier 0 写穿：软件自己动了磁盘，立刻把索引改成新事实。
 
-    为什么需要这个：索引是一份快照，而软件自己的整理 / 撤销 / 删除 / 清理
-    每天都在改磁盘。不写穿的话，用户刚用软件整理完文件，同一个软件再去回答
-    「什么最占空间」或者搜索，给出的还是整理之前的位置 —— 它连自己做过什么
-    都不记得。这不是索引机制的缺陷，是没有把「自己也是改动源」这件事算进去。
+    成本几乎为零：一次移动/清理只读一次 catalog.json、单遍加载受影响的 dirs 行，
+    且删除目录文件块严格走 rowid 区间，绝不做 O(N*M) 全表扫描。
 
-    成本几乎为零：一次移动只涉及源目录和目标目录两个目录，各扫一层就够
-    （schema 3 的 size_sum 是单目录粒度，聚合在查询期做）。去重之后，整理
-    几百个文件往往只需要刷十几个目录，总共几十毫秒。
+    paths 里每个元素是「刚被创建 / 移动 / 删除的那条路径」。
+    dropped_dirs 若显式传入（如 trash_delete/clean_cache_paths 已知哪些被删路径是目录），
+    则仅对这些真实目录摘子树，绝不对成千上万个普通已删文件逐个扫描 dirs 表。
 
-    paths 里每个元素是「刚被创建 / 移动 / 删除的那条路径」。函数自己判断它
-    现在还在不在：还在就刷父目录，不在就顺手把那棵子树从索引里摘掉。
-
-    失败一律吞掉：写穿是优化，不是业务的一部分。它出错绝不能连带让用户的
-    整理操作失败 —— 那种取舍是拿数据正确性换缓存新鲜度，方向反了。
+    失败一律吞掉：写穿是优化，不是业务的一部分。
     """
     try:
         raw = [p for p in (paths or []) if isinstance(p, str) and p.strip()]
@@ -4439,47 +4747,128 @@ def index_touch(paths):
     if not raw:
         return 0
 
+    # 只读一次 catalog.json，内存中按最长前缀匹配索引库，避免 2*N 次磁盘 JSON 解析
+    catalog = _ix_load()
+    if not catalog:
+        return 0
+    indexed_roots = []
+    for it in catalog:
+        root = str(it.get("root") or "")
+        if not root:
+            continue
+        try:
+            rk = os.path.normcase(os.path.abspath(root)).rstrip("\\/")
+        except (ValueError, OSError):
+            continue
+        indexed_roots.append((len(rk), rk, it))
+    if not indexed_roots:
+        return 0
+    indexed_roots.sort(key=lambda x: x[0], reverse=True)
+
+    def _owner_of(norm_p):
+        for _ln, rk, it in indexed_roots:
+            if norm_p == rk or norm_p.startswith(rk + os.sep):
+                return it
+        return None
+
     # 按「哪个库 + 哪个目录」去重：一次整理常把几十个文件搬进同一个分类夹
     plan = {}
     dropped = {}
+    explicit_drops = dropped_dirs is not None
     for p in raw:
         try:
             ap = os.path.abspath(p)
         except (ValueError, OSError):
             continue
         parent = os.path.dirname(ap.rstrip("\\/")) or ap
-        owners = _ix_items_for_path(parent)
-        if owners:
-            item = owners[0][0]
-            plan.setdefault(item["id"], (item, set()))[1].add(parent)
-        if not os.path.exists(ap):
-            owners2 = _ix_items_for_path(ap)
-            if owners2:
-                item2 = owners2[0][0]
-                dropped.setdefault(item2["id"], (item2, set()))[1].add(ap)
+        parent_key = os.path.normcase(parent).rstrip("\\/")
+        owner = _owner_of(parent_key)
+        if owner is not None:
+            plan.setdefault(owner["id"], (owner, set()))[1].add(parent)
+        if not explicit_drops and not os.path.exists(ap):
+            ap_key = os.path.normcase(ap).rstrip("\\/")
+            owner2 = _owner_of(ap_key)
+            if owner2 is not None:
+                dropped.setdefault(owner2["id"], (owner2, set()))[1].add(ap)
 
-    if sum(len(v[1]) for v in plan.values()) > _IX_TOUCH_MAX_DIRS:
+    if explicit_drops:
+        for dp in (dropped_dirs or []):
+            if not isinstance(dp, str) or not dp.strip():
+                continue
+            try:
+                ap = os.path.abspath(dp)
+            except (ValueError, OSError):
+                continue
+            ap_key = os.path.normcase(ap).rstrip("\\/")
+            owner2 = _owner_of(ap_key)
+            if owner2 is not None:
+                dropped.setdefault(owner2["id"], (owner2, set()))[1].add(ap)
+
+    total_plan_dirs = sum(len(v[1]) for v in plan.values())
+    total_drop_dirs = sum(len(v[1]) for v in dropped.values())
+    if total_plan_dirs > _IX_TOUCH_MAX_DIRS or total_drop_dirs > _IX_TOUCH_MAX_DIRS:
         # 一次动了几千个目录：逐个刷不如等下一次重建，别在这里拖住用户。
         # 注意数的是「目录总数」不是「库的个数」—— plan 按库 id 分键，
         # 一台机器通常只有一两个库，拿 len(plan) 当判断条件永远不会触发。
         return 0
 
+    all_ids = list(dict.fromkeys(list(plan.keys()) + list(dropped.keys())))
     touched = 0
-    for ident, (item, dirs) in plan.items():
+    for ident in all_ids:
+        item = (plan.get(ident) or dropped.get(ident))[0]
+        dirs = plan.get(ident, (item, set()))[1]
+        drop_set = dropped.get(ident, (item, set()))[1]
         db = None
         try:
-            db = _index_open(_ix_db_abspath(item))
+            # 写穿走短超时：若后台校验正占着锁，绝不让清理 RPC 干等 5 秒
+            db = _index_open(_ix_db_abspath(item), timeout=0.4)
             if db is None or not _index_has_totals(db):
                 # 老库（schema 2）没有 size_sum/n_files：等它重建时自然升级，
                 # 这里硬写会报「没有那一列」
                 continue
+
+            drop_keys, _drop_paths = _ix_prune_prefixes(drop_set)
+            drop_key_set = set(drop_keys)
+            drop_prefixes = tuple(k + os.sep for k in drop_keys)
+            refresh_key_map = {}
+            for folder in dirs:
+                try:
+                    ap_f = os.path.abspath(folder)
+                    refresh_key_map[os.path.normcase(ap_f).rstrip("\\/")] = ap_f
+                except (OSError, ValueError):
+                    continue
+
+            # 若涉及多个目录或需要摘子树，一次性单遍扫 dirs（~20ms）代替 O(N) 次全表扫！
+            use_single_scan = (len(refresh_key_map) + len(drop_keys)) > 3
+            existing_refresh = {}
+            rows_to_drop = []
+            if use_single_scan:
+                for did, p_row, f0, n in db.execute("SELECT id, path, f0, n FROM dirs"):
+                    try:
+                        k = os.path.normcase(os.path.abspath(p_row)).rstrip("\\/")
+                    except (OSError, ValueError):
+                        continue
+                    if k in refresh_key_map:
+                        existing_refresh[k] = (did, f0, n)
+                    if drop_keys and (k in drop_key_set or k.startswith(drop_prefixes)):
+                        rows_to_drop.append((did, f0, n))
+
+            next_rowid_box = [None]
+            db_touched = 0
             with db:
-                for folder in dirs:
-                    if _ix_refresh_dir(db, folder):
-                        touched += 1
-                for folder in dropped.get(ident, (item, set()))[1]:
-                    touched += _ix_drop_subtree(db, folder)
-            if touched:
+                for k, folder in refresh_key_map.items():
+                    ex_arg = existing_refresh.get(k) if use_single_scan else _UNSET_EXISTING
+                    if _ix_refresh_dir(db, folder, existing=ex_arg, next_rowid_box=next_rowid_box):
+                        db_touched += 1
+                if use_single_scan:
+                    for did, f0, n in rows_to_drop:
+                        _ix_delete_dir_row(db, did, f0, n)
+                        db_touched += 1
+                else:
+                    for folder in _drop_paths:
+                        db_touched += _ix_drop_subtree(db, folder)
+            touched += db_touched
+            if db_touched:
                 _ix_sync_item_totals(item["id"], db)
         except Exception:
             continue
@@ -7142,7 +7531,7 @@ def _shell_thumb_png(path, size=256):
         return b""
 
 
-def shot_thumb_png(src, size=256, force=False):
+def shot_thumb_png(src, size=256, force=False, cached_only=False):
     """视频/相机格式 -> 缓存 PNG 路径；非目标类型或失败返回空串。"""
     try:
         if not src or not os.path.isfile(src):
@@ -7155,10 +7544,12 @@ def shot_thumb_png(src, size=256, force=False):
                                int(st.st_size), int(st.st_mtime), int(size))
         name = hashlib.sha1(key.encode("utf-8", "ignore")).hexdigest() + ".png"
         folder = os.path.join(data_dir(), "thumbs")
-        os.makedirs(folder, exist_ok=True)
         out = os.path.join(folder, name)
         if os.path.isfile(out) and os.path.getsize(out) > 0:
             return out
+        if cached_only:
+            return ""
+        os.makedirs(folder, exist_ok=True)
         png = _shell_thumb_png(src, size)
         if not png:
             return ""
@@ -7209,8 +7600,8 @@ def _engine_shots_scan(params):
             "group": os.path.basename(parent) or parent,
             # 是否“截图”：all_images 下用来把照片/视频和截图区分开，只有截图进默认清理
             "shot": bool(_is_shot_file(p)),
-            # 视频与相机格式没有浏览器可解码的封面，走系统缩略图并缓存
-            "thumb": (shot_thumb_png(p, 256)
+            # 视频与相机格式扫描期仅回填已缓存缩略图，未缓存的由前端按当前可见页按需生成，避免几十个视频同步阻塞扫描
+            "thumb": (shot_thumb_png(p, 256, cached_only=True)
                       if os.path.splitext(p)[1].lower() in (VIDEO_EXTS | CAMERA_EXTS)
                       else ""),
         })
@@ -7254,23 +7645,27 @@ def _engine_shots_clean(params):
             failed.append({"path": p, "why": "不是截图文件（不在截图命名/目录规则内）"})
             continue
         todo.append(p)
+    sizes = {}
     size = 0
     for p in todo:
         try:
-            size += os.path.getsize(p)
+            sz = os.path.getsize(p)
         except OSError:
-            pass
+            sz = 0
+        sizes[p] = sz
+        size += sz
     if not confirm:
         return {"dry_run": True, "deleted": 0, "failed": failed,
                 "moved_to_trash": True, "would_delete": len(todo),
                 "would_free": size}
     ok, fail = trash_delete(todo)     # 复用 GUI 同一套「移到回收站」逻辑
+    freed = sum(sizes.get(p, 0) for p in ok)
     return {
         "dry_run": False,
         "deleted": len(ok),
         "failed": failed + [{"path": p, "why": why} for p, why in fail],
         "moved_to_trash": True,
-        "freed": size,
+        "freed": freed,
     }
 
 

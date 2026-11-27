@@ -604,25 +604,27 @@
         );
       }
 
-      async function cleanPaths(paths, { quiet = false } = {}) {
+      async function cleanPaths(paths, { quiet = false, skipConfirm = false } = {}) {
         if (!paths || !paths.length) {
           toast(T('没有选中项', 'Nothing selected'), 'warn');
           return false;
         }
 
-        let ok = false;
-        try {
-          ok = await confirm({
-            title: T('清理缓存', 'Clean caches'),
-            body: confirmBody(paths),
-            ok: T('清理', 'Clean'),
-            danger: true
-          });
-        } catch (e) {
-          toast(errText(e), 'error');
-          return false;
+        if (!skipConfirm) {
+          let ok = false;
+          try {
+            ok = await confirm({
+              title: T('清理缓存', 'Clean caches'),
+              body: confirmBody(paths),
+              ok: T('清理', 'Clean'),
+              danger: true
+            });
+          } catch (e) {
+            toast(errText(e), 'error');
+            return false;
+          }
+          if (!ok) return false;
         }
-        if (!ok) return false;
 
         let res;
         try {
@@ -637,6 +639,8 @@
         }
         if (!res) return false;
         if (res.error) { toast(res.error, 'error'); return false; }
+
+        GlobalCachePageCache.lastScanTime = 0;
 
         const cleaned = Number(res.cleaned) || 0;
         const freed = Number(res.freed) || 0;
@@ -831,7 +835,7 @@
                 ctrl && ctrl.setProgress(60);
                 ctrl && ctrl.setSub(T('共 ' + toRetry.length + ' 个缓存项', toRetry.length + ' item(s)'));
                 if (toRetry.length) {
-                  await cleanPaths(toRetry, true);
+                  await cleanPaths(toRetry, { quiet: true, skipConfirm: true });
                 }
                 ctrl && ctrl.setText(T('正在刷新缓存扫描结果…', 'Refreshing scan results…'));
                 ctrl && ctrl.setProgress(90);
@@ -885,9 +889,11 @@
           }
         }, T(
           '已清理 ' + fmtCount(summary.cleaned || 0) + ' 项，释放 ' + fmtBytes(summary.freed || 0) +
-            '（' + fmtCount(failed.length) + ' 项因程序占用或系统保护跳过）',
+            '（' + fmtCount(failed.length) + ' 项因程序占用或系统保护未清理' +
+            (summary.skipped ? '，跳过 ' + fmtCount(summary.skipped) + ' 项受保护内容' : '') + '）',
           'Cleaned ' + fmtCount(summary.cleaned || 0) + ' items, freed ' + fmtBytes(summary.freed || 0) +
-            ' (' + fmtCount(failed.length) + ' items locked by active apps)'
+            ' (' + fmtCount(failed.length) + ' items locked by active apps' +
+            (summary.skipped ? ', skipped ' + fmtCount(summary.skipped) + ' protected' : '') + ')'
         )) : null;
 
         const body = h('div', { class: 'stack', style: { gap: '0' } }, summaryBar, noticeBox, listWrap);
