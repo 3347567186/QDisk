@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "自绘标题栏所需的最小窗口权限：最小化、关闭、拖动、八向缩放、查询全屏。",
-  "windows": ["main"],
+  "windows": ["main", "updater"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

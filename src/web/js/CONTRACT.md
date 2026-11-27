@@ -179,4 +179,4 @@ $py='E:\AI\DeepSeekHarness多插件版\home\dsh-runtimes\dsh-primary-runtime\dep
 - **apps**：已安装程序 / 开机自启（对接 `Run32` 与 `StartupFolder`、过滤 `desktop.ini`）/ 后台进程（`process.list`/`process.close` 整树终止 + 复生复核 + 轻盘自身进程树保护）/ 资源概览（`system.performance` PDH 物理磁盘 I/O + 物理网卡去重 + 4 KPI 卡），切页销毁 0 定时器与监听器泄漏，顶栏 `UI.askBtn`、支持 `jump({ tab, status, filter })`。
 - **migrate**：合顶命令与目标目录条 + 平衡双栏（来源 vs 选项）、`planSlot`/`resultSlot` 局刷不丢输入焦点、顶栏 `UI.askBtn`、支持 `jump({ sources, destination })`。
 - **log**：骨架 II 主从双栏（`.split-wb.master-detail` 文件清单 + `.log-viewer-pre` 尾部查看器 + 引擎诊断与操作历史双列）、顶栏 `UI.askBtn`、支持 `jump({ file })`。
-- **settings**：骨架 III 7 个手风琴分组（含 AI 助手模型/端点/密钥/权限配置，移除顶部 `.set-nav-bar` 与设置页 AI 入口）、支持 `jump({ section })`。
+- **settings**：骨架 III 7 个手风琴分组（含 AI 助手模型/端点/密钥/权限配置，移除顶部 `.set-nav-bar` 与设置页 AI 入口；在线更新支持 `API.updaterAutoUpdate` 一键切换至融合轻盘 Logo 的独立进度弹窗 `updater.html` 全自动静默升级并重启）、支持 `jump({ section })`。

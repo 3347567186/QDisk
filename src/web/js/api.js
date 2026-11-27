@@ -104,6 +104,16 @@
     }),
     updaterCancel: () => invoke('updater_cancel'),
     updaterClearCache: () => invoke('updater_clear_cache'),
+    updaterAutoUpdate: (opts) => invoke('updater_auto_update', {
+      url: opts.url,
+      sha256: opts.sha256,
+      size: opts.size || 0,
+      version: opts.version,
+      fileName: opts.fileName,
+      packageKind: opts.packageKind,
+      theme: opts.theme || null,
+      lang: opts.lang || null
+    }),
     updaterInstall: (silent) => invoke('updater_install', { silent: !!silent }),
     updaterChangelog: (includeRemote) => invoke('updater_changelog', { includeRemote: !!includeRemote }),
   logRead: (path, maxBytes) => invoke('log_read', { path, maxBytes: maxBytes || null }),

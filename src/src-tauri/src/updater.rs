@@ -2,7 +2,6 @@ use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -14,13 +13,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::archive::{self, Overwrite, Progress, TaskControl};
+use crate::archive;
 use crate::{append_log, data_dir, exe_dir, is_local_host, read_config, split_url, write_config, AppState, CONFIG_LOCK};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 单次更新清单最大体积（2 MiB），防恶意超大 JSON 耗尽内存。
 pub const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
@@ -1769,6 +1763,10 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     sum
 }
 
+pub(crate) fn sweep_old_updates_keep(keep_dir: &Path) {
+    sweep_old_updates(Some(keep_dir));
+}
+
 /// 清理旧版本更新缓存，始终只保留当前已下载的最新 1 份，防止磁盘体积膨胀。
 fn sweep_old_updates(keep_dir: Option<&Path>) {
     let root = updates_dir();
@@ -2222,134 +2220,7 @@ pub fn validate_staged_before_install(updates_root: &Path, staged: &StagedInfo) 
     Ok(canon_file)
 }
 
-#[cfg(windows)]
-fn spawn_installer_bootstrap(installer_path: &Path, silent: bool) -> Result<()> {
-    let cur_pid = std::process::id().to_string();
-    let cur_exe = std::env::current_exe()
-        .context("无法获取当前程序路径")?
-        .to_string_lossy()
-        .to_string();
-    // 所有路径严格通过环境变量传递，杜绝任何命令行/PowerShell 字符串注入
-    let script = if silent {
-        r#"
-$ErrorActionPreference = 'SilentlyContinue'
-$pidVal = [int]$env:_TIDY_UPD_PID
-for ($i = 0; $i -lt 150; $i++) {
-  if (-not (Get-Process -Id $pidVal -ErrorAction SilentlyContinue)) { break }
-  Start-Sleep -Milliseconds 100
-}
-$p = Start-Process -FilePath $env:_TIDY_UPD_FILE -ArgumentList '/S' -PassThru -Wait
-if ($p -and $p.ExitCode -eq 0 -and (Test-Path -LiteralPath $env:_TIDY_UPD_EXE)) {
-  Start-Process -FilePath $env:_TIDY_UPD_EXE
-}
-"#
-    } else {
-        r#"
-$ErrorActionPreference = 'SilentlyContinue'
-$pidVal = [int]$env:_TIDY_UPD_PID
-for ($i = 0; $i -lt 150; $i++) {
-  if (-not (Get-Process -Id $pidVal -ErrorAction SilentlyContinue)) { break }
-  Start-Sleep -Milliseconds 100
-}
-Start-Process -FilePath $env:_TIDY_UPD_FILE
-"#
-    };
-    Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
-        .env("_TIDY_UPD_PID", cur_pid)
-        .env("_TIDY_UPD_FILE", installer_path.to_string_lossy().to_string())
-        .env("_TIDY_UPD_EXE", cur_exe)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .context("启动安装更新引导器失败")?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn spawn_portable_swap_bootstrap(payload_root: &Path, app_dir: &Path, backup_dir: &Path, stage_root: &Path) -> Result<()> {
-    let cur_pid = std::process::id().to_string();
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$pidVal = [int]$env:_TIDY_UPD_PID
-$appDir = $env:_TIDY_UPD_APP
-$srcDir = $env:_TIDY_UPD_SRC
-$bakDir = $env:_TIDY_UPD_BAK
-$stgDir = $env:_TIDY_UPD_STG
-
-for ($i = 0; $i -lt 150; $i++) {
-  if (-not (Get-Process -Id $pidVal -ErrorAction SilentlyContinue)) { break }
-  Start-Sleep -Milliseconds 100
-}
-Start-Sleep -Milliseconds 250
-
-try {
-  if (Test-Path -LiteralPath $bakDir) { Remove-Item -LiteralPath $bakDir -Recurse -Force -ErrorAction SilentlyContinue }
-  [void][System.IO.Directory]::CreateDirectory($bakDir)
-
-  # 1. 备份旧版程序与引擎，失败时可完整回滚
-  $oldExe = Join-Path $appDir 'tidy-assistant.exe'
-  if (Test-Path -LiteralPath $oldExe) {
-    Copy-Item -LiteralPath $oldExe -Destination (Join-Path $bakDir 'tidy-assistant.exe') -Force
-  }
-  $oldEng = Join-Path $appDir '引擎'
-  if (Test-Path -LiteralPath $oldEng) {
-    Copy-Item -LiteralPath $oldEng -Destination (Join-Path $bakDir '引擎') -Recurse -Force
-  }
-
-  # 2. 替换新版核心文件（保留用户本地数据目录不受影响）
-  $newExe = Join-Path $srcDir 'tidy-assistant.exe'
-  Copy-Item -LiteralPath $newExe -Destination $oldExe -Force
-  $newWv = Join-Path $srcDir 'WebView2Loader.dll'
-  if (Test-Path -LiteralPath $newWv) {
-    Copy-Item -LiteralPath $newWv -Destination (Join-Path $appDir 'WebView2Loader.dll') -Force -ErrorAction SilentlyContinue
-  }
-
-  $newEng = Join-Path $srcDir '引擎'
-  if (Test-Path -LiteralPath $newEng) {
-    $oldLoc = Join-Path $oldEng '数据位置.json'
-    $savedLoc = Join-Path $bakDir '数据位置.json'
-    if (Test-Path -LiteralPath $oldLoc) { Copy-Item -LiteralPath $oldLoc -Destination $savedLoc -Force -ErrorAction SilentlyContinue }
-    if (Test-Path -LiteralPath $oldEng) { Remove-Item -LiteralPath $oldEng -Recurse -Force }
-    Copy-Item -LiteralPath $newEng -Destination $oldEng -Recurse -Force
-    if (Test-Path -LiteralPath $savedLoc) { Copy-Item -LiteralPath $savedLoc -Destination (Join-Path $oldEng '数据位置.json') -Force -ErrorAction SilentlyContinue }
-  }
-  $newTp = Join-Path $srcDir 'THIRD_PARTY.md'
-  if (Test-Path -LiteralPath $newTp) {
-    Copy-Item -LiteralPath $newTp -Destination (Join-Path $appDir 'THIRD_PARTY.md') -Force
-  }
-  Remove-Item -LiteralPath $bakDir -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $stgDir -Recurse -Force -ErrorAction SilentlyContinue
-} catch {
-  # 异常自动回滚旧版，确保软件绝不变砖
-  try {
-    $bakExe = Join-Path $bakDir 'tidy-assistant.exe'
-    if (Test-Path -LiteralPath $bakExe) { Copy-Item -LiteralPath $bakExe -Destination (Join-Path $appDir 'tidy-assistant.exe') -Force }
-    $bakEng = Join-Path $bakDir '引擎'
-    if (Test-Path -LiteralPath $bakEng) {
-      $oldEng = Join-Path $appDir '引擎'
-      if (Test-Path -LiteralPath $oldEng) { Remove-Item -LiteralPath $oldEng -Recurse -Force -ErrorAction SilentlyContinue }
-      Copy-Item -LiteralPath $bakEng -Destination $oldEng -Recurse -Force
-    }
-  } catch {}
-} finally {
-  $launch = Join-Path $appDir 'tidy-assistant.exe'
-  if (Test-Path -LiteralPath $launch) {
-    Start-Process -FilePath $launch
-  }
-}
-"#;
-    Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
-        .env("_TIDY_UPD_PID", cur_pid)
-        .env("_TIDY_UPD_APP", app_dir.to_string_lossy().to_string())
-        .env("_TIDY_UPD_SRC", payload_root.to_string_lossy().to_string())
-        .env("_TIDY_UPD_BAK", backup_dir.to_string_lossy().to_string())
-        .env("_TIDY_UPD_STG", stage_root.to_string_lossy().to_string())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .context("启动便携版原子替换引导器失败")?;
-    Ok(())
-}
+// 旧版隐藏 PowerShell 引导已由独立可视化自动更新宿主 (`updater_host.rs`) 全面取代。
 
 // ---------------------------------------------------------------- Tauri 命令接口
 
@@ -2723,11 +2594,139 @@ pub fn updater_clear_cache(state: State<'_, UpdaterState>) -> Result<bool, Strin
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn updater_auto_update(
+    app: AppHandle,
+    state: State<'_, UpdaterState>,
+    url: String,
+    sha256: String,
+    size: u64,
+    version: String,
+    file_name: String,
+    package_kind: String,
+    theme: Option<String>,
+    lang: Option<String>,
+) -> Result<bool, String> {
+    if state
+        .busy
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("更新任务正在进行中，请稍候".into());
+    }
+    let _guard = BusyGuard(&state.busy);
+
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let norm_sha = normalize_sha256(&sha256).map_err(|e| format!("{e:#}"))?;
+    let safe_name = sanitize_file_name(&file_name).map_err(|e| format!("{e:#}"))?;
+    let cur_sem = SemVer::parse(&current_version).map_err(|e| format!("{e:#}"))?;
+    let target_sem = SemVer::parse(&version).map_err(|e| format!("{e:#}"))?;
+    if target_sem <= cur_sem {
+        return Err(format!(
+            "安全拦截：拒绝安装低于或等于当前版本的更新（目标 v{version}，当前 v{current_version}）"
+        ));
+    }
+    if !matches!(package_kind.as_str(), "installer" | "portable") {
+        return Err(format!("未知的更新包类型：{package_kind}"));
+    }
+    validate_update_url(&url, false).map_err(|e| format!("{e:#}"))?;
+
+    if package_kind == "portable" {
+        let probe = exe_dir().join(format!(".tidy_upd_probe_{}.tmp", std::process::id()));
+        if let Err(e) = fs::write(&probe, b"ok") {
+            return Err(format!(
+                "程序目录无写入权限（{e}），请先以管理员身份重启后再安装便携更新"
+            ));
+        }
+        let _ = fs::remove_file(&probe);
+    }
+
+    let root = updates_dir();
+    let staged_path = state
+        .staged
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .and_then(|s| {
+            if s.version == version && s.package_kind == package_kind {
+                validate_staged_before_install(&root, &s)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
+
+    let cfg = read_config();
+    let resolved_theme = theme
+        .filter(|t| t == "light" || t == "dark")
+        .or_else(|| cfg["theme"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "light".to_string());
+    let resolved_lang = lang
+        .filter(|l| l == "zh" || l == "en")
+        .or_else(|| cfg["lang"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "zh".to_string());
+
+    let cur_exe = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径：{e}"))?;
+    let job = crate::updater_host::UpdateJob {
+        current_version,
+        target_version: version.clone(),
+        package_kind: package_kind.clone(),
+        download_url: url,
+        sha256: norm_sha,
+        size,
+        file_name: safe_name,
+        staged_path,
+        app_dir: exe_dir().to_string_lossy().to_string(),
+        app_exe: cur_exe.to_string_lossy().to_string(),
+        main_pid: std::process::id(),
+        theme: if resolved_theme == "dark" {
+            "dark".into()
+        } else {
+            "light".into()
+        },
+        lang: if resolved_lang == "en" {
+            "en".into()
+        } else {
+            "zh".into()
+        },
+        preview: false,
+    };
+
+    // 优雅收掉子进程与撤回缓存，避免更新替换时遇到文件锁
+    app.state::<archive::ArchiveCtx>().clear_undo();
+    if let Ok(mut g) = app.state::<AppState>().engine.lock() {
+        if let Some(mut old) = g.take() {
+            let _ = old.child.kill();
+            let _ = old.child.wait();
+        }
+    }
+
+    #[cfg(windows)]
+    crate::updater_host::prepare_and_spawn_updater_host(&job).map_err(|e| format!("{e:#}"))?;
+
+    append_log(
+        "info",
+        &format!("已切换至独立自动更新小窗，即将升级至 v{version} ({package_kind})"),
+    );
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(180));
+        handle.exit(0);
+    });
+    Ok(true)
+}
+
+#[tauri::command]
 pub async fn updater_install(
     app: AppHandle,
     state: State<'_, UpdaterState>,
     silent: Option<bool>,
 ) -> Result<bool, String> {
+    let _ = silent;
     if state
         .busy
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -2744,13 +2743,11 @@ pub async fn updater_install(
         .ok_or_else(|| "尚未下载已校验的更新包，请先下载更新".to_string())?;
 
     let staged_clone = staged.clone();
-    let silent_flag = silent.unwrap_or(false);
-    let prepared = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+    let verified_path = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
         let root = updates_dir();
         let file = validate_staged_before_install(&root, &staged_clone)
             .map_err(|e| format!("{e:#}"))?;
         if staged_clone.package_kind == "portable" {
-            // 退出前先探测当前便携目录是否可写，避免退出后替换失败（如用户手动解压到了 Program Files）
             let probe = exe_dir().join(format!(".tidy_upd_probe_{}.tmp", std::process::id()));
             if let Err(e) = fs::write(&probe, b"ok") {
                 return Err(format!(
@@ -2758,35 +2755,12 @@ pub async fn updater_install(
                 ));
             }
             let _ = fs::remove_file(&probe);
-
-            let stage_dir = root.join(format!("stage_{}", staged_clone.version));
-            if stage_dir.exists() {
-                let _ = fs::remove_dir_all(&stage_dir);
-            }
-            let p = Arc::new(Progress::detached());
-            let c = Arc::new(TaskControl::default());
-            archive::extract_archive(
-                None,
-                &file,
-                &stage_dir,
-                None,
-                None,
-                Overwrite::Overwrite,
-                "performance",
-                &p,
-                &c,
-            )
-            .map_err(|e| format!("解压便携更新包失败：{e:#}"))?;
-            let payload = find_portable_payload_root(&stage_dir).map_err(|e| format!("{e:#}"))?;
-            Ok(payload)
-        } else {
-            Ok(file)
         }
+        Ok(file)
     })
     .await
     .map_err(|e| format!("准备安装失败：{e}"))??;
 
-    // 优雅收掉子进程与撤回缓存，避免更新替换时遇到文件锁
     app.state::<archive::ArchiveCtx>().clear_undo();
     if let Ok(mut g) = app.state::<AppState>().engine.lock() {
         if let Some(mut old) = g.take() {
@@ -2795,23 +2769,51 @@ pub async fn updater_install(
         }
     }
 
-    if staged.package_kind == "portable" {
-        let root = updates_dir();
-        let stage_dir = root.join(format!("stage_{}", staged.version));
-        let backup_dir = root.join(format!("backup_{}", staged.version));
-        spawn_portable_swap_bootstrap(&prepared, &exe_dir(), &backup_dir, &stage_dir)
-            .map_err(|e| format!("{e:#}"))?;
-    } else {
-        spawn_installer_bootstrap(&prepared, silent_flag).map_err(|e| format!("{e:#}"))?;
-    }
+    let cfg = read_config();
+    let cur_exe = std::env::current_exe().map_err(|e| format!("无法获取当前程序路径：{e}"))?;
+    let file_name = verified_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("QDisk-update.exe")
+        .to_string();
+    let job = crate::updater_host::UpdateJob {
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        target_version: staged.version.clone(),
+        package_kind: staged.package_kind.clone(),
+        download_url: String::new(),
+        sha256: staged.sha256.clone(),
+        size: staged.size,
+        file_name,
+        staged_path: Some(verified_path.to_string_lossy().to_string()),
+        app_dir: exe_dir().to_string_lossy().to_string(),
+        app_exe: cur_exe.to_string_lossy().to_string(),
+        main_pid: std::process::id(),
+        theme: if cfg["theme"].as_str() == Some("dark") {
+            "dark".into()
+        } else {
+            "light".into()
+        },
+        lang: if cfg["lang"].as_str() == Some("en") {
+            "en".into()
+        } else {
+            "zh".into()
+        },
+        preview: false,
+    };
+
+    #[cfg(windows)]
+    crate::updater_host::prepare_and_spawn_updater_host(&job).map_err(|e| format!("{e:#}"))?;
 
     append_log(
         "info",
-        &format!("即将退出并安装更新 v{} ({})", staged.version, staged.package_kind),
+        &format!("即将退出并由独立更新弹窗安装更新 v{} ({})", staged.version, staged.package_kind),
     );
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
     let handle = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(260));
+        std::thread::sleep(Duration::from_millis(180));
         handle.exit(0);
     });
     Ok(true)

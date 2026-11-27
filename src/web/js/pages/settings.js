@@ -2695,16 +2695,26 @@
                   disabled: state.updInstalling || state.updDownloading,
                   onclick: () => installStagedUpdate(targetVer, pkgKind)
                 }, icon('refresh', 14), h('span', {
-                  text: state.updInstalling ? T('正在准备安装…', 'Preparing…') : T('立即重启并安装更新', 'Restart & install update')
+                  text: state.updInstalling ? T('正在切换更新弹窗…', 'Switching to updater…') : T('立即重启并安装更新', 'Restart & install update')
                 }))
-                : h('button', {
-                  type: 'button',
-                  class: 'btn primary sm',
-                  disabled: state.updDownloading || state.updChecking,
-                  onclick: startUpdateDownload
-                }, icon('download', 14), h('span', {
-                  text: state.updDownloading ? T('下载中…', 'Downloading…') : T('下载更新包', 'Download update')
-                })),
+                : [
+                  h('button', {
+                    type: 'button',
+                    class: 'btn primary sm',
+                    disabled: state.updDownloading || state.updChecking || state.updInstalling,
+                    onclick: startAutoUpdate
+                  }, icon('refresh', 14), h('span', {
+                    text: state.updInstalling ? T('正在切换更新弹窗…', 'Switching to updater…') : T('一键自动更新', 'Auto update')
+                  })),
+                  h('button', {
+                    type: 'button',
+                    class: 'btn ghost sm',
+                    disabled: state.updDownloading || state.updChecking || state.updInstalling,
+                    onclick: startUpdateDownload
+                  }, icon('download', 14), h('span', {
+                    text: state.updDownloading ? T('下载中…', 'Downloading…') : T('后台下载更新包', 'Download in background')
+                  }))
+                ],
               h('button', {
                 type: 'button',
                 class: 'btn ghost sm',
@@ -2971,6 +2981,32 @@
         }
       }
 
+      async function startAutoUpdate() {
+        const chk = state.updCheck;
+        if (!chk || !chk.hasUpdate || state.updDownloading || state.updInstalling) return;
+        state.updInstalling = true;
+        state.updError = null;
+        paint();
+        try {
+          await API.updaterAutoUpdate({
+            url: chk.downloadUrl,
+            sha256: chk.sha256,
+            size: chk.size,
+            version: chk.latestVersion,
+            fileName: chk.fileName,
+            packageKind: chk.packageKind,
+            theme: state.theme === 'dark' ? 'dark' : 'light',
+            lang: state.lang === 'en' ? 'en' : 'zh'
+          });
+          toast(T('已切换至全自动更新小窗，程序即将退出并完成升级…', 'Launching automatic updater window…'), 'ok');
+        } catch (e) {
+          state.updInstalling = false;
+          state.updError = errText(e);
+          toast(state.updError, 'error');
+          paint();
+        }
+      }
+
       async function startUpdateDownload() {
         const chk = state.updCheck;
         if (!chk || !chk.hasUpdate || state.updDownloading) return;
@@ -3052,18 +3088,18 @@
         const ok = await confirm({
           title: T(`安装更新 v${ver}`, `Install update v${ver}`),
           body: pkgKind === 'portable'
-            ? T('应用将立即退出，自动备份当前便携版程序并替换为新版本（你的配置、历史与数据目录会完整保留），完成后自动重启。',
-              'The app will close, back up current binaries, swap in the new portable build (preserving all user data), and restart.')
-            : T('应用将立即退出并启动新版安装程序完成覆盖升级（你的配置、历史与数据目录会完整保留）。',
-              'The app will close and launch the new installer (preserving all user data).'),
+            ? T('轻盘将退出并切换为小巧进度弹窗，自动备份当前便携版程序并替换为新版本（你的配置、历史与数据目录会完整保留），完成后自动重启。',
+              'QDisk will close into a compact progress window, back up current binaries, swap in the new portable build (preserving all user data), and restart.')
+            : T('轻盘将退出并切换为小巧进度弹窗，全自动静默完成升级并重启（无需手动卸载或点击安装向导，你的配置、历史与数据目录会完整保留）。',
+              'QDisk will close into a compact progress window and complete the upgrade automatically with no manual uninstall or installer wizard (all user data preserved).'),
           ok: T('立即重启更新', 'Restart & update')
         });
         if (!ok) return;
         state.updInstalling = true;
         paint();
         try {
-          await API.updaterInstall(false);
-          toast(T('正在退出并启动更新…', 'Restarting to install update…'), 'ok');
+          await API.updaterInstall(true);
+          toast(T('已切换至全自动更新小窗，程序即将退出并完成升级…', 'Launching automatic updater window…'), 'ok');
         } catch (e) {
           state.updInstalling = false;
           state.updError = errText(e);

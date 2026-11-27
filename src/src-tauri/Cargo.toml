@@ -1,6 +1,6 @@
 [package]
 name = "tidy-assistant"
-version = "1.47.5"
+version = "1.48.0"
 edition = "2021"
 
 [build-dependencies]
@@ -21,7 +21,7 @@ sevenz-rust2 = { version = "0.25", features = ["compress", "util", "aes256", "bz
 sha2 = "0.10"
 tar = "0.4"
 walkdir = "2.5"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Globalization", "Win32_Networking_WinHttp", "Win32_System_Time"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Globalization", "Win32_Networking_WinHttp", "Win32_System_Time", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Registry"] }
 zip = { version = "9.6", default-features = false, features = ["deflate-flate2", "aes-crypto", "bzip2", "xz", "time"] }
 
 [profile.release]

@@ -1467,6 +1467,7 @@ function findNodes(rootNode, pred, out = []) {
   const origCfgSetU = sandbox.API.updaterConfigSet;
   const origCheck = sandbox.API.updaterCheck;
   const origDownload = sandbox.API.updaterDownload;
+  const origAutoUpdate = sandbox.API.updaterAutoUpdate;
   const origCancel = sandbox.API.updaterCancel;
   const origInstall = sandbox.API.updaterInstall;
 
@@ -1529,6 +1530,12 @@ function findNodes(rootNode, pred, out = []) {
     resolveDl = res;
     rejectDl = rej;
   });
+  let autoUpdateCalls = 0;
+  sandbox.API.updaterAutoUpdate = async (opts) => {
+    autoUpdateCalls++;
+    if (!opts || opts.version !== '9.9.9') throw new Error('missing version');
+    return true;
+  };
   sandbox.API.updaterCancel = async () => { cancelCalls++; return true; };
   sandbox.API.updaterInstall = async () => { installCalls++; return true; };
 
@@ -1578,11 +1585,17 @@ function findNodes(rootNode, pred, out = []) {
   clickBtn(checkBtnNow || checkBtn);
   await new Promise((r) => setTimeout(r, 30));
 
+  const autoBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('一键自动更新'))[0];
   const dlBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('下载更新包'))[0];
   const notesBtn = findNodes(rootSet, (n) => n.tagName === 'BUTTON' && txt(n).includes('更新内容'))[0];
   const inlineRawPre = findNodes(rootSet, (n) => n.tagName === 'PRE' && n.classList && n.classList.contains('upd-notes'));
-  if (!dlBtn || !notesBtn || inlineRawPre.length > 0 || !txt(rootSet).includes('v9.9.9') || !txt(rootSet).includes('红队验证版本更新说明')) {
-    console.error(`[在线更新回归] 检查更新后卡片简化或更新内容入口异常: dl=${!!dlBtn}, notesBtn=${!!notesBtn}, rawPre=${inlineRawPre.length}`);
+  if (!autoBtn || !dlBtn || !notesBtn || inlineRawPre.length > 0 || !txt(rootSet).includes('v9.9.9') || !txt(rootSet).includes('红队验证版本更新说明')) {
+    console.error(`[在线更新回归] 检查更新后卡片简化或更新内容入口异常: auto=${!!autoBtn}, dl=${!!dlBtn}, notesBtn=${!!notesBtn}, rawPre=${inlineRawPre.length}`);
+    process.exit(1);
+  }
+  const updaterHtmlSrc = fs.readFileSync(path.join(root, 'src', 'web', 'updater.html'), 'utf8');
+  if (!updaterHtmlSrc.includes('class="qd-logo"') || !updaterHtmlSrc.includes('class="qd-platter-track"') || !updaterHtmlSrc.includes('<progress class="logo-progress-ring"') || !updaterHtmlSrc.includes('updater_host_init')) {
+    console.error('[在线更新回归] updater.html 缺少轻盘 Logo 动效或语义化进度环');
     process.exit(1);
   }
   // 点击「更新内容」必须打开独立卡片时间轴窗口展示，且点击「知道了」彻底清理
@@ -1662,6 +1675,7 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.API.updaterConfigSet = origCfgSetU;
   sandbox.API.updaterCheck = origCheck;
   sandbox.API.updaterDownload = origDownload;
+  sandbox.API.updaterAutoUpdate = origAutoUpdate;
   sandbox.API.updaterCancel = origCancel;
   sandbox.API.updaterInstall = origInstall;
 }

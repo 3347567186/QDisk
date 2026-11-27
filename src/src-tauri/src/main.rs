@@ -17,6 +17,7 @@ use tauri::menu::{Menu, MenuItem};
 
 mod archive;
 mod updater;
+mod updater_host;
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, State, WindowEvent};
 
@@ -5227,6 +5228,18 @@ fn webview_browser_args() -> String {
 
 fn main() {
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", webview_browser_args());
+    if let Some(cli) = updater_host::parse_updater_host_cli() {
+        archive::set_data_dir(data_dir());
+        updater_host::run_updater_host_app(cli);
+        return;
+    }
+
+    // 正常主程序启动后异步清理上次自动更新遗留的宿主目录
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        updater_host::cleanup_updater_host_artifacts();
+    });
+
     let auto = std::env::args().any(|a| a == "--auto");
     let auto_clean = std::env::args().any(|a| a == "--auto-clean");
     let elevated = std::env::args().any(|a| a == "--elevated");
@@ -5341,6 +5354,7 @@ fn main() {
             updater::updater_download,
             updater::updater_cancel,
             updater::updater_clear_cache,
+            updater::updater_auto_update,
             updater::updater_install,
             updater::updater_changelog
         ])
