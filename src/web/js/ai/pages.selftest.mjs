@@ -3502,5 +3502,106 @@ function findNodes(rootNode, pred, out = []) {
   sandbox.UI.confirm = origConfirm;
 }
 
+/* ==================== 回归 22：cache.js 清理推荐过滤 0 B 空目录 + 仅系统占用时给绿色成功反馈不误报失败弹窗 ==================== */
+{
+  const origEngine22 = sandbox.API.engine;
+  const origConfirm22 = sandbox.UI.confirm;
+  const origToast22 = sandbox.UI.toast;
+  let cleanedPathsArg = null;
+  let lastToastMsg = '';
+  let lastToastKind = '';
+  let listCall = 0;
+
+  sandbox.UI.confirm = async () => true;
+  sandbox.UI.toast = (msg, kind) => { lastToastMsg = String(msg || ''); lastToastKind = String(kind || ''); };
+  sandbox.API.engine = async (method, params) => {
+    if (method === 'cache.list') {
+      listCall += 1;
+      if (listCall === 1) {
+        return {
+          groups: [
+            {
+              name: '系统',
+              level: 'safe',
+              items: [
+                { path: 'C:\\Temp', label: '用户临时文件', size: 2048, exists: true, level: 'safe' },
+                { path: 'C:\\EmptySafe1', label: '空目录1', size: 0, exists: true, level: 'safe' },
+                { path: 'C:\\EmptySafe2', label: '空目录2', size: 0, exists: true, level: 'safe' }
+              ]
+            },
+            {
+              name: '应用',
+              level: 'caution',
+              items: [
+                { path: 'C:\\BigCaution', label: '谨慎大缓存', size: 10 * 1024 * 1024, exists: true, level: 'caution' }
+              ]
+            }
+          ],
+          total_size: 10 * 1024 * 1024 + 2048
+        };
+      }
+      return {
+        groups: [
+          {
+            name: '系统',
+            level: 'safe',
+            items: [
+              { path: 'C:\\Temp', label: '用户临时文件', size: 512, exists: true, level: 'safe' },
+              { path: 'C:\\EmptySafe1', label: '空目录1', size: 0, exists: true, level: 'safe' }
+            ]
+          }
+        ],
+        total_size: 512
+      };
+    }
+    if (method === 'cache.clean') {
+      cleanedPathsArg = params.paths;
+      return {
+        dry_run: false,
+        cleaned: 3,
+        freed: 1536,
+        pruned_dirs: 0,
+        skipped: 0,
+        locked_count: 1,
+        locked_bytes: 512,
+        error_count: 0,
+        failed: [{ path: 'C:\\Temp\\active.tmp', why: '被其他程序占用（WinError 32）', locked: true, size: 512 }]
+      };
+    }
+    return origEngine22(method, params);
+  };
+
+  const cacheHost = new FakeElement('div');
+  const umCache = await sandbox.Pages.cache.mount(cacheHost);
+  // 若有前序缓存命中，强制触发一次刷新拿到本回归 mock 数据
+  const reloadBtn22 = findNodes(cacheHost, (n) => n.tagName === 'BUTTON' && txt(n).includes('重新读取'))[0];
+  clickBtn(reloadBtn22);
+  await new Promise((r) => setTimeout(r, 30));
+
+  const recBtn22 = findNodes(cacheHost, (n) => n.tagName === 'BUTTON' && txt(n).includes('清理推荐'))[0];
+  if (!recBtn22 || !txt(recBtn22).includes('2')) {
+    console.error(`[回归 22] 清理推荐按钮未展示安全级可清理体积: ${txt(recBtn22)}`);
+    process.exit(1);
+  }
+  const modalRoot22 = sandbox.document.getElementById('modal-root');
+  const beforeModals22 = modalRoot22.children.length;
+  clickBtn(recBtn22);
+  await new Promise((r) => setTimeout(r, 40));
+
+  if (!Array.isArray(cleanedPathsArg) || cleanedPathsArg.length !== 1 || cleanedPathsArg[0] !== 'C:\\Temp') {
+    console.error(`[回归 22] 清理推荐未过滤 0 B 空目录: ${JSON.stringify(cleanedPathsArg)}`);
+    process.exit(1);
+  }
+  if (lastToastKind !== 'ok' || !lastToastMsg.includes('已清理') || modalRoot22.children.length !== beforeModals22) {
+    console.error(`[回归 22] 仅剩运行中系统占用文件时误弹失败框或缺少成功提示: kind=${lastToastKind}, msg=${lastToastMsg}, modals=${modalRoot22.children.length - beforeModals22}`);
+    process.exit(1);
+  }
+
+  umCache();
+  sandbox.API.engine = origEngine22;
+  sandbox.UI.confirm = origConfirm22;
+  sandbox.UI.toast = origToast22;
+}
+
 console.log(`结果：${count}/${count} 页面双轮挂载、销毁、防泄漏回归全绿（0 崩溃、0 累积定时器/监听器，含后台进程真实关闭核验、开机自启排雷、资源概览实时监控与全站红队回归）`);
 process.exit(0);

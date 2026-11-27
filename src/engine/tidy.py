@@ -3697,7 +3697,13 @@ def clean_cache_paths(real_paths, progress=None, rules=None, skipped=None):
             root_key = os.path.normcase(os.path.normpath(os.path.abspath(root)))
         except (OSError, ValueError):
             root_key = ""
-        is_builtin = root_key in builtin_keys
+        is_builtin = bool(
+            root_key
+            and (
+                root_key in builtin_keys
+                or any(root_key.startswith(bk + os.sep) for bk in builtin_keys)
+            )
+        )
         # 仅对非内置路径执行程序安装目录整目录拦截，防止 %TEMP% 因含临时安装包被整目录误杀
         if not is_builtin and rules and rules.cache_forbid_apps:
             hit_app, ev_app = looks_like_app_dir(root, rules)
@@ -7746,8 +7752,29 @@ def _engine_cache_clean(params):
     removed, fails, freed = clean_cache_paths(
         todo, progress=_engine_progress, rules=app_guard_rules(),
         skipped=skipped)
+    locked_count = 0
+    locked_bytes = 0
+    error_count = len(failed)
     for p, why in fails:
-        failed.append({"path": p, "why": why})
+        is_locked = (
+            "WinError 32" in why
+            or "WinError 33" in why
+            or "被其他程序占用" in why
+            or "区域锁" in why
+        )
+        f_sz = 0
+        if is_locked:
+            locked_count += 1
+            try:
+                lp_f = _lp_win(p)
+                if os.path.isfile(lp_f):
+                    f_sz = int(os.path.getsize(lp_f) or 0)
+            except OSError:
+                f_sz = 0
+            locked_bytes += f_sz
+        else:
+            error_count += 1
+        failed.append({"path": p, "why": why, "locked": is_locked, "size": f_sz})
     pruned = 0
     if prune_empty:
         for root in todo:
@@ -7762,6 +7789,8 @@ def _engine_cache_clean(params):
                     pass
     return {"dry_run": False, "cleaned": int(removed), "skipped": len(skipped),
             "failed": failed, "freed": int(freed), "pruned_dirs": pruned,
+            "locked_count": locked_count, "locked_bytes": int(locked_bytes),
+            "error_count": error_count,
             "skipped_items": [{"path": p, "why": why} for p, why in skipped]}
 
 

@@ -1716,6 +1716,50 @@ class TestCache(EngineCase):
         self.assertEqual(res["freed"], 550, res)
         self.assertEqual(os.listdir(temp_dir), [])
 
+    def test_clean_builtin_subpath_and_locked_classification(self):
+        """内置缓存子文件重试不被 keep_exts 误拦，且占用文件正确归类为 locked_count/locked_bytes。"""
+        temp_dir = os.path.join(self.root, "temp")
+        sub = os.path.join(temp_dir, "sub_retry")
+        os.makedirs(sub, exist_ok=True)
+        dll_file = os.path.join(sub, "retry_target.dll")
+        with open(dll_file, "wb") as f:
+            f.write(b"d" * 200)
+        res = self.rpc_ok("cache.clean", {"paths": [dll_file], "confirm": True})
+        self.assertEqual(res["cleaned"], 1, res)
+        self.assertEqual(res["skipped"], 0, res)
+        self.assertEqual(res["error_count"], 0, res)
+        self.assertFalse(os.path.exists(dll_file))
+
+        if os.name == "nt":
+            import ctypes
+            locked_file = os.path.join(temp_dir, "in_use_lock.tmp")
+            free_file = os.path.join(temp_dir, "free_file.tmp")
+            with open(locked_file, "wb") as f:
+                f.write(b"L" * 1024)
+            with open(free_file, "wb") as f:
+                f.write(b"F" * 512)
+            k32 = ctypes.windll.kernel32
+            k32.CreateFileW.restype = ctypes.c_void_p
+            k32.CreateFileW.argtypes = [
+                ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+            ]
+            # 仅共享读写、不共享删除（模拟真实运行中程序占用）
+            h = k32.CreateFileW(locked_file, 0x80000000, 0x3, None, 3, 0, None)
+            try:
+                res2 = self.rpc_ok("cache.clean", {"paths": [temp_dir], "confirm": True})
+            finally:
+                if h and h != ctypes.c_void_p(-1).value:
+                    k32.CloseHandle(h)
+            self.assertEqual(res2["cleaned"], 1, res2)
+            self.assertEqual(res2["freed"], 512, res2)
+            self.assertEqual(res2["locked_count"], 1, res2)
+            self.assertEqual(res2["locked_bytes"], 1024, res2)
+            self.assertEqual(res2["error_count"], 0, res2)
+            self.assertTrue(res2["failed"][0]["locked"], res2)
+            self.assertEqual(res2["failed"][0]["size"], 1024, res2)
+            os.remove(locked_file)
+
 
 class TestCacheCustom(EngineCase):
     @classmethod

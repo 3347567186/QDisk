@@ -60,7 +60,8 @@
         selected: new Set(),     // path 集合
         loading: false,
         loaded: hasCache,
-        failed: false
+        failed: false,
+        loadSeq: 0
       };
       const refs = new Map();    // 分组名 -> { sec, body, group, page, filled, cb }
 
@@ -73,9 +74,10 @@
 
       const reloadBtn = h('button', { class: 'btn sm', onclick: () => { doLoad(true); } },
         icon('refresh', 13), T('重新读取', 'Reload'));
+      const recBtnLabel = h('span', null, T('清理推荐', 'Clean recommended'));
       const recBtn = h('button', {
         class: 'btn sm primary', disabled: true, onclick: () => { doCleanRecommended(); }
-      }, icon('shield', 13), T('清理推荐', 'Clean recommended'));
+      }, icon('shield', 13), recBtnLabel);
       const cleanBtn = h('button', {
         class: 'btn sm danger', disabled: true, onclick: () => { doCleanSelected(); }
       }, icon('trash', 13), T('清理选中', 'Clean selected'));
@@ -208,6 +210,9 @@
         return out;
       }
       const existingItems = () => allItems().filter((it) => it.exists !== false);
+      const nonEmptyItems = () => existingItems().filter((it) => (Number(it.size) || 0) > 0);
+      const recommendedItems = () => existingItems().filter((it) => it.level === 'safe' && (Number(it.size) || 0) > 0);
+      const recommendedSize = () => recommendedItems().reduce((n, it) => n + (Number(it.size) || 0), 0);
 
       function findItem(path) {
         for (const g of S.groups) {
@@ -232,7 +237,7 @@
 
       function selectSafe() {
         S.selected.clear();
-        existingItems().forEach((it) => { if (it.level === 'safe') S.selected.add(it.path); });
+        recommendedItems().forEach((it) => S.selected.add(it.path));
         syncSelection();
       }
 
@@ -271,8 +276,10 @@
         });
 
         const n = S.selected.size;
+        const recList = recommendedItems();
+        const recSz = recommendedSize();
         statGroups.textContent = fmtCount(S.groups.length);
-        statItems.textContent = fmtCount(existingItems().length);
+        statItems.textContent = fmtCount(nonEmptyItems().length);
         statSize.textContent = fmtBytes(recomputeSize());
         statSel.textContent = fmtCount(n);
         statSelK.textContent = n
@@ -280,8 +287,15 @@
           : T('已选', 'Selected');
 
         cleanBtn.disabled = n === 0;
-        safeBtn.disabled = !existingItems().some((it) => it.level === 'safe');
-        recBtn.disabled = !existingItems().some((it) => it.level === 'safe');
+        safeBtn.disabled = !recList.length;
+        recBtn.disabled = !recList.length;
+        recBtnLabel.textContent = recList.length
+          ? T('清理推荐 · ' + fmtBytes(recSz), 'Clean recommended · ' + fmtBytes(recSz))
+          : T('清理推荐', 'Clean recommended');
+        recBtn.title = recList.length
+          ? T('一键清理 ' + fmtCount(recList.length) + ' 项安全级非空缓存（' + fmtBytes(recSz) + '）',
+            'Clean ' + fmtCount(recList.length) + ' safe non-empty caches (' + fmtBytes(recSz) + ')')
+          : T('当前没有可清理的安全级缓存', 'No non-empty safe caches to clean');
         collapseBtn.disabled = !S.groups.length;
       }
 
@@ -529,6 +543,7 @@
       /* ---------- 读取 ---------- */
       async function doLoad(withOverlay, silent = false) {
         if (S.loading) return;
+        const seq = ++S.loadSeq;
         const isBackgroundCheck = silent && S.loaded && S.groups.length > 0;
         if (!isBackgroundCheck) {
           S.loading = true;
@@ -545,17 +560,19 @@
             ? await busy(() => API.engine('cache.list', params), T('正在读取缓存目录…', 'Reading cache folders…'), 'cache')
             : await API.engine('cache.list', params);
         } catch (e) {
+          if (seq !== S.loadSeq) return;
           if (!isBackgroundCheck) {
             toast(errText(e), 'error');
             S.failed = true;
           }
         } finally {
-          if (!isBackgroundCheck) {
+          if (seq === S.loadSeq && !isBackgroundCheck) {
             S.loading = false;
             S.loaded = true;
           }
         }
 
+        if (seq !== S.loadSeq) return;
         if (!res) { if (!isBackgroundCheck) render(); return; }
         if (res.error) {
           if (!isBackgroundCheck) {
@@ -591,20 +608,34 @@
       }
 
       /* ---------- 清理 ---------- */
-      function confirmBody(paths) {
+      function confirmBody(paths, isRecommended = false) {
         const size = paths.reduce((n, p) => {
           const it = findItem(p);
           return n + (it ? Number(it.size) || 0 : 0);
         }, 0);
+        const totalAll = recomputeSize();
+        const otherBytes = isRecommended ? Math.max(0, totalAll - size) : 0;
+        const extraNote = otherBytes > 0
+          ? T('（另有 ' + fmtBytes(otherBytes) + ' 谨慎/高级缓存需手动勾选）',
+            ' (' + fmtBytes(otherBytes) + ' caution/advanced cache requires manual selection)')
+          : '';
         return T(
-          '清理 ' + fmtCount(paths.length) + ' 项（预计释放 ' + fmtBytes(size) + '）？只清内容不删目录' +
-            (S.pruneEmpty ? '，并删除清理后变空的子目录' : '') + '。',
-          'Clean ' + fmtCount(paths.length) + ' items (about ' + fmtBytes(size) + ' to free)? Only contents are cleared' +
-            (S.pruneEmpty ? ', and subfolders left empty are removed' : '') + '.'
+          '清理 ' + fmtCount(paths.length) + (isRecommended ? ' 项安全级推荐缓存' : ' 项') +
+            '（预计释放 ' + fmtBytes(size) + '）？只清内容不删目录' +
+            (S.pruneEmpty ? '，并删除清理后变空的子目录' : '') + '。' + extraNote,
+          'Clean ' + fmtCount(paths.length) + (isRecommended ? ' recommended safe items' : ' items') +
+            ' (about ' + fmtBytes(size) + ' to free)? Only contents are cleared' +
+            (S.pruneEmpty ? ', and subfolders left empty are removed' : '') + '.' + extraNote
         );
       }
 
-      async function cleanPaths(paths, { quiet = false, skipConfirm = false } = {}) {
+      function isLockFailure(f) {
+        if (!f) return false;
+        if (f.locked === true) return true;
+        return /winerror 3[23]|占用|开着|区域锁|lock/i.test(String(f.why || ''));
+      }
+
+      async function cleanPaths(paths, { quiet = false, skipConfirm = false, isRecommended = false } = {}) {
         if (!paths || !paths.length) {
           toast(T('没有选中项', 'Nothing selected'), 'warn');
           return false;
@@ -614,8 +645,8 @@
           let ok = false;
           try {
             ok = await confirm({
-              title: T('清理缓存', 'Clean caches'),
-              body: confirmBody(paths),
+              title: isRecommended ? T('清理推荐缓存', 'Clean recommended caches') : T('清理缓存', 'Clean caches'),
+              body: confirmBody(paths, isRecommended),
               ok: T('清理', 'Clean'),
               danger: true
             });
@@ -625,6 +656,9 @@
           }
           if (!ok) return false;
         }
+
+        // 令在途后台扫描失效，防止清理完成后被旧扫描结果回写覆盖
+        S.loadSeq += 1;
 
         let res;
         try {
@@ -647,6 +681,15 @@
         const pruned = Number(res.pruned_dirs) || 0;
         const skipped = Number(res.skipped) || 0;
         const failed = Array.isArray(res.failed) ? res.failed : [];
+        const lockedItems = failed.filter(isLockFailure);
+        const realErrors = failed.filter((f) => !isLockFailure(f));
+        const lockedCount = Number(res.locked_count) || lockedItems.length;
+        const lockedBytes = Number(res.locked_bytes) || lockedItems.reduce((s, f) => s + (Number(f.size) || 0), 0);
+        const hasActionableBrowser = lockedItems.some((f) => {
+          const p = String(f.path || '').toLowerCase();
+          return p.includes('\\microsoft\\edge\\') || p.includes('msedge')
+            || p.includes('\\google\\chrome\\') || p.includes('chrome');
+        });
 
         if (!failed.length) {
           toast(T(
@@ -657,11 +700,23 @@
               (pruned ? ', removed ' + fmtCount(pruned) + ' empty folders' : '') +
               (skipped ? ', skipped ' + fmtCount(skipped) : '')
           ), 'ok');
+        } else if (!realErrors.length && cleaned > 0 && !hasActionableBrowser) {
+          // 可删缓存已全部清理，仅剩运行中系统/软件正常占用的活文件：给绿色成功反馈，不再误报「没有清理成功」
+          toast(T(
+            '已清理 ' + fmtCount(cleaned) + ' 项，释放 ' + fmtBytes(freed) +
+              '（另有 ' + fmtCount(lockedCount) + ' 个运行中占用文件' +
+              (lockedBytes > 0 ? ' · ' + fmtBytes(lockedBytes) : '') + ' 已自动跳过）',
+            'Cleaned ' + fmtCount(cleaned) + ' items, freed ' + fmtBytes(freed) +
+              ' (' + fmtCount(lockedCount) + ' in-use file(s)' +
+              (lockedBytes > 0 ? ' · ' + fmtBytes(lockedBytes) : '') + ' skipped)'
+          ), 'ok', 5200);
         } else {
-          // 清空底角 toast 浮层，彻底杜绝通知卡片与弹窗操作按钮在右下角重叠遮挡
           const toastBox = document.getElementById('toasts');
           if (toastBox) toastBox.innerHTML = '';
-          showFailures(failed, { cleaned, freed, pruned, skipped });
+          showFailures(failed, {
+            cleaned, freed, pruned, skipped,
+            lockedCount, lockedBytes, errorCount: realErrors.length
+          });
         }
         return true;
       }
@@ -673,9 +728,9 @@
       }
 
       async function doCleanRecommended() {
-        const list = existingItems().filter((it) => it.level === 'safe');
-        if (!list.length) { toast(T('没有可推荐清理的安全级缓存', 'No safe-level caches to clean'), 'warn'); return; }
-        const ok = await cleanPaths(list.map((it) => it.path));
+        const list = recommendedItems();
+        if (!list.length) { toast(T('当前没有可推荐清理的安全级非空缓存', 'No non-empty safe-level caches to clean'), 'warn'); return; }
+        const ok = await cleanPaths(list.map((it) => it.path), { isRecommended: true });
         if (ok) await doLoad(false);
       }
 
@@ -727,6 +782,8 @@
             } else if (p.includes('startmenuexperiencehost') || p.includes('startmenu')) {
               appSet.add(T('Windows 开始菜单', 'Start Menu'));
               hasSystem = true;
+            } else if (p.includes('\\appdata\\local\\temp\\')) {
+              appSet.add(T('系统临时目录中运行中的程序', 'Active apps in %TEMP%'));
             } else {
               appSet.add(T('系统或后台软件', 'Background app'));
             }
@@ -877,6 +934,12 @@
           ))
         );
 
+        const lockBytes = Number(summary && summary.lockedBytes) || 0;
+        const errCnt = Number(summary && summary.errorCount) || 0;
+        const cleanedCnt = Number(summary && summary.cleaned) || 0;
+        const freedBytes = Number(summary && summary.freed) || 0;
+        const onlyLocked = errCnt === 0 && lockedCount > 0;
+
         const summaryBar = summary ? h('div', {
           style: {
             padding: '9px 12px',
@@ -887,19 +950,42 @@
             fontSize: 'var(--fs-small)',
             color: 'var(--text-1)'
           }
-        }, T(
-          '已清理 ' + fmtCount(summary.cleaned || 0) + ' 项，释放 ' + fmtBytes(summary.freed || 0) +
-            '（' + fmtCount(failed.length) + ' 项因程序占用或系统保护未清理' +
-            (summary.skipped ? '，跳过 ' + fmtCount(summary.skipped) + ' 项受保护内容' : '') + '）',
-          'Cleaned ' + fmtCount(summary.cleaned || 0) + ' items, freed ' + fmtBytes(summary.freed || 0) +
-            ' (' + fmtCount(failed.length) + ' items locked by active apps' +
-            (summary.skipped ? ', skipped ' + fmtCount(summary.skipped) + ' protected' : '') + ')'
-        )) : null;
+        }, onlyLocked && cleanedCnt === 0
+          ? T(
+            '所有可释放的安全缓存已清理完毕；剩余 ' + fmtCount(lockedCount) + ' 个文件' +
+              (lockBytes > 0 ? '（共 ' + fmtBytes(lockBytes) + '）' : '') +
+              '正被运行中的程序实时占用，无法在运行期间删除。',
+            'All cleanable safe caches are cleared; the remaining ' + fmtCount(lockedCount) + ' file(s)' +
+              (lockBytes > 0 ? ' (' + fmtBytes(lockBytes) + ')' : '') +
+              ' are currently locked by running apps.'
+          )
+          : T(
+            '已清理 ' + fmtCount(cleanedCnt) + ' 项，释放 ' + fmtBytes(freedBytes) +
+              '（' + fmtCount(failed.length) + ' 项' +
+              (onlyLocked
+                ? '正被运行中程序占用' + (lockBytes > 0 ? ' · ' + fmtBytes(lockBytes) : '')
+                : '因程序占用或权限受限未清理') +
+              (summary.skipped ? '，跳过 ' + fmtCount(summary.skipped) + ' 项受保护内容' : '') + '）',
+            'Cleaned ' + fmtCount(cleanedCnt) + ' items, freed ' + fmtBytes(freedBytes) +
+              ' (' + fmtCount(failed.length) + ' item(s) ' +
+              (onlyLocked
+                ? 'in use' + (lockBytes > 0 ? ' · ' + fmtBytes(lockBytes) : '')
+                : 'locked or access denied') +
+              (summary.skipped ? ', skipped ' + fmtCount(summary.skipped) + ' protected' : '') + ')'
+          )) : null;
 
         const body = h('div', { class: 'stack', style: { gap: '0' } }, summaryBar, noticeBox, listWrap);
 
+        const modalTitle = onlyLocked
+          ? (cleanedCnt > 0
+            ? T('清理完成，释放 ' + fmtBytes(freedBytes) + '（' + fmtCount(lockedCount) + ' 项正被占用）',
+              'Cleaned ' + fmtBytes(freedBytes) + ' (' + fmtCount(lockedCount) + ' in use)')
+            : T('可清理缓存已清空，剩余 ' + fmtCount(lockedCount) + ' 项正被程序占用',
+              'Cleanable caches cleared (' + fmtCount(lockedCount) + ' in use)'))
+          : T('有 ' + fmtCount(failed.length) + ' 项没有清理成功', fmtCount(failed.length) + ' items were not cleaned');
+
         dlg = modal({
-          title: T('有 ' + fmtCount(failed.length) + ' 项没有清理成功', fmtCount(failed.length) + ' items were not cleaned'),
+          title: modalTitle,
           body: body,
           wide: true,
           buttons: [{ id: 'ok', label: T('我知道了', 'Got it'), kind: 'primary' }]
